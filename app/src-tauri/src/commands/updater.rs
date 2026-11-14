@@ -1002,7 +1002,7 @@ where
                 continue;
             }
             EndpointAnswer::Unsuccessful => {
-                tracing::warn!(endpoint, channel = channel.as_str(), "清单端点回了非 2xx");
+                // 这时还分不清是 404 还是服务器故障，日志放到下面：问出了状态码的按它定级，没再问的记 warn。
                 asked.push(Asked::Unsuccessful);
                 continue;
             }
@@ -1087,7 +1087,14 @@ where
             }
             Asked::Failed(failure) => (EndpointOutcome::Failed, Some(failure)),
             Asked::Unsuccessful => match &probe {
-                None => (EndpointOutcome::Failed, None),
+                None => {
+                    tracing::warn!(
+                        endpoint,
+                        channel = channel.as_str(),
+                        "清单端点回了非 2xx，另一个端点已给出清单，没再问状态码"
+                    );
+                    (EndpointOutcome::Failed, None)
+                }
                 Some(client) => {
                     let probed = client
                         .get(endpoint)
@@ -1105,10 +1112,34 @@ where
                             &tauri_plugin_updater::Error::Reqwest(err),
                         ),
                     };
-                    let outcome = if failure.status == Some(MANIFEST_MISSING_STATUS) {
-                        EndpointOutcome::Missing
-                    } else {
-                        EndpointOutcome::Failed
+                    let outcome = match failure.status {
+                        // 通道还没有发布时每次检查都会走到这里（正式版发出之前问 stable 就是），记 warn 会每次都刷。
+                        Some(MANIFEST_MISSING_STATUS) => {
+                            tracing::info!(
+                                endpoint,
+                                channel = channel.as_str(),
+                                "清单端点回了 404"
+                            );
+                            EndpointOutcome::Missing
+                        }
+                        Some(status) => {
+                            tracing::warn!(
+                                endpoint,
+                                channel = channel.as_str(),
+                                status,
+                                "清单端点回了非 2xx"
+                            );
+                            EndpointOutcome::Failed
+                        }
+                        None => {
+                            tracing::warn!(
+                                endpoint,
+                                channel = channel.as_str(),
+                                error = %failure.message,
+                                "清单端点回了非 2xx，再问状态码时没问到"
+                            );
+                            EndpointOutcome::Failed
+                        }
                     };
                     (outcome, Some(failure))
                 }
@@ -1119,8 +1150,8 @@ where
     }
     let outcome = channel_outcome(outcomes);
     if outcome == ChannelOutcome::NotPublished {
-        // 界面上不算失败，日志要留痕。
-        tracing::warn!(
+        // 界面上不算失败，日志要留痕；还没有发布是常态，记 info 不记 warn。
+        tracing::info!(
             channel = channel.as_str(),
             endpoints = ?group.endpoints,
             "更新源上没有这个通道的清单（404），按还没有发布处理"
@@ -5194,6 +5225,83 @@ mod tests {
         assert_eq!(detail["attempts"][0]["network"], json!("timeout"));
         assert_eq!(detail["attempts"][1]["status"], json!(404));
         assert!(detail.get("network").is_none());
+    }
+
+    /// 通道还没有发布（端点都答 404）是常态，正式版发出之前每次检查都问 stable：逐端点那条与通道那条都记 info，不刷
+    /// warn。404 以外的状态、再问时连不上、另一个端点已给出清单而没再问状态码的非 2xx，仍记 warn。
+    #[tokio::test]
+    async fn not_published_logs_info_while_other_failures_stay_warn() {
+        let captured = crate::tests::Captured::new();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        // 含 `message` 的各行的级别。fmt 层每行先是时间，再是级别。
+        let levels = |message: &str| -> Vec<String> {
+            captured
+                .text()
+                .lines()
+                .filter(|line| line.contains(message))
+                .map(|line| line.split_whitespace().nth(1).unwrap().to_owned())
+                .collect()
+        };
+
+        let (_missing, missing_url) = source_answering(404).await;
+        let (_other_missing, other_missing_url) = source_answering(404).await;
+        let outcome = after_release_not_found(Channel::Dev, &[missing_url, other_missing_url])
+            .await
+            .unwrap();
+        assert_eq!(outcome, ChannelOutcome::NotPublished);
+        assert_eq!(levels("清单端点回了 404"), ["INFO", "INFO"]);
+        assert_eq!(levels("按还没有发布处理"), ["INFO"]);
+        assert!(!captured.text().contains("WARN"), "{}", captured.text());
+
+        captured.clear();
+        let (_broken, broken_url) = source_answering(503).await;
+        after_release_not_found(Channel::Stable, &[broken_url])
+            .await
+            .expect_err("503 是检查失败");
+        assert_eq!(levels("清单端点回了非 2xx"), ["WARN"]);
+        assert!(
+            captured.text().contains("status=503"),
+            "{}",
+            captured.text()
+        );
+        assert!(levels("清单端点回了 404").is_empty());
+        assert!(levels("按还没有发布处理").is_empty());
+
+        captured.clear();
+        after_release_not_found(Channel::Stable, &[closed_endpoint()])
+            .await
+            .expect_err("再问时连不上是检查失败");
+        assert_eq!(levels("再问状态码时没问到"), ["WARN"]);
+        assert!(levels("按还没有发布处理").is_empty());
+
+        captured.clear();
+        let (_first, first_url) = source_answering(503).await;
+        let (_second, second_url) = source_answering(404).await;
+        let (outcome, asked) = check_channel(
+            Channel::Dev,
+            &[first_url, second_url],
+            None,
+            vec![
+                EndpointAnswer::Unsuccessful,
+                head("1.0.0-dev.12", "1.0.0-dev.6"),
+            ],
+        )
+        .await;
+        assert_eq!(asked, [0, 1]);
+        assert_eq!(
+            outcome.unwrap(),
+            ChannelOutcome::Published {
+                endpoint: 1,
+                version: version("1.0.0-dev.12"),
+            }
+        );
+        assert_eq!(levels("没再问状态码"), ["WARN"]);
+        assert!(levels("清单端点回了 404").is_empty());
     }
 
     /// 哪个端点先给出了验过的清单头就以它为准：后面的端点不再问，前面也没有谁要再问状态码。比当前新不新都算
