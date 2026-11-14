@@ -197,6 +197,33 @@ describe("切到别的游戏目录之后", () => {
     expect(store.actions.retryFailedTasks()).toBe(0);
     expect(store.getState().tasks.map((t) => [t.id, t.status, t.error?.code])).toEqual([["task-create", "failed", "interrupted"]]);
   });
+
+  it("重试「全部更新」的预检也带发起时的目录：后端已切到 B、前端还没读到时，不读那边同名实例的更新、不当作零项做完", async () => {
+    store.stop();
+    const items = [
+      { fileName: "sodium.jar", platform: "modrinth", projectId: "AANobbMI", modVersionId: "sodium-2", title: "Sodium", fileSize: 3 },
+      { fileName: "lithium.jar", platform: "modrinth", projectId: "gvQqBUqZ", modVersionId: "lithium-2", title: "Lithium", fileSize: 3 },
+    ];
+    const updates = installRecord("task-updates", {
+      kind: "mod",
+      title: "更新 2 个 Mod",
+      detail: "「生存」",
+      instance_id: "生存",
+      game_dir: A,
+      spec: { command: "update_mods", args: { versionId: "生存", items } },
+    });
+    await boot({ journal: [updates] });
+    // 后端此刻在 B：B 里同名的「生存」没有可更新的 Mod；带着发起时目录来问的，照后端的核对拒绝
+    ipc.overrides.set("check_updates", (args) => {
+      if (typeof args.gameDir === "string" && args.gameDir !== B) throw new IpcError("game_dir_changed", "当前游戏目录已经换了", { expected: args.gameDir, current: B });
+      return [];
+    });
+    store.actions.retryTask("task-updates");
+    await settle();
+    expect(callsOf(ipc, "check_updates")).toEqual([{ versionId: "生存", gameDir: A }]);
+    expect(callsOf(ipc, "update_mod")).toEqual([]);
+    expect(taskOf("task-updates")).toMatchObject({ status: "failed", attempt: 2, error: { code: "game_dir_changed" } });
+  });
 });
 
 describe("旧版本留下的任务日志", () => {

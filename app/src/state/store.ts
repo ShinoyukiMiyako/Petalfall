@@ -2137,7 +2137,7 @@ export class LauncherStore {
     if (command === "update_mods") {
       const versionId = strArg(args, "versionId", command);
       const dir = requiredGameDir(gameDir, command);
-      const items = task.attempt > 1 ? await this.pendingUpdates(versionId, updateItems(args)) : updateItems(args);
+      const items = task.attempt > 1 ? await this.pendingUpdates(versionId, dir, updateItems(args)) : updateItems(args);
       const updated: UpdateItem[] = [];
       const skipped: string[] = [];
       try {
@@ -2174,9 +2174,11 @@ export class LauncherStore {
   /**
    * 重试「全部更新」时，上一次尝试里已经换过的不再更新：更新会把文件换成新版本的文件名，按原文件名再调一次只会失败。
    * 按工程重新对一遍：已经是目标版本的、或者 Mod 已被移除不再有更新的跳过，其余用它现在的文件名。
+   * 带上任务发起时的目录：之后的各项更新由后端核对，这一步按名字查的话，排队期间切了目录就读到新目录里的同名实例，
+   * 还会给它反查身份写卷宗；那边没有可更新的，组合任务就零项做完，原任务被误记为完成。
    */
-  private async pendingUpdates(versionId: string, items: UpdateItem[]): Promise<UpdateItem[]> {
-    const candidates = await modsIpc.checkUpdates(versionId);
+  private async pendingUpdates(versionId: string, gameDir: string, items: UpdateItem[]): Promise<UpdateItem[]> {
+    const candidates = await modsIpc.checkUpdates(versionId, gameDir);
     return items.flatMap((item) => {
       const current = candidates.find((c) => c.latest.platform === item.platform && c.latest.project_id === item.projectId);
       if (current === undefined || current.current_version_id === item.modVersionId) return [];

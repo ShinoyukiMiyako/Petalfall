@@ -1027,6 +1027,8 @@ export const handlers: MockHandlers = {
   // 查更新会把反查到的身份回写卷宗，同样占住实例
   check_updates: (args) => {
     const id = requireString(args.versionId, "versionId");
+    // 与后端一样，带了发起时的目录（重试「全部更新」前的预检）才核对
+    if (args.gameDir !== undefined) ensureMockGameDir(args, "check_updates");
     return withMockInstance(id, "modifying", () => checkUpdates(mockInstance(id)));
   },
   update_mod: async (args): Promise<ModUpdateOutcomeDto> => {

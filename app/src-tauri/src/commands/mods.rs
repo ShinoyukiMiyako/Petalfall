@@ -333,22 +333,30 @@ pub(crate) async fn remove_mod_with(
 
 /// 检查该实例可更新的 Mod（无身份的文件先按哈希反查补身份）。反查到的身份会回写卷宗，所以与其它
 /// Mod 改动一样占住实例：改名、删除进行中报 `instance_busy`，免得卷宗按旧路径写回、建出空目录。
+///
+/// `game_dir`（前端传 `gameDir`）只有重试「全部更新」前的预检传，是那个任务入队时的游戏目录：当前目录已经不是它
+/// 就报 `game_dir_changed`，不去查、也不给新目录里同名实例写卷宗。Mod 页的检查更新不传，查当前目录。
 #[tauri::command]
 pub async fn check_updates(
     version_id: String,
+    game_dir: Option<String>,
     facade: State<'_, Facade>,
     locks: State<'_, InstanceLocks>,
 ) -> Result<Vec<UpdateCandidate>, CommandError> {
-    check_updates_with(&facade, &locks, &version_id).await
+    check_updates_with(&facade, &locks, &version_id, game_dir.as_deref()).await
 }
 
 pub(crate) async fn check_updates_with(
     facade: &Facade,
     locks: &InstanceLocks,
     version_id: &str,
+    game_dir: Option<&str>,
 ) -> Result<Vec<UpdateCandidate>, CommandError> {
-    let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
     let petalfall = facade.snapshot().await;
+    if let Some(expected) = game_dir {
+        ensure_game_dir(&petalfall, expected)?;
+    }
+    let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
     Ok(petalfall.check_updates(version_id).await?)
 }
 
@@ -989,7 +997,7 @@ mod tests {
             .unwrap_err();
             assert_eq!(err.code, code::INSTANCE_BUSY);
             assert!(!tasks.is_running("t-busy"));
-            let err = check_updates_with(&facade, &locks, VERSION_ID)
+            let err = check_updates_with(&facade, &locks, VERSION_ID, None)
                 .await
                 .unwrap_err();
             assert_eq!(err.code, code::INSTANCE_BUSY);
@@ -1789,5 +1797,35 @@ mod tests {
                 .acquire(VERSION_ID, InstanceActivity::Modifying)
                 .unwrap(),
         );
+    }
+
+    /// 「全部更新」重试前的检查更新带着发起时的目录来：当前目录已经换了就报 game_dir_changed，不按名字去查新目录里
+    /// 同名实例、不给它的文件反查身份写卷宗，实例也不占。核对在占锁之前：同名实例此刻被改名占着，也先报目录换了。
+    #[tokio::test]
+    async fn check_updates_for_a_retry_refuses_another_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (facade, mods_dir) = facade_with_instance(tmp.path()).await;
+        tokio::fs::write(mods_dir.join("sodium.jar"), b"jar")
+            .await
+            .unwrap();
+        let before = disk_state(tmp.path());
+        let elsewhere = tempfile::tempdir().unwrap();
+        let expected = elsewhere.path().join(".minecraft").display().to_string();
+        let locks = InstanceLocks::default();
+
+        let renaming = locks
+            .acquire(VERSION_ID, InstanceActivity::Renaming)
+            .unwrap();
+        let err = check_updates_with(&facade, &locks, VERSION_ID, Some(&expected))
+            .await
+            .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &tmp.path().join(".minecraft"));
+        drop(renaming);
+        let err = check_updates_with(&facade, &locks, VERSION_ID, Some(&expected))
+            .await
+            .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &tmp.path().join(".minecraft"));
+        assert_eq!(disk_state(tmp.path()), before);
+        assert_eq!(locks.activity(VERSION_ID), None);
     }
 }

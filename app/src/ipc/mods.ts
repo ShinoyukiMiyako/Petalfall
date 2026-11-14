@@ -175,8 +175,12 @@ export const removeMod = (versionId: string, fileName: string): Promise<void> =>
 /**
  * 忽略更新的 Mod 不出现；锁定版本的不报晚于锁定版本的候选；按当前版本的发布通道过滤：
  * 正式版只报正式版，测试版报正式版或测试版，预览版三种都报。
+ *
+ * gameDir 只有重试「全部更新」前的预检传，是那个任务入队时的游戏目录：当前目录已经不是它时后端报 game_dir_changed，
+ * 不去查新目录里的同名实例。Mod 页的检查更新不传，查当前目录。
  */
-export const checkUpdates = (versionId: string): Promise<UpdateCandidate[]> => invoke<UpdateCandidate[]>("check_updates", { versionId });
+export const checkUpdates = (versionId: string, gameDir?: string): Promise<UpdateCandidate[]> =>
+  invoke<UpdateCandidate[]>("check_updates", gameDir === undefined ? { versionId } : { versionId, gameDir });
 
 /** 批量启停里一个文件的结果：成功给改名后的路径，失败给这一项的命令错误，其余文件不受影响。 */
 export type ModToggleResult =

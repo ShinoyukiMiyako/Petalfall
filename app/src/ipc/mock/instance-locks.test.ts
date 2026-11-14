@@ -115,6 +115,13 @@ describe("mock 的任务命令与后端一样核对发起时的游戏目录", ()
     acquireMockInstance(FABRIC, "installing").release();
   });
 
+  it("检查更新只有带了 gameDir（重试「全部更新」前的预检）才核对：对不上报 game_dir_changed、不占实例；不带的照查当前目录", async () => {
+    const error = await rejection(checkUpdates(FABRIC, STALE));
+    expect([error.code, error.detail]).toEqual(["game_dir_changed", { expected: STALE, current: mockGameDir() }]);
+    acquireMockInstance(FABRIC, "installing").release();
+    expect(await checkUpdates(FABRIC, mockGameDir())).toEqual(await checkUpdates(FABRIC));
+  });
+
   it("缺 gameDir 是 Tauri 自己的参数错误，同样什么都不占", async () => {
     const error = await rejection(invoke("backup_world", { taskId: "t-old", id: FABRIC, world: "新的世界" }));
     expect([error.code, error.message]).toEqual(["unknown", "invalid args `gameDir` for command `backup_world`: missing required key gameDir"]);
