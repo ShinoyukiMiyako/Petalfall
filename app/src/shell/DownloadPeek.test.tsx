@@ -31,6 +31,7 @@ function task(id: string, patch: Partial<Task> = {}): Task {
     createdAt: 0,
     finishedAt: null,
     spec: { command: "install_resource", args: { id } },
+    gameDir: "D:/Games/.minecraft",
     ...patch,
   };
 }

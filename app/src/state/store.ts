@@ -124,11 +124,14 @@ import {
   attemptTaskId,
   batchRetryable,
   clearFinished,
+  commandGameDir,
   completeCompositeStep,
   compositeProgress,
   dropSuperseded,
   exportDestination,
   findDuplicate,
+  GAME_DIR_FREE_COMMANDS,
+  inGameDir,
   INSTANCE_TASK_COMMANDS,
   isActiveTask,
   markCancelled,
@@ -139,6 +142,7 @@ import {
   MOVE_TASK_COMMAND,
   newTask,
   restoreJournal,
+  retryGameDirReason,
   retryTask,
   sharedSavesKeys,
   startComposite,
@@ -503,7 +507,7 @@ export interface LauncherActions {
   cancelTask(id: string): Promise<void>;
   cancelAllTasks(): Promise<void>;
   retryTask(id: string): void;
-  /** 把失败的任务重新排进队列（已有同一件事在队列里的跳过；移动与要手动下载的不收，见 batchRetryable），返回重新排进去的个数。 */
+  /** 把失败的任务重新排进队列（已有同一件事在队列里的跳过；移动、要手动下载的与游戏目录对不上的不收，见 batchRetryable），返回重新排进去的个数。 */
   retryFailedTasks(): number;
   clearFinishedTasks(): void;
   /** 打开下载快览或进入下载任务页时调用：此刻的失败都算看过了。 */
@@ -664,6 +668,12 @@ function journalTask(task: Task): Task {
       ...(error.move_blocker === undefined ? {} : { move_blocker: instancesIpc.parseMoveBlocker(error.move_blocker, `${where}.move_blocker`) }),
     },
   };
+}
+
+/** 组合任务的各项（装 Mod、更新 Mod）都按发起时的游戏目录核对，commandGameDir 不会给它们 null；给了就是那张表漏了它们。 */
+function requiredGameDir(gameDir: string | null, command: string): string {
+  if (gameDir === null) throw new Error(`组合任务 ${command} 没有带发起时的游戏目录`);
+  return gameDir;
 }
 
 function strArg(args: Record<string, unknown>, key: string, command: string): string {
@@ -1684,7 +1694,8 @@ export class LauncherStore {
 
   /** 由离线转回在线：发「网络已恢复」；有失败的下载时正文写个数，操作为全部重试。 */
   private announceRecovered(): void {
-    const failed = this.raw.tasks.filter(batchRetryable).length;
+    const current = this.currentGameDir();
+    const failed = this.raw.tasks.filter((t) => batchRetryable(t, current)).length;
     const copy = TOAST_COPY.networkRestored(failed);
     const action: ToastAction | undefined =
       failed === 0 ? undefined : { label: TOAST_COPY.retryAllAction, run: () => void this.actions.retryFailedTasks(), errorTitle: ACTION_ERROR.install };
@@ -1979,14 +1990,17 @@ export class LauncherStore {
 
   // ---------------------------------------------------------------- 下载任务
 
-  private enqueue(draft: Omit<TaskDraft, "id">, meta: TaskMeta | null, subject: string): Task | null {
+  private enqueue(draft: Omit<TaskDraft, "id" | "gameDir">, meta: TaskMeta | null, subject: string): Task | null {
     const duplicate = findDuplicate(this.raw.tasks, draft.spec);
     if (duplicate !== undefined) {
       this.pushToast("info", TASK_TOAST.duplicate(subject).title);
       return null;
     }
     if (!TASK_COMMANDS.has(draft.spec.command)) throw new Error(`不是可排队的命令：${draft.spec.command}`);
-    const task = newTask({ ...draft, id: freshId("task") }, Date.now());
+    // 记下这一刻的游戏目录：重试前与当前的比对，命令也带上它供后端核对。不知道当前目录就排不出能重试的任务
+    const gameDir = this.currentGameDir();
+    if (gameDir === null && !GAME_DIR_FREE_COMMANDS.has(draft.spec.command)) throw new Error(`还没读到当前的游戏目录，不能排「${subject}」`);
+    const task = newTask({ ...draft, id: freshId("task"), gameDir }, Date.now());
     this.set((raw) => ({
       tasks: [...raw.tasks, task],
       taskMeta: meta === null ? raw.taskMeta : { ...raw.taskMeta, [task.id]: meta },
@@ -2095,17 +2109,19 @@ export class LauncherStore {
     const taskId = attemptTaskId(task);
     const { command, args } = task.spec;
     if (!TASK_COMMANDS.has(command)) throw new Error(`任务日志里有不可重放的命令：${command}`);
+    const gameDir = commandGameDir(task);
     // 组合任务逐个调后端命令，复用同一个 taskId
     if (command === "install_mods") {
       const versionId = strArg(args, "versionId", command);
       const skipped: string[] = [];
+      const dir = requiredGameDir(gameDir, command);
       try {
         await this.runSteps(
           taskId,
           modItems(args).map((item) => ({
             size: item.fileSize,
             run: async (step) => {
-              const outcome = await installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId, step);
+              const outcome = await installMod(taskId, dir, versionId, item.platform, item.projectId, item.modVersionId, step);
               skipped.push(...outcome.skipped);
             },
           })),
@@ -2119,6 +2135,7 @@ export class LauncherStore {
     }
     if (command === "update_mods") {
       const versionId = strArg(args, "versionId", command);
+      const dir = requiredGameDir(gameDir, command);
       const items = task.attempt > 1 ? await this.pendingUpdates(versionId, updateItems(args)) : updateItems(args);
       const updated: UpdateItem[] = [];
       const skipped: string[] = [];
@@ -2128,7 +2145,7 @@ export class LauncherStore {
           items.map((item) => ({
             size: item.fileSize,
             run: async (step) => {
-              const outcome = await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId, step);
+              const outcome = await modsIpc.updateMod(taskId, dir, versionId, item.fileName, item.modVersionId, step);
               updated.push(item);
               skipped.push(...outcome.skipped);
             },
@@ -2143,9 +2160,14 @@ export class LauncherStore {
       return outcome;
     }
     // starterMods 只供前端在重启后恢复「就绪后接着装」，后端的新建与补全命令没有这个参数，不往下传
-    const wire: Record<string, unknown> = { ...args, taskId };
+    const wire: Record<string, unknown> = { ...args, taskId, ...(gameDir === null ? {} : { gameDir }) };
     delete wire.starterMods;
     return invoke<unknown>(command, wire);
+  }
+
+  /** 此刻的当前游戏目录；设置还没读到时为 null。 */
+  private currentGameDir(): string | null {
+    return this.raw.settings === null ? null : this.raw.settings.gameDir;
   }
 
   /**
@@ -2203,7 +2225,7 @@ export class LauncherStore {
     const keep = this.keepsPlaceholder(before) || (repaired !== null && !this.discardLanding.has(id));
     this.set((raw) => {
       const done = trimHistory(markDone(raw.tasks, id, attempt, Date.now()));
-      return { tasks: repaired === null ? done : dropSuperseded(done, repaired), ...(keep ? { landing: [...raw.landing, id] } : {}) };
+      return { tasks: repaired === null ? done : dropSuperseded(done, repaired, before.gameDir), ...(keep ? { landing: [...raw.landing, id] } : {}) };
     });
     this.tasksChanged();
     this.rescanHeld(before.instanceId);
@@ -2412,26 +2434,31 @@ export class LauncherStore {
     this.renameSeq += 1;
     const seq = this.renameSeq;
     this.renames.push({ from, to });
-    this.set((raw) => ({
-      lastRename: { from, to, seq },
-      scanned: raw.scanned.map((i) => (i.id === from ? { ...i, id: to, name: to } : i)),
-      pins: raw.pins.map((p) => (p === from ? to : p)),
-      settings: raw.settings === null || raw.settings.selectedVersion !== from ? raw.settings : { ...raw.settings, selectedVersion: to },
-      tasks: raw.tasks.map((t) => renamedTask(t, from, to)),
-      taskMeta: Object.fromEntries(Object.entries(raw.taskMeta).map(([taskId, meta]) => [taskId, renamedMeta(meta, from, to)])),
-      // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
-      session: raw.session !== null && raw.session.instanceId === from ? { ...raw.session, instanceId: to } : raw.session,
-      toasts: retargetToasts(raw.toasts, from, to),
-      login: renamedLogin(raw.login, from, to),
-      launchPrompt:
-        raw.launchPrompt === null
-          ? null
-          : {
-              ...raw.launchPrompt,
-              instanceId: raw.launchPrompt.instanceId === from ? to : raw.launchPrompt.instanceId,
-              occupantId: raw.launchPrompt.occupantId === from ? to : raw.launchPrompt.occupantId,
-            },
-    }));
+    this.set((raw) => {
+      // 改名发生在当前游戏目录：别的目录里同名实例的任务不跟着改，否则切回去重试就落到那边另一个实例上
+      const dir = raw.settings === null ? null : raw.settings.gameDir;
+      const elsewhere = new Set(raw.tasks.filter((t) => !inGameDir(t, dir)).map((t) => t.id));
+      return {
+        lastRename: { from, to, seq },
+        scanned: raw.scanned.map((i) => (i.id === from ? { ...i, id: to, name: to } : i)),
+        pins: raw.pins.map((p) => (p === from ? to : p)),
+        settings: raw.settings === null || raw.settings.selectedVersion !== from ? raw.settings : { ...raw.settings, selectedVersion: to },
+        tasks: raw.tasks.map((t) => (elsewhere.has(t.id) ? t : renamedTask(t, from, to))),
+        taskMeta: Object.fromEntries(Object.entries(raw.taskMeta).map(([taskId, meta]) => [taskId, elsewhere.has(taskId) ? meta : renamedMeta(meta, from, to)])),
+        // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
+        session: raw.session !== null && raw.session.instanceId === from ? { ...raw.session, instanceId: to } : raw.session,
+        toasts: retargetToasts(raw.toasts, from, to),
+        login: renamedLogin(raw.login, from, to),
+        launchPrompt:
+          raw.launchPrompt === null
+            ? null
+            : {
+                ...raw.launchPrompt,
+                instanceId: raw.launchPrompt.instanceId === from ? to : raw.launchPrompt.instanceId,
+                occupantId: raw.launchPrompt.occupantId === from ? to : raw.launchPrompt.occupantId,
+              },
+      };
+    });
   }
 
   /** mark（当时的 renames.length）之后 id 改成了什么；没改过原样返回。 */
@@ -3648,6 +3675,9 @@ export class LauncherStore {
       },
       retryTask(id) {
         const task = store.findTask(id);
+        // 排在下面两个按实例名查当前目录扫描结果的判断前面：目录换过之后它们认出的是另一个目录里的同名实例
+        const blocked = retryGameDirReason(task, store.currentGameDir());
+        if (blocked !== null) throw new Error(blocked);
         const leftover = store.leftoverOfFailedCreate(task);
         if (leftover !== null) {
           store.retryAsRepair(task, leftover);
@@ -3669,8 +3699,9 @@ export class LauncherStore {
       },
       retryFailedTasks() {
         let retried = 0;
+        const current = store.currentGameDir();
         try {
-          for (const task of store.raw.tasks.filter(batchRetryable)) {
+          for (const task of store.raw.tasks.filter((t) => batchRetryable(t, current))) {
             const leftover = store.leftoverOfFailedCreate(task);
             if (leftover !== null) {
               // 与下面一样，已在队列里的同一件事静默跳过，不逐条提示重复

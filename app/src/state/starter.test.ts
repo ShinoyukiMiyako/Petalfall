@@ -4,10 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../ipc/errors";
 import { saveInstanceAsTemplate } from "../ipc/instances";
 import { mockInvoke, resetMocks } from "../ipc/mock";
+import { mockGameDir } from "../ipc/mock/handlers/config";
 import { listMods, starterMods } from "../ipc/mods";
 import type { TaskRecordDto } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, resetRecorder, settle, startedStore } from "../test/launcher";
+import { bootOverrides, callsOf, configDto, resetRecorder, settle, startedStore } from "../test/launcher";
 import type { LauncherStore, StarterPick } from "./store";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -38,7 +39,8 @@ beforeEach(async () => {
   vi.setSystemTime(T0);
   resetRecorder(ipc);
   resetMocks();
-  bootOverrides(ipc);
+  // 任务命令落到假后端，它按自己的当前游戏目录核对命令带来的 gameDir：两边认同一个目录
+  bootOverrides(ipc, { config: configDto({ game_dir: mockGameDir() }) });
   // 实例列表与侧栏固定也走假后端：新建出来的实例要出现在列表里，装 Mod 时假后端也认得它
   ipc.overrides.delete("list_instances");
   ipc.overrides.delete("get_sidebar_pins");
@@ -77,7 +79,7 @@ describe("新实例起步：沿用默认设置与开局 Mod", () => {
     const picks = await fabricPicks();
     expect(picks).toHaveLength(5);
     await store.actions.createInstance({ name: NAME, mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", cover: "grass", useTemplate: true, starterMods: picks });
-    expect(callsOf(ipc, "install_version")).toEqual([{ taskId: expect.any(String), id: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", targetName: NAME, useTemplate: true }]);
+    expect(callsOf(ipc, "install_version")).toEqual([{ taskId: expect.any(String), id: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", targetName: NAME, useTemplate: true, gameDir: mockGameDir() }]);
     // 实例装好之前不装 Mod：组合任务在就绪之后才排进来
     expect(tasksOf("install_mods")).toEqual([]);
 
@@ -217,6 +219,7 @@ describe("新实例起步：沿用默认设置与开局 Mod", () => {
       error: null,
       created_at: T0 - 60_000,
       finished_at: null,
+      game_dir: mockGameDir(),
       spec: {
         command: "install_mods",
         args: {
@@ -271,6 +274,7 @@ describe("新实例起步：沿用默认设置与开局 Mod", () => {
     error: null,
     created_at: T0 - 60_000,
     finished_at: null,
+    game_dir: mockGameDir(),
     spec: { command, args },
   });
 

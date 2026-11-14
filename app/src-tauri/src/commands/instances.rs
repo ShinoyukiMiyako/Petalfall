@@ -29,6 +29,7 @@ use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::commands::launch::RunningGame;
+use crate::commands::tasks::ensure_game_dir;
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
@@ -1592,11 +1593,15 @@ pub(crate) async fn set_sidebar_pins_with(
 ///
 /// `use_template`（前端传 `useTemplate`）为 true 时，装好后把默认设置补进实例，结果在出参的 `template`
 /// 里。缺省按 false：旧任务表里重放的新建任务没有这个键，前端新入队的任务一律显式传。
+///
+/// `game_dir`（前端传 `gameDir`）是入队那一刻的游戏目录，当前目录已经不是它（切换目录后重试）就报
+/// `game_dir_changed`，什么都不动。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn install_version(
     app: AppHandle,
     task_id: String,
+    game_dir: String,
     id: String,
     loader: Option<String>,
     loader_version: Option<String>,
@@ -1612,6 +1617,7 @@ pub async fn install_version(
         &tasks,
         &locks,
         &task_id,
+        &game_dir,
         InstallArgs {
             mc_version: id,
             loader,
@@ -1641,6 +1647,7 @@ pub(crate) async fn install_version_with(
     tasks: &TaskRegistry,
     locks: &InstanceLocks,
     task_id: &str,
+    game_dir: &str,
     args: InstallArgs,
     events: &EventSink,
 ) -> Result<InstallResultDto, CommandError> {
@@ -1657,6 +1664,8 @@ pub(crate) async fn install_version_with(
     request.validate()?;
     let name = args.target_name;
     let petalfall = facade.snapshot().await;
+    // 先于查重与占名：换了目录时该报的是目录换了，而不是新目录里恰好重名或被占着。
+    ensure_game_dir(&petalfall, game_dir)?;
     petalfall
         .check_new_instance_name(&name)
         .await
@@ -1704,10 +1713,15 @@ pub(crate) async fn install_version_with(
 /// `reinstall_loader`（前端传 `reinstallLoader`）为 true 时把版本 JSON 里读出的加载器原样重装一遍，版本号、
 /// Mod、配置与存档不变；读不出能原样装回的内容时报 `instance_failed`。占用与补全相同。缺省按 false：
 /// 旧任务表里重放的补全任务没有这个键。
+///
+/// `game_dir`（前端传 `gameDir`）是入队那一刻的游戏目录，当前目录已经不是它（切换目录后重试）就报
+/// `game_dir_changed`，什么都不动。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn repair_instance(
     app: AppHandle,
     task_id: String,
+    game_dir: String,
     id: String,
     reinstall_loader: Option<bool>,
     facade: State<'_, Facade>,
@@ -1716,9 +1730,27 @@ pub async fn repair_instance(
 ) -> Result<RepairResultDto, CommandError> {
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
     let outcome = if reinstall_loader.unwrap_or(false) {
-        reinstall_loader_with(&facade, &tasks, &locks, &task_id, &id, events.sink()).await
+        reinstall_loader_with(
+            &facade,
+            &tasks,
+            &locks,
+            &task_id,
+            &game_dir,
+            &id,
+            events.sink(),
+        )
+        .await
     } else {
-        repair_instance_with(&facade, &tasks, &locks, &task_id, &id, events.sink()).await
+        repair_instance_with(
+            &facade,
+            &tasks,
+            &locks,
+            &task_id,
+            &game_dir,
+            &id,
+            events.sink(),
+        )
+        .await
     };
     events.finish().await;
     crate::textures::refresh_on_success(&app, &outcome).await;
@@ -1730,10 +1762,11 @@ pub(crate) async fn repair_instance_with(
     tasks: &TaskRegistry,
     locks: &InstanceLocks,
     task_id: &str,
+    game_dir: &str,
     id: &str,
     events: &EventSink,
 ) -> Result<RepairResultDto, CommandError> {
-    run_repair(facade, tasks, locks, task_id, id, false, events).await
+    run_repair(facade, tasks, locks, task_id, game_dir, id, false, events).await
 }
 
 pub(crate) async fn reinstall_loader_with(
@@ -1741,22 +1774,27 @@ pub(crate) async fn reinstall_loader_with(
     tasks: &TaskRegistry,
     locks: &InstanceLocks,
     task_id: &str,
+    game_dir: &str,
     id: &str,
     events: &EventSink,
 ) -> Result<RepairResultDto, CommandError> {
-    run_repair(facade, tasks, locks, task_id, id, true, events).await
+    run_repair(facade, tasks, locks, task_id, game_dir, id, true, events).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_repair(
     facade: &Facade,
     tasks: &TaskRegistry,
     locks: &InstanceLocks,
     task_id: &str,
+    game_dir: &str,
     id: &str,
     reinstall_loader: bool,
     events: &EventSink,
 ) -> Result<RepairResultDto, CommandError> {
     let petalfall = facade.snapshot().await;
+    // 先于占锁：换了目录时该报的是目录换了，而不是新目录里同名实例或它的基底在忙。
+    ensure_game_dir(&petalfall, game_dir)?;
     // 传统布局的加载器实例把客户端 jar 与 natives 补进继承链根的目录：补全期间基底不能被删、改名或补全。
     // 依赖检查只在删除、改名动手那一刻扫一次，挡不住补全中途的这些操作。
     let _guard = locks
@@ -2966,16 +3004,18 @@ pub(crate) struct WorldTaskEnv<'a> {
     pub game: &'a GameSlot,
 }
 
-/// 三个长任务共同的开头（参数已由调用方校验过）：占住实例，共用存档再查别的实例的游戏，最后登记任务、
-/// 给快照挂上取消令牌。被拒绝的调用不占任务 id。
+/// 三个长任务共同的开头（参数已由调用方校验过）：取快照核对游戏目录还是发起时的 `game_dir`，占住实例，
+/// 共用存档再查别的实例的游戏，最后登记任务、给快照挂上取消令牌。被拒绝的调用不占任务 id。
 async fn begin_world_task<'a>(
     env: &WorldTaskEnv<'a>,
     task_id: &str,
+    game_dir: &str,
     id: &str,
     replaces_saves: bool,
 ) -> Result<(InstanceGuard, TaskHandle<'a>, Petalfall), CommandError> {
-    let guard = env.locks.acquire(id, InstanceActivity::BackingUp)?;
     let snapshot = env.facade.snapshot().await;
+    ensure_game_dir(&snapshot, game_dir)?;
+    let guard = env.locks.acquire(id, InstanceActivity::BackingUp)?;
     ensure_shared_world_free(&snapshot, env.game, id).await?;
     // 备份与导出存档只读，可以和读存档的导出整合包并行；恢复要替换存档，得等它读完。
     if replaces_saves {
@@ -2993,11 +3033,15 @@ async fn begin_world_task<'a>(
 /// 游戏启动中或运行中报 `instance_busy`（detail.activity 为 launching / running）；共用存档在别的不隔离实例
 /// 开着游戏时同样报 `instance_busy`，detail.id 为那个实例。存档不在报 `world_not_found`，被游戏打开着报
 /// `world_in_use`。
+///
+/// `game_dir`（前端传 `gameDir`）是入队那一刻的游戏目录，当前目录已经不是它（切换目录后重试）就报
+/// `game_dir_changed`，什么都不动。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn backup_world(
     app: AppHandle,
     task_id: String,
+    game_dir: String,
     id: String,
     world: String,
     facade: State<'_, Facade>,
@@ -3012,7 +3056,7 @@ pub async fn backup_world(
         game: running.slot(),
     };
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
-    let outcome = backup_world_with(&env, &task_id, &id, &world, events.sink()).await;
+    let outcome = backup_world_with(&env, &task_id, &game_dir, &id, &world, events.sink()).await;
     events.finish().await;
     outcome
 }
@@ -3020,13 +3064,14 @@ pub async fn backup_world(
 pub(crate) async fn backup_world_with(
     env: &WorldTaskEnv<'_>,
     task_id: &str,
+    game_dir: &str,
     id: &str,
     world: &str,
     events: &EventSink,
 ) -> Result<BackupResultDto, CommandError> {
     check_instance_id(id)?;
     check_world(world)?;
-    let (_guard, task, petalfall) = begin_world_task(env, task_id, id, false).await?;
+    let (_guard, task, petalfall) = begin_world_task(env, task_id, game_dir, id, false).await?;
     let outcome = task
         .run(async {
             petalfall
@@ -3070,11 +3115,15 @@ pub(crate) async fn list_world_backups_with(
 /// 实际报。占用规则与 `backup_world` 相同。备份不在报 `world_backup_not_found`，备份损坏或有越界条目报
 /// `world_backup_corrupt`；原存档已进回收站、新的没放到位时报 `world_restore_incomplete`，detail.staged 为恢复
 /// 出的副本。
+///
+/// `game_dir`（前端传 `gameDir`）是入队那一刻的游戏目录，当前目录已经不是它（切换目录后重试）就报
+/// `game_dir_changed`，什么都不动。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_world_backup(
     app: AppHandle,
     task_id: String,
+    game_dir: String,
     id: String,
     world: String,
     file: String,
@@ -3093,6 +3142,7 @@ pub async fn restore_world_backup(
     let outcome = restore_world_backup_with(
         &env,
         &task_id,
+        &game_dir,
         &id,
         &world,
         &file,
@@ -3104,9 +3154,11 @@ pub async fn restore_world_backup(
     outcome
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn restore_world_backup_with(
     env: &WorldTaskEnv<'_>,
     task_id: &str,
+    game_dir: &str,
     id: &str,
     world: &str,
     file: &str,
@@ -3116,7 +3168,7 @@ pub(crate) async fn restore_world_backup_with(
     check_instance_id(id)?;
     check_world(world)?;
     check_backup_file(file)?;
-    let (_guard, _task, petalfall) = begin_world_task(env, task_id, id, true).await?;
+    let (_guard, _task, petalfall) = begin_world_task(env, task_id, game_dir, id, true).await?;
     // 不走 TaskHandle::run：解压阶段自己看令牌，取消时很快停下；换存档一旦开始就停不下来了，宽限期满丢弃
     // future 只是不再等它，后台线程照样换完，用户却收到「已取消」，实例也放开了，半途就能启动游戏。
     // 新副本没能就位时也得照实报出它在哪，不能被 run 盖成取消。
@@ -3167,11 +3219,15 @@ pub(crate) async fn delete_world_backup_with(
 /// 把存档打包导出到 `dest`（系统保存对话框选的位置，已存在则覆盖）：zip 里是一层存档文件夹，解压进 saves
 /// 就能直接用。长任务，可取消；占用规则与 `backup_world` 相同。`dest` 不是绝对路径、不是 .zip、父目录不在
 /// 或落在这个存档里面时报 `invalid_argument`，detail.field 为 dest。
+///
+/// `game_dir`（前端传 `gameDir`）是入队那一刻的游戏目录，当前目录已经不是它（切换目录后重试）就报
+/// `game_dir_changed`，什么都不动。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn export_world(
     app: AppHandle,
     task_id: String,
+    game_dir: String,
     id: String,
     world: String,
     dest: String,
@@ -3188,7 +3244,8 @@ pub async fn export_world(
         game: running.slot(),
     };
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
-    let outcome = export_world_with(&env, &task_id, &id, &world, &dest, events.sink()).await;
+    let outcome =
+        export_world_with(&env, &task_id, &game_dir, &id, &world, &dest, events.sink()).await;
     events.finish().await;
     // 完成通知上的「打开所在文件夹」要定位它
     if let Ok(done) = &outcome {
@@ -3200,6 +3257,7 @@ pub async fn export_world(
 pub(crate) async fn export_world_with(
     env: &WorldTaskEnv<'_>,
     task_id: &str,
+    game_dir: &str,
     id: &str,
     world: &str,
     dest: &str,
@@ -3208,7 +3266,7 @@ pub(crate) async fn export_world_with(
     check_instance_id(id)?;
     check_world(world)?;
     let dest = check_export_dest(dest)?;
-    let (_guard, task, petalfall) = begin_world_task(env, task_id, id, false).await?;
+    let (_guard, task, petalfall) = begin_world_task(env, task_id, game_dir, id, false).await?;
     let outcome = task
         .run(async {
             petalfall
@@ -3237,6 +3295,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::commands::error::code as common;
+    use crate::commands::tasks::{assert_game_dir_changed, current_game_dir, disk_state};
     use crate::tasks::CANCEL_DEADLINE;
 
     /// 发出响应头与 64 KiB 后保持连接不再发送，模拟慢到卡住的下载源。
@@ -3411,7 +3470,16 @@ mod tests {
                 mc_version: "slow".into(),
                 ..args("慢慢装")
             };
-            install_version_with(&f, &r, &l, "install-slow", request, &sink).await
+            install_version_with(
+                &f,
+                &r,
+                &l,
+                "install-slow",
+                &current_game_dir(&f).await,
+                request,
+                &sink,
+            )
+            .await
         });
 
         // 等到客户端 jar 的临时文件已经写进 64 KiB，现场才算造好。
@@ -3465,9 +3533,17 @@ mod tests {
             ("", "empty"),
             (".hidden", "leading_dot"),
         ] {
-            let err = install_version_with(&env.facade, &registry, &locks, "t", args(name), &sink)
-                .await
-                .unwrap_err();
+            let err = install_version_with(
+                &env.facade,
+                &registry,
+                &locks,
+                "t",
+                &current_game_dir(&env.facade).await,
+                args(name),
+                &sink,
+            )
+            .await
+            .unwrap_err();
             assert_eq!(err.code, common::INVALID_ARGUMENT, "{name:?}");
             let detail = err.detail.unwrap();
             assert_eq!(detail["field"], "name", "{name:?}");
@@ -3479,9 +3555,17 @@ mod tests {
             loader: Some("rift".into()),
             ..args("新的")
         };
-        let err = install_version_with(&env.facade, &registry, &locks, "t", rift, &sink)
-            .await
-            .unwrap_err();
+        let err = install_version_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "t",
+            &current_game_dir(&env.facade).await,
+            rift,
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, common::INVALID_ARGUMENT);
         assert_eq!(err.detail.unwrap()["field"], "loader");
 
@@ -3489,9 +3573,17 @@ mod tests {
             loader: Some("forge".into()),
             ..args("新的")
         };
-        let err = install_version_with(&env.facade, &registry, &locks, "t", forge, &sink)
-            .await
-            .unwrap_err();
+        let err = install_version_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "t",
+            &current_game_dir(&env.facade).await,
+            forge,
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, common::LOADER_VERSION_NOT_FOUND);
         assert!(!env.game_dir().join("versions").join("新的").exists());
     }
@@ -3503,9 +3595,17 @@ mod tests {
         let locks = InstanceLocks::default();
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let _held = locks.acquire("撞名", InstanceActivity::Renaming).unwrap();
-        let err = install_version_with(&env.facade, &registry, &locks, "t", args("撞名"), &sink)
-            .await
-            .unwrap_err();
+        let err = install_version_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "t",
+            &current_game_dir(&env.facade).await,
+            args("撞名"),
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, code::INSTANCE_BUSY);
         assert_eq!(err.detail.unwrap()["activity"], "renaming");
         assert!(!registry.is_running("t"));
@@ -3530,6 +3630,7 @@ mod tests {
             &TaskRegistry::default(),
             &InstanceLocks::default(),
             "t",
+            &current_game_dir(&env.facade).await,
             args("没装完"),
             &sink,
         )
@@ -3589,9 +3690,17 @@ mod tests {
             use_template: true,
             ..args("沿用")
         };
-        let result = install_version_with(&env.facade, &registry, &locks, "t1", with, &sink)
-            .await
-            .unwrap();
+        let result = install_version_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "t1",
+            &current_game_dir(&env.facade).await,
+            with,
+            &sink,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             result.template,
             Some(TemplateOutcomeDto::Applied {
@@ -3610,10 +3719,17 @@ mod tests {
             b"\x0a\x00\x00servers"
         );
 
-        let result =
-            install_version_with(&env.facade, &registry, &locks, "t2", args("不沿用"), &sink)
-                .await
-                .unwrap();
+        let result = install_version_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "t2",
+            &current_game_dir(&env.facade).await,
+            args("不沿用"),
+            &sink,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.template, None);
         assert_eq!(
             serde_json::to_value(&result).unwrap()["template"],
@@ -3759,9 +3875,17 @@ mod tests {
         let locks = InstanceLocks::default();
         let (sink, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
 
-        let outcome = repair_instance_with(&env.facade, &registry, &locks, "r1", "1.21.1", &sink)
-            .await
-            .unwrap();
+        let outcome = repair_instance_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "r1",
+            &current_game_dir(&env.facade).await,
+            "1.21.1",
+            &sink,
+        )
+        .await
+        .unwrap();
         assert!(!outcome.reinstalled);
         assert!(dir.is_dir());
         let list = list_instances_with(&env.facade, &locks, &test_textures())
@@ -3784,9 +3908,17 @@ mod tests {
                 "sha1":"0000000000000000000000000000000000000000","size":1,
                 "url":"http://127.0.0.1:9/b-1.jar"}}}]}"#,
         );
-        let err = repair_instance_with(&env.facade, &registry, &locks, "r2", "坏库", &sink)
-            .await
-            .unwrap_err();
+        let err = repair_instance_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "r2",
+            &current_game_dir(&env.facade).await,
+            "坏库",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_ne!(err.code, common::CANCELLED);
         let list = list_instances_with(&env.facade, &locks, &test_textures())
             .await
@@ -3840,9 +3972,17 @@ mod tests {
         let locks = InstanceLocks::default();
         let (sink, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
 
-        let err = reinstall_loader_with(&env.facade, &registry, &locks, "r1", "FAB", &sink)
-            .await
-            .unwrap_err();
+        let err = reinstall_loader_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "r1",
+            &current_game_dir(&env.facade).await,
+            "FAB",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_ne!(err.code, common::CANCELLED);
         assert_eq!(stage_messages(&mut rx), vec!["查找原版 1.21.1".to_owned()]);
         let list = list_instances_with(&env.facade, &locks, &test_textures())
@@ -3861,9 +4001,17 @@ mod tests {
         assert_eq!(incomplete.error.as_ref().unwrap().code, err.code);
         assert_eq!(locks.activity("FAB"), None);
 
-        repair_instance_with(&env.facade, &registry, &locks, "r2", "FAB", &sink)
-            .await
-            .unwrap_err();
+        repair_instance_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "r2",
+            &current_game_dir(&env.facade).await,
+            "FAB",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(stage_messages(&mut rx), vec!["查找原版 1.21.1".to_owned()]);
     }
 
@@ -3877,9 +4025,17 @@ mod tests {
         let locks = InstanceLocks::default();
         let (sink, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
 
-        let first = repair_instance_with(&env.facade, &registry, &locks, "r1", "FAB", &sink)
-            .await
-            .unwrap_err();
+        let first = repair_instance_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "r1",
+            &current_game_dir(&env.facade).await,
+            "FAB",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(first.code, code::LOADER_LIBRARY_MISSING);
         assert_eq!(
             stage_messages(&mut rx),
@@ -3895,9 +4051,17 @@ mod tests {
             code::LOADER_LIBRARY_MISSING
         );
 
-        let second = repair_instance_with(&env.facade, &registry, &locks, "r2", "FAB", &sink)
-            .await
-            .unwrap_err();
+        let second = repair_instance_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "r2",
+            &current_game_dir(&env.facade).await,
+            "FAB",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_ne!(second.code, code::LOADER_LIBRARY_MISSING);
         assert_eq!(stage_messages(&mut rx), vec!["查找原版 1.21.1".to_owned()]);
     }
@@ -3917,9 +4081,17 @@ mod tests {
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
 
         let running = locks.acquire("FAB", InstanceActivity::Running).unwrap();
-        let err = reinstall_loader_with(&env.facade, &registry, &locks, "r1", "FAB", &sink)
-            .await
-            .unwrap_err();
+        let err = reinstall_loader_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "r1",
+            &current_game_dir(&env.facade).await,
+            "FAB",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, code::INSTANCE_BUSY);
         assert_eq!(
             err.detail.unwrap(),
@@ -3928,9 +4100,17 @@ mod tests {
         drop(running);
 
         let deleting = locks.acquire("1.20.1", InstanceActivity::Deleting).unwrap();
-        let err = reinstall_loader_with(&env.facade, &registry, &locks, "r2", "FAB", &sink)
-            .await
-            .unwrap_err();
+        let err = reinstall_loader_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "r2",
+            &current_game_dir(&env.facade).await,
+            "FAB",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, code::INSTANCE_BUSY);
         assert_eq!(
             err.detail.unwrap(),
@@ -3955,9 +4135,17 @@ mod tests {
         let locks = InstanceLocks::default();
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
 
-        let err = reinstall_loader_with(&env.facade, &registry, &locks, "r", "1.21.1", &sink)
-            .await
-            .unwrap_err();
+        let err = reinstall_loader_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "r",
+            &current_game_dir(&env.facade).await,
+            "1.21.1",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, common::INSTANCE_FAILED);
         assert_eq!(
             err.message,
@@ -3985,6 +4173,7 @@ mod tests {
             &TaskRegistry::default(),
             &locks,
             "r",
+            &current_game_dir(&env.facade).await,
             "1.21.1",
             &sink,
         )
@@ -4011,9 +4200,17 @@ mod tests {
             .acquire("装到 一半", InstanceActivity::Installing)
             .unwrap();
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
-        let err = repair_instance_with(&env.facade, &registry, &locks, "r", "装到 一半", &sink)
-            .await
-            .unwrap_err();
+        let err = repair_instance_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "r",
+            &current_game_dir(&env.facade).await,
+            "装到 一半",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, code::INSTANCE_BUSY, "{err:?}");
         assert_eq!(
             err.detail.unwrap(),
@@ -4047,7 +4244,16 @@ mod tests {
             let (f, r, l) = (env.facade.clone(), registry.clone(), locks.clone());
             async move {
                 let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
-                repair_instance_with(&f, &r, &l, "repair-fab", "FAB", &sink).await
+                repair_instance_with(
+                    &f,
+                    &r,
+                    &l,
+                    "repair-fab",
+                    &current_game_dir(&f).await,
+                    "FAB",
+                    &sink,
+                )
+                .await
             }
         });
         let game_dir = env.game_dir();
@@ -5742,9 +5948,15 @@ mod tests {
         write_world(&instance.join("saves"), "新的世界", b"region-v1");
         let w = WorldEnv::new();
 
-        let held = begin_world_task(&w.with(&env), "t", "织布", false)
-            .await
-            .unwrap();
+        let held = begin_world_task(
+            &w.with(&env),
+            "t",
+            &current_game_dir(&env.facade).await,
+            "织布",
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(w.locks.activity("织布"), Some(InstanceActivity::BackingUp));
         assert_eq!(w.locks.occupancy("1.20.1"), (None, None));
         drop(
@@ -5974,6 +6186,7 @@ mod tests {
                 &locks,
                 &GameSlot::default(),
                 "ex",
+                &current_game_dir(&facade).await,
                 "织布",
                 options,
                 &events,
@@ -5989,6 +6202,7 @@ mod tests {
         let err = restore_world_backup_with(
             &w.with(&env),
             "rs",
+            &current_game_dir(w.with(&env).facade).await,
             "织布",
             "新的世界",
             "1761900000000-manual.zip",
@@ -6008,9 +6222,16 @@ mod tests {
             b"region-v1"
         );
         // 备份只读存档，与导出并行无妨
-        let made = backup_world_with(&w.with(&env), "bk", "织布", "新的世界", &events)
-            .await
-            .unwrap();
+        let made = backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "织布",
+            "新的世界",
+            &events,
+        )
+        .await
+        .unwrap();
         assert_eq!(made.backup.kind, BackupKind::Manual);
 
         release_export.send(()).expect("mock 还在等放行");
@@ -6019,6 +6240,7 @@ mod tests {
         let restored = restore_world_backup_with(
             &w.with(&env),
             "rs-after",
+            &current_game_dir(w.with(&env).facade).await,
             "织布",
             "新的世界",
             &made.backup.file,
@@ -6045,12 +6267,20 @@ mod tests {
             let held = w.locks.acquire("生存", activity).unwrap();
             let expected = serde_json::to_value(activity).unwrap();
             let errors = [
-                backup_world_with(&w.with(&env), "t", "生存", "新的世界", &events)
-                    .await
-                    .unwrap_err(),
+                backup_world_with(
+                    &w.with(&env),
+                    "t",
+                    &current_game_dir(w.with(&env).facade).await,
+                    "生存",
+                    "新的世界",
+                    &events,
+                )
+                .await
+                .unwrap_err(),
                 restore_world_backup_with(
                     &w.with(&env),
                     "t",
+                    &current_game_dir(w.with(&env).facade).await,
                     "生存",
                     "新的世界",
                     "1761900000000-manual.zip",
@@ -6059,9 +6289,17 @@ mod tests {
                 )
                 .await
                 .unwrap_err(),
-                export_world_with(&w.with(&env), "t", "生存", "新的世界", dest, &events)
-                    .await
-                    .unwrap_err(),
+                export_world_with(
+                    &w.with(&env),
+                    "t",
+                    &current_game_dir(w.with(&env).facade).await,
+                    "生存",
+                    "新的世界",
+                    dest,
+                    &events,
+                )
+                .await
+                .unwrap_err(),
             ];
             for err in errors {
                 assert_eq!(err.code, code::INSTANCE_BUSY);
@@ -6079,9 +6317,16 @@ mod tests {
             .locks
             .acquire("生存", InstanceActivity::Modifying)
             .unwrap();
-        let made = backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
-            .await
-            .unwrap();
+        let made = backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "生存",
+            "新的世界",
+            &events,
+        )
+        .await
+        .unwrap();
         assert_eq!(made.backup.kind, BackupKind::Manual);
         assert!(
             made.backup.file.ends_with("-manual.zip"),
@@ -6133,9 +6378,17 @@ mod tests {
         assert_eq!(listed.backups, vec![made.backup.clone()]);
         assert_eq!(listed.total_bytes, made.backup.size_bytes);
 
-        let exported = export_world_with(&w.with(&env), "ex", "生存", "新的世界", dest, &events)
-            .await
-            .unwrap();
+        let exported = export_world_with(
+            &w.with(&env),
+            "ex",
+            &current_game_dir(w.with(&env).facade).await,
+            "生存",
+            "新的世界",
+            dest,
+            &events,
+        )
+        .await
+        .unwrap();
         assert_eq!(exported.path, dest);
         assert_eq!(exported.size_bytes, std::fs::metadata(dest).unwrap().len());
         assert!(zip_names(Path::new(dest)).contains(&"新的世界/level.dat".to_owned()));
@@ -6144,6 +6397,7 @@ mod tests {
         let restored = restore_world_backup_with(
             &w.with(&env),
             "rs",
+            &current_game_dir(w.with(&env).facade).await,
             "生存",
             "新的世界",
             &made.backup.file,
@@ -6169,12 +6423,27 @@ mod tests {
 
         for world in ["", "..", "../生存", "a/b", r"a\b", ".hidden", "C:x"] {
             for err in [
-                backup_world_with(&w.with(&env), "t", "生存", world, &events)
-                    .await
-                    .unwrap_err(),
-                export_world_with(&w.with(&env), "t", "生存", world, inside, &events)
-                    .await
-                    .unwrap_err(),
+                backup_world_with(
+                    &w.with(&env),
+                    "t",
+                    &current_game_dir(w.with(&env).facade).await,
+                    "生存",
+                    world,
+                    &events,
+                )
+                .await
+                .unwrap_err(),
+                export_world_with(
+                    &w.with(&env),
+                    "t",
+                    &current_game_dir(w.with(&env).facade).await,
+                    "生存",
+                    world,
+                    inside,
+                    &events,
+                )
+                .await
+                .unwrap_err(),
                 list_world_backups_with(&env.facade, "生存", world)
                     .await
                     .unwrap_err(),
@@ -6197,6 +6466,7 @@ mod tests {
             let err = restore_world_backup_with(
                 &w.with(&env),
                 "t",
+                &current_game_dir(w.with(&env).facade).await,
                 "生存",
                 "新的世界",
                 file,
@@ -6209,9 +6479,16 @@ mod tests {
             assert_eq!(err.detail.unwrap()["field"], "file", "{file:?}");
         }
         for id in ["../生存", "", ".hidden", r"a\b"] {
-            let err = backup_world_with(&w.with(&env), "t", id, "新的世界", &events)
-                .await
-                .unwrap_err();
+            let err = backup_world_with(
+                &w.with(&env),
+                "t",
+                &current_game_dir(w.with(&env).facade).await,
+                id,
+                "新的世界",
+                &events,
+            )
+            .await
+            .unwrap_err();
             assert_eq!(err.code, common::INVALID_ARGUMENT, "{id:?}");
             let detail = err.detail.unwrap();
             assert_eq!(
@@ -6221,10 +6498,17 @@ mod tests {
             );
             assert_eq!(w.locks.activity(id), None);
         }
-        let relative =
-            export_world_with(&w.with(&env), "t", "生存", "新的世界", "导出.zip", &events)
-                .await
-                .unwrap_err();
+        let relative = export_world_with(
+            &w.with(&env),
+            "t",
+            &current_game_dir(w.with(&env).facade).await,
+            "生存",
+            "新的世界",
+            "导出.zip",
+            &events,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(relative.code, common::INVALID_ARGUMENT);
         let detail = relative.detail.unwrap();
         assert_eq!(
@@ -6235,6 +6519,7 @@ mod tests {
         let not_zip = export_world_with(
             &w.with(&env),
             "t",
+            &current_game_dir(w.with(&env).facade).await,
             "生存",
             "新的世界",
             txt.to_str().unwrap(),
@@ -6266,6 +6551,7 @@ mod tests {
             let err = export_world_with(
                 &w.with(&env),
                 "ex",
+                &current_game_dir(w.with(&env).facade).await,
                 "生存",
                 "新的世界",
                 dest.to_str().unwrap(),
@@ -6282,6 +6568,7 @@ mod tests {
         let exported = export_world_with(
             &w.with(&env),
             "ex",
+            &current_game_dir(w.with(&env).facade).await,
             "生存",
             "新的世界",
             dest.to_str().unwrap(),
@@ -6294,6 +6581,7 @@ mod tests {
         let missing = export_world_with(
             &w.with(&env),
             "ex",
+            &current_game_dir(w.with(&env).facade).await,
             "生存",
             "没有这个",
             dest.to_str().unwrap(),
@@ -6349,7 +6637,15 @@ mod tests {
                 game: &g,
             };
             let (events, _rx) = sink();
-            backup_world_with(&ctx, "bk-big", "生存", "大存档", &events).await
+            backup_world_with(
+                &ctx,
+                "bk-big",
+                &current_game_dir(ctx.facade).await,
+                "生存",
+                "大存档",
+                &events,
+            )
+            .await
         });
 
         let root = env.backups_root();
@@ -6439,6 +6735,7 @@ mod tests {
             restore_world_backup_with(
                 &ctx,
                 "rs-big",
+                &current_game_dir(ctx.facade).await,
                 "生存",
                 "新的世界",
                 "1761900000000-manual.zip",
@@ -6518,9 +6815,16 @@ mod tests {
         let world = env.isolated_world("生存", "新的世界");
         let w = WorldEnv::new();
         let (events, _rx) = sink();
-        let made = backup_world_with(&w.with(env), "bk", "生存", "新的世界", &events)
-            .await
-            .unwrap();
+        let made = backup_world_with(
+            &w.with(env),
+            "bk",
+            &current_game_dir(w.with(env).facade).await,
+            "生存",
+            "新的世界",
+            &events,
+        )
+        .await
+        .unwrap();
         std::fs::write(world.join("region").join("r.0.0.mca"), b"region-v2").unwrap();
 
         let facade = env.facade.clone();
@@ -6542,7 +6846,17 @@ mod tests {
                 game: &g,
             };
             let (events, _rx) = sink();
-            restore_world_backup_with(&ctx, "rs-swap", "生存", "新的世界", &file, d, &events).await
+            restore_world_backup_with(
+                &ctx,
+                "rs-swap",
+                &current_game_dir(ctx.facade).await,
+                "生存",
+                "新的世界",
+                &file,
+                d,
+                &events,
+            )
+            .await
         });
         let deadline = Instant::now() + Duration::from_secs(20);
         while !disposer.entered.load(SeqCst) {
@@ -6619,9 +6933,16 @@ mod tests {
         let level_before = std::fs::read(world.join("level.dat")).unwrap();
         let w = WorldEnv::new();
         let (events, _rx) = sink();
-        let made = backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
-            .await
-            .unwrap();
+        let made = backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "生存",
+            "新的世界",
+            &events,
+        )
+        .await
+        .unwrap();
         std::fs::write(world.join("region").join("r.0.0.mca"), b"region-v2").unwrap();
         std::fs::write(world.join("新加的.txt"), b"x").unwrap();
         std::fs::write(world.join("level.dat"), level_dat("改过的名字")).unwrap();
@@ -6630,6 +6951,7 @@ mod tests {
         let restored = restore_world_backup_with(
             &w.with(&env),
             "rs",
+            &current_game_dir(w.with(&env).facade).await,
             "生存",
             "新的世界",
             &made.backup.file,
@@ -6667,6 +6989,7 @@ mod tests {
         let err = restore_world_backup_with(
             &w.with(&env),
             "rs",
+            &current_game_dir(w.with(&env).facade).await,
             "生存",
             "新的世界",
             "1-auto.zip",
@@ -6693,9 +7016,16 @@ mod tests {
         let session = std::fs::File::open(world.join("session.lock")).unwrap();
         session.lock().unwrap();
 
-        let err = backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
-            .await
-            .unwrap_err();
+        let err = backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "生存",
+            "新的世界",
+            &events,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, common::WORLD_IN_USE);
         assert_eq!(
             err.detail.unwrap()["path"],
@@ -6713,9 +7043,16 @@ mod tests {
 
         session.unlock().unwrap();
         drop(session);
-        backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
-            .await
-            .unwrap();
+        backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "生存",
+            "新的世界",
+            &events,
+        )
+        .await
+        .unwrap();
     }
 
     /// 删除备份：zip 交给 disposer，从列表里摘掉；再删一次报 world_backup_not_found。游戏运行中也能删。
@@ -6725,12 +7062,26 @@ mod tests {
         env.isolated_world("生存", "新的世界");
         let w = WorldEnv::new();
         let (events, _rx) = sink();
-        let first = backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
-            .await
-            .unwrap();
-        let second = backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
-            .await
-            .unwrap();
+        let first = backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "生存",
+            "新的世界",
+            &events,
+        )
+        .await
+        .unwrap();
+        let second = backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "生存",
+            "新的世界",
+            &events,
+        )
+        .await
+        .unwrap();
         assert_ne!(first.backup.file, second.backup.file);
 
         let _game = w.locks.acquire("生存", InstanceActivity::Running).unwrap();
@@ -6775,9 +7126,16 @@ mod tests {
         env.isolated_world("生存", "新的世界");
         let w = WorldEnv::new();
         let (events, _rx) = sink();
-        let made = backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
-            .await
-            .unwrap();
+        let made = backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "生存",
+            "新的世界",
+            &events,
+        )
+        .await
+        .unwrap();
         let file = made.backup.file;
         let disposer = Recorder::default();
         let delete = || {
@@ -6823,10 +7181,12 @@ mod tests {
         let w = WorldEnv::new();
         let (events, _rx) = sink();
         let ctx = w.with(&env);
+        let game_dir = current_game_dir(ctx.facade).await;
         let restore = |id: &'static str, world: &'static str, task: &'static str| {
             restore_world_backup_with(
                 &ctx,
                 task,
+                &game_dir,
                 id,
                 world,
                 "1-manual.zip",
@@ -6874,12 +7234,20 @@ mod tests {
 
         let writing = w.locks.write_saves("甲");
         for id in ["甲", "乙"] {
-            let backup = backup_world_with(&ctx, "bk", id, "共用", &events)
-                .await
-                .unwrap_err();
+            let backup = backup_world_with(
+                &ctx,
+                "bk",
+                &current_game_dir(ctx.facade).await,
+                id,
+                "共用",
+                &events,
+            )
+            .await
+            .unwrap_err();
             let restore = restore_world_backup_with(
                 &ctx,
                 "rs",
+                &current_game_dir(ctx.facade).await,
                 id,
                 "共用",
                 "1-manual.zip",
@@ -6888,9 +7256,17 @@ mod tests {
             )
             .await
             .unwrap_err();
-            let export = export_world_with(&ctx, "ex", id, "共用", dest, &events)
-                .await
-                .unwrap_err();
+            let export = export_world_with(
+                &ctx,
+                "ex",
+                &current_game_dir(ctx.facade).await,
+                id,
+                "共用",
+                dest,
+                &events,
+            )
+            .await
+            .unwrap_err();
             for err in [backup, restore, export] {
                 assert_eq!(err.code, code::INSTANCE_BUSY, "{id}");
                 assert_eq!(
@@ -6903,15 +7279,29 @@ mod tests {
             assert_eq!(w.locks.activity(id), None, "被拒绝时实例占用随之放开");
         }
         assert!(!w.registry.is_running("bk"));
-        backup_world_with(&ctx, "bk-iso", "丙", "自己的", &events)
-            .await
-            .unwrap();
+        backup_world_with(
+            &ctx,
+            "bk-iso",
+            &current_game_dir(ctx.facade).await,
+            "丙",
+            "自己的",
+            &events,
+        )
+        .await
+        .unwrap();
         drop(writing);
 
         assert!(w.locks.writing_saves().is_empty());
-        backup_world_with(&ctx, "bk-after", "乙", "共用", &events)
-            .await
-            .unwrap();
+        backup_world_with(
+            &ctx,
+            "bk-after",
+            &current_game_dir(ctx.facade).await,
+            "乙",
+            "共用",
+            &events,
+        )
+        .await
+        .unwrap();
     }
 
     /// 反方向：备份或恢复在做，或者存档正被打进整合包时，装数据包等它们做完。隔离的实例在备份不挡，
@@ -7021,9 +7411,16 @@ mod tests {
         let (events, _rx) = sink();
 
         let loading = w.game.reserve("乙").unwrap();
-        let err = backup_world_with(&w.with(&env), "bk", "甲", "共用", &events)
-            .await
-            .unwrap_err();
+        let err = backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "甲",
+            "共用",
+            &events,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, code::INSTANCE_BUSY);
         assert_eq!(
             err.detail,
@@ -7034,6 +7431,7 @@ mod tests {
         let err = restore_world_backup_with(
             &w.with(&env),
             "rs",
+            &current_game_dir(w.with(&env).facade).await,
             "甲",
             "共用",
             "1-manual.zip",
@@ -7044,14 +7442,28 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.detail.unwrap()["id"], "乙");
 
-        backup_world_with(&w.with(&env), "bk", "丙", "自己的", &events)
-            .await
-            .unwrap();
+        backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "丙",
+            "自己的",
+            &events,
+        )
+        .await
+        .unwrap();
         drop(loading);
 
-        let made = backup_world_with(&w.with(&env), "bk", "甲", "共用", &events)
-            .await
-            .unwrap();
+        let made = backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "甲",
+            "共用",
+            &events,
+        )
+        .await
+        .unwrap();
         let mine = list_world_backups_with(&env.facade, "甲", "共用")
             .await
             .unwrap();
@@ -7190,9 +7602,16 @@ mod tests {
         env.isolated_world("a", "新的世界");
         let w = WorldEnv::new();
         let (events, _rx) = sink();
-        let made = backup_world_with(&w.with(&env), "bk", "a", "新的世界", &events)
-            .await
-            .unwrap();
+        let made = backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "a",
+            "新的世界",
+            &events,
+        )
+        .await
+        .unwrap();
 
         rename_instance_with(&env.facade, &w.locks, "a", "b")
             .await
@@ -7258,9 +7677,16 @@ mod tests {
             .unwrap();
         let w = WorldEnv::new();
         let (events, _rx) = sink();
-        let made = backup_world_with(&w.with(&env), "bk", "周末生存", "新的世界", &events)
-            .await
-            .unwrap();
+        let made = backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "周末生存",
+            "新的世界",
+            &events,
+        )
+        .await
+        .unwrap();
 
         for name in ["Weekend", "WEEKEND"] {
             rename_instance_with(
@@ -7319,12 +7745,26 @@ mod tests {
         env.isolated_world("c", "新的世界");
         let w = WorldEnv::new();
         let (events, _rx) = sink();
-        backup_world_with(&w.with(&env), "bk", "a", "新的世界", &events)
-            .await
-            .unwrap();
-        backup_world_with(&w.with(&env), "bk", "c", "新的世界", &events)
-            .await
-            .unwrap();
+        backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "a",
+            "新的世界",
+            &events,
+        )
+        .await
+        .unwrap();
+        backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(w.with(&env).facade).await,
+            "c",
+            "新的世界",
+            &events,
+        )
+        .await
+        .unwrap();
         env.facade
             .update(|petalfall| {
                 petalfall.set_sidebar_pins(vec!["a".into()]);
@@ -8204,5 +8644,306 @@ mod tests {
         );
         settle_move_recovery(&env.facade, completed).await;
         assert_eq!(env.saved_config().await, saved);
+    }
+
+    // ---- 切换游戏目录之后重试 ----
+
+    /// 任务发起时的游戏目录：另一个临时目录下的 .minecraft，与门面的当前目录不同。
+    fn elsewhere() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let game_dir = path_text(&dir.path().join(".minecraft"));
+        (dir, game_dir)
+    }
+
+    /// 切换目录后重试新建：报 game_dir_changed，当前目录里不建出这个名字的实例、别的实例原样，版本清单一次没问；
+    /// 实例名与任务 id 随之放开。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_retried_after_switching_directories_is_refused() {
+        let server = MockServer::start().await;
+        let env = env_with_empty_manifest(&server).await;
+        env.vanilla("别的");
+        let before = disk_state(env.dir.path());
+        let (_a, expected) = elsewhere();
+        let (registry, locks) = (TaskRegistry::default(), InstanceLocks::default());
+        let (events, _rx) = sink();
+
+        let err = install_version_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "t",
+            &expected,
+            args("生存"),
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &env.game_dir());
+        assert!(!env.game_dir().join("versions").join("生存").exists());
+        assert_eq!(disk_state(env.dir.path()), before);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        // 当前目录里恰好有同名实例也先报目录换了：核对在查重与占名之前，不让新目录里的重名盖过它。
+        env.vanilla("生存");
+        let err = install_version_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "t",
+            &expected,
+            args("生存"),
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &env.game_dir());
+        drop(registry.register("t").unwrap());
+        drop(locks.acquire("生存", InstanceActivity::Installing).unwrap());
+    }
+
+    /// 切换目录后重试补全：报 game_dir_changed，当前目录里同名实例上次补全失败的标记原样（照名字补全的话补的是它，
+    /// 补好就把标记清掉），盘上什么都没动；实例与任务 id 随之放开。
+    #[tokio::test]
+    async fn repair_retried_after_switching_directories_is_refused() {
+        let env = Env::new();
+        let dir = env.vanilla("生存");
+        let marker = petalfall_core::MarkerStore::for_version_dir(&dir);
+        let failed = IncompleteMarker {
+            kind: IncompleteKind::Repair,
+            outcome: IncompleteOutcome::Failed,
+            started_at: 1_761_800_000_000,
+            error: Some(MarkerError {
+                code: common::IO.to_owned(),
+                message: "上次补全没成".to_owned(),
+            }),
+        };
+        marker.save(&failed).await.unwrap();
+        let before = disk_state(env.dir.path());
+        let (_a, expected) = elsewhere();
+        let (registry, locks) = (TaskRegistry::default(), InstanceLocks::default());
+        let (events, _rx) = sink();
+
+        let err = repair_instance_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "r",
+            &expected,
+            "生存",
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &env.game_dir());
+        assert_eq!(marker.load().await.unwrap(), Some(failed));
+        assert_eq!(disk_state(env.dir.path()), before);
+        // 同名实例此刻正被改名也先报目录换了：核对在占锁之前，不让新目录里的占用盖过它。
+        let renaming = locks.acquire("生存", InstanceActivity::Renaming).unwrap();
+        let err = repair_instance_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "r",
+            &expected,
+            "生存",
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &env.game_dir());
+        drop(renaming);
+        drop(registry.register("r").unwrap());
+        drop(locks.acquire("生存", InstanceActivity::Repairing).unwrap());
+    }
+
+    /// 切换目录后重试重装加载器：报 game_dir_changed，当前目录里同名实例没写进安装标记、盘上什么都没动，版本清单
+    /// 一次没问；实例与任务 id 随之放开。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn loader_reinstall_retried_after_switching_directories_is_refused() {
+        let server = MockServer::start().await;
+        let env = env_with_empty_manifest(&server).await;
+        let dir = env.version("FAB", LOST_LOADER_JSON);
+        let before = disk_state(env.dir.path());
+        let (_a, expected) = elsewhere();
+        let (registry, locks) = (TaskRegistry::default(), InstanceLocks::default());
+        let (events, _rx) = sink();
+
+        let err = reinstall_loader_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "r",
+            &expected,
+            "FAB",
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &env.game_dir());
+        assert!(!petalfall_core::MarkerStore::for_version_dir(&dir)
+            .path()
+            .exists());
+        assert_eq!(disk_state(env.dir.path()), before);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        // 同名实例此刻正被改名也先报目录换了：核对在占锁之前，不让新目录里的占用盖过它。
+        let renaming = locks.acquire("FAB", InstanceActivity::Renaming).unwrap();
+        let err = reinstall_loader_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "r",
+            &expected,
+            "FAB",
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &env.game_dir());
+        drop(renaming);
+        drop(registry.register("r").unwrap());
+        drop(locks.acquire("FAB", InstanceActivity::Repairing).unwrap());
+    }
+
+    /// 切换目录后重试备份存档：报 game_dir_changed，当前目录里同名实例的存档没被备份（备份目录都没建），盘上什么都
+    /// 没动；实例与任务 id 随之放开。
+    #[tokio::test]
+    async fn world_backup_retried_after_switching_directories_is_refused() {
+        let env = Env::new();
+        env.isolated_world("生存", "新的世界");
+        let before = disk_state(env.dir.path());
+        let (_a, expected) = elsewhere();
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+
+        let err = backup_world_with(&w.with(&env), "bk", &expected, "生存", "新的世界", &events)
+            .await
+            .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &env.game_dir());
+        assert!(!env.backups_root().exists());
+        assert_eq!(disk_state(env.dir.path()), before);
+        // 同名实例此刻正被改名也先报目录换了：核对在占锁之前，不让新目录里的占用盖过它。
+        let renaming = w.locks.acquire("生存", InstanceActivity::Renaming).unwrap();
+        let err = backup_world_with(&w.with(&env), "bk", &expected, "生存", "新的世界", &events)
+            .await
+            .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &env.game_dir());
+        drop(renaming);
+        drop(w.registry.register("bk").unwrap());
+        drop(
+            w.locks
+                .acquire("生存", InstanceActivity::BackingUp)
+                .unwrap(),
+        );
+    }
+
+    /// 切换目录后重试恢复存档：报 game_dir_changed，当前目录里同名实例的存档还是恢复前的内容、没有东西被移进回收站，
+    /// 盘上什么都没动；实例与任务 id 随之放开。
+    #[tokio::test]
+    async fn world_restore_retried_after_switching_directories_is_refused() {
+        let env = Env::new();
+        let world = env.isolated_world("生存", "新的世界");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let made = backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(&env.facade).await,
+            "生存",
+            "新的世界",
+            &events,
+        )
+        .await
+        .unwrap();
+        let region = world.join("region").join("r.0.0.mca");
+        std::fs::write(&region, b"region-v2").unwrap();
+        let before = disk_state(env.dir.path());
+        let (_a, expected) = elsewhere();
+        let disposer = Recorder::default();
+
+        let err = restore_world_backup_with(
+            &w.with(&env),
+            "rs",
+            &expected,
+            "生存",
+            "新的世界",
+            &made.backup.file,
+            disposer.clone(),
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &env.game_dir());
+        assert_eq!(std::fs::read(&region).unwrap(), b"region-v2");
+        assert_eq!(disposer.disposed(), Vec::<PathBuf>::new());
+        assert_eq!(disk_state(env.dir.path()), before);
+        // 同名实例此刻正被改名也先报目录换了：核对在占锁之前，不让新目录里的占用盖过它。
+        let renaming = w.locks.acquire("生存", InstanceActivity::Renaming).unwrap();
+        let err = restore_world_backup_with(
+            &w.with(&env),
+            "rs",
+            &expected,
+            "生存",
+            "新的世界",
+            &made.backup.file,
+            disposer.clone(),
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &env.game_dir());
+        drop(renaming);
+        drop(w.registry.register("rs").unwrap());
+        drop(
+            w.locks
+                .acquire("生存", InstanceActivity::BackingUp)
+                .unwrap(),
+        );
+    }
+
+    /// 切换目录后重试导出存档：报 game_dir_changed，落点文件不存在，盘上什么都没动；实例与任务 id 随之放开。
+    #[tokio::test]
+    async fn world_export_retried_after_switching_directories_is_refused() {
+        let env = Env::new();
+        env.isolated_world("生存", "新的世界");
+        let dest = env.dir.path().join("导出.zip");
+        let before = disk_state(env.dir.path());
+        let (_a, expected) = elsewhere();
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+
+        let err = export_world_with(
+            &w.with(&env),
+            "ex",
+            &expected,
+            "生存",
+            "新的世界",
+            dest.to_str().unwrap(),
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &env.game_dir());
+        assert!(!dest.exists());
+        assert_eq!(disk_state(env.dir.path()), before);
+        // 同名实例此刻正被改名也先报目录换了：核对在占锁之前，不让新目录里的占用盖过它。
+        let renaming = w.locks.acquire("生存", InstanceActivity::Renaming).unwrap();
+        let err = export_world_with(
+            &w.with(&env),
+            "ex",
+            &expected,
+            "生存",
+            "新的世界",
+            dest.to_str().unwrap(),
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &env.game_dir());
+        drop(renaming);
+        drop(w.registry.register("ex").unwrap());
+        drop(
+            w.locks
+                .acquire("生存", InstanceActivity::BackingUp)
+                .unwrap(),
+        );
     }
 }

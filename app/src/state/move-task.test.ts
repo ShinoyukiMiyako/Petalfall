@@ -298,8 +298,15 @@ describe("切换游戏目录之后", () => {
     return id;
   }
 
-  it("单条重试照发起时的源目录发出；后端认出当前目录换了、以 source_changed 拒绝，原因写清切回去再移", async () => {
+  it("单条重试在前端就拒绝并写明源目录，不发命令；切回去之后照发起时的源目录发出，切换与重试撞在一起时后端以 source_changed 兜底，原因写清切回去再移", async () => {
     const id = await failedMoveThenSwitch();
+    expect(() => store.actions.retryTask(id)).toThrow(`这个任务发起于游戏目录 ${SOURCE}，切回去再重试`);
+    await settle();
+    expect(callsOf(ipc, "move_instance")).toHaveLength(1);
+
+    ipc.overrides.set("get_config", () => configDto({ game_dir: SOURCE }));
+    await store.actions.setGameDirectory(SOURCE);
+    await settle();
     ipc.overrides.set("move_instance", () => {
       throw new IpcError("instance_move_blocked", `实例 生存 不能移到 ${TARGET}：当前游戏目录已经换了，不是发起移动时的那个`, { id: "生存", blocker: { kind: "source_changed" } });
     });

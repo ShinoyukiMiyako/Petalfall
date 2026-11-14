@@ -11,6 +11,7 @@ import type {
 } from "../../config";
 import { UI_LANGUAGES } from "../../config";
 import { IpcError } from "../../errors";
+import { GAME_DIR_CHANGED_ERROR_CODE } from "../../tasks";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
 
 export const MOCK_DATA_DIR = "D:\\Games\\Launcher";
@@ -154,6 +155,18 @@ function directoryName(path: string): string {
 /** 当前游戏目录。 */
 export function mockGameDir(): string {
   return config.game_dir;
+}
+
+/**
+ * 与后端 ensure_game_dir 同口径：按实例名动手的任务命令带来的 gameDir（入队那一刻的游戏目录）不是当前目录时报
+ * game_dir_changed，什么都不动。调用方与后端同序，放在占住实例、登记任务之前。缺这个参数是 Tauri 自己的参数错误。
+ */
+export function ensureMockGameDir(args: MockArgs, command: string): void {
+  const expected = args.gameDir;
+  if (typeof expected !== "string") throw tauriArgError(command, "gameDir", "missing required key gameDir");
+  const current = config.game_dir;
+  if (samePath(expected, current)) return;
+  throw new IpcError(GAME_DIR_CHANGED_ERROR_CODE, `当前游戏目录已经换了，不是发起任务时的那个（发起于 ${expected}，当前是 ${current}）`, { expected, current });
 }
 
 /** 游戏目录的显示名，与目录列表同一规则；还没记录的文件夹也按它推。 */

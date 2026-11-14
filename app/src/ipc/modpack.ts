@@ -161,8 +161,8 @@ export const summarizePlatformModpack = (platform: Platform, projectId: string, 
  * 进度经 core-event 推送并带 task_id，可用 cancelTask(taskId) 取消；失败或取消后不留半成品实例。
  * 还有需要手动下载的文件时以 distribution_blocked 失败，detail.files 只列没认领到的。
  */
-export const installModpack = (taskId: string, source: ModpackSource, name: string | null, excludedOptional: readonly string[]): Promise<ModpackInstallOutcomeDto> =>
-  invoke<ModpackInstallOutcomeDto>("install_modpack", { taskId, source, name, excludedOptional });
+export const installModpack = (taskId: string, gameDir: string, source: ModpackSource, name: string | null, excludedOptional: readonly string[]): Promise<ModpackInstallOutcomeDto> =>
+  invoke<ModpackInstallOutcomeDto>("install_modpack", { taskId, gameDir, source, name, excludedOptional });
 
 /**
  * 从用户选的文件夹里认领手动下载的文件：只看文件夹顶层，按文件名或大小挑候选，再按 sha1 或指纹校验，
@@ -314,6 +314,6 @@ export const previewModpackExport = (id: string): Promise<ModpackExportPreviewDt
  * 装数据包，或共用存档的实例有这些事时报 instance_busy。先写到同目录的临时文件、回读校验通过后才换到
  * destination，失败或取消不留文件。
  */
-export const exportModpack = (taskId: string, id: string, options: ModpackExportOptions): Promise<ModpackExportOutcomeDto> =>
-  invoke<ModpackExportOutcomeDto>("export_modpack", { taskId, id, options });
+export const exportModpack = (taskId: string, gameDir: string, id: string, options: ModpackExportOptions): Promise<ModpackExportOutcomeDto> =>
+  invoke<ModpackExportOutcomeDto>("export_modpack", { taskId, gameDir, id, options });
 

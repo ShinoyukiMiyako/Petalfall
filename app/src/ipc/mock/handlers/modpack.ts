@@ -32,7 +32,7 @@ import type {
 import { DISTRIBUTION_BLOCKED, EXPORT_EXTRAS, parseBlockedFiles } from "../../modpack";
 import { findMockSource, type MockPackManifest } from "../catalog";
 import type { MockArgs, MockHandlers } from "../types";
-import { MOCK_DATA_DIR, tauriArgError } from "./config";
+import { ensureMockGameDir, MOCK_DATA_DIR, tauriArgError } from "./config";
 import { MOCK_GAME_DIR, argReader, emitCoreEvent, parsePlatform, runMockTask, simulateDownload } from "./discover";
 import { NAME_MESSAGES, acquireMockInstance, acquireMockInstanceWithBases, addMockInstance, ensureMockSavesSettledForReading, handlers as instanceHandlers, markMockSavesRead, recordMockExport, mockInstanceIds, mockInstanceWorlds, type MockInstanceHold } from "./instances";
 import { DISABLED_SUFFIX, ledgerKey, mockInstance, mockModsDir, placeMockPackMods } from "./mods";
@@ -322,6 +322,7 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
   const source = parseSource(args.source);
   const requested = read.nullableString("name");
   const excluded = parseExcluded(args);
+  ensureMockGameDir(args, "install_modpack");
   // 与后端一样，占用放在导入主体之外，导入无论怎样结束都在最后放开
   let hold: MockInstanceHold | null = null;
   return runMockTask(taskId, async () => {
@@ -636,7 +637,8 @@ function exportModpack(args: MockArgs): Promise<ModpackExportOutcomeDto> {
   const taskId = read.string("taskId");
   const id = read.string("id");
   const options = validateExport(id, parseExportOptions(args.options));
-  // 与后端一样先占实例再登记任务：参数不合法不占任何东西，任务无论怎样结束都在最后放开
+  // 与后端一样先核对游戏目录、再占实例、再登记任务：参数不合法或目录换了都不占任何东西，任务无论怎样结束都在最后放开
+  ensureMockGameDir(args, "export_modpack");
   const hold = acquireMockInstance(id, "modifying");
   // 勾了存档时与后端一样先记下「存档正被整份读走」再查：恢复与启动要等它读完
   const includesSaves = options.extras.includes("saves");

@@ -13,6 +13,16 @@ export function samePath(a: string, b: string): boolean {
   return normalizePath(a) === normalizePath(b);
 }
 
+/**
+ * 任务发起时的游戏目录与当前的是不是同一个，逐字照后端 petalfall-core 的 same_path：分隔符统一成「\」、去掉末尾的
+ * 「\」、整串小写。前端重试前的检查与后端开工前的核对（game_dir_changed）必须判得一样：前端放行、后端拒绝只是多报一次错，
+ * 前端拒绝、后端本会放行就是平白不让重试。samePath 口径不同（只给盘符路径忽略大小写、先抹首尾空白），不能拿来代替。
+ */
+export function sameGameDir(a: string, b: string): boolean {
+  const norm = (p: string) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+  return norm(a) === norm(b);
+}
+
 /** Java 的 classpath 用「!」分隔 jar 内路径，目录名里带它会让游戏读不出文件。 */
 export function hasBang(path: string): boolean {
   return path.includes("!");

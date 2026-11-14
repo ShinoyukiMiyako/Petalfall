@@ -11,7 +11,7 @@ import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import type { RouteOf } from "../../state/route";
-import { drainFrames, render, stepFrames, stubResizeObserver, type Rendered } from "../../test/dom";
+import { drainFrames, focusByKeyboard, render, stepFrames, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import type { InstanceDto } from "../../ipc/instances";
 import { bootOverrides, callsOf, cancelledError, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
@@ -162,6 +162,7 @@ function record(id: string, status: TaskRecordDto["status"], overrides: Partial<
     created_at: T0 - 120_000,
     finished_at: status === "queued" || status === "running" ? null : T0 - 60_000,
     spec: { command: "install_java", args: { requiredMajor: 21 } },
+    game_dir: "D:/Games/.minecraft",
     ...overrides,
   };
 }
@@ -344,6 +345,34 @@ describe("下载任务页：历史", () => {
     expect(row("failed-java").textContent).toContain("等待数据");
   });
 
+  it("发起于别的游戏目录的失败任务：重试置灰、聚焦写明发起于哪个目录，点了不发命令；与游戏目录无关的 Java 下载照常可点", async () => {
+    const other = "E:\\HMCL\\.minecraft";
+    bootOverrides(ipc, {
+      journal: [
+        record("failed-backup", "failed", {
+          kind: "world_backup",
+          title: "备份「旧世界」",
+          detail: "「生存」",
+          instance_id: "生存",
+          error: { code: "io", message: "磁盘已满" },
+          spec: { command: "backup_world", args: { id: "生存", world: "旧世界" } },
+          game_dir: other,
+        }),
+        record("failed-java", "failed", { error: { code: "network_failed", message: "dns" }, game_dir: other }),
+      ],
+    });
+    await mount();
+    const retry = buttonIn(row("备份「旧世界」"), "重试");
+    expect(retry.getAttribute("aria-disabled")).toBe("true");
+    act(() => focusByKeyboard(retry));
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toContain(`这个任务发起于游戏目录 ${other}，切回去再重试`);
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toEqual([]);
+    expect(launcher.state.tasks.find((t) => t.id === "failed-backup")?.status).toBe("failed");
+    expect(buttonIn(row("下载 Java failed-java"), "重试").getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("上次关闭时中断的移动：行上写已在打开时收尾，不给重试；同样中断的下载照常给重试", async () => {
     bootOverrides(ipc, {
       journal: [
@@ -406,7 +435,7 @@ describe("下载任务页：历史", () => {
     expect(dialog().textContent).toContain("2 个文件都已找到。");
     act(() => buttonIn(dialog(), "重新安装").click());
     await flush();
-    expect(callsOf(ipc, "install_mod")).toEqual([{ ...args, taskId: "failed-mod#2" }]);
+    expect(callsOf(ipc, "install_mod")).toEqual([{ ...args, taskId: "failed-mod#2", gameDir: "D:/Games/.minecraft" }]);
     expect(row("安装 Locked").textContent).toContain("第 2 次尝试");
     expect(hasButton(row("安装 Locked"), "查看这些文件")).toBe(false);
   });
@@ -462,7 +491,7 @@ describe("下载任务页：断网", () => {
     expect(retry.getAttribute("aria-disabled")).toBeNull();
     act(() => retry.click());
     await flush();
-    expect(callsOf(ipc, "backup_world")).toEqual([{ ...args, taskId: "failed-backup#2" }]);
+    expect(callsOf(ipc, "backup_world")).toEqual([{ ...args, taskId: "failed-backup#2", gameDir: "D:/Games/.minecraft" }]);
   });
 
   it("断网：要手动下载的文件都找到后「重新安装」只提示联网后再重试，不把任务重新排进队列", async () => {

@@ -213,6 +213,7 @@ function task(id: string, status: Task["status"], kind: Task["kind"] = "game"): 
     createdAt: 0,
     finishedAt: status === "done" || status === "failed" ? 1 : null,
     spec: { command: "install_version", args: {} },
+    gameDir: "D:/Games/.minecraft",
   };
 }
 

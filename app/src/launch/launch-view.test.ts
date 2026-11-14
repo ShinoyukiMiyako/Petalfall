@@ -87,7 +87,7 @@ const loading = (instanceId: string, stage = 0): SessionState => {
 const running = (instanceId: string) => sessionLaunched(loading(instanceId), "launch-1", T0 + 1000);
 
 function installTask(instanceId: string, id: string, status: Task["status"], progress = 0): Task {
-  return { ...newTask({ id, kind: "game", title: `安装 ${instanceId}`, detail: "", instanceId, spec: { command: "install_version", args: { targetName: instanceId } } }, T0), status, progress };
+  return { ...newTask({ gameDir: "D:/Games/.minecraft", id, kind: "game", title: `安装 ${instanceId}`, detail: "", instanceId, spec: { command: "install_version", args: { targetName: instanceId } } }, T0), status, progress };
 }
 
 describe("启动视图判定", () => {
@@ -143,7 +143,7 @@ describe("启动视图判定", () => {
     expect(launchView(state({ tasks: [created] }), a)).toEqual({ kind: "installing", task: created, queuePosition: null });
 
     const repaired: Task = {
-      ...newTask({ id: "t2", kind: "repair", title: "补全 A", detail: "", instanceId: "A", spec: { command: "repair_instance", args: { id: "A" } } }, T0),
+      ...newTask({ gameDir: "D:/Games/.minecraft", id: "t2", kind: "repair", title: "补全 A", detail: "", instanceId: "A", spec: { command: "repair_instance", args: { id: "A" } } }, T0),
       status: "done",
       progress: 1,
       finishedAt: T0 + 2000,
@@ -162,7 +162,7 @@ describe("启动视图判定", () => {
 
     const other: Task = { ...installTask("B", "t3", "done", 1), finishedAt: T0 + 3000 };
     const mod: Task = {
-      ...newTask({ id: "t4", kind: "mod", title: "装 Sodium", detail: "", instanceId: "A", spec: { command: "install_mod", args: { versionId: "A", platform: "modrinth", projectId: "sodium" } } }, T0),
+      ...newTask({ gameDir: "D:/Games/.minecraft", id: "t4", kind: "mod", title: "装 Sodium", detail: "", instanceId: "A", spec: { command: "install_mod", args: { versionId: "A", platform: "modrinth", projectId: "sodium" } } }, T0),
       status: "done",
       progress: 1,
       finishedAt: T0 + 4000,

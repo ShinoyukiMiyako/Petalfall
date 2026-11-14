@@ -498,6 +498,7 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 | `world_backups_not_moved` | 改名已完成，只差存档备份没挪过去，前端照成功处理再提示 | `{ id, renamed_to, path }`，`path` 是留在旧名下的备份目录 |
 | `server_not_pinned` | 要改的服务器不在固定列表里 | `{ address }` |
 | `quick_play_unsupported` | 实例的版本不支持这种直达方式 | `{ version_id, mode }`，`mode` 取 `singleplayer`、`multiplayer` |
+| `game_dir_changed` | 按实例名动手的任务命令带来的 `game_dir`（入队那一刻的游戏目录）已经不是当前目录，什么都没动（见「长任务」） | `{ expected, current }`：`expected` 是命令带来的目录，`current` 是此刻的当前目录 |
 | `java_path_invalid` | 手动添加的路径不是可用的 java 可执行文件 | `{ path, reason }` |
 | `java_runtime_incomplete` | 手动添加的 Java 缺运行时文件 | `{ path, missing }` |
 | `gpu_query_failed` | 枚举显卡失败 | `{ hresult, causes }` |
@@ -517,10 +518,12 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 需要较长时间的命令（新建实例、补全、导入与导出整合包、装 Mod 与资源、更新 Mod、装 Java、备份、恢复与导出存档、启动游戏）都带一个由前端分配的 `task_id`。启动游戏的 `task_id` 只作为加载阶段的取消句柄使用，不进入前端的下载队列，阶段进度经 `petalfall://launch-phase` 推送。
 
+按实例名动手的任务命令（新建、补全与重装加载器、导入与导出整合包、装 Mod 与资源、更新 Mod、备份、恢复与导出存档）另带必填的 `game_dir`：前端入队那一刻的游戏目录。任务记录只存实例名，同名实例在别的游戏目录里是另一个实例，切换目录之后重试就会作用到它身上。命令取快照之后、占锁与登记任务之前，用同一份快照按 `same_path` 比对（`commands::tasks::ensure_game_dir`），对不上报 `game_dir_changed`，什么都不动；再取一份快照来比的话，两次之间切换了目录就漏过去。前端重试前已按同一口径比对（`state/tasks.ts` 的 `retryGameDirReason`，`domain/paths.ts` 的 `sameGameDir`），目录对不上或不知道（旧任务日志）的不进「全部重试」与断网恢复的计数，单条重试拒绝并写明发起于哪个目录；后端这道核对兜的是切换与重试撞在一起的窗口。移动实例另有 `source`，执行时它已不是当前目录就报 `instance_move_blocked`（拦截项 `source_changed`）；装 Java 与游戏目录无关，不带。
+
 1. 命令开头调用 `TaskRegistry::register`。同一个 id 已在运行时报 `task_conflict`。
 2. 进度通过 `petalfall://core-event` 推送，负载里带 `task_id`，前端的下载队列据此把进度归到对应任务。作为组合任务的一项调用时（见下文），命令另收可选参数 `step`（第几项，从 0 计），原样标在这次调用的每条事件上。
 3. `cancel_task(taskId)` 触发令牌，命令必须在 1000 ms（`CANCEL_DEADLINE`）内以 `cancelled` 返回。个别不观察令牌的阶段，由 `TaskHandle::run` 在宽限期满后放弃。失败或被放弃的整合包导入按命令层占住的实例名清理半成品（`discard_modpack_import`），不看未完成标记里记的是哪个任务；删不掉时把标记落成 `failed` 或 `cancelled`（`settle_modpack_import`），不留 `pending`。半成品目录已不在（删掉了或本来就不在）时，命令层趁占住这个名字的守卫还在，在门面上按导入所在的游戏目录去掉配置里对这个名字的引用：那个目录仍是当前目录时去掉侧栏固定、当前选中与固定服务器记住的实例，已切走时只改它收起的固定与选中（`forget_moved_instance`，与移走实例同一个规则）。守卫还占着，别的命令不能在这个名字下新建实例，清掉的只会是旧引用；按导入所在的目录清，是因为后端不拦导入途中切换当前目录。去不掉只记日志，返回给前端的仍是导入本身的错误。还没占到实例名就失败的导入不碰任何实例。
-4. 前端任务表通过 `save_task_journal` / `load_task_journal` 整份原子写入 `<数据目录>/tasks.json`。后端不解读任务表本身，只比序号：`save_task_journal` 带从 1 起单调递增的 `seq`，后端在写锁内读盘上那份的序号，不比它大的丢弃（仍返回成功，`seq` 为 0 报 `invalid_argument`），两次几乎同时到达的写入不会让较早的那份盖掉较新的。`load_task_journal` 返回 `{ seq, tasks }`，与写入共用一把锁，前端从读到的序号之后接着编（取它与内存序号的较大者，不倒退）。读回时还在进行的导出任务按落点调一次 `discard_export_leftovers`：进程没了收尾代码跑不到，写到一半的临时文件留在玩家选的目录里，这个命令只删导出自己的命名。没有 `seq` 的旧文件按 0 读；盘上文件损坏或版本不符时其中的序号按 0 处理，前端照常写回覆盖。任务记录里的 `detail` 仍是任务行显示的整句文案；实例改名时只替换其中写实例名的那一段（「<名字>」），字段含义和任务日志的格式版本都不变。不按新名字重新生成，是因为版本号与前置数没有全都留在命令参数里，重启后恢复的任务也没有入队上下文。任务记录另有可缺的 `transferred_bytes`（这一次尝试网络上实际读到的字节，含重传），较早写入的记录没有这一项，读回为 null，完成行不写量；后端不解读这个字段，任务日志的格式版本不变。
+4. 前端任务表通过 `save_task_journal` / `load_task_journal` 整份原子写入 `<数据目录>/tasks.json`。后端不解读任务表本身，只比序号：`save_task_journal` 带从 1 起单调递增的 `seq`，后端在写锁内读盘上那份的序号，不比它大的丢弃（仍返回成功，`seq` 为 0 报 `invalid_argument`），两次几乎同时到达的写入不会让较早的那份盖掉较新的。`load_task_journal` 返回 `{ seq, tasks }`，与写入共用一把锁，前端从读到的序号之后接着编（取它与内存序号的较大者，不倒退）。读回时还在进行的导出任务按落点调一次 `discard_export_leftovers`：进程没了收尾代码跑不到，写到一半的临时文件留在玩家选的目录里，这个命令只删导出自己的命名。没有 `seq` 的旧文件按 0 读；盘上文件损坏或版本不符时其中的序号按 0 处理，前端照常写回覆盖。任务记录里的 `detail` 仍是任务行显示的整句文案；实例改名时只替换其中写实例名的那一段（「<名字>」），字段含义和任务日志的格式版本都不变。不按新名字重新生成，是因为版本号与前置数没有全都留在命令参数里，重启后恢复的任务也没有入队上下文。任务记录另有可缺的 `transferred_bytes`（这一次尝试网络上实际读到的字节，含重传），较早写入的记录没有这一项，读回为 null，完成行不写量；后端不解读这个字段，任务日志的格式版本不变。可缺的 `game_dir` 同理：入队那一刻的游戏目录，较早写入的记录没有它，读回为 null（不知道发起于哪个目录，不拿开机时的目录去补），这样的任务不能重试；旧记录里的移动按 `source` 认发起时的目录。
 
 ### 实例互斥
 

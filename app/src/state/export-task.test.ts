@@ -70,7 +70,7 @@ describe("导出整合包任务", () => {
     ipc.overrides.set("export_modpack", () => pending.promise);
     const id = await store.actions.exportModpack("生存", OPTIONS);
     await settle();
-    expect(callsOf(ipc, "export_modpack")).toEqual([{ taskId: `${id}#1`, id: "生存", options: OPTIONS }]);
+    expect(callsOf(ipc, "export_modpack")).toEqual([{ gameDir: "D:/Games/.minecraft", taskId: `${id}#1`, id: "生存", options: OPTIONS }]);
     const task = store.getState().tasks.find((t) => t.id === id);
     expect(task).toMatchObject({ kind: "modpack_export", title: "导出整合包 周末包", detail: "1.2.0 · 「生存」", instanceId: "生存", status: "running" });
     expect(store.getState().instances.find((i) => i.id === "生存")).toMatchObject({ status: "ready", activity: "modifying" });
@@ -151,6 +151,7 @@ describe("导出整合包任务", () => {
       error: { code: "interrupted", message: "关闭时中断" },
       created_at: T0 - 60_000,
       finished_at: T0 - 1000,
+      game_dir: "D:/Games/.minecraft",
       spec: { command: "export_modpack", args: { id: "生存", options: OPTIONS } },
     };
     resetRecorder(ipc);
@@ -160,7 +161,7 @@ describe("导出整合包任务", () => {
     expect(store.getState().tasks.map((t) => [t.id, t.kind, t.status])).toEqual([["task-export", "modpack_export", "failed"]]);
     store.actions.retryTask("task-export");
     await settle();
-    expect(callsOf(ipc, "export_modpack")).toEqual([{ taskId: "task-export#2", id: "生存", options: OPTIONS }]);
+    expect(callsOf(ipc, "export_modpack")).toEqual([{ gameDir: "D:/Games/.minecraft", taskId: "task-export#2", id: "生存", options: OPTIONS }]);
     expect([lastToast().title, lastToast().body, lastToast().action?.label]).toEqual(["已导出「周末包」", "1 个 Mod 打包进了文件，分享前确认作者允许转载", "打开所在文件夹"]);
   });
 
@@ -181,6 +182,7 @@ describe("导出整合包任务", () => {
       error: null,
       created_at: T0 - 60_000,
       finished_at: null,
+      game_dir: "D:/Games/.minecraft",
       spec,
     });
     resetRecorder(ipc);
@@ -214,6 +216,7 @@ describe("导出整合包任务", () => {
       error: { code: "interrupted", message: "关闭时中断" },
       created_at: T0 - 60_000,
       finished_at: T0 - 1000,
+      game_dir: "D:/Games/.minecraft",
       spec: { command: "export_modpack", args: { id: "生存", options: { ...OPTIONS, name: 7 } } },
     };
     resetRecorder(ipc);
@@ -244,6 +247,7 @@ describe("导出整合包任务", () => {
       error: { code: "interrupted", message: "关闭时中断" },
       created_at: T0 - 60_000,
       finished_at: T0 - 1000,
+      game_dir: "D:/Games/.minecraft",
       spec: { command: "export_modpack", args: { id: "生存", options: { ...OPTIONS, name } } },
     });
     resetRecorder(ipc);
@@ -252,7 +256,7 @@ describe("导出整合包任务", () => {
     store = await startedStore();
     expect(() => store.actions.retryFailedTasks()).toThrow("任务 export_modpack 的参数 name 应为字符串");
     await settle();
-    expect(callsOf(ipc, "export_modpack")).toEqual([{ taskId: "task-good#2", id: "生存", options: OPTIONS }]);
+    expect(callsOf(ipc, "export_modpack")).toEqual([{ gameDir: "D:/Games/.minecraft", taskId: "task-good#2", id: "生存", options: OPTIONS }]);
     expect(store.getState().tasks.find((t) => t.id === "task-good")?.status).toBe("done");
   });
 });

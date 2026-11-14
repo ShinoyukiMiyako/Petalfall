@@ -44,6 +44,7 @@ import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
 import {
   addExtraDirectory,
+  ensureMockGameDir,
   followMockSelection,
   isKnownMockGameDirectory,
   isMockPathWithin,
@@ -1126,6 +1127,7 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
   if ((loader === "forge" || loader === "neoforge") && loaderVersionArg === null) {
     throw new IpcError("loader_version_not_found", `${LOADER_NAMES[loader]} 没有适用于 ${mcVersion} 的可用 loader 版本`);
   }
+  ensureMockGameDir(args, "install_version");
   checkName(name, null);
   const release = acquire(name, "installing");
   try {
@@ -1262,6 +1264,7 @@ async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
   const taskId = str(args, "taskId");
   const id = str(args, "id");
   const reinstallLoader = reinstallLoaderArg(args);
+  ensureMockGameDir(args, "repair_instance");
   const instance = requireInstance(id);
   // 与后端一样，补全期间连同继承链上的基底一起占住：补全要读写基底里的客户端 jar 与 natives。
   const repairHold = acquireMockInstanceWithBases(id, "repairing", mockInheritanceChain(id));
@@ -1593,6 +1596,7 @@ async function backupWorld(args: MockArgs): Promise<BackupResultDto> {
   const taskId = str(args, "taskId");
   const id = str(args, "id");
   const world = worldArg(args);
+  ensureMockGameDir(args, "backup_world");
   return worldTask(taskId, id, false, async () => {
     const instance = requireInstance(id);
     const found = requireWorld(instance, world);
@@ -1628,6 +1632,7 @@ async function restoreWorldBackup(args: MockArgs): Promise<RestoreResultDto> {
   const id = str(args, "id");
   const world = worldArg(args);
   const file = str(args, "file");
+  ensureMockGameDir(args, "restore_world_backup");
   return worldTask(taskId, id, true, async () => {
     const instance = requireInstance(id);
     const entry = worldBackups(id, world).find((b) => b.file === file);
@@ -1659,6 +1664,7 @@ async function exportWorld(args: MockArgs): Promise<ExportResultDto> {
   const dest = str(args, "dest");
   if (!/^([A-Za-z]:[\\/]|\\\\)/.test(dest)) throw invalid("dest", "not_absolute", `导出位置须是绝对路径：${dest}`);
   if (!dest.toLowerCase().endsWith(".zip")) throw invalid("dest", "not_zip", `导出文件须是 .zip：${dest}`);
+  ensureMockGameDir(args, "export_world");
   const result = await worldTask(taskId, id, false, async () => {
     const instance = requireInstance(id);
     const found = requireWorld(instance, world);

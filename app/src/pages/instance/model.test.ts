@@ -222,7 +222,7 @@ describe("整页订阅的启动视图", () => {
   const T0 = 1_700_000_000_000;
   const account = { uuid: "u", name: "Steve", kind: "microsoft" as const };
   const repair = (status: Task["status"], progress: number, speedBps: number, id = "repair-1"): Task => ({
-    ...newTask({ id, kind: "game", title: "补全 生存", detail: "", instanceId: "生存", spec: { command: "repair", args: { versionId: "生存" } } }, T0),
+    ...newTask({ gameDir: "D:/Games/.minecraft", id, kind: "game", title: "补全 生存", detail: "", instanceId: "生存", spec: { command: "repair", args: { versionId: "生存" } } }, T0),
     status,
     progress,
     speedBps,
@@ -350,7 +350,7 @@ describe("新建与导入还没装好", () => {
   const T0 = 1_700_000_000_000;
   const NAME = "周末生存";
   const task = (id: string, command: string, status: Task["status"], over: Partial<Task> = {}): Task => ({
-    ...newTask({ id, kind: "game", title: `任务 ${id}`, detail: "", instanceId: NAME, spec: { command, args: {} } }, T0),
+    ...newTask({ gameDir: "D:/Games/.minecraft", id, kind: "game", title: `任务 ${id}`, detail: "", instanceId: NAME, spec: { command, args: {} } }, T0),
     status,
     ...over,
   });
@@ -587,7 +587,7 @@ describe("路径", () => {
 describe("更新任务换掉的 Mod", () => {
   it("挡住「全部更新」的只有本实例排队或进行中的更新任务", () => {
     const task = (command: string, instanceId: string, status: Task["status"]): Task => ({
-      ...newTask({ id: `${command}-${status}`, kind: "mod", title: "", detail: "", instanceId, spec: { command, args: {} } }, 0),
+      ...newTask({ gameDir: "D:/Games/.minecraft", id: `${command}-${status}`, kind: "mod", title: "", detail: "", instanceId, spec: { command, args: {} } }, 0),
       status,
     });
     expect(isPendingModUpdate(task("update_mod", "生存", "queued"), "生存")).toBe(true);

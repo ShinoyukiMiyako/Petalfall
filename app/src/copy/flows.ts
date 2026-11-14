@@ -927,6 +927,16 @@ export const TASK_INTERRUPTED_CODE = "interrupted";
  */
 export const MOVE_INTERRUPTED_CODE = "move_interrupted";
 
+/**
+ * 重试被游戏目录挡住的原因：任务行上重试按钮的置灰说明，与点了重试（含通知上的）之后的报错共用。任务参数只认实例名，
+ * 同名实例在别的游戏目录里是另一个实例，所以目录对不上、或者不知道发起于哪个目录时都不重试。
+ */
+export const RETRY_GAME_DIR_REASON = {
+  elsewhere: (dir: string) => `这个任务发起于游戏目录 ${dir}，切回去再重试`,
+  unknownOrigin: "这条任务记录是旧版本留下的，不知道发起于哪个游戏目录，不能重试；需要的话重新发起",
+  currentUnknown: "还没读到当前的游戏目录，读到后再重试",
+} as const;
+
 function namedList(names: readonly string[], limit: number): string {
   const named = names
     .slice(0, limit)
@@ -994,6 +1004,9 @@ export function taskFailureReason(error: TaskError): string {
       return error.move_blocker === undefined ? error.message : moveBlockerReason(error.move_blocker);
     case "instance_move_verify_failed":
       return "复制出的文件和原件对不上，这次移动已放弃，原件没动";
+    // 前端重试前已经比对过，后端还是拦下：切换目录与重试撞在了一起
+    case "game_dir_changed":
+      return "当前游戏目录已经换了，切回发起任务时的游戏目录再重试";
     case "network_failed":
       return "网络连接失败";
     case "hash_mismatch":

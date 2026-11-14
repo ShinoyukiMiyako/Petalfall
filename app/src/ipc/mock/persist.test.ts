@@ -68,6 +68,7 @@ describe("mock 持久化", () => {
     await first.mockInvoke("rename_instance", { id: "樱花生存", newName: "樱花二周目" });
     await first.mockInvoke("remove_mod", { versionId: "1.20.1-Fabric", fileName: "handmade-1.0.jar" });
     await first.mockInvoke("install_resource", {
+      gameDir: "D:\\Games\\Launcher\\.minecraft",
       taskId: "t-rp",
       versionId: "1.21.1-Fabric",
       resourceType: "resource_pack",
@@ -171,7 +172,7 @@ describe("mock 持久化", () => {
     const storage = new MemoryStorage();
     const core = await reload();
     core.enableMockPersistence(storage, PREFIX);
-    const install = core.mockInvoke("install_version", { taskId: "t-fail", id: "9.9.9", loader: null, loaderVersion: null, targetName: "装不上" });
+    const install = core.mockInvoke("install_version", { taskId: "t-fail", gameDir: "D:\\Games\\Launcher\\.minecraft", id: "9.9.9", loader: null, loaderVersion: null, targetName: "装不上" });
     await expect(install).rejects.toMatchObject({ code: "install_failed" });
     const text = storage.getItem("slug.mock.instances");
     if (text === null) throw new Error("实例状态没有落盘");

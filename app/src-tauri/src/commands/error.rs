@@ -216,6 +216,9 @@ pub mod code {
     pub const INSTANCE_MOVE_VERIFY_FAILED: &str = "instance_move_verify_failed";
     /// 实例的版本不支持这种直达方式。detail：`{ version_id, mode: "singleplayer" | "multiplayer" }`。
     pub const QUICK_PLAY_UNSUPPORTED: &str = "quick_play_unsupported";
+    /// 任务发起时的游戏目录已经不是当前目录（切换目录之后重试）：同名实例在别的目录里是另一个实例，什么都没动。
+    /// detail：`{ expected, current }`，expected 是任务带来的发起时目录，current 是此刻的当前目录。
+    pub const GAME_DIR_CHANGED: &str = "game_dir_changed";
 }
 
 /// 序列化给前端的命令错误。

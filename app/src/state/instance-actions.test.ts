@@ -662,6 +662,7 @@ describe("改名迁移任务", () => {
       error: { code: "interrupted", message: "关闭时中断" },
       created_at: 1_719_000_000_000,
       finished_at: 1_719_000_000_500,
+      game_dir: "D:/Games/.minecraft",
       spec: { command, args },
     };
     bootOverrides(ipc, { journal: [record] });
@@ -701,6 +702,7 @@ describe("改名迁移任务", () => {
       error: { code: "interrupted", message: "关闭时中断" },
       created_at: 1_719_000_000_000,
       finished_at: 1_719_000_000_500,
+      game_dir: "D:/Games/.minecraft",
       spec: { command: "update_mods", args: { versionId: "生存", items: [] } },
     };
     bootOverrides(ipc, { journal: [record] });
@@ -1817,6 +1819,7 @@ describe("重启后重试上次关闭时中断的新建与导入", () => {
       error: null,
       created_at: 1_719_999_000_000,
       finished_at: null,
+      game_dir: "D:/Games/.minecraft",
       spec: { command, args },
     };
   }

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mockGameDir } from "./handlers/config";
 import { getConfig, setGameDirectory, updateConfig } from "../config";
+import { invoke } from "../bridge";
 import { lastCrash, lastLaunchLog } from "../diagnostics";
 import { installMod, installResource } from "../discover";
 import { IpcError } from "../errors";
@@ -7,6 +9,7 @@ import { rollback } from "../history";
 import {
   backupWorld,
   deleteInstance,
+  exportWorld,
   getInstanceSettings,
   getSidebarPins,
   installVersion,
@@ -16,11 +19,12 @@ import {
   previewInstanceDeletion,
   renameInstance,
   repairInstance,
+  restoreWorldBackup,
   setInstanceSettings,
   setSidebarPins,
 } from "../instances";
 import { launchGame, onGameExit, onWorldBackup, playStats, type WorldBackupEvent } from "../launch";
-import { exportModpack, type ModpackExportOptions } from "../modpack";
+import { exportModpack, installModpack, type ModpackExportOptions } from "../modpack";
 import { addLocalMods, checkUpdates, removeMod, setModEnabled, updateMod } from "../mods";
 import { cancelTask } from "../tasks";
 import { resetMocks } from ".";
@@ -82,6 +86,41 @@ async function minutesOf(id: string): Promise<number | null> {
   const row = stats.instances.find((i) => i.version_id === id);
   return row === undefined ? null : row.minutes;
 }
+
+describe("mock 的任务命令与后端一样核对发起时的游戏目录", () => {
+  const STALE = "E:\\Elsewhere\\.minecraft";
+  const exportOptions: ModpackExportOptions = { destination: "D:\\分享\\a.mrpack", name: "a", version: "1", summary: null, extras: [], include_disabled: false };
+  const COMMANDS: readonly [string, (taskId: string, dir: string) => Promise<unknown>][] = [
+    ["install_version", (t, d) => installVersion(t, d, "1.21.1", null, null, "新的")],
+    ["repair_instance", (t, d) => repairInstance(t, d, FABRIC)],
+    ["install_mod", (t, d) => installMod(t, d, FABRIC, "modrinth", "x", "y")],
+    ["install_resource", (t, d) => installResource({ taskId: t, gameDir: d, versionId: FABRIC, resourceType: "shader", world: null, platform: "modrinth", projectId: "x", fileVersionId: "y" })],
+    ["update_mod", (t, d) => updateMod(t, d, FABRIC, "a.jar", "v")],
+    ["backup_world", (t, d) => backupWorld(t, d, FABRIC, "新的世界")],
+    ["restore_world_backup", (t, d) => restoreWorldBackup(t, d, FABRIC, "新的世界", "1.zip")],
+    ["export_world", (t, d) => exportWorld(t, d, FABRIC, "新的世界", "D:\\导出\\a.zip")],
+    ["install_modpack", (t, d) => installModpack(t, d, { kind: "file", path: "D:\\a.mrpack" }, null, [])],
+    ["export_modpack", (t, d) => exportModpack(t, d, FABRIC, exportOptions)],
+  ];
+
+  it("gameDir 不是当前目录：十条命令都报 game_dir_changed，detail 带两个目录；实例没被占住，任务 id 也没登记", async () => {
+    for (const [cmd, call] of COMMANDS) {
+      const error = await rejection(call(`t-${cmd}`, STALE));
+      expect([cmd, error.code, error.detail]).toEqual([cmd, "game_dir_changed", { expected: STALE, current: mockGameDir() }]);
+    }
+    for (const [cmd] of COMMANDS) {
+      beginMockTask(`t-${cmd}`);
+      endMockTask(`t-${cmd}`);
+    }
+    acquireMockInstance(FABRIC, "installing").release();
+  });
+
+  it("缺 gameDir 是 Tauri 自己的参数错误，同样什么都不占", async () => {
+    const error = await rejection(invoke("backup_world", { taskId: "t-old", id: FABRIC, world: "新的世界" }));
+    expect([error.code, error.message]).toEqual(["unknown", "invalid args `gameDir` for command `backup_world`: missing required key gameDir"]);
+    acquireMockInstance(FABRIC, "installing").release();
+  });
+});
 
 describe("mock 的实例占用与后端同一张兼容表", () => {
   const ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited", "backing_up"] as const;
@@ -151,7 +190,7 @@ describe("mock 的实例占用与后端同一张兼容表", () => {
     addMockInstance("导入的包", "1.21", { kind: "fabric", version: "0.16.10" }, null);
     await launchGame(offline("1.21", "t-base"));
     expect(await baseBusyOf("导入的包")).toEqual({ id: "1.21", activity: "running" });
-    expect(await busy(repairInstance("t-repair", "导入的包"))).toEqual(["实例 1.21 正在运行，请稍后再试", { id: "1.21", activity: "running" }]);
+    expect(await busy(repairInstance("t-repair", mockGameDir(), "导入的包"))).toEqual(["实例 1.21 正在运行，请稍后再试", { id: "1.21", activity: "running" }]);
     expect(await activityOf("导入的包")).toBeNull();
     endMockGame(0, MINUTE);
     expect(await baseBusyOf("导入的包")).toBeNull();
@@ -195,13 +234,13 @@ describe("mock 的实例占用与后端同一张兼容表", () => {
       expect((await busy(setModEnabled(FABRIC, "AANobbMI-0.5.3.jar", false)))[1]).toEqual(expected);
       expect((await busy(removeMod(FABRIC, "handmade-1.0.jar")))[1]).toEqual(expected);
       expect((await busy(addLocalMods(FABRIC, ["D:\\dl\\extra.jar"])))[1]).toEqual(expected);
-      expect((await busy(updateMod("t-up", FABRIC, "handmade-1.0.jar", "v1")))[1]).toEqual(expected);
-      expect((await busy(installMod("t-mod", FABRIC, "modrinth", "AANobbMI", "mr-sodium-0.5.11")))[1]).toEqual(expected);
+      expect((await busy(updateMod("t-up", mockGameDir(), FABRIC, "handmade-1.0.jar", "v1")))[1]).toEqual(expected);
+      expect((await busy(installMod("t-mod", mockGameDir(), FABRIC, "modrinth", "AANobbMI", "mr-sodium-0.5.11")))[1]).toEqual(expected);
       expect((await busy(rollback(FABRIC, "e1")))[1]).toEqual(expected);
       expect(
         (
           await busy(
-            installResource({ taskId: "t-res", versionId: FABRIC, resourceType: "shader", world: null, platform: "modrinth", projectId: "x", fileVersionId: "y" }),
+            installResource({ gameDir: mockGameDir(), taskId: "t-res", versionId: FABRIC, resourceType: "shader", world: null, platform: "modrinth", projectId: "x", fileVersionId: "y" }),
           )
         )[1],
       ).toEqual(expected);
@@ -231,7 +270,7 @@ describe("mock 的实例占用与后端同一张兼容表", () => {
 
   it("补全进行中：写设置报 instance_busy（repairing）", async () => {
     vi.useFakeTimers();
-    const repairing = repairInstance("t-repair", "1.21");
+    const repairing = repairInstance("t-repair", mockGameDir(), "1.21");
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
     const settings = await getInstanceSettings("1.21");
     expect((await busy(setInstanceSettings("1.21", settings)))[1]).toEqual({ id: "1.21", activity: "repairing" });
@@ -271,7 +310,7 @@ describe("mock 改名与删除带上游玩记录、崩溃报告与会话日志",
     expect(await lastCrash("1.21")).toBeNull();
     expect(await lastLaunchLog("1.21")).toBeNull();
 
-    const installing = installVersion("t-new", "1.21.1", null, null, "1.21");
+    const installing = installVersion("t-new", mockGameDir(), "1.21.1", null, null, "1.21");
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS * (MOCK_INSTALL_STEPS + 2));
     await installing;
     expect((await listInstances()).find((i) => i.id === "1.21")).toMatchObject({ playtime_min: 0, last_played_at: null, last_crash_at: null });
@@ -456,14 +495,14 @@ describe("mock 的存档读写互斥与后端同序", () => {
   const SHARED_B = "1.21.1";
   const OPTIONS: ModpackExportOptions = { destination: "D:/分享/周末包.mrpack", name: "周末包", version: "1.0.0", summary: null, extras: [], include_disabled: false };
 
-  const withSaves = (taskId: string, id = ISOLATED) => exportModpack(taskId, id, { ...OPTIONS, extras: ["saves"] });
+  const withSaves = (taskId: string, id = ISOLATED) => exportModpack(taskId, mockGameDir(), id, { ...OPTIONS, extras: ["saves"] });
   const dataPack = (taskId: string, versionId = ISOLATED) =>
-    installResource({ taskId, versionId, resourceType: "data_pack", world: WORLD, platform: "modrinth", projectId: "x", fileVersionId: "y" });
+    installResource({ gameDir: mockGameDir(), taskId, versionId, resourceType: "data_pack", world: WORLD, platform: "modrinth", projectId: "x", fileVersionId: "y" });
 
   it.each(["launching", "running", "backing_up"] as const)("实例报着 %s：带存档的导出报 instance_busy，没勾存档的照常导出", async (activity) => {
     const hold = acquireMockInstance(ISOLATED, activity);
     expect((await rejection(withSaves("t-saves"))).detail).toEqual({ id: ISOLATED, activity });
-    expect((await exportModpack("t-plain", ISOLATED, OPTIONS)).path).toBe(OPTIONS.destination);
+    expect((await exportModpack("t-plain", mockGameDir(), ISOLATED, OPTIONS)).path).toBe(OPTIONS.destination);
     hold.release();
     expect((await withSaves("t-again")).path).toBe(OPTIONS.destination);
   });
@@ -486,7 +525,7 @@ describe("mock 的存档读写互斥与后端同序", () => {
     expect((await rejection(dataPack("t-backup"))).detail).toEqual({ id: ISOLATED, activity: "backing_up" });
     backup.release();
 
-    const plain = exportModpack("t-plain", ISOLATED, OPTIONS);
+    const plain = exportModpack("t-plain", mockGameDir(), ISOLATED, OPTIONS);
     expect((await rejection(dataPack("t-beside-plain"))).code).not.toBe("instance_busy");
     await plain;
 
@@ -499,11 +538,11 @@ describe("mock 的存档读写互斥与后端同序", () => {
   it("正在装数据包：备份与带存档的导出都报 instance_busy，写明在装数据包，结束后放开", async () => {
     const unmark = markMockSavesWritten(ISOLATED);
     const expected = [`实例 ${ISOLATED} 正在往存档里装数据包，请稍后再试`, { id: ISOLATED, activity: "modifying" }];
-    expect(await busy(backupWorld("t-backup", ISOLATED, WORLD))).toEqual(expected);
+    expect(await busy(backupWorld("t-backup", mockGameDir(), ISOLATED, WORLD))).toEqual(expected);
     expect(await busy(withSaves("t-saves"))).toEqual(expected);
     unmark();
     vi.useFakeTimers();
-    const done = backupWorld("t-after", ISOLATED, WORLD);
+    const done = backupWorld("t-after", mockGameDir(), ISOLATED, WORLD);
     await vi.advanceTimersByTimeAsync(10 * MINUTE);
     await done;
   });
@@ -528,7 +567,7 @@ describe("mock 的存档备份按作用域存放，与后端的备份目录一�
     addMockWorld(SHARED_A, world);
     addMockWorld(SHARED_B, world);
     vi.useFakeTimers();
-    const done = backupWorld("t-shared", SHARED_A, world);
+    const done = backupWorld("t-shared", mockGameDir(), SHARED_A, world);
     await vi.advanceTimersByTimeAsync(10 * MINUTE);
     await done;
     const seen = await listWorldBackups(SHARED_B, world);

@@ -536,7 +536,16 @@ export function taskFromRecord(dto: TaskRecordDto): Task {
     createdAt: dto.created_at,
     finishedAt: dto.finished_at,
     spec: { command: dto.spec.command, args: dto.spec.args },
+    gameDir: journalGameDir(dto),
   };
+}
+
+/** 记录里的发起时游戏目录：较早的日志没有这一项，记为不知道（null）；有这一项却不是字符串或 null 是日志坏了。 */
+function journalGameDir(dto: TaskRecordDto): string | null {
+  const value: unknown = dto.game_dir;
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new Error(`任务 ${dto.id} 的 game_dir 应为字符串或 null`);
+  return value;
 }
 
 export function taskToRecord(task: Task): TaskRecordDto {
@@ -559,5 +568,6 @@ export function taskToRecord(task: Task): TaskRecordDto {
     created_at: task.createdAt,
     finished_at: task.finishedAt,
     spec: { command: task.spec.command, args: task.spec.args },
+    game_dir: task.gameDir,
   };
 }

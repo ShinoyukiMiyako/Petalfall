@@ -157,6 +157,8 @@ export interface ResourceInstallOutcomeDto {
 
 export interface InstallResourceArgs {
   taskId: string;
+  /** 入队那一刻的游戏目录：当前目录已经不是它时后端以 game_dir_changed 拒绝，什么都不动。 */
+  gameDir: string;
   versionId: string;
   resourceType: InstallableResourceType;
   /** 数据包必须给出存档目录名，其余类型必须为 null。 */
@@ -174,17 +176,19 @@ export const projectDetail = (platform: PlatformId, projectId: string): Promise<
   invoke<ProjectDetail>("project_detail", { platform, projectId });
 
 /**
- * 长任务：进度经 core-event 推送并带 task_id，可用 cancelTask(taskId) 取消。
- * 作为组合任务的一项调用时 step 给第几项（从 0 计），后端把它标在这次调用的每条事件上；单独调用不给。
+ * 长任务：进度经 core-event 推送并带 task_id，可用 cancelTask(taskId) 取消。gameDir 是入队那一刻的游戏目录，当前目录已经不是它时
+ * 以 game_dir_changed 拒绝、什么都不动。作为组合任务的一项调用时 step 给第几项（从 0 计），后端把它标在这次调用的每条事件上；
+ * 单独调用不给。
  */
 export const installMod = (
   taskId: string,
+  gameDir: string,
   versionId: string,
   platform: PlatformId,
   projectId: string,
   modVersionId: string,
   step?: number,
-): Promise<ModInstallOutcomeDto> => invoke<ModInstallOutcomeDto>("install_mod", { taskId, versionId, platform, projectId, modVersionId, step });
+): Promise<ModInstallOutcomeDto> => invoke<ModInstallOutcomeDto>("install_mod", { taskId, gameDir, versionId, platform, projectId, modVersionId, step });
 
 /** 长任务：资源包进 resourcepacks/，光影进 shaderpacks/，数据包进 saves/<存档>/datapacks/。Mod 不走这里（报 invalid_argument），用 installMod。 */
 export const installResource = (args: InstallResourceArgs): Promise<ResourceInstallOutcomeDto> =>

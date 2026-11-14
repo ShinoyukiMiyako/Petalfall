@@ -4,9 +4,10 @@
 // 「重试排到队尾」都不需要改写 createdAt。每次尝试的命令 taskId 是「任务 id + 尝试次数」：后端会记住
 // 「取消时不在运行」的 id，同 id 再登记会直接是已取消状态，重试必须换新 id。
 
-import { MOVE_INTERRUPTED_CODE, TASK_INTERRUPTED_CODE, taskFailureReason } from "../copy/flows";
+import { MOVE_INTERRUPTED_CODE, RETRY_GAME_DIR_REASON, TASK_INTERRUPTED_CODE, taskFailureReason } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
 import { MAX_PARALLEL_TASKS, TASK_HISTORY_LIMIT } from "../domain/limits";
+import { sameGameDir } from "../domain/paths";
 import type { InstallPhase, Task, TaskKind, TaskPhase, TaskSpec } from "../domain/types";
 
 export interface TaskDraft {
@@ -16,6 +17,8 @@ export interface TaskDraft {
   detail: string;
   instanceId: string | null;
   spec: TaskSpec;
+  /** 入队那一刻的游戏目录；只有与游戏目录无关的任务（GAME_DIR_FREE_COMMANDS）在设置没读到时为 null。 */
+  gameDir: string | null;
 }
 
 export function isActiveTask(task: Task): boolean {
@@ -498,13 +501,62 @@ export function settledOnRestart(task: Task): boolean {
   return task.error !== null && task.error.code === MOVE_INTERRUPTED_CODE;
 }
 
+/** Java 运行时装在数据目录里，与游戏目录无关：这些任务的重试不看游戏目录，命令也不带它。 */
+export const GAME_DIR_FREE_COMMANDS: ReadonlySet<string> = new Set(["install_java"]);
+
 /**
- * 「全部重试」与断网恢复的批量重试收不收这个任务。要走手动下载清单的不收（见 awaitsManualFiles）。移动一律不收：它不需要
- * 网络，是玩家逐个确认过的大动作，批量里没人看着它从哪移到哪；发起之后可能已切换了游戏目录，单条重试由玩家自己点，
- * 源目录对不上时后端以 source_changed 拒绝。
+ * 任务发起时所在的游戏目录；不知道为 null（加上这一项之前写的任务日志）。移动的源目录就是发起时的游戏目录，
+ * 旧日志里也带着，用它。
  */
-export function batchRetryable(task: Task): boolean {
-  return task.status === "failed" && !awaitsManualFiles(task) && task.spec.command !== MOVE_TASK_COMMAND;
+export function originGameDir(task: Task): string | null {
+  if (task.gameDir !== null) return task.gameDir;
+  if (task.spec.command !== MOVE_TASK_COMMAND) return null;
+  const source = task.spec.args.source;
+  if (typeof source !== "string") throw new Error(`移动任务 ${task.id} 的参数 source 应为字符串`);
+  return source;
+}
+
+/**
+ * 重试被游戏目录挡住的原因，不挡为 null。current 是此刻的当前游戏目录，设置还没读到时为 null。任务参数只认实例名，
+ * 同名实例在别的游戏目录里是另一个实例：发起时的目录与当前的对不上、或者不知道发起于哪个目录，都不重试，也不拿开机时的目录去补。
+ * 单条重试、「全部重试」、断网恢复的计数与任务行的重试按钮都按它，后端开工前用同一口径再核对一次（game_dir_changed）。
+ */
+export function retryGameDirReason(task: Task, current: string | null): string | null {
+  if (GAME_DIR_FREE_COMMANDS.has(task.spec.command)) return null;
+  const origin = originGameDir(task);
+  if (origin === null) return RETRY_GAME_DIR_REASON.unknownOrigin;
+  if (current === null) return RETRY_GAME_DIR_REASON.currentUnknown;
+  return sameGameDir(origin, current) ? null : RETRY_GAME_DIR_REASON.elsewhere(origin);
+}
+
+/**
+ * 按实例名改动已结束的任务（改名迁移参数、补全成功后撤下被接替的失败）时，这个任务算不算 dir 这个游戏目录里的。
+ * 已知发起于别的目录的不算：在这边改了，切回去重试就落到那边另一个同名实例上。不知道发起于哪个目录的旧记录算（它们本来就
+ * 不能重试，跟着改只影响显示与「查看实例」）。dir 不知道时只认旧记录。
+ */
+export function inGameDir(task: Task, dir: string | null): boolean {
+  const origin = originGameDir(task);
+  if (origin === null) return true;
+  return dir !== null && sameGameDir(origin, dir);
+}
+
+/**
+ * 执行时命令要带的 gameDir（后端开工前据此核对，对不上报 game_dir_changed），不带为 null。移动带着自己的 source，后端按它
+ * 核对；Java 下载与游戏目录无关。别的任务不知道发起于哪个目录就不该走到执行（重试前已经拦下），走到了是状态层的错。
+ */
+export function commandGameDir(task: Task): string | null {
+  if (task.spec.command === MOVE_TASK_COMMAND || GAME_DIR_FREE_COMMANDS.has(task.spec.command)) return null;
+  if (task.gameDir === null) throw new Error(`任务 ${task.id} 不知道发起于哪个游戏目录，不能执行`);
+  return task.gameDir;
+}
+
+/**
+ * 「全部重试」与断网恢复的批量重试收不收这个任务，current 是此刻的当前游戏目录。要走手动下载清单的不收（见 awaitsManualFiles）；
+ * 游戏目录对不上或不知道的不收（见 retryGameDirReason），断网恢复的通知也不数它们。移动一律不收：它不需要网络，是玩家逐个确认过的
+ * 大动作，批量里没人看着它从哪移到哪。
+ */
+export function batchRetryable(task: Task, current: string | null): boolean {
+  return task.status === "failed" && !awaitsManualFiles(task) && task.spec.command !== MOVE_TASK_COMMAND && retryGameDirReason(task, current) === null;
 }
 
 /** 重试：同一任务回到排队并移到队尾，尝试次数加一。只有失败的任务能重试，重启后已由后端收尾的移动不算。 */
@@ -553,10 +605,13 @@ export function trimHistory(tasks: readonly Task[]): Task[] {
 
 /**
  * 补全成功后，这个实例失败的新建与补全都没有要重试的了：实例已经好了，留着的话任务页一直报失败，新建那行点重试还会撞名。
+ * gameDir 是补全所在的游戏目录：别的目录里同名实例的失败与它无关，留着（见 inGameDir）。
  */
-export function dropSuperseded(tasks: readonly Task[], instanceId: string): Task[] {
+export function dropSuperseded(tasks: readonly Task[], instanceId: string, gameDir: string | null): Task[] {
   const key = instanceId.toLowerCase();
-  return tasks.filter((t) => !(t.status === "failed" && t.instanceId !== null && t.instanceId.toLowerCase() === key && (t.spec.command === "install_version" || t.spec.command === "repair_instance")));
+  return tasks.filter(
+    (t) => !(t.status === "failed" && t.instanceId !== null && t.instanceId.toLowerCase() === key && (t.spec.command === "install_version" || t.spec.command === "repair_instance") && inGameDir(t, gameDir)),
+  );
 }
 
 /**

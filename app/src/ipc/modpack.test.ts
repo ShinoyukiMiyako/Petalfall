@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mockGameDir } from "./mock/handlers/config";
 import { invoke, listen } from "./bridge";
 import { IpcError } from "./errors";
 import { instanceBusyFromError } from "../domain/instance-busy";
@@ -70,11 +71,11 @@ describe("Tauri 里参数键与 Rust 形参一致", () => {
       include_disabled: true,
     };
     await previewModpackExport("樱花生存");
-    await exportModpack("t-ex", "樱花生存", options);
+    await exportModpack("t-ex", mockGameDir(), "樱花生存", options);
     await revealInFolder("D:\\分享\\樱花 1.0.0.mrpack");
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
       ["preview_modpack_export", { id: "樱花生存" }],
-      ["export_modpack", { taskId: "t-ex", id: "樱花生存", options }],
+      ["export_modpack", { taskId: "t-ex", gameDir: mockGameDir(), id: "樱花生存", options }],
       ["reveal_in_folder", { path: "D:\\分享\\樱花 1.0.0.mrpack" }],
     ]);
   });
@@ -83,11 +84,11 @@ describe("Tauri 里参数键与 Rust 形参一致", () => {
     vi.mocked(tauriInvoke).mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValueOnce(null);
     await previewModpack("D:/a.zip");
     await summarizePlatformModpack("modrinth", "1KVo5zza", "v14");
-    await installModpack("t-mp", platform, null, ["mods/a.jar"]);
+    await installModpack("t-mp", mockGameDir(), platform, null, ["mods/a.jar"]);
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
       ["preview_modpack", { path: "D:/a.zip" }],
       ["summarize_platform_modpack", { platform: "modrinth", projectId: "1KVo5zza", versionId: "v14" }],
-      ["install_modpack", { taskId: "t-mp", source: { kind: "platform", platform: "modrinth", project_id: "1KVo5zza", version_id: "v14" }, name: null, excludedOptional: ["mods/a.jar"] }],
+      ["install_modpack", { taskId: "t-mp", gameDir: mockGameDir(), source: { kind: "platform", platform: "modrinth", project_id: "1KVo5zza", version_id: "v14" }, name: null, excludedOptional: ["mods/a.jar"] }],
     ]);
   });
 });
@@ -125,7 +126,7 @@ describe("整合包 mock", () => {
   it("平台整合包导入为新实例：名字缺省取整合包名，记下来源，事件带本任务 id", async () => {
     const events: CoreEvent[] = [];
     const off = await listen<CoreEvent>(CORE_EVENT, (e) => events.push(e));
-    const outcome = await installModpack("t-1", { ...platform, version_id: "fo-641" }, null, []);
+    const outcome = await installModpack("t-1", mockGameDir(), { ...platform, version_id: "fo-641" }, null, []);
     off();
     expect(outcome.version_id).toBe("Fabulously Optimized");
     expect(outcome.version_dir).toBe("D:/Games/.minecraft/versions/Fabulously Optimized");
@@ -137,12 +138,12 @@ describe("整合包 mock", () => {
     expect(events.at(-1)).toEqual({ task_id: "t-1", kind: "stage", message: "整合包已导入为实例 Fabulously Optimized" });
 
     // 同名再导入一次：不区分大小写的重名。
-    const again = await installModpack("t-2", { ...platform, version_id: "fo-641" }, "fabulously optimized", []).catch((e: unknown) => e);
+    const again = await installModpack("t-2", mockGameDir(), { ...platform, version_id: "fo-641" }, "fabulously optimized", []).catch((e: unknown) => e);
     expect(again).toMatchObject({ code: "instance_name_invalid", detail: { name: "fabulously optimized", rule: "duplicate" } });
   });
 
   it("本地文件的整合包信息不带平台；去掉首尾空白后的名字作为实例名", async () => {
-    const outcome = await installModpack("t-3", local, "  周末联机  ", []);
+    const outcome = await installModpack("t-3", mockGameDir(), local, "  周末联机  ", []);
     expect(outcome.version_id).toBe("周末联机");
     expect(outcome.modpack).toMatchObject({ platform: null, project_id: null, version_id: null, name: "我的整合包", format: "modrinth" });
   });
@@ -151,7 +152,7 @@ describe("整合包 mock", () => {
     // 浏览器里刷新时实例从存储里恢复、游玩记录重新播种：删掉的 1.21 不在了，它的记录却又回来了
     await deleteInstance("1.21");
     resetLaunchMock();
-    await installModpack("t-again", local, "1.21", []);
+    await installModpack("t-again", mockGameDir(), local, "1.21", []);
     const list = await listInstances();
     expect(list.find((i) => i.id === "1.21")).toMatchObject({ playtime_min: 0, last_played_at: null });
     expect(list.find((i) => i.id === "1.20.1-Fabric")?.playtime_min).toBe(180);
@@ -175,33 +176,33 @@ describe("整合包 mock", () => {
       ["1.21.1", "duplicate"],
     ];
     for (const [name, rule] of cases) {
-      const error = await installModpack(`t-${rule}-${name.length}`, local, name, []).catch((e: unknown) => e);
+      const error = await installModpack(`t-${rule}-${name.length}`, mockGameDir(), local, name, []).catch((e: unknown) => e);
       expect(error, name).toBeInstanceOf(IpcError);
       expect(error, name).toMatchObject({ code: "instance_name_invalid", detail: { rule } });
     }
-    expect((await installModpack("t-ok", local, "樱".repeat(INSTANCE_NAME_MAX_UNITS), [])).version_id).toHaveLength(INSTANCE_NAME_MAX_UNITS);
-    expect((await installModpack("t-units", local, "\u{1F338}".repeat(16), [])).version_id).toHaveLength(INSTANCE_NAME_MAX_UNITS);
-    expect((await installModpack("t-com0", local, "COM0", [])).version_id).toBe("COM0");
+    expect((await installModpack("t-ok", mockGameDir(), local, "樱".repeat(INSTANCE_NAME_MAX_UNITS), [])).version_id).toHaveLength(INSTANCE_NAME_MAX_UNITS);
+    expect((await installModpack("t-units", mockGameDir(), local, "\u{1F338}".repeat(16), [])).version_id).toHaveLength(INSTANCE_NAME_MAX_UNITS);
+    expect((await installModpack("t-com0", mockGameDir(), local, "COM0", [])).version_id).toBe("COM0");
   });
 
   it("来源不对：平台上没有这个整合包报 mod_version_not_found，形状不对报 unknown，空字段报 invalid_argument", async () => {
-    const notPack = await installModpack("t-a", { kind: "platform", platform: "modrinth", project_id: "AANobbMI", version_id: "v" }, null, []).catch(
+    const notPack = await installModpack("t-a", mockGameDir(), { kind: "platform", platform: "modrinth", project_id: "AANobbMI", version_id: "v" }, null, []).catch(
       (e: unknown) => e,
     );
     expect(notPack).toMatchObject({ code: "mod_version_not_found", detail: { project_id: "AANobbMI" } });
-    const malformed = await installModpack("t-b", { kind: "url" } as never, null, []).catch((e: unknown) => e);
+    const malformed = await installModpack("t-b", mockGameDir(), { kind: "url" } as never, null, []).catch((e: unknown) => e);
     expect(malformed).toMatchObject({ code: "unknown" });
-    const blank = await installModpack("t-c", { kind: "file", path: " " }, null, []).catch((e: unknown) => e);
+    const blank = await installModpack("t-c", mockGameDir(), { kind: "file", path: " " }, null, []).catch((e: unknown) => e);
     expect(blank).toMatchObject({ code: "invalid_argument" });
   });
 
   it("导入期间连同将要继承的原版一起占住：原版的删除、改名、补全报 instance_busy 并说明是谁在用，导入结束即放开", async () => {
-    const running = installModpack("t-base", { ...platform, version_id: "fo-641" }, "周末联机", []);
+    const running = installModpack("t-base", mockGameDir(), { ...platform, version_id: "fo-641" }, "周末联机", []);
     await vi.waitFor(async () => {
       expect((await listInstances()).find((i) => i.id === "1.21.1")).toMatchObject({ activity: "inherited", used_by: "周末联机" });
     });
     const rejected = (work: Promise<unknown>) => work.then(() => { throw new Error("应被拒绝"); }, (e: unknown) => e);
-    for (const work of [deleteInstance("1.21.1"), renameInstance("1.21.1", "改个名"), repairInstance("t-repair-base", "1.21.1")]) {
+    for (const work of [deleteInstance("1.21.1"), renameInstance("1.21.1", "改个名"), repairInstance("t-repair-base", mockGameDir(), "1.21.1")]) {
       const error = await rejected(work);
       if (!(error instanceof IpcError)) throw error;
       expect(error.message).toBe("实例 1.21.1 正在被实例 周末联机 使用，请稍后再试");
@@ -219,7 +220,7 @@ describe("整合包 mock", () => {
   });
 
   it("原版被当作基底时照样能备份它的存档，先备份再导入也放行：列表报备份，used_by 不丢", async () => {
-    const running = installModpack("t-base-backup", { ...platform, version_id: "fo-641" }, "周末联机", []);
+    const running = installModpack("t-base-backup", mockGameDir(), { ...platform, version_id: "fo-641" }, "周末联机", []);
     await vi.waitFor(async () => {
       expect((await listInstances()).find((i) => i.id === "1.21.1")).toMatchObject({ activity: "inherited", used_by: "周末联机" });
     });
@@ -227,16 +228,16 @@ describe("整合包 mock", () => {
     expect((await listInstances()).find((i) => i.id === "1.21.1")).toMatchObject({ activity: "backing_up", used_by: "周末联机" });
     expect((await running).version_id).toBe("周末联机");
 
-    expect((await installModpack("t-after-backup", { ...platform, version_id: "fo-641" }, "第二个包", [])).version_id).toBe("第二个包");
+    expect((await installModpack("t-after-backup", mockGameDir(), { ...platform, version_id: "fo-641" }, "第二个包", [])).version_id).toBe("第二个包");
     backup.release();
     expect((await listInstances()).find((i) => i.id === "1.21.1")).toMatchObject({ activity: null, used_by: null });
   });
 
   it("导入途中取消以 cancelled 结束，名字没有被占用", async () => {
-    const running = installModpack("t-cancel", local, "取消的包", []).catch((e: unknown) => e);
+    const running = installModpack("t-cancel", mockGameDir(), local, "取消的包", []).catch((e: unknown) => e);
     expect(await cancelTask("t-cancel")).toBe(true);
     expect(await running).toMatchObject({ code: "cancelled" });
-    expect((await installModpack("t-retry", local, "取消的包", [])).version_id).toBe("取消的包");
+    expect((await installModpack("t-retry", mockGameDir(), local, "取消的包", [])).version_id).toBe("取消的包");
   });
 });
 
@@ -305,14 +306,14 @@ describe("整合包 mock：可选文件与需要手动下载的文件", () => {
     const blockedBy = async (attempt: Promise<unknown>) => blockedFilesOf(await attempt.then(() => null, (error: unknown) => error));
 
     expect(await blockedBy(summarizePlatformModpack("curseforge", "285109", "4501122"))).toEqual([body]);
-    expect(await blockedBy(installModpack("t-body-1", source, "受限包", []))).toEqual([body]);
+    expect(await blockedBy(installModpack("t-body-1", mockGameDir(), source, "受限包", []))).toEqual([body]);
     expect((await listInstances()).map((i) => i.id)).not.toContain("受限包");
 
     seedMockDownloads(["285109-2.9.2.zip"]);
     expect(await claimBlockedFiles(MOCK_DOWNLOADS_DIR, [body])).toMatchObject({ missing: [] });
 
     expect(await summarizePlatformModpack("curseforge", "285109", "4501122")).toMatchObject({ version: "2.9.2", mod_files: 178 });
-    await installModpack("t-body-2", source, "受限包", []);
+    await installModpack("t-body-2", mockGameDir(), source, "受限包", []);
     expect((await listInstances()).find((i) => i.id === "受限包")?.modpack).toMatchObject({ project_id: "285109", version_id: "4501122", version: "2.9.2" });
   });
 
@@ -388,7 +389,7 @@ describe("整合包 mock：可选文件与需要手动下载的文件", () => {
   });
 
   it("导入带受限文件的包：还有没认领的就以 distribution_blocked 失败，清单只列没认领的；都认领后放入手动下载的文件并导入成功", async () => {
-    const first = await installModpack("t-b1", BLOCKED, "受限包", []).catch((e: unknown) => e);
+    const first = await installModpack("t-b1", mockGameDir(), BLOCKED, "受限包", []).catch((e: unknown) => e);
     expect(first).toBeInstanceOf(IpcError);
     expect(blockedFilesOf(first)?.map((f) => f.file_name)).toEqual(["blocked-a.jar", "blocked-b.jar"]);
     expect((first as IpcError).message).toBe("这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：blocked-a.jar、blocked-b.jar");
@@ -396,33 +397,33 @@ describe("整合包 mock：可选文件与需要手动下载的文件", () => {
 
     seedMockDownloads(["blocked-a.jar"]);
     await claimBlockedFiles(MOCK_DOWNLOADS_DIR, blockedFilesOf(first) ?? []);
-    const second = await installModpack("t-b2", BLOCKED, "受限包", []).catch((e: unknown) => e);
+    const second = await installModpack("t-b2", mockGameDir(), BLOCKED, "受限包", []).catch((e: unknown) => e);
     expect(blockedFilesOf(second)?.map((f) => f.file_id)).toEqual([5000002]);
 
     seedMockDownloads(["blocked-b.jar"]);
     await claimBlockedFiles(MOCK_DOWNLOADS_DIR, blockedFilesOf(second) ?? []);
     const { events, off } = await capture();
-    const outcome = await installModpack("t-b3", BLOCKED, "受限包", []);
+    const outcome = await installModpack("t-b3", mockGameDir(), BLOCKED, "受限包", []);
     off();
     expect(outcome.version_id).toBe("受限包");
     expect(events.filter((e) => e.kind === "stage").map((e) => e.message)).toContain("放入 2 个手动下载的文件");
   });
 
   it("跳过可选文件：只能跳过包里的可选文件（落点不分大小写），空路径在登记任务前就拒绝；旧日志里没有这个参数照常导入", async () => {
-    expect((await installModpack("t-o1", MRPACK, "可选一", ["MODS/Optional-Helper.jar", "resourcepacks/optional-pack.zip"])).version_id).toBe("可选一");
-    const stray = await installModpack("t-o2", MRPACK, "可选二", ["mods/pack-mod-01.jar"]).catch((e: unknown) => e);
+    expect((await installModpack("t-o1", mockGameDir(), MRPACK, "可选一", ["MODS/Optional-Helper.jar", "resourcepacks/optional-pack.zip"])).version_id).toBe("可选一");
+    const stray = await installModpack("t-o2", mockGameDir(), MRPACK, "可选二", ["mods/pack-mod-01.jar"]).catch((e: unknown) => e);
     expect(stray).toMatchObject({ code: "invalid_argument", detail: { path: "mods/pack-mod-01.jar" } });
-    const zip = await installModpack("t-o3", { kind: "file", path: "D:\\Downloads\\Pack.zip" }, "可选三", ["mods/optional-helper.jar"]).catch((e: unknown) => e);
+    const zip = await installModpack("t-o3", mockGameDir(), { kind: "file", path: "D:\\Downloads\\Pack.zip" }, "可选三", ["mods/optional-helper.jar"]).catch((e: unknown) => e);
     expect(zip).toMatchObject({ code: "invalid_argument", detail: { path: "mods/optional-helper.jar" } });
-    const platformPack = await installModpack("t-o4", { ...platform, version_id: "fo-641" }, "可选四", ["mods/optional-helper.jar"]).catch((e: unknown) => e);
+    const platformPack = await installModpack("t-o4", mockGameDir(), { ...platform, version_id: "fo-641" }, "可选四", ["mods/optional-helper.jar"]).catch((e: unknown) => e);
     expect(platformPack).toMatchObject({ code: "invalid_argument" });
 
     // 空路径不占任务 id：同一个 id 随后照常登记
-    const blank = await installModpack("t-o5", MRPACK, "可选五", [" "]).catch((e: unknown) => e);
+    const blank = await installModpack("t-o5", mockGameDir(), MRPACK, "可选五", [" "]).catch((e: unknown) => e);
     expect(blank).toMatchObject({ code: "invalid_argument", message: "excludedOptional 里有空路径" });
-    expect((await installModpack("t-o5", MRPACK, "可选五", [])).version_id).toBe("可选五");
+    expect((await installModpack("t-o5", mockGameDir(), MRPACK, "可选五", [])).version_id).toBe("可选五");
 
-    expect((await invoke<{ version_id: string }>("install_modpack", { taskId: "t-o6", source: MRPACK, name: "旧日志" })).version_id).toBe("旧日志");
+    expect((await invoke<{ version_id: string }>("install_modpack", { taskId: "t-o6", gameDir: mockGameDir(), source: MRPACK, name: "旧日志" })).version_id).toBe("旧日志");
   });
 });
 
@@ -491,14 +492,14 @@ describe("导出整合包 mock", () => {
       [{ destination: "D:\\分享\\包.zip" }, { field: "destination", rule: "extension" }],
     ];
     for (const [patch, detail] of cases) {
-      const error = await errorOf(exportModpack(`t-bad-${String(detail.field)}-${String(detail.rule)}`, FABRIC, { ...base, ...patch }));
+      const error = await errorOf(exportModpack(`t-bad-${String(detail.field)}-${String(detail.rule)}`, mockGameDir(), FABRIC, { ...base, ...patch }));
       expect(error, JSON.stringify(patch)).toBeInstanceOf(IpcError);
       expect(error, JSON.stringify(patch)).toMatchObject({ code: "invalid_argument", detail });
     }
     // 参数非法的调用没有占住实例：随后改名照常占得到
     expect(() => acquireMockInstance(FABRIC, "renaming").release()).not.toThrow();
     // 边界值：正好到上限的名称、版本号与简介可以导出，大写扩展名与 UNC 路径都认，重复的打包项去重
-    const edge = await exportModpack("t-edge", FABRIC, {
+    const edge = await exportModpack("t-edge", mockGameDir(), FABRIC, {
       ...base,
       name: "樱".repeat(64),
       version: "1".repeat(32),
@@ -520,10 +521,10 @@ describe("导出整合包 mock", () => {
 
   it("同实例正在改名时报 instance_busy；导出进行中改名也报 instance_busy，活动为 modifying", async () => {
     const renaming = acquireMockInstance(FABRIC, "renaming");
-    expect(await errorOf(exportModpack("t-busy", FABRIC, base))).toMatchObject({ code: "instance_busy", detail: { id: FABRIC, activity: "renaming" } });
+    expect(await errorOf(exportModpack("t-busy", mockGameDir(), FABRIC, base))).toMatchObject({ code: "instance_busy", detail: { id: FABRIC, activity: "renaming" } });
     renaming.release();
 
-    const running = exportModpack("t-hold", FABRIC, base);
+    const running = exportModpack("t-hold", mockGameDir(), FABRIC, base);
     // 命令经异步的桥才到假后端：等它占住实例、停在第一段打包进度上
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(() => acquireMockInstance(FABRIC, "renaming")).toThrow(expect.objectContaining({ code: "instance_busy", detail: { id: FABRIC, activity: "modifying" } }));
@@ -536,13 +537,13 @@ describe("导出整合包 mock", () => {
   it("存档备份或恢复进行中：带存档的报 instance_busy，活动为 backing_up，不登记任务、不留占用；没勾存档的照常", async () => {
     const withSaves: ModpackExportOptions = { ...base, extras: ["config", "saves"] };
     const backingUp = acquireMockInstance(FABRIC, "backing_up");
-    expect(await errorOf(exportModpack("t-backup", FABRIC, withSaves))).toMatchObject({ code: "instance_busy", detail: { id: FABRIC, activity: "backing_up" } });
+    expect(await errorOf(exportModpack("t-backup", mockGameDir(), FABRIC, withSaves))).toMatchObject({ code: "instance_busy", detail: { id: FABRIC, activity: "backing_up" } });
     expect(await cancelTask("t-backup")).toBe(false);
-    expect(await exportModpack("t-plain", FABRIC, base)).toMatchObject({ path: base.destination });
+    expect(await exportModpack("t-plain", mockGameDir(), FABRIC, base)).toMatchObject({ path: base.destination });
     backingUp.release();
     // 被拒的那一次没有留下「改动中」：补全这类与改动中互斥的事照常能占
     expect(() => acquireMockInstance(FABRIC, "repairing").release()).not.toThrow();
-    expect(await exportModpack("t-after", FABRIC, withSaves)).toMatchObject({ path: base.destination });
+    expect(await exportModpack("t-after", mockGameDir(), FABRIC, withSaves)).toMatchObject({ path: base.destination });
   });
 
   it("共用存档：另一个不隔离的实例在备份或恢复时带存档的报 instance_busy，指向那个实例，不登记任务、不留占用；自己隔离时不挡", async () => {
@@ -552,17 +553,17 @@ describe("导出整合包 mock", () => {
     const settings = await getInstanceSettings(FABRIC);
     await setInstanceSettings(FABRIC, { ...settings, isolation: "disabled" });
     const backingUp = acquireMockInstance(OTHER, "backing_up");
-    expect(await errorOf(exportModpack("t-shared", FABRIC, withSaves))).toMatchObject({ code: "instance_busy", detail: { id: OTHER, activity: "backing_up" } });
+    expect(await errorOf(exportModpack("t-shared", mockGameDir(), FABRIC, withSaves))).toMatchObject({ code: "instance_busy", detail: { id: OTHER, activity: "backing_up" } });
     expect(await cancelTask("t-shared")).toBe(false);
     expect(() => acquireMockInstance(FABRIC, "repairing").release()).not.toThrow();
 
     await setInstanceSettings(FABRIC, { ...settings, isolation: "enabled" });
-    expect(await exportModpack("t-isolated", FABRIC, withSaves)).toMatchObject({ path: base.destination });
+    expect(await exportModpack("t-isolated", mockGameDir(), FABRIC, withSaves)).toMatchObject({ path: base.destination });
     backingUp.release();
   });
 
   it("导出进行中批量启停与忽略更新照常可用；改过的盘面在下一次预览里体现，忽略更新的 Mod 仍走索引", async () => {
-    const running = exportModpack("t-mods", FABRIC, base);
+    const running = exportModpack("t-mods", mockGameDir(), FABRIC, base);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(await setModsEnabled(FABRIC, ["AANobbMI-0.5.3.jar"], false)).toEqual([
       { status: "ok", file_name: "AANobbMI-0.5.3.jar", path: "C:/Games/.minecraft/versions/1.20.1-Fabric/mods/AANobbMI-0.5.3.jar.disabled" },
@@ -576,7 +577,7 @@ describe("导出整合包 mock", () => {
   });
 
   it("取消后以 cancelled 结束并放开实例", async () => {
-    const running = errorOf(exportModpack("t-cancel", FABRIC, base));
+    const running = errorOf(exportModpack("t-cancel", mockGameDir(), FABRIC, base));
     expect(await cancelTask("t-cancel")).toBe(true);
     expect(await running).toMatchObject({ code: "cancelled" });
     expect(() => acquireMockInstance(FABRIC, "renaming").release()).not.toThrow();
@@ -585,7 +586,7 @@ describe("导出整合包 mock", () => {
   it("成功：打包进文件的是勾选的额外项、不在 Modrinth 上的 Mod 与带上的停用 Mod，事件都带本任务 id", async () => {
     const events: CoreEvent[] = [];
     const off = await listen<CoreEvent>(CORE_EVENT, (e) => events.push(e));
-    const outcome = await exportModpack("t-ok", FABRIC, { ...base, name: "  测试包  ", summary: "  " });
+    const outcome = await exportModpack("t-ok", mockGameDir(), FABRIC, { ...base, name: "  测试包  ", summary: "  " });
     off();
     // config 37 个 412 KB + options 1 个 6 KB + handmade 4096 + 停用的 lithium 524288
     const bytes = 412 * 1024 + 6 * 1024 + 4096 + 524_288;
@@ -608,7 +609,7 @@ describe("导出整合包 mock", () => {
     expect(events.at(-1)).toEqual({ task_id: "t-ok", kind: "stage", message: `已导出到 ${DEST}` });
 
     // 不带停用的 Mod、不带额外项：只剩不在 Modrinth 上的那一个
-    const without = await exportModpack("t-ok2", FABRIC, { ...base, include_disabled: false, extras: [] });
+    const without = await exportModpack("t-ok2", mockGameDir(), FABRIC, { ...base, include_disabled: false, extras: [] });
     expect([without.override_files, without.disabled_mods, without.bytes]).toEqual([1, 0, 4096 + 512 * 3]);
   });
 
@@ -616,7 +617,7 @@ describe("导出整合包 mock", () => {
     const notOurs = await errorOf(revealInFolder(DEST));
     expect(notOurs).toMatchObject({ code: "invalid_argument", detail: { field: "path", reason: "not_launcher_output" } });
     expect(mockRevealedPaths).toEqual([]);
-    await exportModpack("t-reveal", FABRIC, base);
+    await exportModpack("t-reveal", mockGameDir(), FABRIC, base);
     await revealInFolder(DEST);
     await revealInFolder("D:/Games/.minecraft/.petalfall/backups/instances/樱花生存");
     expect(mockRevealedPaths).toEqual([DEST, "D:/Games/.minecraft/.petalfall/backups/instances/樱花生存"]);

@@ -4085,7 +4085,7 @@ describe("实例详情：存档备份", () => {
     expect(menuItems().map((el) => el.getAttribute("aria-disabled"))).toEqual([null, null, null]);
     click(menuItem("备份存档"));
     await flush();
-    expect(callsOf(ipc, "backup_world")).toEqual([{ id: ID, world: "w2", taskId: `${launcher.state.tasks[0].id}#1` }]);
+    expect(callsOf(ipc, "backup_world")).toEqual([{ gameDir: "D:/Games/.minecraft", id: ID, world: "w2", taskId: `${launcher.state.tasks[0].id}#1` }]);
     expect(launcher.state.tasks[0]).toMatchObject({ kind: "world_backup", title: "备份「新世界」" });
     expect(toastTitles()).toContain("已开始备份「新世界」");
   });
@@ -4162,7 +4162,7 @@ describe("实例详情：存档备份", () => {
     await flush();
     const calls = callsOf(ipc, "restore_world_backup");
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toEqual({ id: ID, world: "w2", file: "b-mid.zip", taskId: `${launcher.state.tasks[0].id}#1` });
+    expect(calls[0]).toEqual({ gameDir: "D:/Games/.minecraft", id: ID, world: "w2", file: "b-mid.zip", taskId: `${launcher.state.tasks[0].id}#1` });
     expect(launcher.state.tasks[0]).toMatchObject({ kind: "world_restore", title: "恢复「新世界」" });
   });
 
@@ -4394,7 +4394,7 @@ describe("实例详情：存档备份", () => {
     click(rowMenu("新世界"));
     click(menuItem("导出存档"));
     await flush();
-    expect(callsOf(ipc, "export_world")).toEqual([{ id: ID, world: "w2", dest: "E:\\导出\\新世界.zip", taskId: `${launcher.state.tasks[0].id}#1` }]);
+    expect(callsOf(ipc, "export_world")).toEqual([{ gameDir: "D:/Games/.minecraft", id: ID, world: "w2", dest: "E:\\导出\\新世界.zip", taskId: `${launcher.state.tasks[0].id}#1` }]);
     expect(launcher.state.tasks[0]).toMatchObject({ kind: "world_backup", title: "导出「新世界」" });
   });
 

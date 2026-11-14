@@ -943,6 +943,7 @@ pub async fn play_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::tasks::current_game_dir;
     use petalfall_core::{FailureCode, LaunchFailure, LogStream};
     use std::collections::BTreeMap;
 
@@ -1401,9 +1402,17 @@ mod tests {
         instance.set_activity(InstanceActivity::Running);
         assert_eq!(locks.activity("1.20.1"), Some(InstanceActivity::Inherited));
         let in_use = json!({ "id": "1.20.1", "activity": "inherited", "used_by": "Fabric 生存" });
-        let err = repair_instance_with(&facade, &tasks, &locks, "r", "1.20.1", &sink)
-            .await
-            .unwrap_err();
+        let err = repair_instance_with(
+            &facade,
+            &tasks,
+            &locks,
+            "r",
+            &current_game_dir(&facade).await,
+            "1.20.1",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, crate::commands::error::code::INSTANCE_BUSY);
         assert_eq!(err.detail.unwrap(), in_use);
         assert!(!tasks.is_running("r"), "被拒的补全不占任务 id");
@@ -1421,9 +1430,17 @@ mod tests {
         drop(instance);
         assert_eq!(locks.activity("1.20.1"), None);
         assert_eq!(locks.activity("Fabric 生存"), None);
-        let repaired = repair_instance_with(&facade, &tasks, &locks, "r", "1.20.1", &sink)
-            .await
-            .unwrap();
+        let repaired = repair_instance_with(
+            &facade,
+            &tasks,
+            &locks,
+            "r",
+            &current_game_dir(&facade).await,
+            "1.20.1",
+            &sink,
+        )
+        .await
+        .unwrap();
         assert!(!repaired.reinstalled);
 
         // 原版正在补全：启动以它为基底的实例被拒，detail 说的是原版在做什么，占用槽没被留下。
@@ -1468,9 +1485,17 @@ mod tests {
         let (reservation, game) = reserve_launch(&running, &locks, &petalfall, "1.20.1")
             .await
             .unwrap();
-        let err = repair_instance_with(&facade, &tasks, &locks, "r", "Fabric 生存", &sink)
-            .await
-            .unwrap_err();
+        let err = repair_instance_with(
+            &facade,
+            &tasks,
+            &locks,
+            "r",
+            &current_game_dir(&facade).await,
+            "Fabric 生存",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, crate::commands::error::code::INSTANCE_BUSY);
         assert_eq!(
             err.detail.unwrap(),
@@ -1483,9 +1508,17 @@ mod tests {
             "实例自己的占用随之放开"
         );
         game.set_activity(InstanceActivity::Running);
-        let err = repair_instance_with(&facade, &tasks, &locks, "r", "Fabric 生存", &sink)
-            .await
-            .unwrap_err();
+        let err = repair_instance_with(
+            &facade,
+            &tasks,
+            &locks,
+            "r",
+            &current_game_dir(&facade).await,
+            "Fabric 生存",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             err.detail.unwrap(),
             json!({ "id": "1.20.1", "activity": "running" })

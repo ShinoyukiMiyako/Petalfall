@@ -437,13 +437,14 @@ export const setSidebarPins = (pins: string[]): Promise<string[]> => invoke<stri
  */
 export const installVersion = (
   taskId: string,
+  gameDir: string,
   id: string,
   loader: LoaderChoice | null,
   loaderVersion: string | null,
   targetName: string,
   useTemplate?: boolean,
 ): Promise<InstallResultDto> =>
-  invoke<InstallResultDto>("install_version", { taskId, id, loader, loaderVersion, targetName, useTemplate });
+  invoke<InstallResultDto>("install_version", { taskId, gameDir, id, loader, loaderVersion, targetName, useTemplate });
 
 /** 默认设置的现状：有哪些文件、取自哪个实例、配置里开没开。只读。 */
 export const templateInfo = (): Promise<TemplateInfoDto> => invoke<TemplateInfoDto>("template_info");
@@ -463,8 +464,8 @@ export const clearTemplate = (): Promise<TemplateInfoDto> => invoke<TemplateInfo
  * 版本号、Mod、配置与存档不变；读不出能原样装回的内容（原版、叠着 OptiFine 或 LiteLoader、版本号读不出来）时报 instance_failed。
  * 上次补全败在 loader_library_missing 时，不带它也走重装。
  */
-export const repairInstance = (taskId: string, id: string, opts: { reinstallLoader?: true } = {}): Promise<RepairResultDto> =>
-  invoke<RepairResultDto>("repair_instance", { taskId, id, ...opts });
+export const repairInstance = (taskId: string, gameDir: string, id: string, opts: { reinstallLoader?: true } = {}): Promise<RepairResultDto> =>
+  invoke<RepairResultDto>("repair_instance", { taskId, gameDir, id, ...opts });
 
 /**
  * 改名或删除本身已经完成（目录、侧栏固定与当前选中都已改好），只是游玩记录没能跟着改：照成功处理（刷新列表、
@@ -515,8 +516,8 @@ export const versionRequirements = (mcVersion: string): Promise<VersionRequireme
  * 长任务：把存档打包成一份手动备份，写完按保留规则清理旧的自动备份。实例启动中或游戏中以 instance_busy 拒绝
  * （detail.activity 为 launching / running）；存档正被别的程序打开以 world_in_use 拒绝。
  */
-export const backupWorld = (taskId: string, id: string, world: string): Promise<BackupResultDto> =>
-  invoke<BackupResultDto>("backup_world", { taskId, id, world });
+export const backupWorld = (taskId: string, gameDir: string, id: string, world: string): Promise<BackupResultDto> =>
+  invoke<BackupResultDto>("backup_world", { taskId, gameDir, id, world });
 
 /** 某个存档的全部备份，新的在前。只读，不占实例；存档文件夹已经不在时照常列出它留下的备份。 */
 export const listWorldBackups = (id: string, world: string): Promise<WorldBackupListDto> =>
@@ -526,16 +527,16 @@ export const listWorldBackups = (id: string, world: string): Promise<WorldBackup
  * 长任务：用一份备份替换现在的存档，现在的存档移入回收站。file 不在备份表里时以 world_backup_not_found 拒绝；
  * 备份校验不过（含越出存档目录的条目）以 world_backup_corrupt 拒绝，这时现在的存档原样不动。
  */
-export const restoreWorldBackup = (taskId: string, id: string, world: string, file: string): Promise<RestoreResultDto> =>
-  invoke<RestoreResultDto>("restore_world_backup", { taskId, id, world, file });
+export const restoreWorldBackup = (taskId: string, gameDir: string, id: string, world: string, file: string): Promise<RestoreResultDto> =>
+  invoke<RestoreResultDto>("restore_world_backup", { taskId, gameDir, id, world, file });
 
 /** 把一份备份移入回收站并从备份表里去掉。不占实例，可以在游戏运行时做。 */
 export const deleteWorldBackup = (id: string, world: string, file: string): Promise<void> =>
   invoke<void>("delete_world_backup", { id, world, file });
 
 /** 长任务：把存档打包到 dest（绝对路径、扩展名 .zip、父目录存在）；已有同名文件时覆盖。 */
-export const exportWorld = (taskId: string, id: string, world: string, dest: string): Promise<ExportResultDto> =>
-  invoke<ExportResultDto>("export_world", { taskId, id, world, dest });
+export const exportWorld = (taskId: string, gameDir: string, id: string, world: string, dest: string): Promise<ExportResultDto> =>
+  invoke<ExportResultDto>("export_world", { taskId, gameDir, id, world, dest });
 
 /** 用系统文件管理器打开文件夹；路径由后端按实例 id 解析。 */
 export const openFolder = (target: FolderTarget, id: string | null, world: string | null = null): Promise<void> =>

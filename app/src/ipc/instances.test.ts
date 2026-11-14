@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mockGameDir } from "./mock/handlers/config";
 import { invoke } from "./bridge";
 import { IpcError, isCancelled } from "./errors";
 import { updateConfig } from "./config";
@@ -138,8 +139,8 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
     await listInstanceContent("a");
     await getSidebarPins();
     await setSidebarPins(["a"]);
-    await installVersion("t1", "1.21.1", "fabric", "0.16.10", "周末生存", true);
-    await repairInstance("t2", "a");
+    await installVersion("t1", mockGameDir(), "1.21.1", "fabric", "0.16.10", "周末生存", true);
+    await repairInstance("t2", mockGameDir(), "a");
     await previewInstanceDeletion("a");
     await deleteInstance("a");
     await renameInstance("a", "b");
@@ -160,8 +161,8 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
       ["list_instance_content", { id: "a" }],
       ["get_sidebar_pins", undefined],
       ["set_sidebar_pins", { pins: ["a"] }],
-      ["install_version", { taskId: "t1", id: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", targetName: "周末生存", useTemplate: true }],
-      ["repair_instance", { taskId: "t2", id: "a" }],
+      ["install_version", { taskId: "t1", gameDir: mockGameDir(), id: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", targetName: "周末生存", useTemplate: true }],
+      ["repair_instance", { taskId: "t2", gameDir: mockGameDir(), id: "a" }],
       ["preview_instance_deletion", { id: "a" }],
       ["delete_instance", { id: "a" }],
       ["rename_instance", { id: "a", newName: "b" }],
@@ -180,17 +181,17 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
 
   it("存档备份五条命令：长任务带 taskId，其余只带实例、存档与备份文件名", async () => {
     vi.mocked(tauriInvoke).mockResolvedValue(null);
-    await backupWorld("t-b", "a", "New World");
+    await backupWorld("t-b", mockGameDir(), "a", "New World");
     await listWorldBackups("a", "New World");
-    await restoreWorldBackup("t-r", "a", "New World", "1730000000000-auto.zip");
+    await restoreWorldBackup("t-r", mockGameDir(), "a", "New World", "1730000000000-auto.zip");
     await deleteWorldBackup("a", "New World", "1730000000000-auto.zip");
-    await exportWorld("t-e", "a", "New World", "D:\\导出\\New World.zip");
+    await exportWorld("t-e", mockGameDir(), "a", "New World", "D:\\导出\\New World.zip");
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
-      ["backup_world", { taskId: "t-b", id: "a", world: "New World" }],
+      ["backup_world", { taskId: "t-b", gameDir: mockGameDir(), id: "a", world: "New World" }],
       ["list_world_backups", { id: "a", world: "New World" }],
-      ["restore_world_backup", { taskId: "t-r", id: "a", world: "New World", file: "1730000000000-auto.zip" }],
+      ["restore_world_backup", { taskId: "t-r", gameDir: mockGameDir(), id: "a", world: "New World", file: "1730000000000-auto.zip" }],
       ["delete_world_backup", { id: "a", world: "New World", file: "1730000000000-auto.zip" }],
-      ["export_world", { taskId: "t-e", id: "a", world: "New World", dest: "D:\\导出\\New World.zip" }],
+      ["export_world", { taskId: "t-e", gameDir: mockGameDir(), id: "a", world: "New World", dest: "D:\\导出\\New World.zip" }],
     ]);
   });
 });
@@ -334,7 +335,7 @@ describe("mock：新建与补全", () => {
     vi.useFakeTimers();
     const events: CoreEvent[] = [];
     await onCoreEvent((e) => events.push(e));
-    const done = installVersion("t-new", "1.21.1", "fabric", null, "周末生存");
+    const done = installVersion("t-new", mockGameDir(), "1.21.1", "fabric", null, "周末生存");
 
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS * 2);
     const during = (await listInstances()).find((i) => i.id === "周末生存");
@@ -376,20 +377,20 @@ describe("mock：新建与补全", () => {
       expect(phases.map((e) => [e.plan, e.index]), taskId).toEqual(plan.map((_, i) => [plan, i]));
       return phases.map((e) => e.plan[e.index]);
     };
-    await run(installVersion("t-fabric", "1.21.1", "fabric", null, "周末生存"));
+    await run(installVersion("t-fabric", mockGameDir(), "1.21.1", "fabric", null, "周末生存"));
     expect(steps("t-fabric")).toEqual(["metadata", "loader_profile", "libraries", "assets", "natives"]);
     const order = events.flatMap((e) => (e.task_id !== "t-fabric" ? [] : e.kind === "phase" ? [e.plan[e.index]] : e.kind === "download" ? ["download"] : []));
     expect(order.indexOf("libraries")).toBeLessThan(order.indexOf("download"));
     expect(order.lastIndexOf("download")).toBeLessThan(order.indexOf("assets"));
 
-    await run(installVersion("t-vanilla", "1.21.1", null, null, "原版", true));
+    await run(installVersion("t-vanilla", mockGameDir(), "1.21.1", null, null, "原版", true));
     expect(steps("t-vanilla")).toEqual(["metadata", "libraries", "assets", "natives", "template"]);
-    await run(installVersion("t-forge", "1.20.1", "forge", "47.2.0", "锻造"));
+    await run(installVersion("t-forge", mockGameDir(), "1.20.1", "forge", "47.2.0", "锻造"));
     expect(steps("t-forge")).toEqual(["metadata", "libraries", "assets", "natives", "java", "loader_installer", "loader_libraries", "loader_processors", "verify"]);
     // 只补全的实例走三步；照未完成标记重装的走新建那一份表，不套模板
-    await run(repairInstance("t-complete", "樱花生存"));
+    await run(repairInstance("t-complete", mockGameDir(), "樱花生存"));
     expect(steps("t-complete")).toEqual(["libraries", "assets", "natives"]);
-    await run(repairInstance("t-reinstall", "没装完"));
+    await run(repairInstance("t-reinstall", mockGameDir(), "没装完"));
     expect(steps("t-reinstall")).toEqual(["metadata", "libraries", "assets", "natives", "java", "loader_installer", "loader_libraries", "loader_processors", "verify"]);
   });
 
@@ -398,7 +399,7 @@ describe("mock：新建与补全", () => {
     // 浏览器里刷新时实例从存储里恢复、游玩记录重新播种：删掉的 1.21 不在了，它的记录却又回来了
     await deleteInstance("1.21");
     resetLaunchMock();
-    const done = installVersion("t-again", "1.21.1", null, null, "1.21");
+    const done = installVersion("t-again", mockGameDir(), "1.21.1", null, null, "1.21");
     await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
     await done;
     const list = await listInstances();
@@ -414,11 +415,11 @@ describe("mock：新建与补全", () => {
       ["rlcraft", "duplicate"],
       [".x", "leading_dot"],
     ] as const) {
-      const error = await rejection(installVersion("t-same", "1.21.1", null, null, name));
+      const error = await rejection(installVersion("t-same", mockGameDir(), "1.21.1", null, null, name));
       expect(error.code, name).toBe("invalid_argument");
       expect(detail(error), name).toMatchObject({ field: "name", rule, name });
     }
-    const forge = await rejection(installVersion("t-same", "1.21.1", "forge", null, "新的"));
+    const forge = await rejection(installVersion("t-same", mockGameDir(), "1.21.1", "forge", null, "新的"));
     expect(forge.code).toBe("loader_version_not_found");
     // 一直没有登记过，所以同一个 taskId 也不会撞上 task_conflict。
     expect((await listInstances()).some((i) => i.id === "新的")).toBe(false);
@@ -426,7 +427,7 @@ describe("mock：新建与补全", () => {
 
   it("取消后新建到一半的实例整个消失，以 cancelled 拒绝", async () => {
     vi.useFakeTimers();
-    const pending = installVersion("t-cancel", "1.20.1", "neoforge", "47.1.106", "半路").catch((e: unknown) => e);
+    const pending = installVersion("t-cancel", mockGameDir(), "1.20.1", "neoforge", "47.1.106", "半路").catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS * 2);
     expect(await cancelTask("t-cancel")).toBe(true);
     await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
@@ -436,13 +437,13 @@ describe("mock：新建与补全", () => {
 
   it("失败的新建留下未完成标记；补全照记下的内容重装后标记清除", async () => {
     vi.useFakeTimers();
-    const failed = installVersion("t-fail", "1.21.1", "fabric", "9.9.9", "坏版本").catch((e: unknown) => e);
+    const failed = installVersion("t-fail", mockGameDir(), "1.21.1", "fabric", "9.9.9", "坏版本").catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
     expect(await failed).toMatchObject({ code: "loader_version_not_found" });
     const left = (await listInstances()).find((i) => i.id === "坏版本");
     expect(left?.incomplete).toMatchObject({ kind: "install", outcome: "failed", error: { code: "loader_version_not_found" } });
 
-    const repaired = repairInstance("t-repair", "没装完");
+    const repaired = repairInstance("t-repair", mockGameDir(), "没装完");
     await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
     expect(await repaired).toEqual({ reinstalled: true, libraries: 12, assets: 0, natives: 0 });
     const fixed = (await listInstances()).find((i) => i.id === "没装完");
@@ -463,7 +464,7 @@ describe("mock：新建与补全", () => {
       const worlds = (await listInstanceContent(FABRIC)).worlds;
       expect(worlds.length).toBeGreaterThan(0);
 
-      const done = repairInstance("t-loader", FABRIC, { reinstallLoader: true });
+      const done = repairInstance("t-loader", mockGameDir(), FABRIC, { reinstallLoader: true });
       await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
       expect(await find(FABRIC)).toMatchObject({ activity: "repairing", incomplete: { kind: "install", outcome: "pending", spec: { mc_version: "1.21.1", loader: "fabric", loader_version: "0.16.10" } } });
       await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
@@ -476,7 +477,7 @@ describe("mock：新建与补全", () => {
 
     it("不带参数的普通补全仍按版本 JSON 补，结果不算重装", async () => {
       vi.useFakeTimers();
-      const done = repairInstance("t-plain", FABRIC);
+      const done = repairInstance("t-plain", mockGameDir(), FABRIC);
       await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
       expect(await done).toMatchObject({ reinstalled: false });
     });
@@ -485,35 +486,35 @@ describe("mock：新建与补全", () => {
       vi.useFakeTimers();
       loseMockLoaderLibrary(FABRIC, "fabric-loader-0.16.10.jar");
       expect(await find(FABRIC)).toMatchObject({ incomplete: { kind: "repair", outcome: "failed", error: { code: "loader_library_missing" } } });
-      const done = repairInstance("t-stuck", FABRIC);
+      const done = repairInstance("t-stuck", mockGameDir(), FABRIC);
       await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
       expect(await done).toMatchObject({ reinstalled: true });
       expect((await find(FABRIC)).incomplete).toBeNull();
 
       // 装不回的（这里是原版）照旧补全，不把补全也报成不可补全
       loseMockLoaderLibrary("1.21.1", "x.jar");
-      const plain = repairInstance("t-plain", "1.21.1");
+      const plain = repairInstance("t-plain", mockGameDir(), "1.21.1");
       await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
       expect(await plain).toMatchObject({ reinstalled: false });
     });
 
     it("中途取消：标记记成安装并带着读出的版本号，之后普通补全接着重装", async () => {
       vi.useFakeTimers();
-      const cancelled = repairInstance("t-cancel", FABRIC, { reinstallLoader: true }).catch((e: unknown) => e);
+      const cancelled = repairInstance("t-cancel", mockGameDir(), FABRIC, { reinstallLoader: true }).catch((e: unknown) => e);
       await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
       await cancelTask("t-cancel");
       await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
       expect(isCancelled(await cancelled)).toBe(true);
       expect(await find(FABRIC)).toMatchObject({ activity: null, incomplete: { kind: "install", outcome: "cancelled", spec: { loader: "fabric", loader_version: "0.16.10" } } });
 
-      const resumed = repairInstance("t-resume", FABRIC);
+      const resumed = repairInstance("t-resume", mockGameDir(), FABRIC);
       await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
       expect(await resumed).toMatchObject({ reinstalled: true });
       expect(await find(FABRIC)).toMatchObject({ incomplete: null, loaders: [{ kind: "fabric", version: "0.16.10" }] });
     });
 
     it("原版没有可装的加载器：与后端同码同文，实例不留标记、不留占用", async () => {
-      const error = await rejection(repairInstance("t-vanilla", "1.21.1", { reinstallLoader: true }));
+      const error = await rejection(repairInstance("t-vanilla", mockGameDir(), "1.21.1", { reinstallLoader: true }));
       expect(error).toMatchObject({
         code: "instance_failed",
         message: "实例 1.21.1 无法补全：没有装加载器，不需要重新安装",
@@ -529,12 +530,12 @@ describe("mock：新建与补全", () => {
 
     it("运行中与别的实例占着基底时都报 instance_busy", async () => {
       await launchGame({ taskId: "t-run", versionId: FABRIC, accountUuid: null, offlineName: "Steve", offlineFallback: false, quickPlay: null });
-      expect((await rejection(repairInstance("t-busy", FABRIC, { reinstallLoader: true }))).detail).toEqual({ id: FABRIC, activity: "running" });
+      expect((await rejection(repairInstance("t-busy", mockGameDir(), FABRIC, { reinstallLoader: true }))).detail).toEqual({ id: FABRIC, activity: "running" });
       endMockGame(0, MOCK_STEP_MS);
 
       addMockInstance("叠在原版上", "1.21", { kind: "fabric", version: "0.16.10" }, null);
       const hold = acquireMockInstance("1.21", "deleting");
-      const error = await rejection(repairInstance("t-base", "叠在原版上", { reinstallLoader: true }));
+      const error = await rejection(repairInstance("t-base", mockGameDir(), "叠在原版上", { reinstallLoader: true }));
       hold.release();
       expect(error).toMatchObject({ code: "instance_busy", detail: { id: "1.21", activity: "deleting" } });
       expect((await find("叠在原版上")).incomplete).toBeNull();
@@ -543,7 +544,7 @@ describe("mock：新建与补全", () => {
 
   it("补全被取消时标记记为 cancelled", async () => {
     vi.useFakeTimers();
-    const pending = repairInstance("t-r", "1.21.1").catch((e: unknown) => e);
+    const pending = repairInstance("t-r", mockGameDir(), "1.21.1").catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
     await cancelTask("t-r");
     await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
@@ -736,7 +737,7 @@ describe("mock：新实例的默认设置", () => {
   /** 装完一个实例并拿到结果；假时钟推进到安装结束。 */
   async function install(name: string, mcVersion: string, loader: "fabric" | null, useTemplate: boolean | undefined) {
     vi.useFakeTimers();
-    const done = installVersion(`t-${name}`, mcVersion, loader, null, name, useTemplate);
+    const done = installVersion(`t-${name}`, mockGameDir(), mcVersion, loader, null, name, useTemplate);
     await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
     return done;
   }
@@ -781,7 +782,7 @@ describe("mock：新实例的默认设置", () => {
   });
 
   it("useTemplate 只收布尔：别的类型在登记任务之前就以 invalid_argument 拒绝", async () => {
-    const error = await rejection(installVersion("t-bad", "1.21.1", null, null, "坏参数", "yes" as never));
+    const error = await rejection(installVersion("t-bad", mockGameDir(), "1.21.1", null, null, "坏参数", "yes" as never));
     expect(error.code).toBe("invalid_argument");
     expect(detail(error).field).toBe("useTemplate");
     expect((await listInstances()).some((i) => i.id === "坏参数")).toBe(false);
@@ -789,7 +790,7 @@ describe("mock：新实例的默认设置", () => {
 
   it("保存要占住实例：安装进行中报 instance_busy，游戏运行这类 modifying 兼容的活动不挡", async () => {
     vi.useFakeTimers();
-    const pending = installVersion("t-busy", "1.21.1", "fabric", null, "装着呢");
+    const pending = installVersion("t-busy", mockGameDir(), "1.21.1", "fabric", null, "装着呢");
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
     const busy = await rejection(saveInstanceAsTemplate("装着呢"));
     expect(busy.code).toBe("instance_busy");
@@ -807,7 +808,7 @@ describe("mock：存档备份", () => {
   const WORLD = "New World";
 
   async function backupDone(taskId: string): Promise<Awaited<ReturnType<typeof backupWorld>>> {
-    const done = backupWorld(taskId, ID, WORLD);
+    const done = backupWorld(taskId, mockGameDir(), ID, WORLD);
     await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
     return done;
   }
@@ -853,7 +854,7 @@ describe("mock：存档备份", () => {
     expect(events.every((e) => e.task_id === "t-backup")).toBe(true);
     expect(downloads.at(-1)).toMatchObject({ finished: 24, total: 24 });
 
-    const error = await rejection(backupWorld("t-missing", ID, "没有这个存档"));
+    const error = await rejection(backupWorld("t-missing", mockGameDir(), ID, "没有这个存档"));
     expect(error.code).toBe("world_not_found");
     expect(detail(error)).toEqual({ version_id: ID, world: "没有这个存档" });
   });
@@ -862,20 +863,20 @@ describe("mock：存档备份", () => {
     vi.useFakeTimers();
     const running = acquireMockInstance(ID, "running");
     const [first] = (await listWorldBackups(ID, WORLD)).backups;
-    for (const attempt of [backupWorld("t1", ID, WORLD), restoreWorldBackup("t2", ID, WORLD, first.file), exportWorld("t3", ID, WORLD, "D:\\out\\a.zip")]) {
+    for (const attempt of [backupWorld("t1", mockGameDir(), ID, WORLD), restoreWorldBackup("t2", mockGameDir(), ID, WORLD, first.file), exportWorld("t3", mockGameDir(), ID, WORLD, "D:\\out\\a.zip")]) {
       const error = await rejection(attempt);
       expect(error.code).toBe("instance_busy");
       expect(detail(error)).toMatchObject({ id: ID, activity: "running" });
     }
     running.release();
 
-    const done = backupWorld("t4", ID, WORLD);
+    const done = backupWorld("t4", mockGameDir(), ID, WORLD);
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
     // 备份进行中：改动 Mod 照样能占，两件并行时列表里报 backing_up；改名与第二份备份被挡
     const modifying = acquireMockInstance(ID, "modifying");
     expect((await listInstances()).find((i) => i.id === ID)?.activity).toBe("backing_up");
     expect(detail(await rejection(renameInstance(ID, "x")))).toMatchObject({ activity: "backing_up" });
-    expect(detail(await rejection(backupWorld("t5", ID, WORLD)))).toMatchObject({ activity: "backing_up" });
+    expect(detail(await rejection(backupWorld("t5", mockGameDir(), ID, WORLD)))).toMatchObject({ activity: "backing_up" });
     await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
     expect((await done).backup.kind).toBe("manual");
     expect((await listInstances()).find((i) => i.id === ID)?.activity).toBe("modifying");
@@ -915,7 +916,7 @@ describe("mock：存档备份", () => {
     await setInstanceSettings(ID, { ...settings, isolation: "disabled" });
     for (const activity of ["launching", "running"] as const) {
       const game = acquireMockInstance(OTHER, activity);
-      for (const attempt of [backupWorld("s1", ID, WORLD), restoreWorldBackup("s2", ID, WORLD, first.file), exportWorld("s3", ID, WORLD, "D:\\out\\a.zip")]) {
+      for (const attempt of [backupWorld("s1", mockGameDir(), ID, WORLD), restoreWorldBackup("s2", mockGameDir(), ID, WORLD, first.file), exportWorld("s3", mockGameDir(), ID, WORLD, "D:\\out\\a.zip")]) {
         const error = await rejection(attempt);
         expect(error.code).toBe("instance_busy");
         expect(detail(error)).toEqual({ id: OTHER, activity });
@@ -927,7 +928,7 @@ describe("mock：存档备份", () => {
     // 自己隔离：别的实例开着游戏也照常备份，被拒的那几次没占住任务 id
     const game = acquireMockInstance(OTHER, "running");
     await setInstanceSettings(ID, { ...settings, isolation: "enabled" });
-    const done = backupWorld("s1", ID, WORLD);
+    const done = backupWorld("s1", mockGameDir(), ID, WORLD);
     await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
     expect((await done).backup.kind).toBe("manual");
     game.release();
@@ -936,14 +937,14 @@ describe("mock：存档备份", () => {
   it("勾了存档的导出整合包进行中：恢复报 instance_busy（指向导出的实例，活动为 modifying），不登记任务；备份照常；共用存档的另一个实例同样被挡", async () => {
     vi.useFakeTimers();
     const [first] = (await listWorldBackups(ID, WORLD)).backups;
-    const exporting = exportModpack("ex", ID, { destination: "D:/out/樱花.mrpack", name: "樱花", version: "1.0.0", summary: null, extras: ["saves"], include_disabled: false });
-    const refused = await rejection(restoreWorldBackup("rs", ID, WORLD, first.file));
+    const exporting = exportModpack("ex", mockGameDir(), ID, { destination: "D:/out/樱花.mrpack", name: "樱花", version: "1.0.0", summary: null, extras: ["saves"], include_disabled: false });
+    const refused = await rejection(restoreWorldBackup("rs", mockGameDir(), ID, WORLD, first.file));
     expect(refused.code).toBe("instance_busy");
     expect(refused.message).toBe(`实例 ${ID} 正在导出带存档的整合包，请稍后再试`);
     expect(detail(refused)).toEqual({ id: ID, activity: "modifying" });
     expect(await cancelTask("rs")).toBe(false);
     // 备份只读存档，照常进行
-    const backup = backupWorld("bk", ID, WORLD);
+    const backup = backupWorld("bk", mockGameDir(), ID, WORLD);
     await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
     expect((await backup).backup.kind).toBe("manual");
     await vi.advanceTimersByTimeAsync(1000);
@@ -954,14 +955,14 @@ describe("mock：存档备份", () => {
     const settings = await getInstanceSettings(ID);
     await setInstanceSettings(ID, { ...settings, isolation: "disabled" });
     // 关了隔离就换到共用的那一层备份：先备一份共用的再恢复它
-    const sharedBackup = backupWorld("bk-shared", ID, WORLD);
+    const sharedBackup = backupWorld("bk-shared", mockGameDir(), ID, WORLD);
     await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
     const { file } = (await sharedBackup).backup;
-    const sharedExport = exportModpack("ex-2", OTHER, { destination: "D:/out/原版.mrpack", name: "原版", version: "1.0.0", summary: null, extras: ["saves"], include_disabled: false });
-    expect(detail(await rejection(restoreWorldBackup("rs-2", ID, WORLD, file)))).toEqual({ id: OTHER, activity: "modifying" });
+    const sharedExport = exportModpack("ex-2", mockGameDir(), OTHER, { destination: "D:/out/原版.mrpack", name: "原版", version: "1.0.0", summary: null, extras: ["saves"], include_disabled: false });
+    expect(detail(await rejection(restoreWorldBackup("rs-2", mockGameDir(), ID, WORLD, file)))).toEqual({ id: OTHER, activity: "modifying" });
     await vi.advanceTimersByTimeAsync(1000);
     await sharedExport;
-    const restored = restoreWorldBackup("rs-3", ID, WORLD, file);
+    const restored = restoreWorldBackup("rs-3", mockGameDir(), ID, WORLD, file);
     await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
     expect((await restored).world).toBe(WORLD);
   });
@@ -971,7 +972,7 @@ describe("mock：存档备份", () => {
     const OTHER = "1.21.1";
     const settings = await getInstanceSettings(ID);
     await setInstanceSettings(ID, { ...settings, isolation: "disabled" });
-    const shared = backupWorld("b-shared", ID, WORLD);
+    const shared = backupWorld("b-shared", mockGameDir(), ID, WORLD);
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
     const refused = await rejection(launchGame({ taskId: "l-1", versionId: OTHER, accountUuid: null, offlineName: "Steve", offlineFallback: false, quickPlay: null }));
     expect(refused.code).toBe("instance_busy");
@@ -1029,12 +1030,12 @@ describe("mock：存档备份", () => {
 
   it("恢复：备份表里没有这一份报 world_backup_not_found；成功后存档换成备份时的样子，原存档进回收站", async () => {
     vi.useFakeTimers();
-    const error = await rejection(restoreWorldBackup("t-gone", ID, WORLD, "1-auto.zip"));
+    const error = await rejection(restoreWorldBackup("t-gone", mockGameDir(), ID, WORLD, "1-auto.zip"));
     expect(error.code).toBe("world_backup_not_found");
     expect(detail(error)).toEqual({ id: ID, world: WORLD, file: "1-auto.zip" });
 
     const oldest = (await listWorldBackups(ID, WORLD)).backups[2];
-    const done = restoreWorldBackup("t-restore", ID, WORLD, oldest.file);
+    const done = restoreWorldBackup("t-restore", mockGameDir(), ID, WORLD, oldest.file);
     await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
     expect(await done).toEqual({ world: WORLD, previous_in_recycle_bin: true });
     expect((await listInstanceContent(ID)).worlds.find((w) => w.dir_name === WORLD)).toMatchObject({ name: "樱花村", last_played: oldest.created_at });
@@ -1044,7 +1045,7 @@ describe("mock：存档备份", () => {
 
   it("取消：进行中的备份以 cancelled 拒绝，备份表不变、实例放开", async () => {
     vi.useFakeTimers();
-    const failed = rejection(backupWorld("t-cancel", ID, WORLD));
+    const failed = rejection(backupWorld("t-cancel", mockGameDir(), ID, WORLD));
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
     expect(await cancelTask("t-cancel")).toBe(true);
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
@@ -1067,12 +1068,12 @@ describe("mock：存档备份", () => {
   it("导出：目标不是 .zip 或不是绝对路径报 invalid_argument（field 为 dest），不登记任务；成功给出路径与大小", async () => {
     vi.useFakeTimers();
     for (const dest of ["D:\\out\\a.rar", "out\\a.zip"]) {
-      const error = await rejection(exportWorld("t-bad", ID, WORLD, dest));
+      const error = await rejection(exportWorld("t-bad", mockGameDir(), ID, WORLD, dest));
       expect(error.code, dest).toBe("invalid_argument");
       expect(detail(error).field, dest).toBe("dest");
     }
     // 参数错的那两次没登记任务：同一个 taskId 还能用
-    const done = exportWorld("t-bad", ID, WORLD, "D:\\out\\樱花谷.ZIP");
+    const done = exportWorld("t-bad", mockGameDir(), ID, WORLD, "D:\\out\\樱花谷.ZIP");
     await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
     expect(await done).toEqual({ path: "D:\\out\\樱花谷.ZIP", size_bytes: Math.round(180 * MB * 0.9) });
     expect((await listWorldBackups(ID, WORLD)).backups).toHaveLength(3);

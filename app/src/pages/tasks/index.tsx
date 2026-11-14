@@ -27,7 +27,7 @@ import { useOnline } from "../../state/online";
 import type { PageProps, TaskFilter } from "../../state/route";
 import { clearableFinishedCount } from "../../state/selectors";
 import type { BlockedFileDto } from "../../state/store";
-import { isActiveTask, queuePosition } from "../../state/tasks";
+import { isActiveTask, queuePosition, retryGameDirReason } from "../../state/tasks";
 import { Appear } from "../../ui/Appear";
 import { Banner, BannerSlot } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
@@ -93,6 +93,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
   const slice = useLauncherSelector((s) => s.status.tasks);
   const unseenFailures = useLauncherSelector((s) => s.unseenFailures);
   const instanceIds = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
+  const gameDir = useLauncherSelector((s) => (s.settings === null ? null : s.settings.gameDir));
   // 「清除已结束」的计数按点了真能清掉的算：落地中的任务清除会留着，不计
   const finishedCount = useLauncherSelector(clearableFinishedCount);
   const actions = useLauncherActions();
@@ -216,6 +217,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
             tasks={tasks}
             now={now}
             hasInstance={(id) => instanceIds.includes(id)}
+            gameDir={gameDir}
             retryBlocked={online ? undefined : TASKS_COPY.offline.retryReason}
             onCancel={(task) => void cancel(task)}
             onRetry={(task) => void run(() => actions.retryTask(task.id), ACTION_ERROR.install)}
@@ -334,6 +336,8 @@ function TasksOverview({ finishing }: { finishing: ReadonlySet<string> }) {
 
 interface RowHandlers {
   hasInstance(id: string): boolean;
+  /** 此刻的当前游戏目录，设置没读到时为 null：发起于别的目录（或不知道发起于哪里）的任务，重试按钮置灰并说明。 */
+  gameDir: string | null;
   /** 重试眼下必然失败（断网）时的原因；能重试为 undefined。 */
   retryBlocked: string | undefined;
   onCancel(task: Task): void;
@@ -372,13 +376,15 @@ function TaskListRow({ task: placed, finishing, queuePosition, now, handlers }: 
   // 换成已结束的样子：进度条、百分数与取消键撤掉，整行变淡。在场的行换状态时页面总会给新的对象，运行中的 placed
   // 碰上已完成的任务只会是这样的退场副本（行离开分组或整组退场都是），按收尾画，与有收尾这一拍时离开前的样子相同。
   const holding = finishing || (running && task.status === "done");
+  // 目录对不上是切回去之前一直成立的原因，先说它；断网只是眼下
+  const dirReason = task.status === "failed" ? retryGameDirReason(task, handlers.gameDir) : null;
   return (
     <TaskRow
       task={task}
       finishing={holding}
       meta={{ queuePosition, etaSpeed: running ? etaSpeed(readThroughputHistory(), task) : 0, now }}
       hasInstance={task.instanceId !== null && handlers.hasInstance(task.instanceId)}
-      retryBlocked={retryNeedsNetwork(task) ? handlers.retryBlocked : undefined}
+      retryBlocked={dirReason !== null ? dirReason : retryNeedsNetwork(task) ? handlers.retryBlocked : undefined}
       onCancel={() => handlers.onCancel(task)}
       onRetry={() => handlers.onRetry(task)}
       onViewBlocked={() => handlers.onViewBlocked(task)}

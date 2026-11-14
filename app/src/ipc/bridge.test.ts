@@ -191,32 +191,34 @@ describe("Tauri 窗口里走真命令", () => {
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([["get_appearance", undefined], ["cancel_task", { taskId: "t9" }]]);
   });
 
-  // 键名逐个对应 Rust 命令形参的 camelCase 形式；漏传 taskId 时 Tauri 会以参数错误拒绝整条命令。
-  it("长命令带 taskId，参数键与 Rust 形参一致", async () => {
+  // 键名逐个对应 Rust 命令形参的 camelCase 形式；漏传 taskId 或 gameDir 时 Tauri 会以参数错误拒绝整条命令。
+  it("长命令带 taskId，按实例名动手的另带 gameDir，参数键与 Rust 形参一致", async () => {
+    const dir = "D:\\Games\\.minecraft";
     for (let i = 0; i < 6; i++) vi.mocked(tauriInvoke).mockResolvedValueOnce(null);
     await installJava("t-java", 21);
-    await installVersion("t-ver", "1.21.1", "fabric", "0.16.9", "周末生存");
-    await installMod("t-mod", "1.21.1-fabric", "modrinth", "AANobbMI", "mv1");
+    await installVersion("t-ver", dir, "1.21.1", "fabric", "0.16.9", "周末生存");
+    await installMod("t-mod", dir, "1.21.1-fabric", "modrinth", "AANobbMI", "mv1");
     await launchGame({ taskId: "t-run", versionId: "1.21.1", accountUuid: "u-1", offlineName: null, offlineFallback: true, quickPlay: null });
-    await repairInstance("t-fix", "周末生存");
-    await repairInstance("t-loader", "周末生存", { reinstallLoader: true });
+    await repairInstance("t-fix", dir, "周末生存");
+    await repairInstance("t-loader", dir, "周末生存", { reinstallLoader: true });
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
       ["install_java", { taskId: "t-java", requiredMajor: 21 }],
-      ["install_version", { taskId: "t-ver", id: "1.21.1", loader: "fabric", loaderVersion: "0.16.9", targetName: "周末生存" }],
-      ["install_mod", { taskId: "t-mod", versionId: "1.21.1-fabric", platform: "modrinth", projectId: "AANobbMI", modVersionId: "mv1" }],
+      ["install_version", { taskId: "t-ver", gameDir: dir, id: "1.21.1", loader: "fabric", loaderVersion: "0.16.9", targetName: "周末生存" }],
+      ["install_mod", { taskId: "t-mod", gameDir: dir, versionId: "1.21.1-fabric", platform: "modrinth", projectId: "AANobbMI", modVersionId: "mv1" }],
       ["launch_game", { taskId: "t-run", versionId: "1.21.1", accountUuid: "u-1", offlineFallback: true, offlineName: null, quickPlay: null }],
-      ["repair_instance", { taskId: "t-fix", id: "周末生存" }],
-      ["repair_instance", { taskId: "t-loader", id: "周末生存", reinstallLoader: true }],
+      ["repair_instance", { taskId: "t-fix", gameDir: dir, id: "周末生存" }],
+      ["repair_instance", { taskId: "t-loader", gameDir: dir, id: "周末生存", reinstallLoader: true }],
     ]);
   });
 
   it("组合任务的一项带上 step（第 0 项也带），键名与 Rust 形参一致", async () => {
+    const dir = "D:\\Games\\.minecraft";
     vi.mocked(tauriInvoke).mockResolvedValueOnce(null).mockResolvedValueOnce(null);
-    await installMod("t-all", "1.21.1-fabric", "modrinth", "AANobbMI", "mv1", 0);
-    await updateMod("t-all", "1.21.1-fabric", "AANobbMI-0.5.jar", "mv2", 1);
+    await installMod("t-all", dir, "1.21.1-fabric", "modrinth", "AANobbMI", "mv1", 0);
+    await updateMod("t-all", dir, "1.21.1-fabric", "AANobbMI-0.5.jar", "mv2", 1);
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
-      ["install_mod", { taskId: "t-all", versionId: "1.21.1-fabric", platform: "modrinth", projectId: "AANobbMI", modVersionId: "mv1", step: 0 }],
-      ["update_mod", { taskId: "t-all", versionId: "1.21.1-fabric", fileName: "AANobbMI-0.5.jar", modVersionId: "mv2", step: 1 }],
+      ["install_mod", { taskId: "t-all", gameDir: dir, versionId: "1.21.1-fabric", platform: "modrinth", projectId: "AANobbMI", modVersionId: "mv1", step: 0 }],
+      ["update_mod", { taskId: "t-all", gameDir: dir, versionId: "1.21.1-fabric", fileName: "AANobbMI-0.5.jar", modVersionId: "mv2", step: 1 }],
     ]);
   });
 

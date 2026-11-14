@@ -529,7 +529,7 @@ describe("新建实例：完整走一遍", () => {
     click(button(CREATE_COPY.create));
     await flush();
     // 没有默认设置时不沿用；Fabric API 默认勾着，装好实例后再装
-    expect(callsOf(ipc, "install_version")).toEqual([{ taskId: expect.any(String), id: "1.20.1", loader: "fabric", loaderVersion: "0.16.10", targetName: "周末生存", useTemplate: false }]);
+    expect(callsOf(ipc, "install_version")).toEqual([{ taskId: expect.any(String), gameDir: "D:/Games/.minecraft", id: "1.20.1", loader: "fabric", loaderVersion: "0.16.10", targetName: "周末生存", useTemplate: false }]);
     expect(launcher.state.toasts.map((t) => `${t.tone}:${t.title}:${t.body}`)).toContain(`info:开始安装「周末生存」:${CREATE_COPY.startedBody}`);
     expect(callsOf(ipc, "update_config")).toEqual([{ selectedVersion: "周末生存" }]);
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -552,7 +552,7 @@ describe("新建实例：完整走一遍", () => {
     click(button(CREATE_COPY.confirm.openAfter));
     click(button(CREATE_COPY.create));
     await flush();
-    expect(callsOf(ipc, "install_version")).toEqual([{ taskId: expect.any(String), id: "1.21.1", loader: null, loaderVersion: null, targetName: "原版生存", useTemplate: false }]);
+    expect(callsOf(ipc, "install_version")).toEqual([{ taskId: expect.any(String), gameDir: "D:/Games/.minecraft", id: "1.21.1", loader: null, loaderVersion: null, targetName: "原版生存", useTemplate: false }]);
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(nav.route).toEqual({ page: "home" });
   });

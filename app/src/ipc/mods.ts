@@ -218,10 +218,11 @@ export const modUpdateChangelog = (versionId: string, fileName: string, modVersi
 
 /**
  * 长任务：进度经 core-event 推送并带 task_id，可用 cancelTask(taskId) 取消。旧文件留作 `.old` 备份，可在变更历史里回滚。
+ * gameDir 是入队那一刻的游戏目录，当前目录已经不是它时以 game_dir_changed 拒绝、什么都不动。
  * 作为组合任务的一项调用时 step 给第几项（从 0 计），后端把它标在这次调用的每条事件上；单独调用不给。
  */
-export const updateMod = (taskId: string, versionId: string, fileName: string, modVersionId: string, step?: number): Promise<ModUpdateOutcomeDto> =>
-  invoke<ModUpdateOutcomeDto>("update_mod", { taskId, versionId, fileName, modVersionId, step });
+export const updateMod = (taskId: string, gameDir: string, versionId: string, fileName: string, modVersionId: string, step?: number): Promise<ModUpdateOutcomeDto> =>
+  invoke<ModUpdateOutcomeDto>("update_mod", { taskId, gameDir, versionId, fileName, modVersionId, step });
 
 /** 某工程的版本列表。 */
 export interface ModVersionList {

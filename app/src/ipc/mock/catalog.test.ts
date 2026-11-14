@@ -1,6 +1,7 @@
 // 假后端的工程目录要自洽：发现页搜得到的每个工程都能打开详情、列出版本、判定落位并装进实例，
 // 浏览器预览里点开任何一张卡都不会撞上 404。
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mockGameDir } from "./handlers/config";
 import { installMod, installResource, projectDetail, searchResources, type SearchArgs } from "../discover";
 import { deleteInstance, listInstances, renameInstance } from "../instances";
 import { installModpack, summarizePlatformModpack } from "../modpack";
@@ -147,7 +148,7 @@ describe("工程目录：搜得到就打得开、装得上", () => {
       ["sodium-121", "YL57xq9U", false],
       ["fapi-0115", "AANobbMI", false],
     ]);
-    const outcome = await installMod("t-iris", "1.21.1-Fabric", "modrinth", "YL57xq9U", "iris-181");
+    const outcome = await installMod("t-iris", mockGameDir(), "1.21.1-Fabric", "modrinth", "YL57xq9U", "iris-181");
     expect(outcome).toEqual({ file_name: "YL57xq9U-1.8.1.jar", path: "C:/Games/.minecraft/versions/1.21.1-Fabric/mods/YL57xq9U-1.8.1.jar", platform: "modrinth", skipped: [] });
     const mods = await listMods("1.21.1-Fabric");
     expect(mods.map((m) => [m.file_name, m.source?.project_id, m.source?.dependency_of])).toEqual([
@@ -159,7 +160,7 @@ describe("工程目录：搜得到就打得开、装得上", () => {
     const after = await matchInstances("modrinth", "AANobbMI", "mod", null);
     expect(after.find((m) => m.version_id === "1.21.1-Fabric")).toMatchObject({ state: "installed", installed: { file_name: "AANobbMI-0.6.5.jar", version_id: "sodium-121" } });
     // CurseForge 的工程在自己的平台上解析前置
-    await installMod("t-cf", "1.20.1-Fabric", "curseforge", "394468", "4957843");
+    await installMod("t-cf", mockGameDir(), "1.20.1-Fabric", "curseforge", "394468", "4957843");
     expect((await listMods("1.20.1-Fabric")).map((m) => m.file_name)).toContain("394468-0.5.3.jar");
   });
 
@@ -170,11 +171,12 @@ describe("工程目录：搜得到就打得开、装得上", () => {
       return row.best_version.version_id;
     };
     const base = { versionId: "1.21.1-Fabric", world: null };
-    const rp = await installResource({ ...base, taskId: "t-rp", resourceType: "resource_pack", platform: "modrinth", projectId: "faithful-32x", fileVersionId: await pick("modrinth", "faithful-32x", "resource_pack", "1.21.1-Fabric") });
+    const rp = await installResource({ gameDir: mockGameDir(), ...base, taskId: "t-rp", resourceType: "resource_pack", platform: "modrinth", projectId: "faithful-32x", fileVersionId: await pick("modrinth", "faithful-32x", "resource_pack", "1.21.1-Fabric") });
     expect(rp.path).toBe("D:/Games/.minecraft/versions/1.21.1-Fabric/resourcepacks/faithful-32x-1.21.1-r2.zip");
-    const sh = await installResource({ ...base, taskId: "t-sh", resourceType: "shader", platform: "curseforge", projectId: "627557", fileVersionId: await pick("curseforge", "627557", "shader", "1.21.1-Fabric") });
+    const sh = await installResource({ gameDir: mockGameDir(), ...base, taskId: "t-sh", resourceType: "shader", platform: "curseforge", projectId: "627557", fileVersionId: await pick("curseforge", "627557", "shader", "1.21.1-Fabric") });
     expect(sh.path).toBe("D:/Games/.minecraft/versions/1.21.1-Fabric/shaderpacks/627557-r5.3.zip");
     const dp = await installResource({
+      gameDir: mockGameDir(),
       ...base,
       taskId: "t-dp",
       world: "生存",
@@ -195,11 +197,11 @@ describe("工程目录：搜得到就打得开、装得上", () => {
     expect((await row("modrinth", "faithful-32x", "resource_pack", null, "1.21.1-Fabric")).state).toBe("compatible");
 
     const base = { versionId: "1.21.1-Fabric", world: null };
-    await installResource({ ...base, taskId: "t-rp", resourceType: "resource_pack", platform: "modrinth", projectId: "faithful-32x", fileVersionId: "f32-1211" });
-    await installResource({ ...base, taskId: "t-sh", resourceType: "shader", platform: "curseforge", projectId: "627557", fileVersionId: "5701234" });
-    await installResource({ ...base, taskId: "t-dp", world: "生存", resourceType: "data_pack", platform: "modrinth", projectId: "8oi3bsk5", fileVersionId: "tl-254" });
+    await installResource({ gameDir: mockGameDir(), ...base, taskId: "t-rp", resourceType: "resource_pack", platform: "modrinth", projectId: "faithful-32x", fileVersionId: "f32-1211" });
+    await installResource({ gameDir: mockGameDir(), ...base, taskId: "t-sh", resourceType: "shader", platform: "curseforge", projectId: "627557", fileVersionId: "5701234" });
+    await installResource({ gameDir: mockGameDir(), ...base, taskId: "t-dp", world: "生存", resourceType: "data_pack", platform: "modrinth", projectId: "8oi3bsk5", fileVersionId: "tl-254" });
     // 旧版装进原版 1.21.1：之后按新版查矩阵，仍要认出装着的旧版。
-    await installResource({ versionId: "1.21.1", world: null, taskId: "t-old", resourceType: "resource_pack", platform: "modrinth", projectId: "faithful-32x", fileVersionId: "f32-1201" });
+    await installResource({ gameDir: mockGameDir(), versionId: "1.21.1", world: null, taskId: "t-old", resourceType: "resource_pack", platform: "modrinth", projectId: "faithful-32x", fileVersionId: "f32-1201" });
 
     expect(await row("modrinth", "faithful-32x", "resource_pack", null, "1.21.1-Fabric")).toMatchObject({
       state: "installed",
@@ -237,7 +239,7 @@ describe("工程目录：搜得到就打得开、装得上", () => {
         expect(summary.minecraft).toBe(latest.game_versions[0]);
         n++;
         const name = `导入 ${n}`;
-        await installModpack(`t-mp-${n}`, { kind: "platform", platform: s.platform, project_id: s.project_id, version_id: latest.version_id }, name, []);
+        await installModpack(`t-mp-${n}`, mockGameDir(), { kind: "platform", platform: s.platform, project_id: s.project_id, version_id: latest.version_id }, name, []);
         const instance = (await listInstances()).find((i) => i.id === name);
         expect(instance?.modpack).toEqual({ platform: s.platform, project_id: s.project_id, version_id: latest.version_id, name: hit.title, version: latest.version_number });
         expect(instance?.mc_version).toBe(summary.minecraft);

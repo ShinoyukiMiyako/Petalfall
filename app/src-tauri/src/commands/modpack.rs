@@ -23,6 +23,7 @@ use crate::commands::instances::{
     ensure_saves_settled_for_reading, ChainGuard, ExportedFiles, InstanceActivity, InstanceLocks,
 };
 use crate::commands::launch::RunningGame;
+use crate::commands::tasks::ensure_game_dir;
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
@@ -259,11 +260,15 @@ pub(crate) async fn preview_modpack_with(
 ///
 /// 动手之前先核对当前游戏目录的数据格式记号：目录被更新的落樱用过报 `game_dir_data_too_new`，记号读不懂报
 /// `data_format_unreadable`，这时平台整合包不下载、平台接口不问。
+///
+/// `game_dir`（前端传 `gameDir`）是入队那一刻的游戏目录，当前目录已经不是它（切换目录后重试）就报
+/// `game_dir_changed`，什么都不动。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn install_modpack(
     app: AppHandle,
     task_id: String,
+    game_dir: String,
     source: ModpackSourceArg,
     name: Option<String>,
     excluded_optional: Option<Vec<String>>,
@@ -277,6 +282,7 @@ pub async fn install_modpack(
         &tasks,
         &locks,
         &task_id,
+        &game_dir,
         source,
         name.as_deref(),
         excluded_optional,
@@ -294,6 +300,7 @@ pub(crate) async fn install_modpack_with(
     tasks: &TaskRegistry,
     locks: &InstanceLocks,
     task_id: &str,
+    game_dir: &str,
     source: ModpackSourceArg,
     name: Option<&str>,
     excluded_optional: Option<Vec<String>>,
@@ -303,8 +310,10 @@ pub(crate) async fn install_modpack_with(
     // 一步判（不是的报 invalid_argument）。
     let source = parse_source(source)?;
     let selection = parse_selection(excluded_optional)?;
+    let snapshot = facade.snapshot().await;
+    ensure_game_dir(&snapshot, game_dir)?;
     let task = tasks.register(task_id)?;
-    let petalfall = facade.snapshot().await.with_cancel(task.token().clone());
+    let petalfall = snapshot.with_cancel(task.token().clone());
     // 占用守卫与实例名放在导入的 future 之外：取消宽限期满时 run 会丢弃 future，实例名得一直占到下面
     // 按名字清理完半成品，否则清理前的空档里别的命令就能动这个目录。
     let reserved: Mutex<Option<(String, ChainGuard)>> = Mutex::new(None);
@@ -689,11 +698,15 @@ pub(crate) async fn preview_modpack_export_with(
 /// 导出期间实例以「改动中」占住：游戏照常运行、Mod 照常可改（读的是此刻的文件），改名、补全、
 /// 删除报 `instance_busy`。勾了存档时存档要先安定下来：游戏启动中、运行中，备份或恢复进行中，共用
 /// 这份存档的别的实例开着游戏时都报 `instance_busy`，导出期间也不能启动这个实例。
+///
+/// `game_dir`（前端传 `gameDir`）是入队那一刻的游戏目录，当前目录已经不是它（切换目录后重试）就报
+/// `game_dir_changed`，什么都不动。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn export_modpack(
     app: AppHandle,
     task_id: String,
+    game_dir: String,
     id: String,
     options: ModpackExportOptionsArg,
     facade: State<'_, Facade>,
@@ -709,6 +722,7 @@ pub async fn export_modpack(
         &locks,
         running.slot(),
         &task_id,
+        &game_dir,
         &id,
         options,
         events.sink(),
@@ -729,6 +743,7 @@ pub(crate) async fn export_modpack_with(
     locks: &InstanceLocks,
     game: &GameSlot,
     task_id: &str,
+    game_dir: &str,
     id: &str,
     options: ModpackExportOptionsArg,
     events: &EventSink,
@@ -736,12 +751,13 @@ pub(crate) async fn export_modpack_with(
     // 参数在占锁、登记任务之前全部校验：非法调用不该占用任务 id。
     let id = export_id(id)?;
     let (destination, options) = parse_export_options(options).await?;
+    let snapshot = facade.snapshot().await;
+    ensure_game_dir(&snapshot, game_dir)?;
     let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
     let includes_saves = options.extras.contains(&ExportExtra::Saves);
     // 勾了存档时记下「存档正被整份读走」，恢复存档与启动游戏要等它读完；先记下再查，与那两边先占后查对称，
     // 两边同时发起时至少有一方会被挡住。被拒时记录随返回撤销。
     let _reading = includes_saves.then(|| locks.read_saves(id));
-    let snapshot = facade.snapshot().await;
     // 没勾存档的导出不碰 saves，与运行和备份都兼容。勾了就要等存档安定下来，否则包里是半截的。
     if includes_saves {
         ensure_saves_settled_for_reading(&snapshot, locks, game, id).await?;
@@ -970,6 +986,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::commands::error::code;
+    use crate::commands::tasks::{assert_game_dir_changed, current_game_dir, disk_state};
 
     fn facade_in(dir: &Path, base: &str) -> Facade {
         let config = PetalfallConfig {
@@ -1045,6 +1062,7 @@ mod tests {
             &registry,
             &InstanceLocks::default(),
             "mp",
+            &current_game_dir(&facade).await,
             file("  "),
             None,
             None,
@@ -1070,6 +1088,7 @@ mod tests {
             &registry,
             &InstanceLocks::default(),
             "mp#1",
+            &current_game_dir(&facade).await,
             file(&missing.display().to_string()),
             None,
             None,
@@ -1125,6 +1144,7 @@ mod tests {
             &registry,
             &InstanceLocks::default(),
             "mp#2",
+            &current_game_dir(&facade).await,
             file(&missing.display().to_string()),
             None,
             None,
@@ -1233,6 +1253,7 @@ mod tests {
             &registry,
             &locks,
             "mp-busy",
+            &current_game_dir(&facade).await,
             file(&pack.display().to_string()),
             Some(" 撞名 "),
             None,
@@ -1274,6 +1295,7 @@ mod tests {
             &registry,
             &locks,
             "mp-base-running",
+            &current_game_dir(&facade).await,
             file(&pack.display().to_string()),
             Some("周末联机"),
             None,
@@ -1317,6 +1339,7 @@ mod tests {
             &registry,
             &locks,
             "mp-loader-running",
+            &current_game_dir(&facade).await,
             file(&pack.display().to_string()),
             Some("周末联机"),
             None,
@@ -1394,8 +1417,18 @@ mod tests {
             let source = file(&pack.display().to_string());
             async move {
                 let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
-                install_modpack_with(&f, &r, &l, "mp-hold", source, Some("导入中"), None, &sink)
-                    .await
+                install_modpack_with(
+                    &f,
+                    &r,
+                    &l,
+                    "mp-hold",
+                    &current_game_dir(&f).await,
+                    source,
+                    Some("导入中"),
+                    None,
+                    &sink,
+                )
+                .await
             }
         });
 
@@ -1515,6 +1548,7 @@ mod tests {
             &TaskRegistry::default(),
             &InstanceLocks::default(),
             "mp-pins",
+            &current_game_dir(facade).await,
             file(&pack.display().to_string()),
             Some(name),
             None,
@@ -1543,6 +1577,7 @@ mod tests {
                     &r,
                     &InstanceLocks::default(),
                     task_id,
+                    &current_game_dir(&f).await,
                     source,
                     Some(name),
                     None,
@@ -1806,7 +1841,18 @@ mod tests {
             let source = file(&pack.display().to_string());
             tokio::spawn(async move {
                 let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
-                install_modpack_with(&f, &r, &l, task, source, Some(name), None, &sink).await
+                install_modpack_with(
+                    &f,
+                    &r,
+                    &l,
+                    task,
+                    &current_game_dir(&f).await,
+                    source,
+                    Some(name),
+                    None,
+                    &sink,
+                )
+                .await
             })
         };
         let wait_for_dir = |name: &str| {
@@ -1849,9 +1895,17 @@ mod tests {
             assert_eq!(err.code, code::INSTANCE_BUSY);
             assert_eq!(err.detail.unwrap(), in_use);
             let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
-            let err = repair_instance_with(&facade, &registry, &locks, "r-base", id, &sink)
-                .await
-                .unwrap_err();
+            let err = repair_instance_with(
+                &facade,
+                &registry,
+                &locks,
+                "r-base",
+                &current_game_dir(&facade).await,
+                id,
+                &sink,
+            )
+            .await
+            .unwrap_err();
             assert_eq!(err.code, code::INSTANCE_BUSY);
             assert_eq!(err.detail.unwrap(), in_use);
             assert!(!registry.is_running("r-base"));
@@ -1925,8 +1979,18 @@ mod tests {
             let source = file(&pack.display().to_string());
             async move {
                 let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
-                install_modpack_with(&f, &r, &l, "mp-locked", source, Some("删不掉"), None, &sink)
-                    .await
+                install_modpack_with(
+                    &f,
+                    &r,
+                    &l,
+                    "mp-locked",
+                    &current_game_dir(&f).await,
+                    source,
+                    Some("删不掉"),
+                    None,
+                    &sink,
+                )
+                .await
             }
         });
         let instance = dir
@@ -2023,6 +2087,7 @@ mod tests {
                     &r,
                     &InstanceLocks::default(),
                     "mp-late",
+                    &current_game_dir(&f).await,
                     source,
                     Some("导入中"),
                     None,
@@ -2192,6 +2257,7 @@ mod tests {
                 &r,
                 &InstanceLocks::default(),
                 "mp-slow",
+                &current_game_dir(&f).await,
                 source,
                 None,
                 None,
@@ -2265,6 +2331,7 @@ mod tests {
             &registry,
             &InstanceLocks::default(),
             "mp-newer",
+            &current_game_dir(&facade).await,
             ModpackSourceArg::Platform {
                 platform: "modrinth".into(),
                 project_id: "proj".into(),
@@ -2382,6 +2449,7 @@ mod tests {
                 &registry,
                 &InstanceLocks::default(),
                 "mp-blank",
+                &current_game_dir(&facade).await,
                 source(),
                 None,
                 Some(vec!["mods/a.jar".into(), blank.into()]),
@@ -2399,6 +2467,7 @@ mod tests {
             &registry,
             &InstanceLocks::default(),
             "mp-required",
+            &current_game_dir(&facade).await,
             source(),
             Some("必需"),
             Some(vec![" mods/core.jar ".into()]),
@@ -2724,6 +2793,7 @@ mod tests {
                 &locks,
                 &GameSlot::default(),
                 "ex-bad",
+                &current_game_dir(&facade).await,
                 id,
                 args,
                 &sink,
@@ -2745,6 +2815,7 @@ mod tests {
             &locks,
             &GameSlot::default(),
             "ex-bad",
+            &current_game_dir(&facade).await,
             EXPORT_ID,
             with(&|a| a.extras = vec!["config".into(), "Saves".into()]),
             &sink,
@@ -2810,6 +2881,7 @@ mod tests {
             &locks,
             &GameSlot::default(),
             "ex-ok",
+            &current_game_dir(&facade).await,
             EXPORT_ID,
             export_args(&destination),
             &sink,
@@ -2862,6 +2934,7 @@ mod tests {
                     &l,
                     &GameSlot::default(),
                     "ex-slow",
+                    &current_game_dir(&f).await,
                     EXPORT_ID,
                     args,
                     &sink,
@@ -2918,6 +2991,7 @@ mod tests {
                     &l,
                     &GameSlot::default(),
                     "ex-hold",
+                    &current_game_dir(&f).await,
                     EXPORT_ID,
                     args,
                     &sink,
@@ -2983,6 +3057,7 @@ mod tests {
             &locks,
             &GameSlot::default(),
             "ex-backup",
+            &current_game_dir(&facade).await,
             EXPORT_ID,
             with_saves(),
             &sink,
@@ -3003,6 +3078,7 @@ mod tests {
             &locks,
             &GameSlot::default(),
             "ex-no-saves",
+            &current_game_dir(&facade).await,
             EXPORT_ID,
             export_args(&destination),
             &sink,
@@ -3021,6 +3097,7 @@ mod tests {
             &locks,
             &GameSlot::default(),
             "ex-after",
+            &current_game_dir(&facade).await,
             EXPORT_ID,
             with_saves(),
             &sink,
@@ -3075,6 +3152,7 @@ mod tests {
                 &locks,
                 &GameSlot::default(),
                 "ex-running",
+                &current_game_dir(&facade).await,
                 EXPORT_ID,
                 args(true),
                 &sink,
@@ -3100,6 +3178,7 @@ mod tests {
             &locks,
             &GameSlot::default(),
             "ex-no-saves",
+            &current_game_dir(&facade).await,
             EXPORT_ID,
             args(false),
             &sink,
@@ -3118,6 +3197,7 @@ mod tests {
             &locks,
             &slot,
             "ex-shared-game",
+            &current_game_dir(&facade).await,
             "共用乙",
             args(true),
             &sink,
@@ -3139,6 +3219,7 @@ mod tests {
             &locks,
             &GameSlot::default(),
             "ex-writing",
+            &current_game_dir(&facade).await,
             EXPORT_ID,
             args(true),
             &sink,
@@ -3195,6 +3276,7 @@ mod tests {
             &locks,
             &GameSlot::default(),
             "ex-shared",
+            &current_game_dir(&facade).await,
             "共用乙",
             args(),
             &sink,
@@ -3220,6 +3302,7 @@ mod tests {
             &locks,
             &GameSlot::default(),
             "ex-shared",
+            &current_game_dir(&facade).await,
             "共用乙",
             args(),
             &sink,
@@ -3254,5 +3337,151 @@ mod tests {
                 "WebView 不该拿到 {unneeded}：它会放行不受路径范围约束的 reveal_item_in_dir"
             );
         }
+    }
+
+    // ---------------------------------------------------------------- 切换游戏目录之后重试
+
+    /// 任务发起时的游戏目录：另一个临时目录下的 .minecraft，与门面的当前目录不同。
+    fn elsewhere() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let game_dir = dir.path().join(".minecraft").display().to_string();
+        (dir, game_dir)
+    }
+
+    /// 切换目录后重试导入：报 game_dir_changed，当前目录里不建出这个名字的实例、别的实例原样，盘上什么都没动，版本
+    /// 清单一次没问；实例名与任务 id 随之放开。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn import_retried_after_switching_directories_is_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/manifest.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"latest":{"release":"x","snapshot":"x"},"versions":[]}"#),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let facade = importing_facade(dir.path(), &server, PetalfallConfig::default());
+        let versions = dir.path().join(".minecraft").join("versions");
+        std::fs::create_dir_all(versions.join("生存")).unwrap();
+        std::fs::write(
+            versions.join("生存").join("生存.json"),
+            r#"{"id":"生存","type":"release","mainClass":"m"}"#,
+        )
+        .unwrap();
+        let pack = dir.path().join("pack.mrpack");
+        write_vanilla_pack(&pack);
+        let before = disk_state(dir.path());
+        let (_a, expected) = elsewhere();
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+
+        let err = install_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            "mp",
+            &expected,
+            file(&pack.display().to_string()),
+            Some("周末联机"),
+            None,
+            &sink,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &dir.path().join(".minecraft"));
+        assert!(!versions.join("周末联机").exists());
+        assert_eq!(disk_state(dir.path()), before);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        // 同一个任务 id 此刻还登记着也先报目录换了：核对在登记任务之前，不让任务冲突盖过它。
+        let held = registry.register("mp").unwrap();
+        let err = install_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            "mp",
+            &expected,
+            file(&pack.display().to_string()),
+            Some("周末联机"),
+            None,
+            &sink,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &dir.path().join(".minecraft"));
+        drop(held);
+        drop(registry.register("mp").unwrap());
+        drop(
+            locks
+                .acquire("周末联机", InstanceActivity::Installing)
+                .unwrap(),
+        );
+    }
+
+    /// 切换目录后重试导出整合包：报 game_dir_changed，落点文件与临时文件都不存在，盘上什么都没动，Modrinth 一次
+    /// 没问；实例与任务 id 随之放开。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn export_retried_after_switching_directories_is_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/version_files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), &server.uri());
+        export_instance(dir.path());
+        let destination = dir.path().join("樱花林 1.0.0.mrpack");
+        let before = disk_state(dir.path());
+        let (_a, expected) = elsewhere();
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+
+        let err = export_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            &GameSlot::default(),
+            "ex",
+            &expected,
+            EXPORT_ID,
+            export_args(&destination),
+            &sink,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &dir.path().join(".minecraft"));
+        assert!(!destination.exists());
+        assert!(part_files(dir.path()).is_empty());
+        assert_eq!(disk_state(dir.path()), before);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        // 同名实例此刻正被改名也先报目录换了：核对在占锁之前，不让新目录里的占用盖过它。
+        let renaming = locks
+            .acquire(EXPORT_ID, InstanceActivity::Renaming)
+            .unwrap();
+        let err = export_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            &GameSlot::default(),
+            "ex",
+            &expected,
+            EXPORT_ID,
+            export_args(&destination),
+            &sink,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &dir.path().join(".minecraft"));
+        drop(renaming);
+        drop(registry.register("ex").unwrap());
+        drop(
+            locks
+                .acquire(EXPORT_ID, InstanceActivity::Modifying)
+                .unwrap(),
+        );
     }
 }
