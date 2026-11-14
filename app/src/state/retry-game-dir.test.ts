@@ -5,7 +5,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TASK_JOURNAL_DEBOUNCE_MS } from "../domain/limits";
 import { IpcError } from "../ipc/errors";
-import type { InstanceDto } from "../ipc/instances";
+import type { InstallResultDto, InstanceDto, RepairResultDto } from "../ipc/instances";
+import type { ModpackInstallOutcomeDto } from "../ipc/modpack";
 import type { TaskRecordDto } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle, startedStore } from "../test/launcher";
@@ -331,5 +332,96 @@ describe("别的目录里同名实例的改名与补全，不碰这个目录的�
       ["task-create", "failed"],
       ["repair_instance", "done"],
     ]);
+  });
+});
+
+describe("发起之后切了目录的新建、导入与补全落地", () => {
+  /** 后端此刻在 B：带着别的目录来的 Mod 安装照后端的核对拒绝。 */
+  function backendIn(dir: string): void {
+    ipc.overrides.set("install_mod", (args) => {
+      if (args.gameDir !== dir) throw new IpcError("game_dir_changed", "当前游戏目录已经换了", { expected: args.gameDir, current: dir });
+      return { skipped: [] };
+    });
+  }
+
+  it("新建途中切到 B：装好后不给 B 里的同名实例写封面、不固定，通知写明在哪、不带启动按钮；开局 Mod 记的是 A，后端按 A 拒绝", async () => {
+    const installed = deferred<InstallResultDto>();
+    ipc.overrides.set("install_version", () => installed.promise);
+    await store.actions.createInstance({
+      name: "新世界",
+      mcVersion: "1.21.1",
+      loader: "fabric",
+      loaderVersion: "0.16.10",
+      cover: "grass",
+      useTemplate: false,
+      starterMods: [{ projectId: "P7dR8mSH", modVersionId: "fapi-0115", title: "Fabric API", fileSize: 3 }],
+    });
+    await settle();
+    await switchTo(B, [instanceDto("新世界")]);
+    backendIn(B);
+    installed.resolve({ id: "新世界", mc_version: "1.21.1", loader: { kind: "fabric", version: "0.16.10" }, libraries: 0, assets: 0, natives: 0, template: null });
+    await settle();
+
+    expect(callsOf(ipc, "get_instance_settings")).toEqual([]);
+    expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+    const ready = toastOf("「新世界」已就绪");
+    expect([ready.body, ready.action]).toEqual([`它在游戏目录 ${A} 里，当前已换到别的目录，封面与侧栏固定没有写上；切回去再启动`, undefined]);
+    const starter = store.getState().tasks.find((t) => t.spec.command === "install_mods");
+    expect(starter).toMatchObject({ gameDir: A, status: "failed", error: { code: "game_dir_changed" } });
+    expect(callsOf(ipc, "install_mod").map((a) => a.gameDir)).toEqual([A]);
+  });
+
+  it("导入整合包途中切到 B：同样不写封面、不固定，通知写明在哪、不带启动按钮", async () => {
+    const imported = deferred<ModpackInstallOutcomeDto>();
+    ipc.overrides.set("install_modpack", () => imported.promise);
+    await store.actions.installModpack({
+      source: { kind: "file", path: "D:/包.mrpack" },
+      name: "整合包",
+      packName: "樱落",
+      packVersion: "1.0.0",
+      modCount: 3,
+      cover: "grass",
+      excludedOptional: [],
+      mcVersion: "1.21.1",
+      loader: "fabric",
+      loaderVersion: "0.16.5",
+    });
+    await settle();
+    await switchTo(B, [instanceDto("整合包")]);
+    imported.resolve({ version_id: "整合包", version_dir: `${A}\versions\整合包`, modpack: null as never });
+    await settle();
+
+    expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+    const done = toastOf("「整合包」已导入");
+    expect([done.body, done.action]).toEqual([`它在游戏目录 ${A} 里，当前已换到别的目录，封面与侧栏固定没有写上；切回去再启动`, undefined]);
+  });
+
+  it("修好后接着启动、补全途中切到 B：不启动 B 里的同名实例，通知写明在哪、不带启动按钮", async () => {
+    const repaired = deferred<RepairResultDto>();
+    ipc.overrides.set("repair_instance", () => repaired.promise);
+    await store.actions.repairInstance("生存", { launchAfter: true });
+    await settle();
+    await switchTo(B, [instanceDto("生存")]);
+    repaired.resolve({ reinstalled: false, libraries: 0, assets: 0, natives: 0 });
+    await settle();
+
+    expect(callsOf(ipc, "launch_game")).toEqual([]);
+    const done = toastOf("「生存」已修复");
+    expect([done.body, done.action]).toEqual([`它在游戏目录 ${A} 里，当前已换到别的目录，没有接着启动；切回去再启动`, undefined]);
+  });
+
+  it("切走又切回发起时的目录再落地：照常写封面、固定与接着启动", async () => {
+    const repaired = deferred<RepairResultDto>();
+    ipc.overrides.set("repair_instance", () => repaired.promise);
+    ipc.overrides.set("launch_game", () => new Promise(() => undefined));
+    await store.actions.repairInstance("生存", { launchAfter: true });
+    await settle();
+    await switchTo(B, [instanceDto("生存")]);
+    await switchTo(A.toLowerCase(), [instanceDto("生存")]);
+    repaired.resolve({ reinstalled: false, libraries: 0, assets: 0, natives: 0 });
+    await settle();
+    expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["生存"]);
   });
 });

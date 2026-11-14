@@ -1991,7 +1991,8 @@ export class LauncherStore {
 
   // ---------------------------------------------------------------- 下载任务
 
-  private enqueue(draft: Omit<TaskDraft, "id" | "gameDir">, meta: TaskMeta | null, subject: string): Task | null {
+  /** origin 是跟着别的任务排进来的后续任务继承的游戏目录；不给就记此刻的当前目录。 */
+  private enqueue(draft: Omit<TaskDraft, "id" | "gameDir">, meta: TaskMeta | null, subject: string, origin?: string | null): Task | null {
     const duplicate = findDuplicate(this.raw.tasks, draft.spec);
     if (duplicate !== undefined) {
       this.pushToast("info", TASK_TOAST.duplicate(subject).title);
@@ -1999,7 +2000,7 @@ export class LauncherStore {
     }
     if (!TASK_COMMANDS.has(draft.spec.command)) throw new Error(`不是可排队的命令：${draft.spec.command}`);
     // 记下这一刻的游戏目录：重试前与当前的比对，命令也带上它供后端核对。不知道当前目录就排不出能重试的任务
-    const gameDir = this.currentGameDir();
+    const gameDir = origin === undefined ? this.currentGameDir() : origin;
     if (gameDir === null && !GAME_DIR_FREE_COMMANDS.has(draft.spec.command)) throw new Error(`还没读到当前的游戏目录，不能排「${subject}」`);
     const task = newTask({ ...draft, id: freshId("task"), gameDir }, Date.now());
     this.set((raw) => ({
@@ -2373,6 +2374,17 @@ export class LauncherStore {
     return instanceAction(instanceId, (id) => ({ label: TASK_TOAST.launchAction, run: () => this.actions.launch(id), errorTitle: ACTION_ERROR.launch(id) }));
   }
 
+  /**
+   * 新建、导入、补全落地时，发起它的游戏目录已经不是当前目录：返回那个目录；还是当前目录时为 null。跟着要做的事（写封面、
+   * 自动固定、接着启动、通知上的启动按钮）都按实例名作用在当前目录上，目录换了还照做就落到这边的同名实例上。
+   * 还没读到当前目录时同样不做：说不准是哪个目录。
+   */
+  private landedElsewhere(task: Task): string | null {
+    if (task.gameDir === null) throw new Error(`任务 ${task.id} 没有记下发起时的游戏目录`);
+    const current = this.currentGameDir();
+    return current !== null && sameGameDir(task.gameDir, current) ? null : task.gameDir;
+  }
+
   /** 新建、导入的实例：写封面；要固定且侧栏此刻没满时追加到固定列表末尾。重扫结果与撤下占位项在同一次更新里。 */
   private async settleNewInstance(taskId: string, id: string, cover: string | null, pin: boolean): Promise<void> {
     if (cover !== null) {
@@ -2508,9 +2520,16 @@ export class LauncherStore {
       case "create": {
         const outcome = result as InstallResultDto;
         const id = outcome.id;
-        await this.settleNewInstance(task.id, id, meta.cover, meta.autoPin);
-        const copy = TASK_TOAST.ready(id);
-        this.pushToast("success", copy.title, copy.body, this.launchAction(id));
+        const elsewhere = this.landedElsewhere(task);
+        if (elsewhere === null) {
+          await this.settleNewInstance(task.id, id, meta.cover, meta.autoPin);
+          const copy = TASK_TOAST.ready(id);
+          this.pushToast("success", copy.title, copy.body, this.launchAction(id));
+        } else {
+          await this.fetchInstances((raw) => this.withoutLanding(raw, task.id));
+          const copy = TASK_TOAST.readyElsewhere(id, elsewhere, meta.cover !== null, meta.autoPin);
+          this.pushToast("success", copy.title, copy.body);
+        }
         // 勾选与否以任务参数为准：重启后恢复的任务没有入队时的上下文，参数里仍记着
         if (task.spec.args.useTemplate === true) {
           const template = outcome.template;
@@ -2520,11 +2539,18 @@ export class LauncherStore {
             this.pushToast("info", skipped.title, skipped.body);
           }
         }
-        if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter);
+        if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter, task.gameDir);
         return;
       }
       case "modpack": {
         const id = (result as ModpackInstallOutcomeDto).version_id;
+        const elsewhere = this.landedElsewhere(task);
+        if (elsewhere !== null) {
+          await this.fetchInstances((raw) => this.withoutLanding(raw, task.id));
+          const copy = TASK_TOAST.importedElsewhere(id, elsewhere, meta.cover !== null);
+          this.pushToast("success", copy.title, copy.body);
+          return;
+        }
         await this.settleNewInstance(task.id, id, meta.cover, true);
         // 重启后恢复的导入任务不知道 Mod 数，正文省略
         const copy = TASK_TOAST.imported(id, meta.modCount);
@@ -2538,7 +2564,13 @@ export class LauncherStore {
         const id = this.renamedSince(strArg(task.spec.args, "id", command), mark);
         // 排在接着启动之前：启动可能停在登录弹窗上不换会话，失败卡留着的话入口只剩再修一次，和修好了对不上
         this.dismissRepairedFailure(id);
-        if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter);
+        if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter, task.gameDir);
+        const elsewhere = this.landedElsewhere(task);
+        if (elsewhere !== null) {
+          const copy = TASK_TOAST.repairedElsewhere(id, elsewhere, task.spec.args.reinstallLoader === true, meta.launchAfter);
+          this.pushToast("success", copy.title, copy.body);
+          return;
+        }
         if (meta.launchAfter && !isSessionActive(this.raw.session)) {
           await this.actions.launch(id);
           return;
@@ -2695,7 +2727,11 @@ export class LauncherStore {
    * 新实例就绪后接着装开局 Mod：排一个组合任务，在下载任务里只占一行。它是实例之外的一步，失败照任务失败呈现，
    * 实例本身照常可用；重试时前面已经装上的几项后端认出已装、直接跳过。
    */
-  private enqueueStarter(instanceId: string, starter: readonly StarterPick[]): void {
+  /**
+   * 开局 Mod 跟着新建、补全记下的游戏目录（gameDir），不按落地那一刻的当前目录记：落地前切了目录的话，后端按它核对拒绝，
+   * 任务落为失败并说明原因，切回去能重试，不会装进当前目录的同名实例。
+   */
+  private enqueueStarter(instanceId: string, starter: readonly StarterPick[], gameDir: string | null): void {
     const title = TASK_TEXT.starterTitle(starter.length);
     this.enqueue(
       {
@@ -2716,6 +2752,7 @@ export class LauncherStore {
       },
       { type: "starter", instanceId, count: starter.length },
       title,
+      gameDir,
     );
   }
 

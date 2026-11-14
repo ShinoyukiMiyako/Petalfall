@@ -1055,8 +1055,29 @@ const TEMPLATE_SKIP_REASON: Readonly<Record<TemplateSkipReason, string>> = {
   shared_working_dir: "这个实例与其他未隔离的实例共用 .minecraft 里的设置",
 };
 
+/**
+ * 新建、导入、补全落地时，发起它的游戏目录已经不是当前目录（通知正文）：实例在那个目录里，跟着要做的事按实例名会落到
+ * 当前目录的同名实例上，所以没做。missed 是因此没做的事，没有为 null。
+ */
+function landedElsewhere(dir: string, missed: string | null): string {
+  return missed === null ? `它在游戏目录 ${dir} 里，切回去再启动` : `它在游戏目录 ${dir} 里，当前已换到别的目录，${missed}；切回去再启动`;
+}
+
+/** 新建、导入落地时目录已换：没写上的封面与侧栏固定。 */
+function unsettled(cover: boolean, pin: boolean): string | null {
+  if (cover && pin) return "封面与侧栏固定没有写上";
+  if (cover) return "封面没有写上";
+  return pin ? "没有固定到侧栏" : null;
+}
+
 export const TASK_TOAST = {
   ready: (name: string) => ({ title: `「${name}」已就绪`, body: "可以启动游戏了" }),
+  readyElsewhere: (name: string, dir: string, cover: boolean, pin: boolean) => ({ title: `「${name}」已就绪`, body: landedElsewhere(dir, unsettled(cover, pin)) }),
+  importedElsewhere: (name: string, dir: string, cover: boolean) => ({ title: `「${name}」已导入`, body: landedElsewhere(dir, unsettled(cover, true)) }),
+  repairedElsewhere: (name: string, dir: string, reinstalledLoader: boolean, launchAfter: boolean) => ({
+    title: reinstalledLoader ? `「${name}」的加载器已重新安装` : `「${name}」已修复`,
+    body: landedElsewhere(dir, launchAfter ? "没有接着启动" : null),
+  }),
   imported: (name: string, modCount: number | null) => (modCount === null ? { title: `「${name}」已导入` } : { title: `「${name}」已导入`, body: `含 ${modCount} 个 Mod` }),
   repaired: (name: string) => ({ title: `「${name}」已修复` }),
   loaderReinstalled: (name: string) => ({ title: `「${name}」的加载器已重新安装` }),
