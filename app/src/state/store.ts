@@ -64,6 +64,7 @@ import {
   DEVICE_CODE_FETCH_TIMEOUT_MS,
   TASK_JOURNAL_DEBOUNCE_MS,
 } from "../domain/limits";
+import { sameGameDir } from "../domain/paths";
 import { instanceNameError, validateOfflineName } from "../domain/rules";
 import type { FailureCode, LoaderKind, Platform, Task, TaskError, TaskKind } from "../domain/types";
 import * as accountsIpc from "../ipc/accounts";
@@ -2427,8 +2428,10 @@ export class LauncherStore {
    * 已经不在的旧名字）。实例列表里那一项就地改名、与 lastRename 在同一次更新里：外壳按 lastRename 改写历史、按实例列表
    * 剪路由，新 id 晚一帧进列表，实例页就被当成已删除剪掉。后端随改名迁了侧栏固定与当前实例，这里同样就地换掉；
    * 改名之前发出、还没回来的重扫与读取读的是改名前的盘面，晚到时不再采纳。
+   *
+   * dir 是发起改名那一刻的游戏目录：后端按那一刻的快照改名，等后端期间切换了目录，改的仍是那个目录里的实例。
    */
-  private migrateRenamed(from: string, to: string): void {
+  private migrateRenamed(from: string, to: string, dir: string | null): void {
     this.scanApplied = this.scanIssued;
     this.pinsApplied = this.pinsIssued;
     this.settingsApplied = this.settingsIssued;
@@ -2436,16 +2439,20 @@ export class LauncherStore {
     const seq = this.renameSeq;
     this.renames.push({ from, to });
     this.set((raw) => {
-      // 改名发生在当前游戏目录：别的目录里同名实例的任务不跟着改，否则切回去重试就落到那边另一个实例上
-      const dir = raw.settings === null ? null : raw.settings.gameDir;
+      // 别的目录里同名实例的任务不跟着改，否则切回去重试就落到那边另一个实例上
       const elsewhere = new Set(raw.tasks.filter((t) => !inGameDir(t, dir)).map((t) => t.id));
+      const tasks = raw.tasks.map((t) => (elsewhere.has(t.id) ? t : renamedTask(t, from, to)));
+      const taskMeta = Object.fromEntries(Object.entries(raw.taskMeta).map(([taskId, meta]) => [taskId, elsewhere.has(taskId) ? meta : renamedMeta(meta, from, to)]));
+      // 等后端期间已经切到了别的目录：手里的列表、固定、设置与页面都是那个目录的，同名的是那边另一个实例，只迁任务
+      const current = raw.settings === null ? null : raw.settings.gameDir;
+      if (dir !== null && current !== null && !sameGameDir(dir, current)) return { tasks, taskMeta };
       return {
         lastRename: { from, to, seq },
         scanned: raw.scanned.map((i) => (i.id === from ? { ...i, id: to, name: to } : i)),
         pins: raw.pins.map((p) => (p === from ? to : p)),
         settings: raw.settings === null || raw.settings.selectedVersion !== from ? raw.settings : { ...raw.settings, selectedVersion: to },
-        tasks: raw.tasks.map((t) => (elsewhere.has(t.id) ? t : renamedTask(t, from, to))),
-        taskMeta: Object.fromEntries(Object.entries(raw.taskMeta).map(([taskId, meta]) => [taskId, elsewhere.has(taskId) ? meta : renamedMeta(meta, from, to)])),
+        tasks,
+        taskMeta,
         // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
         session: raw.session !== null && raw.session.instanceId === from ? { ...raw.session, instanceId: to } : raw.session,
         toasts: retargetToasts(raw.toasts, from, to),
@@ -3252,6 +3259,8 @@ export class LauncherStore {
       async renameInstance(id, name) {
         const nameError = instanceNameError(name, store.instanceIds(), id);
         if (nameError !== null) throw new Error(nameError);
+        // 后端按此刻的快照改名：等它期间切换了目录，迁移也照这一刻的目录来
+        const dir = store.currentGameDir();
         const { newId, lagged } = await instancesIpc.renameInstance(id, name).then(
           (outcome): { newId: string; lagged: IpcError | null } => ({ newId: outcome.id, lagged: null }),
           (err: unknown) => {
@@ -3264,7 +3273,7 @@ export class LauncherStore {
         // 记住它的固定服务器也跟到了新名字下
         invalidateResources("play-stats");
         invalidateResources("servers");
-        store.migrateRenamed(id, newId);
+        store.migrateRenamed(id, newId, dir);
         store.scheduleJournal();
         if (lagged !== null && lagged.code === instancesIpc.WORLD_BACKUPS_NOT_MOVED_ERROR_CODE) store.backupsLagged(newId, lagged);
         else if (lagged !== null) store.playRecordsLagged(newId, lagged);

@@ -8,7 +8,7 @@ import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import type { TaskRecordDto } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle, startedStore } from "../test/launcher";
+import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle, startedStore } from "../test/launcher";
 import { NetworkMonitor } from "./online";
 import { LauncherStore } from "./store";
 import type { Toast } from "./toasts";
@@ -273,6 +273,24 @@ describe("别的目录里同名实例的改名与补全，不碰这个目录的�
     store.actions.retryTask(id);
     await settle();
     expect(callsOf(ipc, "backup_world").at(-1)).toEqual({ id: "生存", world: "新的世界", taskId: `${id}#2`, gameDir: A });
+  });
+
+  it("在 A 里改名、等后端的时候切到了 B：跟着改名的是 A 里的任务，B 里同名实例的任务与界面都不动", async () => {
+    const fromA = await failedBackup();
+    const renamed = deferred<{ id: string }>();
+    ipc.overrides.set("rename_instance", () => renamed.promise);
+    const renaming = store.actions.renameInstance("生存", "生存二");
+    await settle();
+    await switchTo(B, [instanceDto("生存")]);
+    const fromB = await failedBackup();
+    renamed.resolve({ id: "生存二" });
+    expect(await renaming).toBe("生存二");
+    await settle();
+    expect(taskOf(fromA)).toMatchObject({ instanceId: "生存二", spec: { args: { id: "生存二", world: "新的世界" } } });
+    expect(taskOf(fromB)).toMatchObject({ instanceId: "生存", spec: { args: { id: "生存", world: "新的世界" } } });
+    // 外壳按 lastRename 改写历史与路由：B 里那个「生存」的页面不能被改写成 B 里并不存在的「生存二」
+    expect(store.getState().lastRename).toBeNull();
+    expect(store.getState().instances.map((i) => i.id)).toEqual(["生存"]);
   });
 
   it("在 B 里补全同名实例成功：A 里那条失败的新建不当作已被接替撤掉", async () => {
