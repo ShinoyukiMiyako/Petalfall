@@ -3448,10 +3448,9 @@ mod tests {
         }
     }
 
-    /// 端到端：install_version 在客户端 jar 下载卡住时被取消，立即以 cancelled 返回，
-    /// 新建到一半的实例目录整个删掉，期间推送的事件都带本任务的 task_id，任务与实例占用随之释放。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancel_task_stops_install_and_cleans_up() {
+    /// 版本清单里只有一个 slow，它的客户端 jar 下到 64 KiB 就卡住不动：新建停在下载中，等测试来取消。
+    /// 返回的模拟端点要一直留着。
+    async fn stalled_install_env() -> (MockServer, Env) {
         let server = MockServer::start().await;
         let slow = stalling_server();
         Mock::given(method("GET"))
@@ -3473,9 +3472,16 @@ mod tests {
             )))
             .mount(&server)
             .await;
-
         let uri = server.uri();
         let env = Env::with(|a| a.with_manifest_url(format!("{uri}/manifest.json")));
+        (server, env)
+    }
+
+    /// 端到端：install_version 在客户端 jar 下载卡住时被取消，立即以 cancelled 返回，
+    /// 新建到一半的实例目录整个删掉，期间推送的事件都带本任务的 task_id，任务与实例占用随之释放。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_task_stops_install_and_cleans_up() {
+        let (_server, env) = stalled_install_env().await;
         let registry = Arc::new(TaskRegistry::default());
         let locks = InstanceLocks::default();
 
@@ -3551,6 +3557,63 @@ mod tests {
         assert!(delivered
             .iter()
             .all(|p| p.task_id.as_deref() == Some("install-slow")));
+    }
+
+    /// 新建途中切换了当前目录再取消：删的是原目录里的半成品，清的是原目录那条收起记录里的选中与固定（入队时前端
+    /// 选中了它）；新目录里同名实例的选中与固定是那边另一个实例的，原样留着。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_an_install_after_switching_directories_clears_only_the_origin_refs() {
+        let (_server, env) = stalled_install_env().await;
+        let (home, other) = twin_directories(&env, "慢慢装");
+        let registry = Arc::new(TaskRegistry::default());
+        let locks = InstanceLocks::default();
+        let (f, r, l) = (env.facade.clone(), registry.clone(), locks.clone());
+        let install = tokio::spawn(async move {
+            let (events, _rx) = sink();
+            let request = InstallArgs {
+                mc_version: "slow".into(),
+                ..args("慢慢装")
+            };
+            let game_dir = current_game_dir(&f).await;
+            install_version_with(&f, &r, &l, "install-slow", &game_dir, request, &events).await
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while leftovers(&home).is_empty() {
+            assert!(Instant::now() < deadline, "客户端 jar 下载没有开始");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        pin_and_select(&env, "慢慢装").await;
+        switch_game_dir(&env, &other).await;
+        pin_and_select(&env, "慢慢装").await;
+
+        assert!(registry.cancel("install-slow"));
+        let err = install.await.unwrap().unwrap_err();
+
+        assert_eq!(err.code, common::CANCELLED);
+        assert!(!home.join("versions").join("慢慢装").exists());
+        assert!(
+            other
+                .join("versions")
+                .join("慢慢装")
+                .join("慢慢装.json")
+                .exists(),
+            "另一个目录里的同名实例不动"
+        );
+        let config = env.facade.read().await.config().clone();
+        assert_eq!(config.sidebar_pins, vec!["慢慢装".to_owned()]);
+        assert_eq!(config.selected_version.as_deref(), Some("慢慢装"));
+        assert!(
+            config
+                .parked_directories
+                .iter()
+                .all(|parked| !petalfall_core::folders::same_path(&parked.path, &home)),
+            "原目录那条收起记录只剩半成品的固定与选中，清掉后整条去掉：{:?}",
+            config.parked_directories
+        );
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, config.sidebar_pins);
+        assert_eq!(saved.selected_version, config.selected_version);
+        assert_eq!(saved.parked_directories, config.parked_directories);
     }
 
     #[tokio::test]
@@ -4656,6 +4719,112 @@ mod tests {
         assert_eq!(stats.instances[0].version_id, "周末生存");
     }
 
+    /// 另一个游戏目录（`另一个/.minecraft`），里面有一个同名的原版实例 `id`。返回 (当前目录, 另一个目录)。
+    fn twin_directories(env: &Env, id: &str) -> (PathBuf, PathBuf) {
+        let other = env.dir.path().join("另一个").join(".minecraft");
+        let twin = other.join("versions").join(id);
+        std::fs::create_dir_all(&twin).unwrap();
+        std::fs::write(
+            twin.join(format!("{id}.json")),
+            format!(r#"{{"id":"{id}","type":"release","mainClass":"M"}}"#),
+        )
+        .unwrap();
+        (env.game_dir(), other)
+    }
+
+    /// 在当前目录里把 `id` 设成唯一的侧栏固定和当前选中。
+    async fn pin_and_select(env: &Env, id: &str) {
+        env.facade
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec![id.to_owned()]);
+                petalfall.set_selected_version(Some(id.to_owned()));
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    /// 改名跑在快照上，后端不拦改名途中切换当前目录。切走之后收尾改的是原目录那条收起记录里的固定与选中，新目录里
+    /// 同名实例的固定与选中是那边另一个实例的，原样留着。改名挪存档备份时要拿备份根目录的锁：先删同一目录里另一个
+    /// 实例的一份备份、停在处置那一步占着这把锁，改名就卡在实例目录改好之后、改配置引用之前。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn switching_directories_mid_rename_leaves_the_new_directory_refs_alone() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let env = Env::new();
+        env.vanilla("生存");
+        env.isolated_world("其他", "旧档");
+        let (home, other) = twin_directories(&env, "生存");
+        switch_game_dir(&env, &other).await;
+        pin_and_select(&env, "生存").await;
+        switch_game_dir(&env, &home).await;
+        pin_and_select(&env, "生存").await;
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let made = backup_world_with(
+            &w.with(&env),
+            "bk",
+            &current_game_dir(&env.facade).await,
+            "其他",
+            "旧档",
+            &events,
+        )
+        .await
+        .unwrap();
+
+        let disposer = HeldDisposer::default();
+        let (facade, l, d) = (env.facade.clone(), w.locks.clone(), disposer.clone());
+        let file = made.backup.file;
+        let holding = tokio::spawn(async move {
+            delete_world_backup_with(&facade, &l, "其他", "旧档", &file, d).await
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !disposer.entered.load(SeqCst) {
+            assert!(Instant::now() < deadline, "删除备份没有走到处置那一步");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let (facade, l) = (env.facade.clone(), w.locks.clone());
+        let renaming =
+            tokio::spawn(async move { rename_instance_with(&facade, &l, "生存", "生存二").await });
+        while !home.join("versions").join("生存二").exists() {
+            assert!(Instant::now() < deadline, "改名没有改到实例目录");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!renaming.is_finished(), "改名应等在备份根目录的锁上");
+        switch_game_dir(&env, &other).await;
+        disposer.release.store(true, SeqCst);
+        holding.await.unwrap().unwrap();
+        let outcome = renaming.await.unwrap().unwrap();
+
+        assert_eq!(outcome.id, "生存二");
+        assert!(!home.join("versions").join("生存").exists());
+        assert!(
+            other
+                .join("versions")
+                .join("生存")
+                .join("生存.json")
+                .exists(),
+            "另一个目录里的同名实例不动"
+        );
+        let config = env.facade.read().await.config().clone();
+        assert_eq!(config.sidebar_pins, vec!["生存".to_owned()]);
+        assert_eq!(config.selected_version.as_deref(), Some("生存"));
+        let parked: Vec<_> = config
+            .parked_directories
+            .iter()
+            .filter(|parked| petalfall_core::folders::same_path(&parked.path, &home))
+            .map(|parked| (parked.sidebar_pins.clone(), parked.selected_version.clone()))
+            .collect();
+        assert_eq!(
+            parked,
+            vec![(vec!["生存二".to_owned()], Some("生存二".to_owned()))]
+        );
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, config.sidebar_pins);
+        assert_eq!(saved.selected_version, config.selected_version);
+        assert_eq!(saved.parked_directories, config.parked_directories);
+    }
+
     /// 删除跑在快照上，后端不拦删除途中切换当前目录。切走之后收尾清的是原目录那条收起记录里的固定与选中，
     /// 新目录里同名实例的固定与选中是那边另一个实例的，原样留着。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4663,29 +4832,12 @@ mod tests {
         use std::sync::atomic::Ordering::SeqCst;
         let env = Env::new();
         env.vanilla("生存");
-        let home = env.game_dir();
-        let other = env.dir.path().join("另一个").join(".minecraft");
+        let (home, other) = twin_directories(&env, "生存");
         let twin = other.join("versions").join("生存");
-        std::fs::create_dir_all(&twin).unwrap();
-        std::fs::write(
-            twin.join("生存.json"),
-            r#"{"id":"生存","type":"release","mainClass":"M"}"#,
-        )
-        .unwrap();
-        let pin_and_select = |facade: Arc<Facade>| async move {
-            facade
-                .update(|petalfall| {
-                    petalfall.set_sidebar_pins(vec!["生存".to_owned()]);
-                    petalfall.set_selected_version(Some("生存".to_owned()));
-                    Ok::<_, CommandError>(())
-                })
-                .await
-                .unwrap();
-        };
         switch_game_dir(&env, &other).await;
-        pin_and_select(env.facade.clone()).await;
+        pin_and_select(&env, "生存").await;
         switch_game_dir(&env, &home).await;
-        pin_and_select(env.facade.clone()).await;
+        pin_and_select(&env, "生存").await;
 
         let disposer = HeldDisposer::default();
         let locks = InstanceLocks::default();
@@ -6875,8 +7027,8 @@ mod tests {
         assert!(!registry.is_running("rs-big"));
     }
 
-    /// 处置存档时停住等测试放行：回收站收下一个大存档要好几秒，取消就落在这段时间里。放行后删掉存档；
-    /// `squat` 为真时再在原处建出一个非空目录，让恢复出的副本改名就位失败。
+    /// 处置存档时停住等测试放行：回收站收下一个大存档要好几秒，取消就落在这段时间里。放行后删掉存档（处置的是
+    /// 备份文件时删文件）；`squat` 为真时再在原处建出一个非空目录，让恢复出的副本改名就位失败。
     #[derive(Clone, Default)]
     struct HeldDisposer {
         entered: Arc<std::sync::atomic::AtomicBool>,
@@ -6897,7 +7049,11 @@ mod tests {
                 path: path.to_path_buf(),
                 source,
             };
-            std::fs::remove_dir_all(path).map_err(io)?;
+            if path.is_dir() {
+                std::fs::remove_dir_all(path).map_err(io)?;
+            } else {
+                std::fs::remove_file(path).map_err(io)?;
+            }
             if self.squat {
                 std::fs::create_dir_all(path.join("抢占")).map_err(io)?;
             }
