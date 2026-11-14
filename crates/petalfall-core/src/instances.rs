@@ -376,6 +376,33 @@ impl Petalfall {
         changed
     }
 
+    /// 实例在游戏目录 `in_game_dir` 里从 `old` 改名成了 `new`，把配置在那个目录名下对它的引用跟着改。改名跑在门面快照上，
+    /// 后端不拦改名途中切换当前目录：`in_game_dir` 仍是当前目录时同 [`Petalfall::rename_instance_refs`]；已切走时只改
+    /// `parked_directories` 里那个目录那条的固定与选中（固定服务器记的是当前目录的实例，不动），当前目录里同名的引用是
+    /// 那边另一个实例的。规则同 [`Petalfall::forget_moved_instance`]。返回配置是否有变化，有变化时调用方落盘。
+    pub fn rename_moved_instance_refs(&mut self, old: &str, new: &str, in_game_dir: &Path) -> bool {
+        if same_path(in_game_dir, self.game_dir()) {
+            return self.rename_instance_refs(old, new);
+        }
+        let mut changed = false;
+        for parked in &mut self.config_mut().parked_directories {
+            if !same_path(&parked.path, in_game_dir) {
+                continue;
+            }
+            for pin in &mut parked.sidebar_pins {
+                if pin == old {
+                    *pin = new.to_owned();
+                    changed = true;
+                }
+            }
+            if parked.selected_version.as_deref() == Some(old) {
+                parked.selected_version = Some(new.to_owned());
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// 改名：实例目录、版本 JSON（文件名与其中的 `id`）、客户端 jar 与 natives 目录一起改。
     ///
     /// 新名字按命名规则校验（不分大小写重名，自己除外）；有实例依赖它时拒绝。中途失败时把已经改掉的
@@ -2820,6 +2847,65 @@ pub(crate) mod tests {
             vec![parked("E:/PCL2/.minecraft", &["创造"], None)]
         );
         assert!(!petalfall.forget_moved_instance("生存", Path::new("G:/没记过/.minecraft")));
+    }
+
+    /// 改名途中切走了当前目录：只改改名所在的那个收起目录那条的固定与选中，当前目录里同名的引用、固定服务器与别的
+    /// 收起目录都不动；改名所在的仍是当前目录时同 rename_instance_refs，连固定服务器一起改。
+    #[test]
+    fn renaming_in_a_parked_directory_only_edits_that_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        petalfall.set_sidebar_pins(vec!["生存".to_owned()]);
+        petalfall.set_selected_version(Some("生存".to_owned()));
+        petalfall
+            .set_pinned_servers(vec![pinned("a.example", Some("生存"))])
+            .unwrap();
+        let hmcl = parked("E:/HMCL/.minecraft", &["生存"], Some("生存"));
+        petalfall.config_mut().parked_directories = vec![
+            parked("E:/PCL2/.minecraft", &["创造", "生存"], Some("生存")),
+            hmcl.clone(),
+        ];
+
+        assert!(petalfall.rename_moved_instance_refs(
+            "生存",
+            "生存二",
+            Path::new("e:\\pcl2\\.minecraft\\")
+        ));
+        assert_eq!(
+            petalfall.config().parked_directories,
+            vec![
+                parked("E:/PCL2/.minecraft", &["创造", "生存二"], Some("生存二")),
+                hmcl
+            ]
+        );
+        assert_eq!(petalfall.config().sidebar_pins, vec!["生存".to_owned()]);
+        assert_eq!(petalfall.config().selected_version.as_deref(), Some("生存"));
+        assert_eq!(
+            pinned_instances(&petalfall),
+            vec![("a.example".to_owned(), Some("生存".to_owned()))]
+        );
+        assert!(!petalfall.rename_moved_instance_refs(
+            "生存",
+            "生存二",
+            Path::new("E:/PCL2/.minecraft")
+        ));
+        assert!(!petalfall.rename_moved_instance_refs(
+            "生存",
+            "生存二",
+            Path::new("G:/没记过/.minecraft")
+        ));
+
+        let current = petalfall.game_dir().to_path_buf();
+        assert!(petalfall.rename_moved_instance_refs("生存", "生存三", &current));
+        assert_eq!(petalfall.config().sidebar_pins, vec!["生存三".to_owned()]);
+        assert_eq!(
+            petalfall.config().selected_version.as_deref(),
+            Some("生存三")
+        );
+        assert_eq!(
+            pinned_instances(&petalfall),
+            vec![("a.example".to_owned(), Some("生存三".to_owned()))]
+        );
     }
 
     #[tokio::test]

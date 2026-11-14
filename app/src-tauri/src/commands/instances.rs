@@ -1973,8 +1973,9 @@ pub(crate) async fn delete_instance_with(
         .map_err(instance_error)?;
     // 目录已不在（重复删除、在启动器外删掉）时也清：残留的记录会被之后新建的同名实例继承。
     let records = snapshot.forget_play_records(id).await;
+    // 按快照的目录清：删除途中切换了当前目录的话，当前配置里同名的固定与选中是新目录里另一个实例的。
     let refs = facade
-        .update_if_changed(|petalfall| petalfall.forget_instance(id))
+        .update_if_changed(|petalfall| petalfall.forget_moved_instance(id, snapshot.game_dir()))
         .await;
     follow_up(refs, records, |err| {
         play_records_failed(err, "实例已删除", json!({ "id": id }))
@@ -2095,8 +2096,11 @@ pub(crate) async fn rename_instance_with(
     let records = snapshot.rename_play_records(id, new_name).await;
     // 备份按实例 id 分目录放，不跟着挪的话改名后的实例就看不到改名前的备份。
     let backups = snapshot.rename_world_backups(id, new_name).await;
+    // 按快照的目录改，理由同删除。
     let refs = facade
-        .update_if_changed(|petalfall| petalfall.rename_instance_refs(id, new_name))
+        .update_if_changed(|petalfall| {
+            petalfall.rename_moved_instance_refs(id, new_name, snapshot.game_dir())
+        })
         .await;
     let earlier = follow_up(refs, records, |err| {
         play_records_failed(
@@ -4617,6 +4621,74 @@ mod tests {
         let stats = env.facade.snapshot().await.play_stats(day()).await.unwrap();
         assert_eq!(stats.total_minutes, 90);
         assert_eq!(stats.instances[0].version_id, "周末生存");
+    }
+
+    /// 删除跑在快照上，后端不拦删除途中切换当前目录。切走之后收尾清的是原目录那条收起记录里的固定与选中，
+    /// 新目录里同名实例的固定与选中是那边另一个实例的，原样留着。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn switching_directories_mid_delete_leaves_the_new_directory_refs_alone() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let env = Env::new();
+        env.vanilla("生存");
+        let home = env.game_dir();
+        let other = env.dir.path().join("另一个").join(".minecraft");
+        let twin = other.join("versions").join("生存");
+        std::fs::create_dir_all(&twin).unwrap();
+        std::fs::write(
+            twin.join("生存.json"),
+            r#"{"id":"生存","type":"release","mainClass":"M"}"#,
+        )
+        .unwrap();
+        let pin_and_select = |facade: Arc<Facade>| async move {
+            facade
+                .update(|petalfall| {
+                    petalfall.set_sidebar_pins(vec!["生存".to_owned()]);
+                    petalfall.set_selected_version(Some("生存".to_owned()));
+                    Ok::<_, CommandError>(())
+                })
+                .await
+                .unwrap();
+        };
+        switch_game_dir(&env, &other).await;
+        pin_and_select(env.facade.clone()).await;
+        switch_game_dir(&env, &home).await;
+        pin_and_select(env.facade.clone()).await;
+
+        let disposer = HeldDisposer::default();
+        let locks = InstanceLocks::default();
+        let (facade, l, d) = (env.facade.clone(), locks.clone(), disposer.clone());
+        let deleting =
+            tokio::spawn(async move { delete_instance_with(&facade, &l, "生存", d).await });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !disposer.entered.load(SeqCst) {
+            assert!(Instant::now() < deadline, "删除没有走到处置实例目录");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        switch_game_dir(&env, &other).await;
+        disposer.release.store(true, SeqCst);
+        let outcome = deleting.await.unwrap().unwrap();
+
+        assert!(outcome.existed);
+        assert!(!home.join("versions").join("生存").exists());
+        assert!(
+            twin.join("生存.json").exists(),
+            "另一个目录里的同名实例不动"
+        );
+        let config = env.facade.read().await.config().clone();
+        assert_eq!(config.sidebar_pins, vec!["生存".to_owned()]);
+        assert_eq!(config.selected_version.as_deref(), Some("生存"));
+        assert!(
+            config
+                .parked_directories
+                .iter()
+                .all(|parked| !petalfall_core::folders::same_path(&parked.path, &home)),
+            "原目录那条收起记录只剩被删实例的固定与选中，清掉后整条去掉：{:?}",
+            config.parked_directories
+        );
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, config.sidebar_pins);
+        assert_eq!(saved.selected_version, config.selected_version);
+        assert_eq!(saved.parked_directories, config.parked_directories);
     }
 
     /// 游玩记录读不懂：实例列表照常出来，每个实例带上原因（含 JSON 的行列），时长是 null 而不是 0；
