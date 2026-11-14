@@ -2299,9 +2299,10 @@ export class LauncherStore {
         Promise.all([this.fetchInstances((raw) => this.withoutLanding(raw, id)).finally(() => this.endLanding(id)), this.fetchPins()]),
       );
     }
-    // 整合包导入删掉半成品时，后端连同固定一起去掉了配置里对这个名字的当前选中与固定服务器记住的实例。手里的设置不重读，
-    // 同一会话里再导入同名实例后，选中它会因与旧值相同而跳过写入，后端记下的当前实例一直是空的
-    if (before.spec.command === "install_modpack") {
+    // 整合包导入删掉半成品、新建被取消删掉目录时，后端连同固定一起去掉了配置里对这个名字的当前选中与固定服务器记住的实例
+    // （新建入队时就把它设成了当前实例）。手里的设置不重读，主页一直指着已删的名字；同一会话里再建同名实例后，选中它会因
+    // 与旧值相同而跳过写入，后端记下的当前实例一直是空的
+    if (before.spec.command === "install_modpack" || (before.spec.command === "install_version" && isCancelled(error))) {
       this.background(BOOT_SLICE_ERROR.settings, this.fetchSettings());
       invalidateResources("servers");
     }

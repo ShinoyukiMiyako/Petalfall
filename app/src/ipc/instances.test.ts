@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockGameDir } from "./mock/handlers/config";
 import { invoke } from "./bridge";
 import { IpcError, isCancelled } from "./errors";
-import { updateConfig } from "./config";
+import { getConfig, updateConfig } from "./config";
 import {
   backupWorld,
   checkInstanceName,
@@ -425,14 +425,16 @@ describe("mock：新建与补全", () => {
     expect((await listInstances()).some((i) => i.id === "新的")).toBe(false);
   });
 
-  it("取消后新建到一半的实例整个消失，以 cancelled 拒绝", async () => {
+  it("取消后新建到一半的实例整个消失，以 cancelled 拒绝；入队时设成的当前实例一并去掉", async () => {
     vi.useFakeTimers();
     const pending = installVersion("t-cancel", mockGameDir(), "1.20.1", "neoforge", "47.1.106", "半路").catch((e: unknown) => e);
+    await updateConfig({ selectedVersion: "半路" });
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS * 2);
     expect(await cancelTask("t-cancel")).toBe(true);
     await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
     expect(isCancelled(await pending)).toBe(true);
     expect((await listInstances()).some((i) => i.id === "半路")).toBe(false);
+    expect((await getConfig()).selected_version).toBeNull();
   });
 
   it("失败的新建留下未完成标记；补全照记下的内容重装后标记清除", async () => {

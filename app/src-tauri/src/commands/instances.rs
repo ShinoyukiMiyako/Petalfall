@@ -1694,9 +1694,26 @@ pub(crate) async fn install_version_with(
             Ok(install_result_dto(outcome))
         }
         Err(err) if err.is_cancelled() => {
-            if let Err(abandon_err) = petalfall.abandon_instance(&name).await {
-                tracing::warn!(name, error = %abandon_err, "取消后删除实例目录失败，改为记下已取消");
-                settle_quietly(&petalfall, &name, marker, MarkerSettlement::Cancelled).await;
+            match petalfall.abandon_instance(&name).await {
+                // 目录删掉了，前端入队时选中的它、用户固定的它都得去掉，否则下次启动选中一个不存在的实例。
+                // 按快照的目录清，理由同删除实例。清不掉只记日志：返回给前端的仍是取消本身。
+                Ok(()) => {
+                    if let Err(forget_err) = facade
+                        .update_if_changed(|p| p.forget_moved_instance(&name, petalfall.game_dir()))
+                        .await
+                    {
+                        tracing::error!(
+                            task_id,
+                            name,
+                            error = %petalfall_base::error_with_causes(&forget_err),
+                            "取消的新建实例已删掉，配置里对它的引用没能清掉"
+                        );
+                    }
+                }
+                Err(abandon_err) => {
+                    tracing::warn!(name, error = %abandon_err, "取消后删除实例目录失败，改为记下已取消");
+                    settle_quietly(&petalfall, &name, marker, MarkerSettlement::Cancelled).await;
+                }
             }
             Err(err)
         }
@@ -3495,6 +3512,15 @@ mod tests {
         }
         assert!(registry.is_running("install-slow"));
         assert_eq!(locks.activity("慢慢装"), Some(InstanceActivity::Installing));
+        // 新建一入队，前端就选中它，用户也可能把它固定到侧栏。
+        env.facade
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["生存".to_owned(), "慢慢装".to_owned()]);
+                petalfall.set_selected_version(Some("慢慢装".to_owned()));
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
 
         assert!(registry.cancel("install-slow"));
         let err = install.await.unwrap().unwrap_err();
@@ -3512,6 +3538,13 @@ mod tests {
         );
         assert!(!registry.is_running("install-slow"), "任务应已注销");
         assert_eq!(locks.activity("慢慢装"), None, "实例占用应已释放");
+        // 目录删掉了，选中与固定不能还指着它：下次启动会选中一个不存在的实例。
+        let config = env.facade.read().await.config().clone();
+        assert_eq!(config.selected_version, None);
+        assert_eq!(config.sidebar_pins, vec!["生存".to_owned()]);
+        let saved = env.saved_config().await;
+        assert_eq!(saved.selected_version, None);
+        assert_eq!(saved.sidebar_pins, vec!["生存".to_owned()]);
 
         let delivered = delivered.lock().unwrap();
         assert!(!delivered.is_empty(), "安装过程应推送过事件");

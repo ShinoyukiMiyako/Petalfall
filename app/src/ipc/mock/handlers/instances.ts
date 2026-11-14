@@ -1219,6 +1219,10 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
   } catch (error) {
     if (error instanceof IpcError && error.code === "cancelled") {
       instances = instances.filter((i) => i !== instance);
+      // 与后端一样，目录删掉之后一并去掉配置里对这个名字的引用：新建入队时前端就把它设成了当前实例
+      pins = pins.filter((pin) => pin !== name);
+      forgetMockPinnedInstance(name);
+      followMockSelection(name, null);
     } else if (error instanceof IpcError) {
       instance.dto.incomplete = { ...incomplete, outcome: "failed", error: { code: error.code, message: error.message } };
     }

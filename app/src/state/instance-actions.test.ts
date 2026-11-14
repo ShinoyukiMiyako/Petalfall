@@ -1783,6 +1783,21 @@ describe("删除还在安装的新建实例", () => {
     expect(store.getState().toasts.map((t) => t.title)).toContain("已删除「新世界」");
   });
 
+  it("直接取消新建：后端删掉半成品时一并去掉了当前选中，前端重读设置，不再留着已删的名字", async () => {
+    ipc.overrides.set("cancel_task", () => {
+      install.reject(cancelledError());
+      return true;
+    });
+    await store.actions.createInstance(spec);
+    await settle();
+    expect(store.getState().settings?.selectedVersion).toBe("新世界");
+    ipc.overrides.set("get_config", () => configDto({ selected_version: null }));
+    await store.actions.cancelTask(store.getState().tasks[0].id);
+    await settle();
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["cancelled"]);
+    expect(store.getState().settings?.selectedVersion).toBeNull();
+  });
+
   it("删除已有实例时补全恰好做完：不弹「已修复」，照常删除", async () => {
     const repair = deferred<unknown>();
     ipc.overrides.set("repair_instance", () => repair.promise);
