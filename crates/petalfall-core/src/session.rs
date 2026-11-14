@@ -8,7 +8,7 @@
 //! 交出，记账失败作为 [`Finished::problems`] 一并交给上层如实上报。等待游戏进程本身失败也一样：这一局
 //! 照样记时长、照崩溃判定存这一局的报告，否则界面拿去展示的是上一局的崩溃。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use petalfall_launch::logfile::SessionOutcome;
@@ -139,6 +139,11 @@ impl GameRun {
 
     pub fn version_id(&self) -> &str {
         &self.info.version_id
+    }
+
+    /// 启动这一局时的游戏目录（接回的一局是记录里的那个），不随之后切换当前目录而变。
+    pub fn game_dir(&self) -> &Path {
+        &self.info.game_dir
     }
 
     pub fn pid(&self) -> Option<u32> {

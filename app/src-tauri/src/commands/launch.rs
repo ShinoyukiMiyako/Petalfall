@@ -461,10 +461,13 @@ async fn settle(finish: impl Future<Output = Finished>) -> GameExitDto {
     exit.into()
 }
 
-/// 被监控的一局游戏：哪个实例、会话从何时算起（自动备份只挑这之后写过 level.dat 的存档）、它连同基底的占用。
+/// 被监控的一局游戏：哪个实例、会话从何时算起（自动备份只挑这之后写过 level.dat 的存档）、启动时的游戏目录、
+/// 它连同基底的占用。
 struct Watched {
     version_id: String,
     session_started: SystemTime,
+    /// 自动备份认它：游戏运行期间可以切换当前目录，切走之后按实例名解析到的是新目录里另一个同名实例。
+    game_dir: PathBuf,
     instance: ChainGuard,
 }
 
@@ -484,6 +487,7 @@ async fn watch(
     let Watched {
         version_id,
         session_started,
+        game_dir,
         instance,
     } = watched;
     let exit = settle(finish).await;
@@ -502,10 +506,13 @@ async fn watch(
     let instance = instance.into_backup();
     release_slot();
     emit_exit(exit);
-    // 不挂取消令牌：自动备份不是前端发起的任务，没有能取消它的入口。
-    let outcome = facade
-        .snapshot()
-        .await
+    // 不挂取消令牌：自动备份不是前端发起的任务，没有能取消它的入口。设置照此刻的，目录照这一局的：
+    // 存档与备份都按游戏目录放，指回这一局的目录就是备份它玩过的那个实例。
+    let mut petalfall = facade.snapshot().await;
+    if !petalfall_core::folders::same_path(petalfall.game_dir(), &game_dir) {
+        petalfall.set_game_dir(game_dir);
+    }
+    let outcome = petalfall
         .auto_backup_after_session(&version_id, session_started)
         .await;
     drop(instance);
@@ -522,6 +529,7 @@ fn spawn_watch(
     session_started: SystemTime,
 ) {
     let version_id = run.version_id().to_owned();
+    let game_dir = run.game_dir().to_path_buf();
     tauri::async_runtime::spawn(async move {
         let facade = app.state::<Facade>();
         watch(
@@ -529,6 +537,7 @@ fn spawn_watch(
             Watched {
                 version_id,
                 session_started,
+                game_dir,
                 instance,
             },
             run.finish(),
@@ -1776,6 +1785,7 @@ mod tests {
             Watched {
                 version_id: "1.21".into(),
                 session_started: started,
+                game_dir: dir.path().join(".minecraft"),
                 instance: guard,
             },
             async { finished("1.21") },
@@ -1825,6 +1835,7 @@ mod tests {
             Watched {
                 version_id: "1.21".into(),
                 session_started: started,
+                game_dir: dir.path().join(".minecraft"),
                 instance: guard,
             },
             async { finished("1.21") },
@@ -1896,6 +1907,7 @@ mod tests {
             Watched {
                 version_id: "1.21".into(),
                 session_started: started,
+                game_dir: dir.path().join(".minecraft"),
                 instance: guard,
             },
             async { finished("1.21") },
@@ -1949,6 +1961,7 @@ mod tests {
             Watched {
                 version_id: "Fabric 生存".into(),
                 session_started: started,
+                game_dir: dir.path().join(".minecraft"),
                 instance: guard,
             },
             async { finished("Fabric 生存") },
@@ -1976,6 +1989,74 @@ mod tests {
             backed_up.into_inner(),
             Some(vec!["这局玩的".to_owned()]),
             "备份事件要推出来"
+        );
+    }
+
+    /// 游戏运行期间切换了当前目录：退出后的自动备份照这一局启动时的目录来，备份那边这局玩过的存档；新目录里
+    /// 同名实例是另一个实例，这局也写过的存档不碰。
+    #[tokio::test]
+    async fn auto_backup_follows_the_directory_the_session_ran_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), true);
+        let started = SystemTime::now();
+        let hour = std::time::Duration::from_secs(3600);
+        let home = dir.path().join(".minecraft");
+        let elsewhere = dir.path().join("另一个");
+        world(dir.path(), "1.21", "这局玩的", started + hour);
+        world(&elsewhere, "1.21", "那边的", started + hour);
+        let locks = InstanceLocks::default();
+        let guard = locks
+            .acquire_with_bases("1.21", InstanceActivity::Running, &[])
+            .unwrap();
+        let delivered = std::cell::RefCell::new(None);
+        watch(
+            &facade,
+            Watched {
+                version_id: "1.21".into(),
+                session_started: started,
+                game_dir: home.clone(),
+                instance: guard,
+            },
+            async {
+                facade
+                    .update(|petalfall| {
+                        petalfall.set_game_directory(elsewhere.join(".minecraft"));
+                        Ok::<_, CommandError>(())
+                    })
+                    .await
+                    .unwrap();
+                finished("1.21")
+            },
+            || {},
+            |_| {},
+            |backup| *delivered.borrow_mut() = Some(backup),
+        )
+        .await;
+        let payload = delivered.into_inner().unwrap();
+        assert_eq!(payload.backed_up, vec!["这局玩的".to_owned()]);
+        assert!(payload.failed.is_empty(), "{:?}", payload.failed);
+        let mut launched = facade.snapshot().await;
+        launched.set_game_dir(home);
+        let list = launched
+            .list_world_backups("1.21", "这局玩的")
+            .await
+            .unwrap();
+        assert_eq!(list.backups.len(), 1);
+        assert_eq!(list.backups[0].kind, petalfall_core::BackupKind::Auto);
+        let current = facade.snapshot().await;
+        assert!(current
+            .list_world_backups("1.21", "那边的")
+            .await
+            .unwrap()
+            .backups
+            .is_empty());
+        assert!(
+            !elsewhere
+                .join(".minecraft")
+                .join(concat!(".", petalfall_base::app_slug!()))
+                .join("backups")
+                .exists(),
+            "新目录里什么都不该备份"
         );
     }
 
