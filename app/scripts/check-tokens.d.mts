@@ -10,3 +10,6 @@ export interface Violation {
 export const RULES: Record<string, string>;
 
 export function checkTokens(options: { root: string }): Violation[];
+
+/** tokens.css 里值是阴影列表的令牌 -> 能否写进 text-shadow。 */
+export function shadowTokens(tokensCss: string): Map<string, boolean>;

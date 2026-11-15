@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { checkTokens, RULES } from "./check-tokens.mjs";
+import { checkTokens, RULES, shadowTokens } from "./check-tokens.mjs";
 
 const SCRIPTS = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = join(SCRIPTS, "..");
@@ -109,6 +109,27 @@ describe("令牌守卫", () => {
       [".a {", "  transition:", "    opacity var(--sk-dur-hover) var(--sk-ease),", "    color 90ms linear;", "  inset: 0 2px;", "}", ""].join("\n"),
     );
     expect(found(root)).toEqual(["src/ui/a.module.css:4:T8"]);
+  });
+
+  it("T13 按应用令牌表里的值认阴影令牌：名字不带 shadow 的聚焦环、高光、强调光晕也算，text-shadow 只放过不带扩展与内阴影的", () => {
+    const shadows = shadowTokens(readFileSync(join(APP_ROOT, "src", "styles", "tokens.css"), "utf8"));
+    expect([...shadows.keys()].sort()).toEqual([
+      "--sk-accent-glow",
+      "--sk-focus",
+      "--sk-focus-danger",
+      "--sk-gloss",
+      "--sk-media-text-shadow",
+      "--sk-shadow",
+      "--sk-shadow-lg",
+      "--sk-shadow-sm",
+    ]);
+    expect([...shadows].filter(([, text]) => text).map(([name]) => name)).toEqual(["--sk-media-text-shadow"]);
+  });
+
+  it("T13 的报错写明令牌与属性", () => {
+    expect(checkTokens({ root: join(FIXTURES, "T13", "bad") }).find((v) => v.file === "src/ui/Tile.module.css" && v.line === 2)?.snippet).toBe(
+      "--sk-focus 只允许写进 box-shadow，不允许用在 outline",
+    );
   });
 
   it("命令行逐条打印「文件:行:规则」并以非 0 退出", () => {

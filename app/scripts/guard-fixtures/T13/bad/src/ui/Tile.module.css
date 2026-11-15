@@ -1,0 +1,28 @@
+.tile:focus-visible {
+  outline: 2px solid var(--sk-focus); /* expect T13 */
+  outline-offset: 2px;
+}
+
+.tile {
+  border: 1px solid var(--sk-shadow-sm); /* expect T13 */
+  color: var(--sk-focus); /* expect T13 */
+  background: var(--sk-gloss); /* expect T13 */
+  outline-color: var(--sk-ring); /* expect T13 */
+  filter: drop-shadow(var(--sk-media-text-shadow)); /* expect T13 */
+  padding: var(--sk-space-2);
+}
+
+.label {
+  text-shadow: var(--sk-focus); /* expect T13 */
+}
+
+/* 夜樱那一处只有一层不带扩展，日樱那一处带扩展：text-shadow 照样不收 */
+.hint {
+  text-shadow: var(--sk-shadow-sm); /* expect T13 */
+}
+
+.wrap {
+  outline:
+    2px solid
+    var(--wrap-ring, var(--sk-focus)); /* expect T13 */
+}
