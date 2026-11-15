@@ -214,9 +214,9 @@ export const USAGE_NOTICE_COPY = {
   title: "使用须知",
   /** 标题上方的一行：须知文首记的版本号，与关于页里须知弹窗的副标题同一说法。 */
   version: (version: number) => `第 ${version} 版`,
-  lead: `开始使用${APP_NAME}之前，请先读完这份须知。`,
+  lead: `开始使用${APP_NAME}之前，先读完这份须知。`,
   /** 确认过旧的一版、须知改版之后。 */
-  leadUpdated: "使用须知有了新的一版，请读完后重新确认。",
+  leadUpdated: "使用须知有了新的一版，读完后重新确认。",
   agree: "我已阅读并同意",
   refuse: "不同意并退出",
   agreeFailed: "没能记下你的同意",
