@@ -417,7 +417,7 @@ function RuntimeCard() {
           tone="danger"
           announce
           action={
-            <Button size="sm" onClick={() => void run(() => java.reload(), JAVA_COPY.scanFailed)}>
+            <Button size="sm" variant="ghost" onClick={() => void run(() => java.reload(), JAVA_COPY.scanFailed)}>
               {LOAD_COPY.retry}
             </Button>
           }
@@ -535,7 +535,7 @@ function GpuCard() {
         tone="danger"
         announce
         action={
-          <Button size="sm" onClick={() => gpu.reload()}>
+          <Button size="sm" variant="ghost" onClick={() => gpu.reload()}>
             {LOAD_COPY.retry}
           </Button>
         }

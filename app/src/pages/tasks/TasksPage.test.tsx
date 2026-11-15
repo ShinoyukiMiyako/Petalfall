@@ -1049,9 +1049,12 @@ describe("下载任务页：任务记录读取", () => {
     expect(page().textContent).toContain("下载任务记录读不出来");
     expect(page().textContent).toContain("任务日志第 0 项缺少字符串 id");
     expect(page().textContent).not.toContain("下载队列是空的");
+    // 错误卡里的说明块：重试是文字之后的幽灵小按钮
+    const retry = buttonIn(page(), "重试");
+    expect([retry.dataset.variant, retry.dataset.size]).toEqual(["ghost", "sm"]);
 
     fail = false;
-    act(() => buttonIn(page(), "重试").click());
+    act(() => retry.click());
     await flush();
     expect(callsOf(ipc, "load_task_journal")).toHaveLength(2);
     // 错误卡收起时在原处淡出（已不在场），空状态换上来

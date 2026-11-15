@@ -380,6 +380,8 @@ describe("设置页：骨架与分区导航", () => {
     await mount();
     expect(text()).toContain("配置载入失败");
     expect(text()).toContain("config.json 第 3 行格式不对");
+    // 错误卡里的说明块：重试是文字之后的幽灵小按钮
+    expect([button("重试").dataset.variant, button("重试").dataset.size]).toEqual(["ghost", "sm"]);
     await click(navItem("下载"));
     expect(nav.route).toEqual({ page: "settings", section: "download" });
     fail = false;
@@ -614,6 +616,26 @@ describe("设置页：Java", () => {
     expect(text()).toContain("首次启动时会自动下载");
     expect(text()).toContain("还缺 Java 25、Java 21、Java 8，首次启动对应实例时会自动下载。");
     expect(all('[role="radio"]')).toEqual([]);
+  });
+
+  it("扫描出错：列表位置换成写着原因的说明块，重试是文字之后的幽灵小按钮，点了再扫一次", async () => {
+    let fail = true;
+    ipc.overrides.set("detect_java", async (args) => {
+      if (fail) throw new Error("拒绝访问 C:\\Program Files\\Java");
+      return mockInvoke("detect_java", args);
+    });
+    await mount("java");
+    const alert = section("Java 运行时").querySelector<HTMLElement>('[data-tone="danger"]');
+    if (alert === null) throw new Error("Java 卡里没有读失败的说明块");
+    expect(alert.textContent).toBe("扫描 Java 时出错拒绝访问 C:\\Program Files\\Java重试");
+    const retry = [...alert.querySelectorAll<HTMLButtonElement>("button")];
+    expect(retry.map((b) => [b.textContent, b.dataset.variant, b.dataset.size])).toEqual([["重试", "ghost", "sm"]]);
+
+    fail = false;
+    const before = callsOf(ipc, "detect_java").length;
+    await click(retry[0]);
+    expect(callsOf(ipc, "detect_java")).toHaveLength(before + 1);
+    expect(radio("自动选择").getAttribute("aria-checked")).toBe("true");
   });
 
   it("本机扫出 7 个运行时：列表照常列出全部 8 项（含自动选择），可以选中最后一个", async () => {
@@ -1209,6 +1231,7 @@ describe("设置页：Java · 显卡", () => {
     ipc.overrides.delete("gpu_adapters");
     const retry = [...card.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === "重试");
     if (retry === undefined) throw new Error("显卡卡里没有「重试」");
+    expect([retry.dataset.variant, retry.dataset.size]).toEqual(["ghost", "sm"]);
     await click(retry);
     expect(callsOf(ipc, "gpu_adapters")).toHaveLength(2);
     expect(section("显卡").querySelector('[data-tone="info"]')?.textContent).toContain("Intel(R) UHD Graphics 和 NVIDIA GeForce RTX 4060 Laptop GPU");
@@ -2165,6 +2188,8 @@ describe("设置页：关于与启动器更新", () => {
       await mount("about");
       expect(card().textContent).toContain("版本信息读不出来");
       expect(card().querySelector('[role="radiogroup"]')).toBeNull();
+      const retry = [...card().querySelectorAll<HTMLButtonElement>('[data-tone="danger"] button')];
+      expect(retry.map((b) => [b.textContent, b.dataset.variant, b.dataset.size])).toEqual([["重试", "ghost", "sm"]]);
     });
   });
 

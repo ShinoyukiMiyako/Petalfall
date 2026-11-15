@@ -104,7 +104,7 @@ export function SettingsGate({ section, view, children }: { section: SettingsSec
           tone="danger"
           announce
           action={
-            <Button size="sm" onClick={() => void run(() => actions.reload("settings"), LOAD_COPY.failedTitle)}>
+            <Button size="sm" variant="ghost" onClick={() => void run(() => actions.reload("settings"), LOAD_COPY.failedTitle)}>
               {LOAD_COPY.retry}
             </Button>
           }
