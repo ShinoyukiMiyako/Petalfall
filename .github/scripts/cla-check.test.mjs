@@ -127,6 +127,9 @@ function createGitHub({
   beforeWrite,
   headRepo = BASE_REPO,
   prState = 'open',
+  baseRef = 'dev',
+  sources = {},
+  failSourceCompare = false,
   failStatus,
   failGet = false,
   failComment = false,
@@ -141,7 +144,9 @@ function createGitHub({
       this.signatures = next;
     },
   };
-  const calls = { writes: [], statuses: [], created: [], updated: [], compared: [] };
+  const calls = { writes: [], statuses: [], created: [], updated: [], compared: [], listed: [], sources: [] };
+  // 测试里改 pull.baseRef 就相当于改了 PR 的目标分支。
+  const pull = { baseRef };
 
   const pageOf = (items, { page = 1, per_page: perPage = 30 }) =>
     items.slice((page - 1) * perPage, page * perPage);
@@ -159,6 +164,7 @@ function createGitHub({
     repository,
     comments,
     headSha,
+    pull,
     async paginate(method, params) {
       const items = [];
       for (let page = 1; ; page += 1) {
@@ -170,9 +176,19 @@ function createGitHub({
       }
     },
     // 比较接口：分页取完，总数在 total_commits。compareCommits 模拟比较结果与 PR 记的提交对不上
+    // 拿分支名当 base 比的是晋级的来源：sources 按分支名给出 head 相对那条分支的状态，没给的分支说明测试漏写了。
     async request(route, params) {
       assert.equal(route, 'GET /repos/{owner}/{repo}/compare/{basehead}');
-      assert.equal(params.basehead, `${BASE_SHA}...${headSha()}`);
+      const [base, head] = params.basehead.split('...');
+      assert.equal(head, headSha());
+      if (base !== BASE_SHA) {
+        calls.sources.push(base);
+        if (failSourceCompare) {
+          throw httpError(404);
+        }
+        assert.ok(Object.hasOwn(sources, base), `测试没给 ${base} 的比较状态`);
+        return { data: { status: sources[base] } };
+      }
       calls.compared.push(params.page);
       const listed = compareCommits ?? commits;
       return { data: { total_commits: listed.length, commits: pageOf(withParents(listed), params) } };
@@ -189,7 +205,7 @@ function createGitHub({
               state: prState,
               user: opener,
               head: { sha: headSha(), repo: headRepo },
-              base: { sha: BASE_SHA, repo: BASE_REPO },
+              base: { sha: BASE_SHA, repo: BASE_REPO, ref: pull.baseRef },
               commits: prCommitCount ?? commits.length,
             },
           };
@@ -197,6 +213,7 @@ function createGitHub({
         // listedCommits 是调用那一刻 PR 上的提交，给函数时按页取，模拟两次调用之间或分页之间被推送。
         // 实测超过 250 个时给的是最新的 250 个，最早的被丢掉。
         async listCommits(params) {
+          calls.listed.push(params.page);
           const listed = typeof listedCommits === 'function' ? listedCommits(params.page) : (listedCommits ?? commits);
           return { data: pageOf(withParents(listed).slice(-250), params) };
         },
@@ -494,31 +511,230 @@ describe('需要签署的人', () => {
   });
 });
 
-// dev 到 beta 的晋级 PR 有几百个提交，同样逐个核对作者：维护者在本地拣进没签的外部提交时，这里要拦得住。
+// 目标是 beta 或 main 的 PR：head 提交在本仓库的来源分支上就是晋级，提交进来源分支时已过检查，不再逐个核作者。
+// 来源不对的照普通 PR 逐个核作者：维护者在本地拣进没签的外部提交、不经 dev 直接开 PR 进 beta 时，这里要拦得住。
 describe('晋级 PR', () => {
-  it('全是维护者和 Bot 的提交时通过，不发评论', async () => {
+  const promotedDescription = (source) => `晋级自 ${source}，不再核作者 / Promoted from ${source}`;
+  // 几百个提交里混着只签过旧版的 alice、没签的 bob 和没关联的邮箱：按普通 PR 核对必定判失败。
+  const stuckCommits = () => {
+    const commits = Array.from({ length: 300 }, (_, index) => commitBy(index % 40 === 0 ? renovate : maintainer));
+    commits.splice(120, 0, commitBy(alice));
+    commits.splice(270, 0, commitBy(bob));
+    commits.push(unlinkedCommit({ name: 'Old Email' }));
+    return commits;
+  };
+  const oldSignatures = () => [recordOf(alice, { version: CLA_VERSION - 1 })];
+  const wrongSource = (target, source) => [
+    `本 PR 的目标是 \`${target}\`，来源却不是本仓库 \`${source}\` 上的提交`,
+    `This PR targets \`${target}\`, but its source is not a commit on \`${source}\` in this repository`,
+  ];
+
+  for (const [target, source] of [
+    ['beta', 'dev'],
+    ['main', 'beta'],
+  ]) {
+    for (const status of ['behind', 'identical']) {
+      it(`目标是 ${target}、head 在本仓库的 ${source} 上（${status}）时放行，不列提交、不核作者`, async () => {
+        const commits = stuckCommits();
+        const github = createGitHub({
+          opener: maintainer,
+          commits,
+          baseRef: target,
+          sources: { [source]: status },
+          signatures: oldSignatures(),
+        });
+
+        const result = await run(github);
+
+        assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [], forkDeleted: false });
+        assert.deepEqual(github.calls.sources, [source]);
+        assert.deepEqual(github.calls.listed, []);
+        assert.deepEqual(github.calls.compared, []);
+        assert.deepEqual(github.calls.statuses, [
+          {
+            owner: OWNER,
+            repo: REPO,
+            sha: commits.at(-1).sha,
+            context: STATUS_CONTEXT,
+            state: 'success',
+            description: promotedDescription(source),
+            target_url: CLA_URL,
+          },
+        ]);
+        assert.deepEqual(github.calls.writes, []);
+        assert.deepEqual(github.comments, []);
+      });
+    }
+  }
+
+  for (const status of ['ahead', 'diverged']) {
+    it(`目标是 beta、head 不在 dev 上（${status}）时照普通 PR 逐个核作者，点名并说明来源不对`, async () => {
+      const commits = stuckCommits();
+      const github = createGitHub({
+        opener: maintainer,
+        commits,
+        baseRef: 'beta',
+        sources: { dev: status },
+        signatures: oldSignatures(),
+      });
+
+      const result = await run(github);
+
+      assert.equal(result.state, 'failure');
+      assert.deepEqual(result.missing, ['alice', 'bob']);
+      assert.deepEqual(result.unlinked, [{ sha: commits.at(-1).sha, name: 'Old Email' }]);
+      assert.deepEqual(github.calls.sources, ['dev']);
+      assert.deepEqual(github.calls.compared, [1, 2, 3, 4]);
+      assert.equal(lastStatus(github).state, 'failure');
+      assert.equal(lastStatus(github).sha, commits.at(-1).sha);
+      const [comment] = botComments(github);
+      for (const text of wrongSource('beta', 'dev')) {
+        assert.ok(comment.body.includes(text));
+      }
+      assert.match(comment.body, /@alice @bob/);
+    });
+  }
+
+  it('来源不对但提交作者都已签或豁免时照普通 PR 通过，不发评论', async () => {
     const commits = Array.from({ length: 320 }, (_, index) => commitBy(index % 40 === 0 ? renovate : maintainer));
-    const github = createGitHub({ opener: maintainer, commits });
+    const github = createGitHub({ opener: maintainer, commits, baseRef: 'beta', sources: { dev: 'diverged' } });
 
     const result = await run(github);
 
     assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [], forkDeleted: false });
-    assert.equal(lastStatus(github).state, 'success');
-    assert.equal(lastStatus(github).sha, commits.at(-1).sha);
+    assert.equal(lastStatus(github).description, 'CLA 已签署 / CLA signed');
+    assert.deepEqual(github.calls.compared, [1, 2, 3, 4]);
     assert.deepEqual(github.comments, []);
   });
 
-  it('混着没签的外部提交和没关联的邮箱时照样点名，开启者是维护者也不放行', async () => {
-    const commits = Array.from({ length: 300 }, () => commitBy(maintainer));
-    commits.splice(270, 0, commitBy(bob));
-    commits.push(unlinkedCommit({ name: 'Old Email' }));
-    const github = createGitHub({ opener: maintainer, commits });
+  it('目标是 main 时只认 beta：head 只在 dev 上不算晋级', async () => {
+    const github = createGitHub({
+      opener: maintainer,
+      commits: [commitBy(maintainer), commitBy(bob)],
+      baseRef: 'main',
+      sources: { dev: 'behind', beta: 'diverged' },
+    });
 
     const result = await run(github);
 
     assert.deepEqual(result.missing, ['bob']);
-    assert.equal(result.unlinked.length, 1);
+    assert.deepEqual(github.calls.sources, ['beta']);
+    assert.equal(github.calls.listed.length, 1);
+    const [comment] = botComments(github);
+    for (const text of wrongSource('main', 'beta')) {
+      assert.ok(comment.body.includes(text));
+    }
+  });
+
+  it('来自 fork 的不按晋级认，不去比较来源分支，fork 的主人与作者照样要签', async () => {
+    const github = createGitHub({
+      opener: alice,
+      headRepo: forkOwnedBy(mallory),
+      commits: [commitBy(bob)],
+      baseRef: 'beta',
+      sources: { dev: 'behind' },
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result, { state: 'failure', missing: ['mallory', 'bob'], unlinked: [], unverified: [], forkDeleted: false });
+    assert.deepEqual(github.calls.sources, []);
+    const [comment] = botComments(github);
+    for (const text of wrongSource('beta', 'dev')) {
+      assert.ok(comment.body.includes(text));
+    }
+  });
+
+  it('fork 已删除的同样不按晋级认，判失败', async () => {
+    const github = createGitHub({
+      opener: alice,
+      headRepo: null,
+      commits: [commitBy(alice)],
+      baseRef: 'beta',
+      sources: { dev: 'behind' },
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result, { state: 'failure', missing: [], unlinked: [], unverified: [], forkDeleted: true });
+    assert.deepEqual(github.calls.sources, []);
+  });
+
+  it('晋级 PR 的开启者没签照样点名，签署后改成晋级的通过说明', async () => {
+    const github = createGitHub({ opener: alice, commits: stuckCommits(), baseRef: 'beta', sources: { dev: 'behind' } });
+
+    const before = await run(github);
+
+    assert.deepEqual(before, { state: 'failure', missing: ['alice'], unlinked: [], unverified: [], forkDeleted: false });
+    assert.deepEqual(github.calls.listed, []);
+    assert.deepEqual(github.calls.compared, []);
+    const [comment] = botComments(github);
+    assert.match(comment.body, /@alice/);
+    assert.ok(!comment.body.includes('来源却不是'));
+
+    github.comments.push(commentBy(alice, ENGLISH_PHRASE));
+    const after = await run(github);
+
+    assert.equal(after.state, 'success');
+    assert.equal(lastStatus(github).description, promotedDescription('dev'));
+    assert.equal(github.repository.signatures.at(-1).id, alice.id);
+    assert.equal(botComments(github).length, 1);
+    assert.ok(comment.body.startsWith(`${COMMENT_MARKER}\n\n**CLA 检查通过 / CLA check passed**`));
+    assert.ok(comment.body.includes('本 PR 带进 `beta` 的提交都已在本仓库的 `dev` 上'));
+    assert.ok(comment.body.includes('Every commit this PR brings into `beta` is already on `dev` in this repository'));
+  });
+
+  it('比较来源分支出错时状态改成 error，不退回去逐个核作者', async () => {
+    const github = createGitHub({
+      opener: maintainer,
+      commits: [commitBy(maintainer)],
+      baseRef: 'beta',
+      failSourceCompare: true,
+    });
+
+    await assert.rejects(run(github), { status: 404 });
+
+    assert.deepEqual(github.calls.statuses, [erroredStatus(github)]);
+    assert.deepEqual(github.calls.listed, []);
+    assert.deepEqual(github.comments, []);
+  });
+
+  it('目标从 beta 改成 dev 后照普通 PR 逐个核作者', async () => {
+    const github = createGitHub({
+      opener: maintainer,
+      commits: [commitBy(maintainer), commitBy(bob)],
+      baseRef: 'beta',
+      sources: { dev: 'behind' },
+    });
+    assert.equal((await run(github)).state, 'success');
+
+    github.pull.baseRef = 'dev';
+    const result = await run(github);
+
+    assert.deepEqual(result.missing, ['bob']);
+    assert.deepEqual(github.calls.sources, ['dev']);
+    assert.equal(github.calls.listed.length, 1);
     assert.equal(lastStatus(github).state, 'failure');
+  });
+
+  it('目标是 dev 或其他分支的普通 PR 不比较来源，照旧逐个核作者', async () => {
+    for (const baseRef of ['dev', 'feat/skins']) {
+      const github = createGitHub({
+        opener: maintainer,
+        commits: [commitBy(maintainer), commitBy(bob)],
+        baseRef,
+        sources: { dev: 'behind', beta: 'behind' },
+      });
+
+      const result = await run(github);
+
+      assert.deepEqual(result.missing, ['bob']);
+      assert.deepEqual(github.calls.sources, []);
+      assert.equal(github.calls.listed.length, 1);
+      assert.ok(!botComments(github)[0].body.includes('来源却不是'));
+    }
   });
 });
 
