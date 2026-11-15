@@ -737,7 +737,7 @@
   white-space: nowrap;
   color: var(--sk-text-2);
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
+  font-size: var(--sk-fs-mono);
   user-select: text;
 }
 
@@ -1336,7 +1336,7 @@
   background: var(--sk-bg-2);
   color: var(--sk-text-2);
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
+  font-size: var(--sk-fs-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
   user-select: text;
