@@ -282,9 +282,13 @@
   font-variant-numeric: tabular-nums;
 }
 
+/*
+ * 副行有实例名与失败原因，是中文，字号取 caption；行高随 .text 的 1.25，不换 caption 的 18：
+ * 中号胶囊内高 34，标题行 13.5 × 1.25 再加 18 就超出了
+ */
 .sub {
   color: var(--sk-text-2);
-  font-size: 11.5px;
+  font-size: var(--sk-fs-caption);
   font-variant-numeric: tabular-nums;
 }
 
