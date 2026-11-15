@@ -2,6 +2,7 @@
 // @module-tag heavy-page
 import { act, memo } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { ART_DOWNLOAD_COPY } from "../../copy/cover";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { IpcError } from "../../ipc/errors";
 import { APP_NAME, APP_NAME_EN, ISSUES_URL, REPO_URL } from "../../lib/app-info";
@@ -17,6 +18,7 @@ import {
 } from "../../ipc/mock/handlers/system";
 import { COMPLETION_HOLD_S } from "../../lib/progress-display";
 import { REFLOW_SKIP_ATTR } from "../../lib/reflow";
+import { NO_ART, setArtStatus } from "../../mc/art";
 import { catalogFromDto, setBlockCatalog } from "../../mc/catalog";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickFile } from "../../shell/platform";
@@ -55,10 +57,16 @@ vi.mock("./SettingsNav", async (orig) => {
     },
   };
 });
-// 「下载原版材质」由它自己的测试覆盖；外观分区只管放不放、放在哪、用不用紧凑版
-vi.mock("../shared/cover-picker/ArtDownload", async () => {
+// 「下载原版材质」的下载流程由它自己的测试覆盖；外观分区只管放不放、放在哪、用不用紧凑版、说明用哪一套。
+// 部件本体与「要不要给下载入口」照用，外面套一层标出用的哪一档
+vi.mock("../shared/cover-picker/ArtDownload", async (orig) => {
+  const actual = await orig<typeof import("../shared/cover-picker/ArtDownload")>();
   const { createElement } = await import("react");
-  return { ArtDownload: ({ compact }: { compact?: boolean }) => createElement("div", { "data-art-download": compact === true ? "compact" : "full" }) };
+  return {
+    ...actual,
+    ArtDownload: (props: Parameters<typeof actual.ArtDownload>[0]) =>
+      createElement("div", { "data-art-download": props.compact === true ? "compact" : "full" }, createElement(actual.ArtDownload, props)),
+  };
 });
 
 let view: Rendered | undefined;
@@ -1593,6 +1601,9 @@ describe("设置页：外观", () => {
     // 下载块包在一层出入场的外壳里，外壳紧跟在这一行后面
     const host = download[0].parentElement;
     expect(host?.previousElementSibling?.textContent).toMatch(/^实例卡面默认背景/);
+    // 这一行的说明已经写了没有材质：下载块不加标题，只有一句说明
+    expect([...download[0].querySelectorAll("p")].map((p) => p.textContent)).toEqual(["从 Mojang 官方源或镜像下载原版材质，整包约 20 到 40 MB，下完只留不到 1 MB。"]);
+    expect(text()).not.toContain("本机的原版材质不全");
 
     await click(radio("渐变花瓣"));
     expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { cover_background: "art" } }]);
@@ -1605,6 +1616,38 @@ describe("设置页：外观", () => {
     expect(host?.hasAttribute("inert")).toBe(true);
     expect(live("[data-art-download]")).toEqual([]);
     expect(text()).toContain("方块平铺取封面方块的材质，读取自你本机的游戏文件。");
+  });
+
+  it("本机最新的原版早于 1.20：卡面默认背景下面同样放紧凑的材质下载，标题与说明写材质不全，与方块选择框同一份文案", async () => {
+    onTestFinished(() => {
+      setBlockCatalog(null);
+      setArtStatus(NO_ART);
+    });
+    // 外壳的材质绑定开机就按材质状态载入目录：降级集也有目录
+    ipc.overrides.set("art_status", () => ({ source: { version_id: "1.16.5", degraded: true, legacy_skins: true }, panorama: false }));
+    ipc.overrides.set("art_blocks", () => ({ version_id: "1.16.5", blocks: [] }));
+    await mount("appearance");
+    expect(text()).toContain("方块平铺取封面方块的材质，读取自你本机的游戏文件。");
+    const download = live("[data-art-download]");
+    expect(download.map((d) => d.getAttribute("data-art-download"))).toEqual(["compact"]);
+    expect(download[0].parentElement?.previousElementSibling?.textContent).toMatch(/^实例卡面默认背景/);
+    const paragraphs = [...download[0].querySelectorAll("p")].map((p) => p.textContent);
+    expect(paragraphs).toEqual(["本机的原版材质不全", ART_DOWNLOAD_COPY.degradedBody]);
+    expect(paragraphs[1]).toMatch(/^本机最新的原版早于 1\.20，推荐里有些方块那时还没有，只能画成实例徽记。下载最新正式版的材质就能补齐：/);
+    expect([...download[0].querySelectorAll("button")].map((b) => b.textContent)).toEqual(["下载原版材质"]);
+  });
+
+  it("本机的原版材质齐全：卡面默认背景下面不放材质下载", async () => {
+    onTestFinished(() => {
+      setBlockCatalog(null);
+      setArtStatus(NO_ART);
+    });
+    ipc.overrides.set("art_status", () => ({ source: { version_id: "1.21.4", degraded: false, legacy_skins: false }, panorama: false }));
+    ipc.overrides.set("art_blocks", () => ({ version_id: "1.21.4", blocks: [] }));
+    await mount("appearance");
+    expect(text()).toContain("方块平铺取封面方块的材质，读取自你本机的游戏文件。");
+    expect(all("[data-art-download]")).toEqual([]);
+    expect(all("button").filter((b) => b.textContent === "下载原版材质")).toEqual([]);
   });
 });
 

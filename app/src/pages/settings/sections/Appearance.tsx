@@ -16,7 +16,7 @@ import { AccentSwatches } from "../../../ui/AccentSwatches";
 import { Appear } from "../../../ui/Appear";
 import { MODE_ICON, ModeCards } from "../../../ui/ModeCards";
 import { Toggle } from "../../../ui/Toggle";
-import { ArtDownload } from "../../shared/cover-picker/ArtDownload";
+import { ArtDownload, useArtDownloadOffered } from "../../shared/cover-picker/ArtDownload";
 import { APPEARANCE_COPY, COVER_STYLE_LABEL, saveFailed } from "../copy";
 import { RowFlow } from "../Flow";
 import s from "../settings.module.css";
@@ -33,6 +33,8 @@ export function AppearanceSection() {
   const panoramaAvailable = usePanoramaAvailable();
   // 方块目录随材质源来去：没有目录就是本机还没有材质源，方块平铺画不出来
   const hasArt = useBlockCatalog() !== null;
+  // 下载入口与封面方块选择框同一个条件：没有材质源之外，只有 1.20 之前的原版（推荐方块缺材质）、上次下载失败时也给
+  const offersArtDownload = useArtDownloadOffered();
   const systemReduced = systemPrefersReducedMotion();
   return (
     <>
@@ -82,7 +84,7 @@ export function AppearanceSection() {
               ]}
             />
           </SettingRow>
-          <Appear>{!hasArt && <ArtDownload key="art" compact />}</Appear>
+          <Appear>{offersArtDownload && <ArtDownload key="art" compact />}</Appear>
           <SettingRow
             title={
               <span className={s.titleWithTag}>

@@ -17,7 +17,10 @@ import { ProgressBar } from "../../../ui/ProgressBar";
 import styles from "./ArtDownload.module.css";
 
 export interface ArtDownloadProps {
-  /** 紧凑档：不要标题，说明缩成一句，按钮放在右侧；给设置行这类窄处用。 */
+  /**
+   * 紧凑档：按钮放在右侧，给设置行这类窄处用。没有材质源时不要标题、说明缩成一句，所在设置行的说明已经写了没有材质；
+   * 材质不全时标题与说明照完整档的那一套，设置行的说明看不出不全。
+   */
   compact?: boolean;
 }
 
@@ -79,9 +82,18 @@ export function ArtDownload({ compact = false }: ArtDownloadProps) {
     </div>
   );
 
+  const progressing = state.phase === "running" || state.phase === "finishing";
   return compact ? (
     <div className={styles.compact}>
-      {state.phase !== "running" && state.phase !== "finishing" && <p className={cx(styles.body, styles.compactBody)}>{ART_DOWNLOAD_COPY.compactBody}</p>}
+      {!progressing &&
+        (partial ? (
+          <div className={styles.compactText}>
+            <p className={styles.title}>{ART_DOWNLOAD_COPY.degradedTitle}</p>
+            <p className={styles.body}>{ART_DOWNLOAD_COPY.degradedBody}</p>
+          </div>
+        ) : (
+          <p className={cx(styles.body, styles.compactBody)}>{ART_DOWNLOAD_COPY.compactBody}</p>
+        ))}
       {status}
     </div>
   ) : (

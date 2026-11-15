@@ -54,6 +54,15 @@
   min-width: 0;
 }
 
+/* 材质不全时紧凑档也有标题：标题与说明叠成一列占住左侧，与完整档同样的间距 */
+.compactText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-4);
+  min-width: 0;
+}
+
 .actions {
   display: flex;
   flex: none;
