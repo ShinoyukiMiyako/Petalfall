@@ -139,6 +139,57 @@ describe("左栏", () => {
   });
 });
 
+describe("弹窗高度", () => {
+  const sheet = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const tokens = sheet("../../styles/tokens.css");
+  const modal = sheet("../../ui/Modal.module.css");
+  const button = sheet("../../ui/Button.module.css");
+  const flow = readFileSync(new URL("./index.tsx", import.meta.url), "utf8");
+  const conf = JSON.parse(readFileSync(new URL("../../../src-tauri/tauri.conf.json", import.meta.url), "utf8")) as {
+    app: { windows: { label: string; minHeight: number }[] };
+  };
+
+  /** 字面的 px 或像素令牌换成数值。 */
+  function pixels(value: string): number {
+    const literal = /^(\d+(?:\.\d+)?)px$/.exec(value.trim());
+    if (literal !== null) return Number(literal[1]);
+    const token = /^var\((--[\w-]+)\)$/.exec(value.trim());
+    if (token === null) throw new Error(`认不出的长度：${value}`);
+    const declared = new RegExp(`${token[1]}:\\s*(\\d+(?:\\.\\d+)?)px;`).exec(tokens);
+    if (declared === null) throw new Error(`令牌 ${token[1]} 没有像素值`);
+    return Number(declared[1]);
+  }
+  /** 样式表里选择器恰好是 .selector 的那条规则中 name 的值。 */
+  function value(source: string, selector: string, name: string): string {
+    const rule = new RegExp(`(?:^|\\n)\\.${selector}\\s*\\{([^}]*)\\}`).exec(source);
+    if (rule === null) throw new Error(`样式表里没有 .${selector}`);
+    const found = new RegExp(`(?:^|[\\s;])${name}:\\s*([^;]+);`).exec(rule[1]);
+    if (found === null) throw new Error(`.${selector} 里没有 ${name}`);
+    return found[1];
+  }
+  const first = (shorthand: string) => shorthand.trim().split(/\s+/)[0];
+
+  it("最小窗口高度下整个弹窗放得下：主体不出滚动条，不和步骤自己的滚动条叠成两条", () => {
+    const main = conf.app.windows.find((w) => w.label === "main");
+    if (main === undefined) throw new Error("tauri.conf.json 里没有主窗口");
+    const icon = /<InstanceAvatarBase\b[^>]*\bsize=\{(\d+)\}/.exec(flow);
+    if (icon === null) throw new Error("index.tsx 里没有标题图标的尺寸");
+
+    const [headTop, , headBottom] = value(modal, "head", "padding").split(/\s+/);
+    const headText =
+      pixels(value(modal, "headText", "padding-top")) +
+      pixels(value(modal, "title", "font-size")) * Number(value(modal, "title", "line-height")) +
+      pixels(first(value(modal, "subtitle", "margin"))) +
+      pixels(value(modal, "subtitle", "line-height"));
+    const head = pixels(headTop) + Math.max(Number(icon[1]), headText) + pixels(headBottom);
+    const [footTop, , footBottom] = value(modal, "footer", "padding").split(/\s+/);
+    const foot = pixels(first(value(modal, "footer", "border-top"))) + pixels(footTop) + pixels(value(button, "button", "--button-height")) + pixels(footBottom);
+    const frame = 2 * pixels(value(modal, "layer", "padding")) + 2 * pixels(first(value(modal, "dialog", "border")));
+
+    expect(pixels(value(css, "layout", "--cr-body-height"))).toBeLessThanOrEqual(main.minHeight - frame - head - foot);
+  });
+});
+
 describe("步骤导航", () => {
   it("圆点换态与所在行同一拍渐变；当前步的渐变底画在叠层上，只淡入淡出叠层", () => {
     const dot = declarations("stepDot");
