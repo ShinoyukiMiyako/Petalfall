@@ -33,7 +33,7 @@
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
   font-weight: var(--sk-w-medium);
-  color: var(--sk-accent);
+  color: var(--sk-accent-strong);
 }
 
 .heroTitle {
@@ -66,7 +66,7 @@
   margin-right: var(--sk-space-4);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 /* 每枚胶囊外那层进出场的包裹：也是弹性盒，按钮不落在行盒基线上多出行高 */
@@ -357,7 +357,7 @@
   overflow: hidden;
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -383,7 +383,7 @@
   padding-top: var(--sk-space-10);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .metric {
@@ -474,7 +474,7 @@
   padding-block: var(--sk-space-8);
   font-size: var(--sk-fs-small);
   line-height: var(--sk-lh-small);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 /* 后端给的错误原文：可选中复制，多平台的原因逐行列出 */
