@@ -497,7 +497,7 @@ describe("材质源是 1.20 之前的降级集", () => {
     keydown(g, "PageDown");
     expect(activeBlock()).toBe("filler_090");
 
-    act(() => setArtStatus({ source: { versionId: "1.21.4", degraded: false }, panorama: false }));
+    act(() => setArtStatus({ source: { versionId: "1.21.4", degraded: false, legacySkins: false }, panorama: false }));
     expect(grid()).toBe(g);
     expect(g.style.height).toBe("318px");
     keydown(g, "PageDown");
