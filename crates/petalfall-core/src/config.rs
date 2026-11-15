@@ -1475,7 +1475,7 @@ mod tests {
                     "all",
                 ],
             ),
-            ("appearance.mode", &["day", "night"]),
+            ("appearance.mode", &["day", "night", "system"]),
             ("appearance.accent", &["sakura", "amethyst", "moss"]),
             ("appearance.cover_background", &["art", "texture"]),
             ("after_launch", &["keep", "minimize", "close"]),

@@ -4,10 +4,11 @@ import type { AccentName, AppearanceMode } from "../domain/types";
 import type { UiLanguage } from "../ipc/config";
 import type { JavaSource } from "../ipc/java";
 
-/** 明暗两档；图标随取值固定（ui 的 MODE_ICON），这里只给名称与说明。 */
+/** 明暗三档；图标随取值固定（ui 的 MODE_ICON），这里只给名称与说明。 */
 export const MODE_OPTIONS: readonly { value: AppearanceMode; label: string; desc: string }[] = [
   { value: "day", label: "日樱", desc: "浅粉白底，适合白天" },
   { value: "night", label: "夜樱", desc: "深紫灰底与紫水晶点缀" },
+  { value: "system", label: "跟随系统", desc: "随 Windows 的浅色、深色模式切换" },
 ];
 
 export const ACCENT_OPTIONS: readonly { value: AccentName; label: string }[] = [

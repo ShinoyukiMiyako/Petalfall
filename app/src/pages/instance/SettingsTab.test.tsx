@@ -612,7 +612,30 @@ describe("实例设置：默认设置一行", () => {
       (): TemplateInfoDto => ({ present, files: present ? [{ name: "options.txt", size: 2048 }] : [], source_instance: present ? "创造" : null, saved_at: null, enabled: false }),
     );
     await openSettings();
-    expect(textOf(templateLine())).toBe("新建实例时沿用默认设置已在配置里关闭。");
+    expect(textOf(templateLine())).toBe("新建实例时沿用默认设置已关闭，可以在设置的「游戏」分区打开。");
+  });
+
+  it("在设置里关掉、再打开新实例沿用默认设置：第二行跟着换，不用重开实例页", async () => {
+    // 后端：配置里的开关就是 template_info 的 enabled
+    let enabled = true;
+    ipc.overrides.set("update_config", (args) => {
+      if (typeof args.newInstanceTemplate === "boolean") enabled = args.newInstanceTemplate;
+      return null;
+    });
+    ipc.overrides.set("template_info", (): TemplateInfoDto => ({ ...NO_TEMPLATE, enabled }));
+    await openSettings();
+    expect(textOf(templateLine())).toBe("还没有默认设置，新建实例时没有可沿用的设置。");
+    await act(async () => {
+      await launcher.actions.updateSettings({ newInstanceTemplate: false });
+      await settle(20);
+    });
+    expect(textOf(templateLine())).toBe("新建实例时沿用默认设置已关闭，可以在设置的「游戏」分区打开。");
+    await act(async () => {
+      await launcher.actions.updateSettings({ newInstanceTemplate: true });
+      await settle(20);
+    });
+    expect(textOf(templateLine())).toBe("还没有默认设置，新建实例时没有可沿用的设置。");
+    expect(callsOf(ipc, "update_config")).toEqual([{ newInstanceTemplate: false }, { newInstanceTemplate: true }]);
   });
 
   it("「清除」常驻占位：清除成功后还是同一个按钮，淡出并进了不可交互的层；焦点从它身上交给「保存为默认」", async () => {

@@ -1,4 +1,4 @@
-// 游戏：全局内存（推荐值全部来自后端的内存建议）、版本隔离档位、游戏目录与其他文件夹、存档备份。
+// 游戏：全局内存（推荐值全部来自后端的内存建议）、版本隔离档位、新实例沿不沿用默认设置、游戏目录与其他文件夹、存档备份。
 
 import { AnimatePresence, motion, useIsPresent } from "framer-motion";
 import { useState, type ReactNode, type Ref } from "react";
@@ -46,6 +46,7 @@ import {
   LOAD_COPY,
   MAX_TOTAL_GB_OPTIONS,
   MEMORY_COPY,
+  NEW_INSTANCE_COPY,
   RECOMMENDED_ISOLATION,
   WORLD_BACKUP_COPY,
 } from "../copy";
@@ -227,6 +228,22 @@ function IsolationCard() {
             ...(o.value === RECOMMENDED_ISOLATION ? { hint: ISOLATION_COPY.recommended } : {}),
           }))}
         />
+      </SettingRow>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------- 新实例
+
+function NewInstanceCard() {
+  const settings = useLoadedSettings();
+  const actions = useLauncherActions();
+  const write = useSettingWrite(settings.newInstanceTemplate, NEW_INSTANCE_COPY.template, (newInstanceTemplate: boolean) => actions.updateSettings({ newInstanceTemplate }));
+  return (
+    <Card>
+      <CardHeader title={NEW_INSTANCE_COPY.title} icon="plus" />
+      <SettingRow title={NEW_INSTANCE_COPY.template} description={NEW_INSTANCE_COPY.templateDesc}>
+        <Toggle checked={write.value} onChange={write.set} ariaLabel={NEW_INSTANCE_COPY.template} />
       </SettingRow>
     </Card>
   );
@@ -546,6 +563,7 @@ export function GameSection() {
     <>
       <MemoryCard />
       <IsolationCard />
+      <NewInstanceCard />
       <GameDirectoryCard />
       <WorldBackupCard />
     </>

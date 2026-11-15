@@ -1085,6 +1085,18 @@ describe("新建实例：确认步的开局选项", () => {
     expect(callsOf(ipc, "install_version")[0].useTemplate).toBe(true);
   });
 
+  it("设置里关了新实例沿用默认设置：有模板也禁用不勾，原因点名开关所在的「游戏」分区；创建时不带 useTemplate", async () => {
+    ipc.overrides.set("template_info", () => ({ present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: "樱花生存", saved_at: null, enabled: false }));
+    await toConfirm("关了沿用", "Fabric");
+    const off = checkbox(s.template);
+    expect([isChecked(off), isBlocked(off)]).toEqual([false, true]);
+    expect(dialog().textContent).toContain("新建实例时沿用默认设置已关闭，可以在设置的「游戏」分区打开。");
+    expect(dialog().textContent).not.toContain("取自「樱花生存」");
+    click(button(CREATE_COPY.create));
+    await flush();
+    expect(callsOf(ipc, "install_version")[0].useTemplate).toBe(false);
+  });
+
   it("有模板但新实例按全局策略不隔离（原版正式版）：不勾并说明用不上；手放的模板写来源不明", async () => {
     ipc.overrides.set("template_info", () => ({ present: true, files: [{ name: "servers.dat", size: 512 }], source_instance: null, saved_at: null, enabled: true }));
     await toConfirm("原版", null);

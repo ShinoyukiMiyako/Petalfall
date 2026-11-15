@@ -7,7 +7,7 @@ const DEFAULTS: AppearanceDto = { mode: "day", accent: "sakura", petals: true, p
 let current: AppearanceDto = { ...DEFAULTS };
 
 // ipc/ 只能以类型方式引用领域模型，合法取值在这里按 DTO 类型各列一份。
-const MODES: readonly AppearanceDto["mode"][] = ["day", "night"];
+const MODES: readonly AppearanceDto["mode"][] = ["day", "night", "system"];
 const ACCENTS: readonly AppearanceDto["accent"][] = ["sakura", "amethyst", "moss"];
 const COVER_STYLES: readonly AppearanceDto["cover_background"][] = ["art", "texture"];
 const BOOLEAN_KEYS = ["petals", "panorama", "reduce_motion"] as const;

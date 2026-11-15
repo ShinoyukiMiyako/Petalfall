@@ -19,7 +19,7 @@ import { APP_SLUG } from "./lib/app-info";
 import { ErrorScreen } from "./shell/ErrorScreen";
 import { applyTier, tierOf } from "./shell/tier";
 import { RevealWindow } from "./shell/window";
-import { DEFAULT_APPEARANCE, applyAppearance, loadAppearance, systemPrefersReducedMotion } from "./state/appearance";
+import { DEFAULT_APPEARANCE, applyAppearance, loadAppearance, readSystemPreferences } from "./state/appearance";
 import { loadUiShape } from "./state/ui-shape";
 import { loadFonts } from "./styles/fonts";
 
@@ -47,14 +47,14 @@ async function enableBrowserMockPersistence(): Promise<void> {
 async function boot(container: HTMLElement): Promise<void> {
   const root = createRoot(container);
   applyTier(tierOf(window.innerWidth));
-  const systemReduced = systemPrefersReducedMotion();
+  const system = readSystemPreferences();
   try {
     assertWebViewSupport();
     if (import.meta.env.DEV && !inTauri()) await enableBrowserMockPersistence();
     await loadFonts();
     // 两样都只读后端内存，并行读不多等一个往返；任一样读不出都进错误页
     const [appearance, uiShape] = await Promise.all([loadAppearance(), loadUiShape()]);
-    applyAppearance(appearance, systemReduced);
+    applyAppearance(appearance, system);
     await prepareApp();
     root.render(
       <StrictMode>
@@ -64,7 +64,7 @@ async function boot(container: HTMLElement): Promise<void> {
   } catch (error) {
     // 最外层统一兜底：外壳还没渲染，错误只能在这里接住并整屏显示原文
     console.error("启动失败", error);
-    applyAppearance(DEFAULT_APPEARANCE, systemReduced);
+    applyAppearance(DEFAULT_APPEARANCE, system);
     const copy = error instanceof UnsupportedWebViewError ? BOOT_FAILURE_COPY.unsupported : BOOT_FAILURE_COPY.failed;
     root.render(
       <StrictMode>

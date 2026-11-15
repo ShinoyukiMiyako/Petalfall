@@ -124,9 +124,9 @@ afterEach(async () => {
 });
 
 describe("游戏 · 卡片之间的让位", () => {
-  it("四张卡片直接排在载入门的分区卡片栈里：一张变高时由那一层的让位把下面的卡片滑过去，分区不再自己包一层", async () => {
+  it("五张卡片直接排在载入门的分区卡片栈里：一张变高时由那一层的让位把下面的卡片滑过去，分区不再自己包一层", async () => {
     await mountGame();
-    const cards = ["内存", "版本隔离", "游戏目录", "存档备份"].map(card);
+    const cards = ["内存", "版本隔离", "新实例", "游戏目录", "存档备份"].map(card);
     const stack = cards[0].parentElement;
     if (stack === null) throw new Error("内存卡片没有父元素");
     expect(stack.classList.contains(s.sectionFlow)).toBe(true);

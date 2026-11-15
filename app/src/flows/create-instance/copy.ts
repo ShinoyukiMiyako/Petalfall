@@ -149,7 +149,7 @@ export const CREATE_COPY = {
         source === null ? "取自数据目录里的默认设置" : savedAt === null ? `取自「${source}」` : `取自「${source}」，${formatRelative(savedAt, now)}保存`,
       templateBlocked: {
         loading: "正在读取默认设置…",
-        disabled: "新建实例时沿用默认设置已在配置里关闭。",
+        disabled: "新建实例时沿用默认设置已关闭，可以在设置的「游戏」分区打开。",
         empty: "还没有默认设置。可以在任一实例的设置里把它保存为默认。",
         shared: "这个实例与其他未隔离的实例共用 .minecraft 里的设置，用不上默认设置。",
       },

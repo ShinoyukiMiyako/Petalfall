@@ -3796,6 +3796,8 @@ export class LauncherStore {
       // ---- 设置
       async updateSettings(patch) {
         await configIpc.updateConfig(settingsPatchToConfig(patch));
+        // 实例页与新建确认步经默认设置的查询读这一项（template_info 的 enabled），不读配置
+        if ("newInstanceTemplate" in patch) invalidateResources("template");
         await store.fetchSettings();
       },
       async addJavaPath(path) {

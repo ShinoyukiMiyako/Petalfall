@@ -401,6 +401,13 @@ impl Petalfall {
         self.config.skip_accessibility_onboarding = enabled;
     }
 
+    /// 设置新实例是否沿用默认设置（数据目录里的模板）。
+    ///
+    /// 只管之后的新建与整合包导入；已经套过模板的实例不动，模板文件也不删，再打开时照常沿用。
+    pub fn set_new_instance_template(&mut self, enabled: bool) {
+        self.config.new_instance_template = enabled;
+    }
+
     /// 记下用户跳过的启动器版本。
     pub fn set_skipped_update_version(&mut self, version: Option<String>) {
         self.config.skipped_update_version = version;
@@ -829,6 +836,12 @@ mod tests {
         assert!(!petalfall.config().skip_accessibility_onboarding);
         petalfall.set_skip_accessibility_onboarding(true);
         assert!(petalfall.config().skip_accessibility_onboarding);
+
+        assert!(petalfall.config().new_instance_template);
+        petalfall.set_new_instance_template(false);
+        assert!(!petalfall.config().new_instance_template);
+        petalfall.set_new_instance_template(true);
+        assert!(petalfall.config().new_instance_template);
     }
 
     /// 改版本列表源只写配置：清单地址仍是官方地址，镜像优先体现在源计划给出的首个候选上。

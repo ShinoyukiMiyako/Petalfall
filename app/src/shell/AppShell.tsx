@@ -201,7 +201,7 @@ function PageArrivalSlot({ arrival, bootShown, children }: { arrival: NavArrival
 const MainFrame = memo(function MainFrame({ pages, bindScroll, enter }: { pages: PageRegistry; bindScroll: (el: HTMLDivElement | null) => void; enter: boolean }) {
   const { route, arrival } = useNav();
   const { tier } = useShell();
-  const { appearance, reduced } = useAppearance();
+  const { appearance, resolvedMode, reduced } = useAppearance();
   const run = useRunner();
   const onDowngrade = useCallback(
     (event: PetalDowngrade) =>
@@ -230,7 +230,7 @@ const MainFrame = memo(function MainFrame({ pages, bindScroll, enter }: { pages:
             show={route.page === "home" && appearance.petals}
             reduced={reduced}
             tier={tier}
-            mode={appearance.mode}
+            mode={resolvedMode}
             accent={appearance.accent}
             onDowngrade={onDowngrade}
           />

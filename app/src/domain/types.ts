@@ -6,8 +6,12 @@ import type { BlockedFileDto } from "../ipc/modpack";
 
 // ---------------------------------------------------------------- 外观
 
-export const APPEARANCE_MODES = ["day", "night"] as const;
+/** 外观偏好里的明暗：日樱、夜樱，或跟随系统的浅色 / 深色。 */
+export const APPEARANCE_MODES = ["day", "night", "system"] as const;
 export type AppearanceMode = (typeof APPEARANCE_MODES)[number];
+
+/** 实际画出来的明暗，即 <html> 上 data-sk-mode 的取值：跟随系统时按系统此刻的明暗取其一。 */
+export type ResolvedMode = Exclude<AppearanceMode, "system">;
 
 export const ACCENT_NAMES = ["sakura", "amethyst", "moss"] as const;
 export type AccentName = (typeof ACCENT_NAMES)[number];

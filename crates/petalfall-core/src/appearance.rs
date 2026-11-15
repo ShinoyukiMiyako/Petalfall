@@ -1,4 +1,4 @@
-//! 外观偏好：明暗（日樱 / 夜樱）、强调色、花瓣、樱花林全景背景、实例卡面的默认背景与减少动画。
+//! 外观偏好：明暗（日樱 / 夜樱 / 跟随系统）、强调色、花瓣、樱花林全景背景、实例卡面的默认背景与减少动画。
 //!
 //! 偏好跟随本机而非账户，写在全局配置 `appearance` 段里随数据目录走：重装 WebView2、清浏览器
 //! 存储都不会丢。前端在首帧渲染前读它，把明暗与强调色写到根元素上，窗口显示时就是最终外观。
@@ -18,6 +18,9 @@ pub enum AppearanceMode {
     Day,
     /// 夜樱（深色）。
     Night,
+    /// 跟随系统的浅色 / 深色：前端按系统此刻的明暗画日樱或夜樱，系统切换时跟着换。
+    /// 不认识它的旧版本按字段退回默认的日樱，原值随整份配置写回（见 `config` 模块）。
+    System,
 }
 
 /// 强调色。
@@ -221,5 +224,28 @@ mod tests {
             ..AppearancePatch::default()
         });
         assert!(!a.petals);
+    }
+
+    /// 跟随系统写成 snake_case 的 `system`，读回不变；补丁里也认它，合进去只改明暗。
+    #[test]
+    fn system_mode_roundtrips_and_patches() {
+        let a = Appearance {
+            mode: AppearanceMode::System,
+            ..Appearance::default()
+        };
+        let json = serde_json::to_value(a).unwrap();
+        assert_eq!(json["mode"], "system");
+        assert_eq!(serde_json::from_value::<Appearance>(json).unwrap(), a);
+
+        let mut b = Appearance::default();
+        b.apply(serde_json::from_str(r#"{"mode":"system"}"#).unwrap());
+        assert_eq!(
+            b,
+            Appearance {
+                mode: AppearanceMode::System,
+                ..Appearance::default()
+            }
+        );
+        assert!(serde_json::from_str::<Appearance>(r#"{"mode":"System"}"#).is_err());
     }
 }

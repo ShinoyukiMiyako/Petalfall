@@ -3,16 +3,31 @@
 // 切换时先改 <html> 上的属性（同一帧生效，颜色不做过渡），再写后端；写入失败把属性还原成后端最后确认的值，
 // 并把错误原样抛给调用方，由外层统一提示。连续快速切换时只有最后一次请求的结果决定界面，
 // 较早的请求即使晚回来也不会把界面改回去。
+//
+// 明暗选了跟随系统时按 prefers-color-scheme 画日樱或夜樱，系统切换时实时跟着换。在 WebView2 里这个媒体查询
+// 跟的是 Tauri 窗口的主题：窗口没有指定主题时 tao 按系统的应用模式（AppsUseLightTheme）定窗口主题，并在
+// WM_SETTINGCHANGE 后重判、发出主题变化，tauri-runtime-wry 建 webview 时与每次主题变化时把它写进 WebView2 的
+// PreferredColorScheme。媒体查询同步可读，首帧之前就能定下明暗；改用窗口的 theme 接口要多一次 IPC 往返，
+// 还要另开窗口主题与事件的权限。
 
 import { MotionConfig } from "framer-motion";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ACCENT_NAMES, APPEARANCE_MODES, COVER_STYLES, type AccentName, type Appearance, type AppearanceMode, type CoverStyle } from "../domain/types";
+import { ACCENT_NAMES, APPEARANCE_MODES, COVER_STYLES, type AccentName, type Appearance, type AppearanceMode, type CoverStyle, type ResolvedMode } from "../domain/types";
 import { getAppearance, setAppearance as persistAppearance, type AppearanceDto, type AppearancePatchDto } from "../ipc/appearance";
 import { rootTransition } from "../lib/motion";
 
 export const DEFAULT_APPEARANCE: Appearance = { mode: "day", accent: "sakura", petals: true, panorama: false, reduceMotion: false, coverBackground: "texture" };
 
 const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
+const DARK_SCHEME_QUERY = "(prefers-color-scheme: dark)";
+
+/** 外观要看的两项系统偏好。 */
+export interface SystemPreferences {
+  /** 系统开了「减少动态效果」。 */
+  reducedMotion: boolean;
+  /** 系统此刻是深色。 */
+  dark: boolean;
+}
 
 function assertMode(value: unknown): AppearanceMode {
   if (!APPEARANCE_MODES.includes(value as AppearanceMode)) throw new Error(`未知的外观明暗：${String(value)}`);
@@ -61,17 +76,35 @@ export function systemPrefersReducedMotion(): boolean {
   return window.matchMedia(REDUCED_MOTION_QUERY).matches;
 }
 
+export function systemPrefersDark(): boolean {
+  return window.matchMedia(DARK_SCHEME_QUERY).matches;
+}
+
+export function readSystemPreferences(): SystemPreferences {
+  return { reducedMotion: systemPrefersReducedMotion(), dark: systemPrefersDark() };
+}
+
 /** 减少动画的生效值：应用设置或系统偏好任一开启。应用设置不能把系统偏好改回完整动画。 */
 export function effectiveReducedMotion(appearance: Appearance, systemReduced: boolean): boolean {
   return appearance.reduceMotion || systemReduced;
 }
 
+/** 实际画出来的明暗：跟随系统时按系统此刻的明暗，否则就是选中的那一档。 */
+export function resolveMode(mode: AppearanceMode, systemDark: boolean): ResolvedMode {
+  const chosen = assertMode(mode);
+  if (chosen === "system") return systemDark ? "night" : "day";
+  return chosen;
+}
+
 /** 换明暗或强调色的那一刻挂在 <html> 上：全部过渡暂时关掉（规则在 styles/base.css）。 */
 export const INSTANT_THEME_ATTR = "data-sk-instant";
 
-/** 把外观写到 <html>：data-sk-mode 与 data-sk-accent 永远显式写出，不依赖「不写等于默认」。 */
-export function applyAppearance(appearance: Appearance, systemReduced: boolean, root: HTMLElement = document.documentElement): void {
-  const mode = assertMode(appearance.mode);
+/**
+ * 把外观写到 <html>：data-sk-mode 与 data-sk-accent 永远显式写出，不依赖「不写等于默认」。data-sk-mode 只写画出来的
+ * 日樱或夜樱，跟随系统不是一套令牌。
+ */
+export function applyAppearance(appearance: Appearance, system: SystemPreferences, root: HTMLElement = document.documentElement): void {
+  const mode = resolveMode(appearance.mode, system.dark);
   const accent = assertAccent(appearance.accent);
   // 页面底色一帧切完，按钮、开关轨道、选择卡描边却按自己的颜色过渡拖后约 150 ms 追上。换明暗或强调色时
   // 先关掉全部过渡再改属性，读一次布局让样式在过渡关着时结算到新颜色，再撤掉：之后没有「旧色到新色」可供过渡，
@@ -80,7 +113,7 @@ export function applyAppearance(appearance: Appearance, systemReduced: boolean, 
   if (switching) root.setAttribute(INSTANT_THEME_ATTR, "");
   root.setAttribute("data-sk-mode", mode);
   root.setAttribute("data-sk-accent", accent);
-  if (effectiveReducedMotion(appearance, systemReduced)) root.setAttribute("data-sk-reduced", "");
+  if (effectiveReducedMotion(appearance, system.reducedMotion)) root.setAttribute("data-sk-reduced", "");
   else root.removeAttribute("data-sk-reduced");
   if (switching) {
     void root.offsetWidth;
@@ -102,6 +135,8 @@ export async function loadAppearance(): Promise<Appearance> {
 export interface AppearanceApi {
   /** 当前显示的外观偏好。 */
   appearance: Appearance;
+  /** 实际画出来的明暗：偏好是跟随系统时随系统变。要按日樱、夜樱区分画法的地方读它，不读偏好。 */
+  resolvedMode: ResolvedMode;
   /** 减少动画的生效值。 */
   reduced: boolean;
   /** 改外观：同一帧改 <html> 属性，再写后端；写入失败属性回到后端确认值并抛出原错误。 */
@@ -124,32 +159,43 @@ export interface AppearanceProviderProps {
 
 export function AppearanceProvider({ initial, children }: AppearanceProviderProps) {
   const [appearance, setShown] = useState(initial);
+  // 两项分开存成布尔值：系统偏好没变时 setState 直接跳过，不因为换了个对象就重渲染整棵树
   const [systemReduced, setSystemReduced] = useState(systemPrefersReducedMotion);
+  const [systemDark, setSystemDark] = useState(systemPrefersDark);
   const shownRef = useRef(initial);
   const confirmedRef = useRef(initial);
   /** confirmedRef 来自哪一次请求；首帧前读到的初始值算第 0 次。 */
   const confirmedSeq = useRef(0);
-  const systemReducedRef = useRef(systemReduced);
+  const systemRef = useRef<SystemPreferences>({ reducedMotion: systemReduced, dark: systemDark });
   const requestSeq = useRef(0);
   /** 还没有结果的请求序号。 */
   const pendingSeqs = useRef(new Set<number>());
 
   const show = useCallback((next: Appearance) => {
-    applyAppearance(next, systemReducedRef.current);
+    applyAppearance(next, systemRef.current);
     shownRef.current = next;
     setShown(next);
   }, []);
 
+  // 两项系统偏好一直订阅：深浅色只在跟随系统时影响画面，但切到跟随系统的那一刻要拿到的是此刻的值，
+  // 不能是上次订阅时留下的旧值
   useEffect(() => {
-    const query = window.matchMedia(REDUCED_MOTION_QUERY);
+    const reducedQuery = window.matchMedia(REDUCED_MOTION_QUERY);
+    const darkQuery = window.matchMedia(DARK_SCHEME_QUERY);
     const onChange = () => {
-      systemReducedRef.current = query.matches;
-      applyAppearance(shownRef.current, query.matches);
-      setSystemReduced(query.matches);
+      const next: SystemPreferences = { reducedMotion: reducedQuery.matches, dark: darkQuery.matches };
+      systemRef.current = next;
+      applyAppearance(shownRef.current, next);
+      setSystemReduced(next.reducedMotion);
+      setSystemDark(next.dark);
     };
     onChange();
-    query.addEventListener("change", onChange);
-    return () => query.removeEventListener("change", onChange);
+    reducedQuery.addEventListener("change", onChange);
+    darkQuery.addEventListener("change", onChange);
+    return () => {
+      reducedQuery.removeEventListener("change", onChange);
+      darkQuery.removeEventListener("change", onChange);
+    };
   }, []);
 
   const setAppearance = useCallback(
@@ -180,7 +226,8 @@ export function AppearanceProvider({ initial, children }: AppearanceProviderProp
   );
 
   const reduced = effectiveReducedMotion(appearance, systemReduced);
-  const api = useMemo<AppearanceApi>(() => ({ appearance, reduced, setAppearance }), [appearance, reduced, setAppearance]);
+  const resolvedMode = resolveMode(appearance.mode, systemDark);
+  const api = useMemo<AppearanceApi>(() => ({ appearance, resolvedMode, reduced, setAppearance }), [appearance, resolvedMode, reduced, setAppearance]);
 
   return (
     <AppearanceContext.Provider value={api}>

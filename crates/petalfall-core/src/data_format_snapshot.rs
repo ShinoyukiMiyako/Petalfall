@@ -198,12 +198,17 @@ fn isolation_policy_spelling(value: IsolationPolicy) -> &'static str {
     }
 }
 
-const APPEARANCE_MODES: [AppearanceMode; 2] = [AppearanceMode::Day, AppearanceMode::Night];
+const APPEARANCE_MODES: [AppearanceMode; 3] = [
+    AppearanceMode::Day,
+    AppearanceMode::Night,
+    AppearanceMode::System,
+];
 
 fn appearance_mode_spelling(value: AppearanceMode) -> &'static str {
     match value {
         AppearanceMode::Day => "day",
         AppearanceMode::Night => "night",
+        AppearanceMode::System => "system",
     }
 }
 

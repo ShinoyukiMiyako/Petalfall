@@ -772,7 +772,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 
 ### 装配与状态
 
-- `main.tsx`：主窗口以不可见状态创建。前端先检查 WebView2 能力、加载字体，并行读取外观偏好与界面形状（`state/ui-shape`，首帧占位用，见「动效与布局稳定」），把明暗模式与强调色写到 `<html>`，画完第一帧后才显示窗口。任何一步失败都渲染错误页并照常显示窗口；后端另有 3 秒的兜底显示。
+- `main.tsx`：主窗口以不可见状态创建。前端先检查 WebView2 能力、加载字体，并行读取外观偏好与界面形状（`state/ui-shape`，首帧占位用，见「动效与布局稳定」），把明暗模式与强调色写到 `<html>`，画完第一帧后才显示窗口。明暗选了跟随系统时按 `prefers-color-scheme` 写日樱或夜樱，系统切换浅色、深色时当场跟着换：WebView2 里这个媒体查询跟着 Tauri 窗口的主题走，窗口不指定主题时 tao 按系统的应用模式定主题、设置变化后重判，tauri-runtime-wry 再把它写进 WebView2 的 `PreferredColorScheme`。任何一步失败都渲染错误页并照常显示窗口；后端另有 3 秒的兜底显示。
 - `App.tsx`：按 `AppearanceProvider -> UiShapeProvider -> LauncherProvider -> ShellProvider -> AppShell` 的顺序装配。页面和流程模块在这里按目录约定收集后传给外壳，外壳本身不引用 `pages/` 和 `flows/`。
 - `state/store.ts`：启动器的状态容器，与 React 解耦，测试里可以直接实例化。事件订阅在 `start()` 时建立；动作返回 Promise，失败时原样抛出。
 - 组件按片订阅状态：`useLauncherSelector(selector, isEqual)` 只在选出的值变了时重渲染，`useLauncherActions()` 只取动作、不订阅。整份订阅的 `useLauncher()` 会随每 100 ms 的下载进度与每批游戏日志重渲染：外壳根与常驻部件（含窗口行为与启动提示的钩子）、`useRunner`、主页、实例库与发现页（含资源详情）都不用它。发现页的结果卡包着 `memo`。`pages/subscriptions.test.tsx` 与 `shell/shell-renders.test.tsx` 数着渲染次数守住这一点。
@@ -893,7 +893,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | `extra_java_paths` | 空 | 手动添加的 Java，一律存成规范化后的 java.exe 路径，只经 `add_java_path` / `remove_java_path` 改 |
 | `prefer_dedicated_gpu` | `false` | 启动前把这次用的 Java 设为 Windows 图形设置里的高性能 |
 | `skip_accessibility_onboarding` | `true` | 启动前在缺 `onboardAccessibility:` 这一行的 `options.txt` 里补 `onboardAccessibility:false`，跳过 Minecraft 第一次进游戏时的讲述人与无障碍引导（做法见上文启动前补全 `options.txt` 的一段）；关掉时不写，也不改已有的值。只对还没有这一行的 `options.txt` 起作用：不隔离的实例共用游戏目录里的一份，这一行写过之后，关掉开关再新建的不隔离实例也不会出现引导。老配置缺这个键按 `true` 读入。经 `get_config` / `update_config` 读写，设置页「常规」分区「启动」卡里的开关叫「跳过首次无障碍引导」 |
-| `new_instance_template` | `true` | 新实例是否沿用默认设置。不进 `ConfigDto`，读取经 `template_info.enabled`，没有写入命令 |
+| `new_instance_template` | `true` | 新实例是否沿用默认设置。经 `get_config` / `update_config` 读写（`newInstanceTemplate`），`template_info.enabled` 给出的是同一项；设置页「游戏」分区「新实例」卡里的开关叫「沿用默认设置」，改了以后前端让默认设置的查询失效，实例页与新建确认步跟着换说法 |
 | `world_backup` | `{ auto: true, keep_per_world: 5, max_total_gb: 20 }` | 存档备份。段里不认识的键读入时保留、落盘时写回 |
 | `pinned_servers[].instance` | 无 | 「加入」时记住的实例 id。条目层不认识的键不保留 |
 | `parked_directories` | 空 | 非当前游戏目录留下的侧栏固定与当前选中，按游戏目录各存一份（`path`、`sidebar_pins`、`selected_version`）。它们是实例名，只在所在目录里有意义，`sidebar_pins` 与 `selected_version` 只属于当前目录。切换游戏目录时把当前目录的收起、把目标目录上次留下的放回，两样都为空的不留记录，切回来的目录不留第二份；不收起的话，在新目录里固定一个实例（新建实例也会自动固定）就把原目录的固定整份冲掉了 |

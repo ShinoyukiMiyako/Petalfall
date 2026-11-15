@@ -26,7 +26,8 @@ import panelStyles from "../../shell/UpdatePanel.module.css";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { ICON_PATHS } from "../../art/icon-paths";
+import { render, stubMatchMedia, stubMediaQueries, stubResizeObserver, type Rendered } from "../../test/dom";
 import { NAV_ANCHOR_ATTR } from "../../ui/Page";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { callsOf, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
@@ -1337,6 +1338,60 @@ describe("设置页：游戏", () => {
     expect(text()).not.toContain("已有 mods 或 saves");
   });
 
+  describe("新实例沿用默认设置", () => {
+    const TEMPLATE = "沿用默认设置";
+    const stored = async () => (await mockInvoke<{ new_instance_template: boolean }>("get_config")).new_instance_template;
+    const enabledInTemplateInfo = async () => (await mockInvoke<{ enabled: boolean }>("template_info")).enabled;
+
+    it("在「新实例」卡里，卡排在版本隔离之后、游戏目录之前；默认开，说明写清补什么、关掉后怎样", async () => {
+      await mount("game");
+      const toggle = button(TEMPLATE);
+      expect(section("新实例").contains(toggle)).toBe(true);
+      expect(toggle.getAttribute("role")).toBe("switch");
+      expect(toggle.getAttribute("aria-checked")).toBe("true");
+      const titles = all('[role="region"] h3').map((h) => h.textContent);
+      expect(titles.slice(titles.indexOf("版本隔离"), titles.indexOf("游戏目录") + 1)).toEqual(["版本隔离", "新实例", "游戏目录"]);
+      expect(section("新实例").textContent).toContain(
+        "新建实例与导入整合包时，把在实例设置里保存的默认设置（键位、视距、服务器列表）补进新实例，实例里已有的文件不动。关掉后一律不沿用，已保存的默认设置仍然留着。",
+      );
+    });
+
+    it("关掉写入 newInstanceTemplate: false，再打开写回 true；控件、状态层、配置与默认设置的 enabled 都跟着变", async () => {
+      await mount("game");
+      await click(button(TEMPLATE));
+      expect(callsOf(ipc, "update_config")).toEqual([{ newInstanceTemplate: false }]);
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("false");
+      expect(launcher.state.settings?.newInstanceTemplate).toBe(false);
+      expect([await stored(), await enabledInTemplateInfo()]).toEqual([false, false]);
+
+      await click(button(TEMPLATE));
+      expect(callsOf(ipc, "update_config")).toEqual([{ newInstanceTemplate: false }, { newInstanceTemplate: true }]);
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("true");
+      expect([await stored(), await enabledInTemplateInfo()]).toEqual([true, true]);
+    });
+
+    it("配置里已经关掉：打开设置页时开关就是关的", async () => {
+      await mockInvoke("update_config", { newInstanceTemplate: false });
+      await mount("game");
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("false");
+    });
+
+    it("写入中开关先显示关；失败后回到开，error 通知标题点名设置项、正文给原因，配置没变", async () => {
+      const write = deferred<null>();
+      ipc.overrides.set("update_config", () => write.promise);
+      await mount("game");
+      await click(button(TEMPLATE));
+      expect(callsOf(ipc, "update_config")).toEqual([{ newInstanceTemplate: false }]);
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("false");
+
+      write.reject(new IpcError("config_io", "磁盘已满"));
+      await flush();
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("true");
+      expect(toasts()).toContainEqual({ tone: "error", title: `没能保存「${TEMPLATE}」`, body: "磁盘已满" });
+      expect(await stored()).toBe(true);
+    });
+  });
+
   it("其他文件夹：切换前二次确认，确认后切换并刷新列表；访问不到的不能切；移除只删记录", async () => {
     let dirs = [
       { name: "默认目录", path: "D:\\Games\\Launcher\\.minecraft", is_current: true, available: true },
@@ -1464,7 +1519,10 @@ describe("设置页：外观", () => {
   it("非当前的明暗与强调色也画出真实颜色：预览按各自的明暗与当前强调色，色块各画各的", async () => {
     await mount("appearance");
     const previews = () => all('[role="radiogroup"][aria-label="明暗"] [data-mode]').map((p) => [p.getAttribute("data-mode"), p.getAttribute("data-tint")]);
+    // 跟随系统那张卡叠画日樱、夜樱两幅
     expect(previews()).toEqual([
+      ["day", "sakura"],
+      ["night", "sakura"],
       ["day", "sakura"],
       ["night", "sakura"],
     ]);
@@ -1474,8 +1532,35 @@ describe("设置页：外观", () => {
     expect(previews()).toEqual([
       ["day", "moss"],
       ["night", "moss"],
+      ["day", "moss"],
+      ["night", "moss"],
     ]);
     expect(radio("青苔").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("明暗三档：默认选中日樱；选跟随系统写 mode: system，按系统此刻的深浅色画，系统切换时当场换，卡头图标换成显示器", async () => {
+    const media = stubMediaQueries({ "(prefers-reduced-motion: reduce)": false, "(prefers-color-scheme: dark)": true });
+    await mount("appearance");
+    expect(all('[role="radiogroup"][aria-label="明暗"] [role="radio"]').map((r) => [r.textContent?.slice(0, 4), r.getAttribute("aria-checked")])).toEqual([
+      ["日樱浅粉", "true"],
+      ["夜樱深紫", "false"],
+      ["跟随系统", "false"],
+    ]);
+    // 系统是深色也不影响默认的日樱
+    expect(document.documentElement.getAttribute("data-sk-mode")).toBe("day");
+
+    await click(radio("跟随系统"));
+    expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { mode: "system" } }]);
+    expect(radio("跟随系统").getAttribute("aria-checked")).toBe("true");
+    expect(document.documentElement.getAttribute("data-sk-mode")).toBe("night");
+    expect(section("明暗").querySelector("svg > path")?.getAttribute("d")).toBe(ICON_PATHS.monitor.s);
+    expect((await mockInvoke<{ mode: string }>("get_appearance")).mode).toBe("system");
+
+    media["(prefers-color-scheme: dark)"].set(false);
+    await flush();
+    expect(document.documentElement.getAttribute("data-sk-mode")).toBe("day");
+    expect(radio("跟随系统").getAttribute("aria-checked")).toBe("true");
+    expect(callsOf(ipc, "set_appearance")).toHaveLength(1);
   });
 
   it("明暗即时生效并写后端；本机没有樱花林全景时开关禁用并说明原因", async () => {
