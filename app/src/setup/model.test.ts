@@ -17,6 +17,7 @@ import {
   replay,
   stepDirection,
   stepKey,
+  switchedFrom,
   switchingTo,
   unattendedMode,
   withAppFolder,
@@ -506,6 +507,26 @@ describe("安装中与完成页说不说「换到」", () => {
 
   it("换通道却认不出安装包的通道时报错", () => {
     expect(() => switchingTo("switch", switchProbe({ payloadChannel: null }))).toThrow("按 switch 换通道却认不出安装包的通道");
+  });
+});
+
+describe("完成页说不说新加的设置项可能回到默认", () => {
+  it.each<[string, InstallMode, Probe, Channel | null]>([
+    ["交互的换到更慢通道", "switch", switchProbe(), "dev"],
+    ["带开关的更新模式", "switch", switchProbe(UPDATE_SWITCH), "dev"],
+    ["从正式版换到测试版", "switch", probeOf(existingOf("switch", "stable"), { payloadChannel: "beta" }), "stable"],
+    // 装上的都不比原来旧，设置都还在
+    ["交互的换到更快通道", "upgrade", fasterProbe(), null],
+    ["同通道升级", "upgrade", probeOf(existingOf("upgrade")), null],
+    ["修复", "repair", probeOf(existingOf("same")), null],
+    ["首装", "fresh", probeOf(null), null],
+  ])("%s：%s 计划原来的通道是 %s", (_, mode, probe, channel) => {
+    expect(switchedFrom(mode, probe)).toBe(channel);
+  });
+
+  it("换通道却认不出原来的通道时报错", () => {
+    expect(() => switchedFrom("switch", probeOf(existingOf("switch", null), { payloadChannel: "beta" }))).toThrow("按 switch 换通道却认不出原来的通道");
+    expect(() => switchedFrom("switch", probeOf(null, { payloadChannel: "beta" }))).toThrow("按 switch 换通道却认不出原来的通道");
   });
 });
 

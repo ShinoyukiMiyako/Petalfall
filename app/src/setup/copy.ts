@@ -111,6 +111,11 @@ export interface SetupCopy {
     title: ModeTitles;
     firstRun: string;
     kept: string;
+    /**
+     * 换到更慢通道（switch）后的说明：装上的是更早的版本，ci 里新加的设置项可能回到默认值，不能说设置都还在。
+     * ci、cp 是原来的与换到的通道名，说法与「换到」页的那句相同。
+     */
+    switchKept(ci: string, cp: string): string;
     elevated: string;
     open: string;
     close: string;
@@ -225,6 +230,9 @@ const LEGAL_NOTE_ZH = `${APP_NAME}的代码按 ${APP_LICENSE} 及其附加条款
 const LEGAL_NOTE_EN = `${APP_NAME_EN}'s code is open source under ${APP_LICENSE} with additional terms, and its art assets are licensed under ${ASSET_LICENSE}. It comes with no warranty. You may redistribute it under those licenses.`;
 const DATA_UNTOUCHED_ZH = "设置、账户和游戏文件都不动。";
 const DATA_UNTOUCHED_EN = "Your settings, accounts and game files stay as they are.";
+/** 换到更慢通道装上的是更早的版本：「换到」页确认之前与完成页说同一句。 */
+const SWITCH_KEPT_ZH = (ci: string, cp: string) => `账户和游戏文件都留着；${ci}里新加的设置项，在${cp}里改过设置后可能回到默认值。`;
+const SWITCH_KEPT_EN = (ci: string, cp: string) => `Your accounts and game files are kept; settings added in ${ci} may return to their defaults once you change settings in ${cp}.`;
 /** 覆盖安装换位置等于搬数据目录，这时不能叫人换文件夹。 */
 const LOCKED_LOCATION_ZH = "现有的安装位置不能换。";
 const LOCKED_LOCATION_EN = "The existing install can't move.";
@@ -309,6 +317,7 @@ const ZH: SetupCopy = {
     },
     firstRun: `第一次打开时，${APP_NAME}会带你设置游戏目录、Java 和账户。`,
     kept: "设置、账户和游戏文件都还在。",
+    switchKept: SWITCH_KEPT_ZH,
     elevated: `安装程序是以管理员身份运行的，从开始菜单打开${APP_NAME}才是普通权限。`,
     open: `打开${APP_NAME}`,
     close: "关闭",
@@ -359,7 +368,7 @@ const ZH: SetupCopy = {
       switch: {
         title: (cp) => `换到${cp}`,
         lead: (ci, installed, cp, payload) =>
-          `这台电脑上是${ci} ${installed}，这个安装包是版本更早的${cp} ${payload}。换过去以后${APP_NAME}按${cp}检查更新。账户和游戏文件都留着；${ci}里新加的设置项，在${cp}里改过设置后可能回到默认值。`,
+          `这台电脑上是${ci} ${installed}，这个安装包是版本更早的${cp} ${payload}。换过去以后${APP_NAME}按${cp}检查更新。${SWITCH_KEPT_ZH(ci, cp)}`,
       },
     },
     dataTooNew: {
@@ -489,6 +498,7 @@ const EN: SetupCopy = {
     },
     firstRun: `${APP_NAME_EN} will walk you through the game folder, Java and accounts on first launch.`,
     kept: "Your settings, accounts and game files are untouched.",
+    switchKept: SWITCH_KEPT_EN,
     elevated: `Setup is running as administrator. Open ${APP_NAME_EN} from the Start menu so it runs with normal rights.`,
     open: `Open ${APP_NAME_EN}`,
     close: "Close",
@@ -540,7 +550,7 @@ const EN: SetupCopy = {
       switch: {
         title: (cp) => `Switch to ${cp}`,
         lead: (ci, installed, cp, payload) =>
-          `${ci} ${installed} is installed, and this installer has the earlier ${cp} ${payload}. After switching, ${APP_NAME_EN} checks for ${cp} updates. Your accounts and game files are kept; settings added in ${ci} may return to their defaults once you change settings in ${cp}.`,
+          `${ci} ${installed} is installed, and this installer has the earlier ${cp} ${payload}. After switching, ${APP_NAME_EN} checks for ${cp} updates. ${SWITCH_KEPT_EN(ci, cp)}`,
       },
     },
     dataTooNew: {

@@ -25,6 +25,7 @@ import {
   remindsChannelRevert,
   stepDirection,
   stepKey,
+  switchedFrom,
   switchingTo,
   unattendedMode,
   type SetupEvent,
@@ -319,6 +320,7 @@ function CurrentView({ flow, bridge, copy }: ViewProps) {
           copy={copy}
           mode={plan.mode}
           switching={switchingTo(plan.mode, probe)}
+          switchedFrom={switchedFrom(plan.mode, probe)}
           version={probe.payloadVersion}
           keptData={state.keptData}
           elevated={probe.elevated}

@@ -231,6 +231,17 @@ export function switchingTo(mode: InstallMode, probe: Probe): Channel | null {
   return probe.payloadChannel;
 }
 
+/**
+ * 换到更慢通道（switch）之前装着的通道。switch 装上的是更早的版本，完成页要说那个通道里新加的设置项可能回到默认值；
+ * 别的模式装上的都不比原来旧，为 null。
+ */
+export function switchedFrom(mode: InstallMode, probe: Probe): Channel | null {
+  if (mode !== "switch") return null;
+  const channel = probe.existing?.channel;
+  if (channel === undefined || channel === null) throw new Error("按 switch 换通道却认不出原来的通道");
+  return channel;
+}
+
 function requireProbe(state: SetupState): Probe {
   if (state.probe === null) throw new Error(`视图 ${state.view} 需要探测结果，状态里没有`);
   return state.probe;

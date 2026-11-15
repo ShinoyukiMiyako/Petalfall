@@ -206,6 +206,17 @@ describe("换通道与数据拦截的文案", () => {
     );
   });
 
+  // 换到更慢的通道装上的是更早的版本，完成页不能照别的安装说设置都还在
+  it("完成页换到更慢通道的说明与「换到」页说的是同一句", () => {
+    expect(COPY.zh.done.switchKept("预览版", "测试版")).toBe("账户和游戏文件都留着；预览版里新加的设置项，在测试版里改过设置后可能回到默认值。");
+    expect(COPY.en.done.switchKept("Preview", "Beta")).toBe("Your accounts and game files are kept; settings added in Preview may return to their defaults once you change settings in Beta.");
+    for (const lang of ["zh", "en"] as const) {
+      const copy = COPY[lang];
+      const [ci, cp] = [copy.channel.dev, copy.channel.beta];
+      expect(copy.installed.kind.switch.lead(ci, "1.1.0-dev.61", cp, "1.0.0-beta.5").endsWith(copy.done.switchKept(ci, cp))).toBe(true);
+    }
+  });
+
   it("中文：安装中、完成页换通道的标题与失败页的补句", () => {
     const { installing, done, failed } = COPY.zh;
     expect(installing.title.switch("测试版", "1.0.0-beta.5")).toBe("正在换到测试版 1.0.0-beta.5");
