@@ -29,6 +29,7 @@
 //! 新增一种落盘文件时这里抓不到，要自己在这里加上它的样本。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use petalfall_auth::AccountType;
@@ -63,6 +64,7 @@ use crate::reattach::{RECORD_FORMAT, RecordAccount, RunningRecord};
 use crate::session::JavaUsed;
 use crate::template::{TEMPLATE_META_FILE, TemplateMeta, fill_staging};
 use crate::ui_shape::UiShape;
+use crate::usage_notice::UsageNoticeAcceptance;
 
 /// 自带格式版本的常量与登记值：常量一改就与登记值对不上，逼改动的人同步判断数据格式号。
 const REGISTERED_FORMATS: [(&str, u32, u32); 4] = [
@@ -547,6 +549,10 @@ fn config_samples() -> Vec<PetalfallConfig> {
                 recent_cards: 4,
                 repair_banner: true,
             },
+            usage_notice: Some(UsageNoticeAcceptance {
+                version: NonZeroU32::new(2).expect("样本的须知版本号不是 0"),
+                accepted_at: 1_763_200_000_000,
+            }),
             unrecognized: unrecognized.clone(),
             // 不参与序列化：只由 ConfigStore 读入时收下各段不认识的键、落盘时写回，填不进样本。
             carried_over: CarriedOver::default(),

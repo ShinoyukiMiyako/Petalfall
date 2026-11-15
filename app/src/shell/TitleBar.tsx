@@ -21,7 +21,7 @@ import { DownloadPeek } from "./DownloadPeek";
 import { useNav, useShell } from "./shell";
 import { StatusIsland } from "./StatusIsland";
 import styles from "./TitleBar.module.css";
-import { useRunner } from "./useRunner";
+import { useRunner, type Runner } from "./useRunner";
 import { useWindowFrame, useWindowPort } from "./window";
 
 /** 窗口的最大化与焦点状态；读取失败经外层统一错误处理报告。 */
@@ -147,10 +147,14 @@ function SearchEntry() {
   );
 }
 
-/** 窗口三键：不加提示气泡（与系统标题栏一致），可访问名称随最大化状态切换。 */
-export function WindowControls({ maximized }: { maximized: boolean }) {
+/**
+ * 窗口三键：不加提示气泡（与系统标题栏一致），可访问名称随最大化状态切换。
+ * run 缺省时失败经外壳的通知报告；外壳挂上之前的整窗页面（使用须知）没有通知容器，自己给一个把失败写在页面上的。
+ */
+export function WindowControls({ maximized, run: pageRun }: { maximized: boolean; run?: Runner }) {
   const port = useWindowPort();
-  const run = useRunner();
+  const shellRun = useRunner();
+  const run = pageRun === undefined ? shellRun : pageRun;
   return (
     <div className={styles.window}>
       <button type="button" className={styles.winButton} aria-label={TITLEBAR_COPY.minimize} onClick={() => void run(() => port.minimize(), SHELL_ACTION_ERROR.minimize)}>

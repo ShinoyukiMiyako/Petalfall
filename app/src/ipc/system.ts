@@ -51,6 +51,22 @@ export const isFirstRun = (): Promise<boolean> => invoke<boolean>("is_first_run"
 export const completeFirstRun = (gameDir: string, extraDirectories: NamedDirectoryDto[]): Promise<void> =>
   invoke<void>("complete_first_run", { gameDir, extraDirectories });
 
+// ---- 使用须知 ----
+
+/** 本机确认过的使用须知。 */
+export interface UsageNoticeAcceptanceDto {
+  /** 确认的是第几版：须知文首「版本：N」的 N，从 1 起。 */
+  version: number;
+  /** 确认的时刻，Unix 毫秒。 */
+  accepted_at: number;
+}
+
+/** 本机确认过的使用须知；没确认过（含旧配置没有这一项、这一项读不懂）为 null。 */
+export const usageNoticeAcceptance = (): Promise<UsageNoticeAcceptanceDto | null> => invoke<UsageNoticeAcceptanceDto | null>("usage_notice_acceptance");
+
+/** 记下用户此刻确认了第 version 版并落盘；version 不是正整数时报 invalid_argument。 */
+export const acceptUsageNotice = (version: number): Promise<void> => invoke<void>("accept_usage_notice", { version });
+
 // ---- 启动提示 ----
 
 /** 启动时发生、要让用户知道的事，按 kind 区分。 */

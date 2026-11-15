@@ -145,6 +145,31 @@ describe("mock 持久化", () => {
     expect(await third.mockInvoke("get_config")).toMatchObject({ ...expected, skip_accessibility_onboarding: true });
   });
 
+  it("使用须知的确认：同意后刷新仍记着；早先的快照没有这一项时按没确认过读入", async () => {
+    type StoredConfig = { data: Record<string, unknown> };
+    const KEY = "slug.mock.config";
+    const storage = new MemoryStorage();
+    const version = 1 + Math.floor(Math.random() * 900);
+    const first = await reload();
+    first.enableMockPersistence(storage, PREFIX);
+    expect(await first.mockInvoke("usage_notice_acceptance")).toBeNull();
+    await first.mockInvoke("accept_usage_notice", { version });
+
+    const second = await reload();
+    second.enableMockPersistence(storage, PREFIX);
+    expect(await second.mockInvoke("usage_notice_acceptance")).toMatchObject({ version });
+
+    const raw = storage.getItem(KEY);
+    if (raw === null) throw new Error(`存储里没有 ${KEY}`);
+    const saved = JSON.parse(raw) as StoredConfig;
+    delete saved.data.usageNotice;
+    storage.setItem(KEY, JSON.stringify(saved));
+
+    const third = await reload();
+    third.enableMockPersistence(storage, PREFIX);
+    expect(await third.mockInvoke("usage_notice_acceptance")).toBeNull();
+  });
+
   it("resetMockData 回到种子并清掉存下的状态，刷新后仍是种子", async () => {
     const storage = new MemoryStorage();
     const first = await reload();

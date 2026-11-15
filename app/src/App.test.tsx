@@ -6,6 +6,9 @@
 // 不用 act 包裹、不用假定时器：渲染、懒加载与动画都按真实时间推进，最接近浏览器里 pnpm dev 的样子。
 // 任何一处出错都会留下痕迹：页面错误边界的错误页、console.error（外层统一处理与错误边界都会写）、error 通知。
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import App, { prepareApp } from "./App";
@@ -15,7 +18,7 @@ import { DEVICE_DIALOG_COPY, OFFLINE_DIALOG_COPY, AUTHLIB_DIALOG_COPY } from "./
 import { UPDATE_COPY } from "./copy/updater";
 import { FOOTER_COPY, STEP_COPY } from "./flows/onboarding/copy";
 import { mockInvoke, resetMocks } from "./ipc/mock";
-import { ACCOUNT_COPY, PAGE_ERROR_COPY, PALETTE_COPY, SIDEBAR_COPY } from "./copy/shell";
+import { ACCOUNT_COPY, PAGE_ERROR_COPY, PALETTE_COPY, SIDEBAR_COPY, USAGE_NOTICE_COPY } from "./copy/shell";
 import { ACCOUNTS_COPY } from "./pages/accounts/copy";
 import homeStyles from "./pages/home/home.module.css";
 import { DETAIL_COPY, IMPORT_COPY, SEARCH_COPY } from "./pages/discover/copy";
@@ -26,6 +29,7 @@ import { DEFAULT_APPEARANCE } from "./state/appearance";
 import type { AppearanceMode } from "./domain/types";
 import { INSTANCE_TABS, PAGE_IDS, SETTINGS_SECTIONS, type PageId } from "./state/route";
 import { DEFAULT_UI_SHAPE, type UiShape } from "./state/ui-shape";
+import { loadUsageNoticeState, type UsageNoticeState } from "./state/usage-notice";
 import { stubMatchMedia, stubResizeObserver } from "./test/dom";
 import type { IpcRecorder } from "./test/fake-bridge";
 import { resetRecorder } from "./test/launcher";
@@ -66,6 +70,10 @@ let windowWidth = 1024;
 let mode: AppearanceMode = "day";
 /** 启动时读到的界面形状；冒烟各轮按没记过启动。 */
 let uiShape: UiShape = DEFAULT_UI_SHAPE;
+/** 已经确认过这一版须知：冒烟各轮直接进向导或主界面。 */
+const NOTICE_ACCEPTED: UsageNoticeState = { notice: { version: 1, body: "冒烟测试不展示须知" }, acceptedVersion: 1 };
+/** 启动时读到的使用须知与确认记录。 */
+let usageNotice: UsageNoticeState = NOTICE_ACCEPTED;
 
 function mount(): void {
   // 测试不处理 CSS 模块。外壳与页面之间有一条靠样式成立的约定：内容区是纵向滚动容器（发现页据此找吸顶与预取的滚动根），
@@ -85,7 +93,7 @@ function mount(): void {
   vi.stubGlobal("innerWidth", windowWidth);
   root = createRoot(host);
   // 花瓣画布依赖真实的 2D 上下文与帧循环，冒烟测试只关心页面能否渲染
-  root.render(<App appearance={{ ...DEFAULT_APPEARANCE, mode, petals: false }} uiShape={uiShape} />);
+  root.render(<App appearance={{ ...DEFAULT_APPEARANCE, mode, petals: false }} uiShape={uiShape} usageNotice={usageNotice} />);
 }
 
 /** 分档与明暗确实按这一轮的设定生效了，否则整轮测的不是想测的那一档。 */
@@ -264,6 +272,7 @@ beforeEach(() => {
   consoleError = vi.spyOn(console, "error");
   visited = [];
   uiShape = DEFAULT_UI_SHAPE;
+  usageNotice = NOTICE_ACCEPTED;
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
   vi.spyOn(console, "info").mockImplementation(() => undefined);
 });
@@ -471,5 +480,30 @@ describe("启动时读到的界面形状", () => {
       return grid.children.length;
     }, WAIT);
     expect(skeletons).toBe(2);
+  }, 60_000);
+});
+
+describe("首次启动先过使用须知", () => {
+  it("整窗是仓库里的那份须知，没有侧栏也没有向导；同意之后须知退场、换成向导，记下的是文件里的版本", async () => {
+    windowWidth = 1280;
+    mode = "day";
+    // jsdom 环境里的全局 URL 是 jsdom 的，readFileSync 不认，按路径读
+    const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "docs", "usage-notice.md"), "utf8");
+    vi.stubGlobal("fetch", (url: string) => (url.endsWith("/usage-notice.md") ? Promise.resolve(new Response(text, { status: 200 })) : Promise.reject(new TypeError("测试环境不联网"))));
+    // 假后端初始就是首次启动、没有确认记录
+    usageNotice = await loadUsageNoticeState();
+    expect(usageNotice.acceptedVersion).toBeNull();
+    await prepareApp();
+    mount();
+
+    const agree = await vi.waitFor(() => buttonIn(document, USAGE_NOTICE_COPY.agree), WAIT);
+    expect(document.querySelector("[data-sidebar-item]")).toBeNull();
+    expect(document.body.textContent).not.toContain(STEP_COPY.gameDir.title);
+    click(agree);
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain(STEP_COPY.gameDir.title), WAIT);
+    await vi.waitFor(() => expect(document.querySelector("[data-sk-usage-notice]")).toBeNull(), WAIT);
+    expect(await mockInvoke<{ version: number } | null>("usage_notice_acceptance")).toMatchObject({ version: usageNotice.notice.version });
+    expectNoFailures();
   }, 60_000);
 });
