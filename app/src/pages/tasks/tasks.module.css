@@ -431,19 +431,24 @@
   height: 18px;
   border-radius: var(--sk-r-pill);
   outline: 2px solid var(--sk-surface);
-  color: var(--sk-surface);
 }
 
+/* 状态色实心底上的图标取与它配对的 -ink，不借卡面色：状态色或卡面色调整时，配对关系由令牌兜住 */
 .badge[data-tone="ok"] {
   background: var(--sk-ok);
+  color: var(--sk-ok-ink);
 }
 
 .badge[data-tone="danger"] {
   background: var(--sk-danger);
+  color: var(--sk-danger-ink);
 }
 
+/* 已取消是要认出来的结局，不是禁用态：text-3 填充上的图标不到非文字 3:1，填充取 text-2。
+   text-2 没有配套的 -ink，图标沿用卡面色 surface */
 .badge[data-tone="muted"] {
-  background: var(--sk-text-3);
+  background: var(--sk-text-2);
+  color: var(--sk-surface);
 }
 
 .side {
