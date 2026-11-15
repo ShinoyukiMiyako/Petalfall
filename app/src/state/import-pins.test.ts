@@ -359,4 +359,20 @@ describe("导入进行中：与新建一样，入队就进侧栏", () => {
     expect(store.getState().sidebarPins).toEqual(["生存"]);
     expect(entry(PACK.name)).toMatchObject({ pinned: false });
   });
+
+  it("配置里留着同名旧固定、半成品被扫到后读了回来，导入中没动过它：导入结束后端去掉那一项，落地重读后按自动固定追加到末尾", async () => {
+    await boot([PACK.name, "生存"]);
+    await store.actions.installModpack(PACK);
+    await settle();
+    await scannedHalfway();
+    expect(store.getState().sidebarPins).toEqual([PACK.name, "生存"]);
+
+    // 导入成功返回之前，后端去掉了配置里与新实例同名的旧固定
+    configPins = configPins.filter((p) => p !== PACK.name);
+    await imported();
+    expect(writes()).toEqual([["生存", PACK.name]]);
+    expect(store.getState().sidebarPins).toEqual(["生存", PACK.name]);
+    expect(store.getState().unsavedPins).toEqual([]);
+    expect(entry(PACK.name)).toMatchObject({ pinned: true });
+  });
 });

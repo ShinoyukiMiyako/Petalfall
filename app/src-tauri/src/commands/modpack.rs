@@ -20,7 +20,8 @@ use tauri::{AppHandle, Manager, State};
 use crate::commands::discover::parse_platform;
 use crate::commands::error::code;
 use crate::commands::instances::{
-    ensure_saves_settled_for_reading, ChainGuard, ExportedFiles, InstanceActivity, InstanceLocks,
+    drop_namesake_pins, ensure_saves_settled_for_reading, ChainGuard, ExportedFiles,
+    InstanceActivity, InstanceLocks,
 };
 use crate::commands::launch::RunningGame;
 use crate::commands::tasks::ensure_game_dir;
@@ -353,7 +354,12 @@ pub(crate) async fn install_modpack_with(
         })
         .await;
     match result {
-        Ok(outcome) => Ok(outcome_dto(outcome)),
+        Ok(outcome) => {
+            // 导入成功说明实例目录是这次建的；失败时这里分不清目录建没建出来，半成品删掉了的由下面连选中一起清。
+            // 占用守卫还留在 reserved 里，按导入所在的游戏目录清，理由同下面的清理。
+            drop_namesake_pins(facade, petalfall.game_dir(), &outcome.version_id, task_id).await;
+            Ok(outcome_dto(outcome))
+        }
         Err(err) => {
             let name = reserved
                 .lock()
@@ -1631,6 +1637,60 @@ mod tests {
         let saved = saved_config(dir.path()).await.expect("配置有变化，应落盘");
         assert_eq!(saved.sidebar_pins, ["生存"]);
         assert_eq!(saved.selected_version, None);
+    }
+
+    /// 配置里留着与导入同名的旧固定（同名实例早先在启动器之外删掉了），导入成功后：门面与落盘的配置里这个名字的固定去掉，
+    /// 别的固定原样，当前选中不动。留着的话新导入的实例一出现就是已固定。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn successful_import_drops_the_old_pin_on_its_name_but_keeps_the_selection() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/manifest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                    "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
+                    "time":"t","releaseTime":"t"}}]}}"#
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/test.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"id":"test","type":"release","mainClass":"M"}"#),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let facade = importing_facade(
+            dir.path(),
+            &server,
+            PetalfallConfig {
+                sidebar_pins: vec!["周末联机".to_owned(), "生存".to_owned()],
+                selected_version: Some("周末联机".to_owned()),
+                ..PetalfallConfig::default()
+            },
+        );
+
+        let outcome = import_vanilla_as(&facade, dir.path(), "test", "周末联机")
+            .await
+            .unwrap();
+        assert_eq!(outcome.version_id, "周末联机");
+        assert!(dir
+            .path()
+            .join(".minecraft")
+            .join("versions")
+            .join("周末联机")
+            .join("周末联机.json")
+            .is_file());
+
+        let config = facade.read().await.config().clone();
+        assert_eq!(config.sidebar_pins, ["生存"]);
+        assert_eq!(config.selected_version.as_deref(), Some("周末联机"));
+        let saved = saved_config(dir.path()).await.expect("配置有变化，应落盘");
+        assert_eq!(saved.sidebar_pins, ["生存"]);
+        assert_eq!(saved.selected_version.as_deref(), Some("周末联机"));
     }
 
     /// 同上，导入在实例目录建好之后被取消。

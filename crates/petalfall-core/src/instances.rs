@@ -142,7 +142,7 @@ pub struct DeletionPreview {
 /// 读一次侧栏固定的结果，见 [`Petalfall::read_sidebar_pins`]。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidebarPins {
-    /// 侧栏要显示的固定，保持配置里的顺序。
+    /// 侧栏要显示的固定，保持配置里的顺序，重复的只留第一项。
     pub shown: Vec<String>,
     /// 确认已不在游戏目录里的固定项，按配置里的顺序、不重复，经 [`Petalfall::prune_sidebar_pins`] 从配置里去掉。
     pub gone: Vec<String>,
@@ -405,21 +405,56 @@ impl Petalfall {
             return self.rename_instance_refs(old, new);
         }
         let mut changed = false;
-        for parked in &mut self.config_mut().parked_directories {
+        self.config_mut().parked_directories.retain_mut(|parked| {
             if !same_path(&parked.path, in_game_dir) {
-                continue;
+                return true;
             }
-            for pin in &mut parked.sidebar_pins {
-                if pin == old {
-                    *pin = new.to_owned();
-                    changed = true;
-                }
-            }
+            let renamed = renamed_pins(&parked.sidebar_pins, old, new);
+            let mut touched = renamed != parked.sidebar_pins;
+            parked.sidebar_pins = renamed;
             if parked.selected_version.as_deref() == Some(old) {
                 parked.selected_version = Some(new.to_owned());
-                changed = true;
+                touched = true;
             }
+            changed |= touched;
+            // 去掉同名旧固定之后可能固定与选中都空了，同切换目录时收起它们的规则整条删掉。
+            !(touched && parked.sidebar_pins.is_empty() && parked.selected_version.is_none())
+        });
+        changed
+    }
+
+    /// 新建或导入的实例 `name` 已在游戏目录 `in_game_dir` 里建出来，去掉配置在那个目录名下与它同名（不分大小写，同命名规则
+    /// 查重）的侧栏固定。实例目录是这次建的，建的时候名字下什么都没有，这样的固定只可能是在落樱之外删掉的同名旧实例留下的，
+    /// 留着的话新实例一出现就是固定的；新实例要不要固定由前端按入队时的打算另行写入。当前选中与固定服务器记住的实例不动：
+    /// 新建入队时前端就把当前选中设成了新实例。
+    ///
+    /// `in_game_dir` 是当前目录时改当前的固定；已切走时只改 `parked_directories` 里那个目录那条，改完固定与选中都空了就整条删掉，
+    /// 规则同 [`Petalfall::forget_moved_instance`]。返回配置是否有变化，有变化时调用方落盘。
+    pub fn forget_namesake_pins(&mut self, name: &str, in_game_dir: &Path) -> bool {
+        if same_path(in_game_dir, self.game_dir()) {
+            let pins = &self.config().sidebar_pins;
+            let kept: Vec<String> = pins
+                .iter()
+                .filter(|pin| !is_namesake(pin, name))
+                .cloned()
+                .collect();
+            if kept.len() == pins.len() {
+                return false;
+            }
+            self.set_sidebar_pins(kept);
+            return true;
         }
+        let mut changed = false;
+        self.config_mut().parked_directories.retain_mut(|parked| {
+            if !same_path(&parked.path, in_game_dir) {
+                return true;
+            }
+            let pins = parked.sidebar_pins.len();
+            parked.sidebar_pins.retain(|pin| !is_namesake(pin, name));
+            let touched = parked.sidebar_pins.len() != pins;
+            changed |= touched;
+            !(touched && parked.sidebar_pins.is_empty() && parked.selected_version.is_none())
+        });
         changed
     }
 
@@ -451,20 +486,11 @@ impl Petalfall {
         Ok(())
     }
 
-    /// 把配置里对 `old` 的引用改成 `new`（侧栏固定保持原位，当前选中与固定服务器记住的实例跟着走）。
-    /// 返回配置是否有变化。
+    /// 把配置里对 `old` 的引用改成 `new`（侧栏固定保持原位，当前选中与固定服务器记住的实例跟着走）。固定里与 `new` 同名的
+    /// 旧项一并去掉，当前选中不动，理由同 [`Petalfall::forget_namesake_pins`]。返回配置是否有变化。
     pub fn rename_instance_refs(&mut self, old: &str, new: &str) -> bool {
         let pins = &self.config().sidebar_pins;
-        let renamed: Vec<String> = pins
-            .iter()
-            .map(|pin| {
-                if pin == old {
-                    new.to_owned()
-                } else {
-                    pin.clone()
-                }
-            })
-            .collect();
+        let renamed = renamed_pins(pins, old, new);
         let pins_changed = renamed != *pins;
         if pins_changed {
             self.set_sidebar_pins(renamed);
@@ -522,9 +548,11 @@ impl Petalfall {
             .map(|version| version.id.as_str())
             .chain(scan.broken.iter().map(|broken| broken.id.as_str()))
             .collect();
+        // 改名占住同名旧固定的名字时，旧版本会把配置写成两项同名；前端照显示的整组写回，有重复就整组被拒，所以只显示第一项。
+        let mut seen = HashSet::new();
         let shown = pinned
             .iter()
-            .filter(|pin| visible.contains(pin.as_str()))
+            .filter(|pin| visible.contains(pin.as_str()) && seen.insert(pin.as_str()))
             .cloned()
             .collect();
         Ok(SidebarPins {
@@ -611,6 +639,30 @@ impl Petalfall {
 
 fn not_installed(id: &str) -> CoreError {
     CoreError::VersionNotInstalled { id: id.to_owned() }
+}
+
+/// 两个实例名算不算同名：不分大小写，同命名规则查重（[`check_instance_name`]）。
+fn is_namesake(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
+/// 实例从 `old` 改名成 `new` 之后的固定列表：`old` 原位换成 `new`，重复的只留第一项；与 `new` 同名的别的固定去掉。改名校验过
+/// 新名字不与别的实例同名，这样的固定只可能是在落樱之外删掉的同名旧实例留下的，原样换的话列表里有两项 `new`，之后整组写入
+/// 固定都按重复被拒。
+fn renamed_pins(pins: &[String], old: &str, new: &str) -> Vec<String> {
+    let mut placed = false;
+    pins.iter()
+        .filter_map(|pin| {
+            if pin == old && !placed {
+                placed = true;
+                Some(new.to_owned())
+            } else if pin == old || is_namesake(pin, new) {
+                None
+            } else {
+                Some(pin.clone())
+            }
+        })
+        .collect()
 }
 
 /// 看固定项实例目录的结果怎么算：确实不存在才算不在；有这一项就不算（不是文件夹、扫描之后才建出来的都一样）；
@@ -2985,9 +3037,11 @@ pub(crate) mod tests {
             pinned_instances(&petalfall),
             vec![("a.example".to_owned(), Some("生存".to_owned()))]
         );
+        // 那条里已经没有旧名，也没有与新名字同名的固定：不报变化。再用「生存二」当新名字就是改名占住同名旧固定的名字，
+        // 那一项会被当成旧固定去掉。
         assert!(!petalfall.rename_moved_instance_refs(
             "生存",
-            "生存二",
+            "生存四",
             Path::new("E:/PCL2/.minecraft")
         ));
         assert!(!petalfall.rename_moved_instance_refs(
@@ -3264,6 +3318,149 @@ pub(crate) mod tests {
             .map(|parked| (parked.path.clone(), parked.sidebar_pins.clone()))
             .collect();
         assert_eq!(parked, vec![(first, pins)]);
+    }
+
+    /// 新建、导入建出实例之后：配置里与它同名（不分大小写）的固定去掉，其余保持原顺序；当前选中与固定服务器记住的实例不动，
+    /// 收起的别的目录里同名的固定也不动。
+    #[test]
+    fn a_new_instance_drops_the_namesake_pins_but_keeps_the_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        petalfall.set_sidebar_pins(vec![
+            "生存".to_owned(),
+            "Sky".to_owned(),
+            "创造".to_owned(),
+            "SKY".to_owned(),
+        ]);
+        petalfall.set_selected_version(Some("Sky".to_owned()));
+        petalfall
+            .set_pinned_servers(vec![pinned("a.example", Some("Sky"))])
+            .unwrap();
+        let elsewhere = parked("E:/PCL2/.minecraft", &["Sky"], Some("Sky"));
+        petalfall.config_mut().parked_directories = vec![elsewhere.clone()];
+        let current = PathBuf::from(
+            petalfall
+                .game_dir()
+                .display()
+                .to_string()
+                .to_uppercase()
+                .replace('\\', "/"),
+        );
+
+        assert!(petalfall.forget_namesake_pins("sky", &current));
+        assert_eq!(petalfall.config().sidebar_pins, ["生存", "创造"]);
+        assert_eq!(petalfall.config().selected_version.as_deref(), Some("Sky"));
+        assert_eq!(
+            pinned_instances(&petalfall),
+            vec![("a.example".to_owned(), Some("Sky".to_owned()))]
+        );
+        assert_eq!(petalfall.config().parked_directories, vec![elsewhere]);
+        assert!(!petalfall.forget_namesake_pins("sky", &current));
+        assert!(!petalfall.forget_namesake_pins("空岛", &current));
+        assert_eq!(petalfall.config().sidebar_pins, ["生存", "创造"]);
+    }
+
+    /// 新建、导入途中切走了当前目录：只改建出实例的那个收起目录那条，选中照旧；改完固定与选中都空了的整条删掉。
+    #[test]
+    fn a_new_instance_in_a_parked_directory_only_edits_that_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        petalfall.set_sidebar_pins(vec!["生存".to_owned()]);
+        let hmcl = parked("E:/HMCL/.minecraft", &["生存"], None);
+        petalfall.config_mut().parked_directories = vec![
+            parked("E:/PCL2/.minecraft", &["创造", "生存"], Some("生存")),
+            hmcl.clone(),
+            parked("F:/mc", &["生存"], None),
+        ];
+
+        assert!(petalfall.forget_namesake_pins("生存", Path::new("e:\\pcl2\\.minecraft\\")));
+        assert_eq!(
+            petalfall.config().parked_directories,
+            vec![
+                parked("E:/PCL2/.minecraft", &["创造"], Some("生存")),
+                hmcl.clone(),
+                parked("F:/mc", &["生存"], None),
+            ]
+        );
+        assert_eq!(petalfall.config().sidebar_pins, ["生存"]);
+
+        assert!(petalfall.forget_namesake_pins("生存", Path::new("F:/mc")));
+        assert_eq!(
+            petalfall.config().parked_directories,
+            vec![parked("E:/PCL2/.minecraft", &["创造"], Some("生存")), hmcl]
+        );
+        assert!(!petalfall.forget_namesake_pins("生存", Path::new("G:/没记过/.minecraft")));
+    }
+
+    /// 旧名还留在固定里时把另一个实例改名成它：去掉旧的那一项，改名的实例留在自己原来的位置，列表里只有一项新名字，
+    /// 整组写回照常通过；当前选中不动。只改大小写、配置里本来就重复的也只留一项。
+    #[tokio::test]
+    async fn renaming_onto_a_name_left_in_the_pins_keeps_a_single_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        write_version(&game, "创造", &vanilla_json("1.21.1"));
+        write_version(&game, "空岛", &vanilla_json("1.21.1"));
+        petalfall.set_sidebar_pins(vec!["生存".into(), "创造".into(), "空岛".into()]);
+        petalfall.set_selected_version(Some("生存".to_owned()));
+
+        petalfall
+            .rename_instance_files("空岛", "生存")
+            .await
+            .unwrap();
+        assert!(petalfall.rename_instance_refs("空岛", "生存"));
+        assert_eq!(petalfall.config().sidebar_pins, ["创造", "生存"]);
+        assert_eq!(petalfall.config().selected_version.as_deref(), Some("生存"));
+        let pins = petalfall.config().sidebar_pins.clone();
+        petalfall.validate_sidebar_pins(&pins).await.unwrap();
+        assert_eq!(petalfall.read_sidebar_pins().await.unwrap().shown, pins);
+
+        petalfall.set_sidebar_pins(vec!["sky".into(), "a".into(), "x".into()]);
+        assert!(petalfall.rename_instance_refs("x", "Sky"));
+        assert_eq!(petalfall.config().sidebar_pins, ["a", "Sky"]);
+        assert!(petalfall.rename_instance_refs("Sky", "sky"));
+        assert_eq!(petalfall.config().sidebar_pins, ["a", "sky"]);
+        petalfall.set_sidebar_pins(vec!["y".into(), "a".into(), "y".into()]);
+        assert!(petalfall.rename_instance_refs("y", "z"));
+        assert_eq!(petalfall.config().sidebar_pins, ["z", "a"]);
+    }
+
+    /// 改名途中切走了当前目录：收起的那条同样只留一项新名字；去掉之后固定与选中都空了的整条删掉。
+    #[test]
+    fn renaming_onto_a_pinned_name_in_a_parked_directory_keeps_a_single_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        petalfall.config_mut().parked_directories = vec![
+            parked("E:/PCL2/.minecraft", &["生存", "创造", "空岛"], None),
+            parked("F:/mc", &["生存"], None),
+        ];
+
+        assert!(petalfall.rename_moved_instance_refs(
+            "空岛",
+            "生存",
+            Path::new("E:/PCL2/.minecraft")
+        ));
+        assert!(petalfall.rename_moved_instance_refs("空岛", "生存", Path::new("F:/mc")));
+        assert_eq!(
+            petalfall.config().parked_directories,
+            vec![parked("E:/PCL2/.minecraft", &["创造", "生存"], None)]
+        );
+    }
+
+    /// 配置里已经有两项同名（旧版本改名留下的）：只显示第一项，前端照显示的整组写回时不被按重复拒掉。
+    #[tokio::test]
+    async fn duplicated_pins_are_shown_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        write_version(&game, "生存", &vanilla_json("1.21.1"));
+        write_version(&game, "创造", &vanilla_json("1.21.1"));
+        petalfall.set_sidebar_pins(vec!["生存".into(), "创造".into(), "生存".into()]);
+
+        let read = petalfall.read_sidebar_pins().await.unwrap();
+        assert_eq!(read.shown, ["生存", "创造"]);
+        assert_eq!(read.gone, Vec::<String>::new());
+        petalfall.validate_sidebar_pins(&read.shown).await.unwrap();
     }
 
     #[tokio::test]

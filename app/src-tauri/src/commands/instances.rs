@@ -1614,6 +1614,34 @@ pub(crate) async fn set_sidebar_pins_with(
     Ok(pins)
 }
 
+/// 新建或导入把实例 `name` 建在了游戏目录 `game_dir` 里：去掉配置在那个目录名下与它同名的旧固定（见
+/// `Petalfall::forget_namesake_pins`），否则在落樱之外删掉的同名旧实例的固定落到新实例上，它一出现就是固定的。
+///
+/// 只在实例目录确实由这次建出来之后调用：建目录成功说明游戏目录读得到、名字下原本什么都没有。游戏目录这一刻读不到时建目录
+/// 先失败，固定不动。在任务结束时清而不是一建好就清：安装途中前端可能把手里还留着的那一项随整组固定写回来。
+///
+/// 落盘失败只记日志：实例本身已经建好，返回给前端的是新建或导入本身的结局，固定没去掉的后果只是新实例显示为已固定。
+pub(crate) async fn drop_namesake_pins(
+    facade: &Facade,
+    game_dir: &Path,
+    name: &str,
+    task_id: &str,
+) {
+    match facade
+        .update_if_changed(|petalfall| petalfall.forget_namesake_pins(name, game_dir))
+        .await
+    {
+        Ok(true) => tracing::info!(task_id, name, "配置里与新实例同名的旧固定去掉了"),
+        Ok(false) => {}
+        Err(err) => tracing::error!(
+            task_id,
+            name,
+            error = %petalfall_base::error_with_causes(&err),
+            "新实例已建好，配置里与它同名的旧固定没能去掉"
+        ),
+    }
+}
+
 // ---------------------------------------------------------------- 新建与补全
 
 /// 新建实例：把原版 `id`（可选叠加加载器）安装为名为 `target_name` 的实例。长任务：进度经 core-event
@@ -1717,6 +1745,8 @@ pub(crate) async fn install_version_with(
                 .map_err(instance_error)
         })
         .await;
+    // 不论成败：装失败、取消后没删掉的目录照样列在实例库里；删掉了的下面连选中一起清。按快照的目录清，理由同删除实例。
+    drop_namesake_pins(facade, petalfall.game_dir(), &name, task_id).await;
     match outcome {
         Ok(outcome) => {
             petalfall
@@ -3783,6 +3813,127 @@ mod tests {
         assert_eq!(incomplete.spec.as_ref().unwrap().mc_version, "1.21.1");
     }
 
+    /// 版本清单里只有 1.21.1，它的版本 JSON 没有要下载的文件：新建一下就装好；清单里没有的版本装到一半失败。
+    /// 返回的模拟端点要一直留着。
+    async fn quick_install_env() -> (MockServer, Env) {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/manifest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"latest":{{"release":"1.21.1","snapshot":"1.21.1"}},
+                    "versions":[{{"id":"1.21.1","type":"release","url":"{}/1.21.1.json",
+                    "time":"t","releaseTime":"t"}}]}}"#,
+                server.uri()
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/1.21.1.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"id":"1.21.1","type":"release","mainClass":"net.minecraft.client.main.Main"}"#,
+            ))
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let env = Env::with(|a| a.with_manifest_url(format!("{uri}/manifest.json")));
+        (server, env)
+    }
+
+    /// 同名实例早先在落樱之外删掉了，配置里还留着它们的固定，期间没读过固定：新建同名实例之后，门面与落盘的配置里都不再
+    /// 固定它们，别的固定原样；装失败、目录留在实例库里的也一样。当前选中不动：入队时前端就把它设成了新实例。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_new_instance_does_not_inherit_the_pin_left_by_a_namesake() {
+        let (_server, env) = quick_install_env().await;
+        env.vanilla("生存");
+        env.facade
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["旧档".into(), "生存".into(), "没装完".into()]);
+                petalfall.set_selected_version(Some("旧档".into()));
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+        let game_dir = current_game_dir(&env.facade).await;
+
+        install_version_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "t1",
+            &game_dir,
+            args("旧档"),
+            &sink,
+        )
+        .await
+        .unwrap();
+        let fails = InstallArgs {
+            mc_version: "1.20.1".into(),
+            ..args("没装完")
+        };
+        let err = install_version_with(
+            &env.facade,
+            &registry,
+            &locks,
+            "t2",
+            &game_dir,
+            fails,
+            &sink,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, common::INSTALL_FAILED);
+        assert!(env.game_dir().join("versions").join("没装完").is_dir());
+
+        let survivor = vec!["生存".to_owned()];
+        let config = env.facade.read().await.config().clone();
+        assert_eq!(config.sidebar_pins, survivor);
+        assert_eq!(config.selected_version.as_deref(), Some("旧档"));
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, survivor);
+        assert_eq!(saved.selected_version.as_deref(), Some("旧档"));
+        assert_eq!(get_sidebar_pins_with(&env.facade).await.unwrap(), survivor);
+    }
+
+    /// 游戏目录这一刻够不着（像是移动硬盘没插上）：查重看不出名字被占，建实例目录却失败。新建照常报错，配置里同名的固定
+    /// 不动：接上之后那个实例可能还在。
+    #[tokio::test]
+    async fn an_install_that_cannot_reach_the_game_dir_keeps_the_namesake_pin() {
+        let env = Env::new();
+        let unplugged = env.dir.path().join("拔掉的盘");
+        std::fs::write(&unplugged, b"not a folder").unwrap();
+        switch_game_dir(&env, &unplugged.join(".minecraft")).await;
+        pin(&env, &["旧档"]).await;
+        env.facade
+            .snapshot()
+            .await
+            .check_new_instance_name("旧档")
+            .await
+            .unwrap();
+        let registry = TaskRegistry::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+
+        let err = install_version_with(
+            &env.facade,
+            &registry,
+            &InstanceLocks::default(),
+            "t",
+            &current_game_dir(&env.facade).await,
+            args("旧档"),
+            &sink,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, common::IO, "{err:?}");
+        assert!(!registry.is_running("t"));
+
+        let kept = vec!["旧档".to_owned()];
+        assert_eq!(env.facade.read().await.config().sidebar_pins, kept);
+        assert_eq!(env.saved_config().await.sidebar_pins, kept);
+    }
+
     /// 新建的成功路径：请求套用时出参 template 为 applied、模板文件落进实例；不请求时为 null、实例里一个
     /// 模板文件都没有。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4659,6 +4810,44 @@ mod tests {
             .unwrap();
         assert_eq!(list[0].id, "生存");
         assert_eq!(list[0].mc_version.as_deref(), Some("1.21.1"));
+    }
+
+    /// 旧名还留在固定里（同名实例早先在落樱之外删掉了）时把另一个实例改名成它：门面与落盘的配置里只有一项新名字，留在改名的
+    /// 实例原来的位置，当前选中不动；之后前端照读到的固定整组写回照常通过，不按重复拒掉。
+    #[tokio::test]
+    async fn renaming_onto_a_name_left_pinned_keeps_the_pins_writable() {
+        let env = Env::new();
+        env.vanilla("创造");
+        env.vanilla("空岛");
+        env.facade
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["生存".into(), "创造".into(), "空岛".into()]);
+                petalfall.set_selected_version(Some("生存".into()));
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+
+        rename_instance_with(&env.facade, &InstanceLocks::default(), "空岛", "生存")
+            .await
+            .unwrap();
+        let expected = vec!["创造".to_owned(), "生存".to_owned()];
+        assert_eq!(env.facade.read().await.config().sidebar_pins, expected);
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, expected);
+        assert_eq!(saved.selected_version.as_deref(), Some("生存"));
+
+        let shown = get_sidebar_pins_with(&env.facade).await.unwrap();
+        assert_eq!(shown, expected);
+        env.vanilla("末地");
+        let next: Vec<String> = shown.into_iter().chain(["末地".to_owned()]).collect();
+        assert_eq!(
+            set_sidebar_pins_with(&env.facade, next.clone())
+                .await
+                .unwrap(),
+            next
+        );
+        assert_eq!(env.saved_config().await.sidebar_pins, next);
     }
 
     fn write_playtime(env: &Env, json: &str) {

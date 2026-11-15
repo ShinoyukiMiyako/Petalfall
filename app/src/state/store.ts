@@ -2391,7 +2391,12 @@ export class LauncherStore {
     return current !== null && sameGameDir(task.gameDir, current) ? null : task.gameDir;
   }
 
-  /** 新建、导入的实例：写封面；要固定且侧栏此刻没满时追加到固定列表末尾。重扫结果与撤下占位项在同一次更新里。 */
+  /**
+   * 新建、导入的实例：写封面；固定列表按后端重读，要固定且侧栏此刻没满时追加到末尾。重扫结果与撤下占位项在同一次更新里。
+   *
+   * 后端在新建、导入结束时去掉了配置里与它同名的旧固定（在落樱之外删掉的同名实例留下的）。手里的固定列表可能还留着那一项：
+   * 按它判断，要固定的会当成已经固定、不再写入，之后一读就没了；不要固定的照样画成已固定。所以不论要不要固定都先重读。
+   */
   private async settleNewInstance(taskId: string, id: string, cover: string | null, pin: boolean): Promise<void> {
     if (cover !== null) {
       await this.queueInstanceSettings(id, async () => {
@@ -2399,12 +2404,12 @@ export class LauncherStore {
         await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, cover }));
       });
     }
-    if (pin) {
-      await this.queueSidebarPins(async () => {
-        const pins = this.raw.pins;
-        if (pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) await this.writePins([...pins, id]);
-      });
-    }
+    await this.queueSidebarPins(async () => {
+      await this.fetchPins();
+      if (!pin) return;
+      const pins = this.raw.pins;
+      if (pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) await this.writePins([...pins, id]);
+    });
     this.instanceIdTaken(id);
     await this.fetchInstances((raw) => this.withoutLanding(raw, taskId));
   }
@@ -2469,7 +2474,9 @@ export class LauncherStore {
       return {
         lastRename: { from, to, seq },
         scanned: raw.scanned.map((i) => (i.id === from ? { ...i, id: to, name: to } : i)),
-        pins: raw.pins.map((p) => (p === from ? to : p)),
+        // 与后端同一口径：与新名字同名（不分大小写）的别的固定是在落樱之外删掉的同名旧实例留下的，去掉，否则有两项新名字，
+        // 之后整组写回都按重复被拒
+        pins: raw.pins.filter((p) => p === from || p.toLowerCase() !== to.toLowerCase()).map((p) => (p === from ? to : p)),
         settings: raw.settings === null || raw.settings.selectedVersion !== from ? raw.settings : { ...raw.settings, selectedVersion: to },
         tasks,
         taskMeta,

@@ -973,6 +973,40 @@ describe("改名已落盘、之后的读取失败：内存里挂在旧 id 上的
     expect(await renamed).toBe("生存二");
     expect(store.getState().instances.map((i) => i.id)).toEqual(["生存二", "创造", "新世界"]);
   });
+
+  it("手里的固定列表还留着与新名字同名的旧实例：就地迁移时去掉它，不出现两项新名字；之后固定别的实例照常写成", async () => {
+    // 固定列表读到的时候「生存二」还在，之后在落樱之外删掉了、没再读过。假后端整组写入时照后端的规矩拒掉重复
+    let pins = ["生存二", "生存"];
+    ipc.overrides.set("get_sidebar_pins", () => pins);
+    ipc.overrides.set("set_sidebar_pins", (args) => {
+      const next = args.pins as string[];
+      const dup = next.find((p, i) => next.indexOf(p) !== i);
+      if (dup !== undefined) throw new IpcError("invalid_argument", "侧栏固定列表不合法：同一个实例重复固定", { field: "pins", reason: "duplicate", id: dup });
+      pins = next;
+      return pins;
+    });
+    await store.actions.reload("pins");
+    await settle();
+    expect(store.getState().sidebarPins).toEqual(["生存二", "生存"]);
+
+    // 后端改名时去掉同名旧固定、原位改名；改名之后的固定读取失败，只剩就地迁移
+    ipc.overrides.set("rename_instance", () => {
+      instances = instances.map((i) => (i.id === "生存" ? { ...i, id: "生存二" } : i));
+      pins = ["生存二"];
+      return { id: "生存二" };
+    });
+    ipc.overrides.set("get_sidebar_pins", () => {
+      throw new IpcError("io_error", "读取失败：拒绝访问。 (os error 5)");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(await store.actions.renameInstance("生存", "生存二")).toBe("生存二");
+    expect(store.getState().sidebarPins).toEqual(["生存二"]);
+
+    await store.actions.togglePin("创造");
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存二", "创造"] }]);
+    expect(pins).toEqual(["生存二", "创造"]);
+    expect(store.getState().sidebarPins).toEqual(["生存二", "创造"]);
+  });
 });
 
 describe("删除实例时取消它的全部任务", () => {
@@ -1191,6 +1225,33 @@ describe("新建实例入队即成为当前实例，侧栏有空位时安装期�
     await store.actions.setSidebarPins(["生存", "新世界"]);
     expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存", "新世界"] }]);
     expect(store.getState().sidebarPins).toEqual(["生存", "新世界"]);
+  });
+
+  /**
+   * 固定列表读到的时候同名的旧实例还在，之后在落樱之外删掉了、没再读过：手里的列表还留着它。新建结束时后端去掉了配置里的
+   * 这一项（假后端在装好的那一刻改成去掉之后的列表），落地按后端重读再定。
+   */
+  async function landOverStalePin(bootPins: string[], afterDrop: string[]): Promise<void> {
+    await restart(bootPins);
+    await store.actions.createInstance(spec);
+    expect(store.getState().sidebarPins).toEqual(bootPins);
+    ipc.overrides.set("get_sidebar_pins", () => afterDrop);
+    await finish();
+  }
+
+  it("手里的固定列表还留着同名旧实例、侧栏有空位：落地重读后按自动固定追加到末尾", async () => {
+    await landOverStalePin(["新世界", "生存"], ["生存"]);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存", "新世界"] }]);
+    expect(store.getState().sidebarPins).toEqual(["生存", "新世界"]);
+    expect(store.getState().unsavedPins).toEqual([]);
+    expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({ status: "ready", pinned: true });
+  });
+
+  it("手里的固定列表还留着同名旧实例、侧栏已满：落地重读后新实例不固定，也不写固定列表", async () => {
+    await landOverStalePin(["a", "b", "新世界", "c", "d"], ["a", "b", "c", "d"]);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+    expect(store.getState().sidebarPins).toEqual(["a", "b", "c", "d"]);
+    expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({ status: "ready", pinned: false });
   });
 
   it.each([

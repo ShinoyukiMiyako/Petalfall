@@ -146,7 +146,8 @@ beforeEach(() => {
   bootOverrides(ipc, { instances });
   ipc.overrides.set("list_instances", () => instances);
   ipc.overrides.set("get_sidebar_pins", () => configPins.filter((id) => instances.some((i) => i.id === id)));
-  ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+  // 写下的整组固定像后端一样存进配置：新建、导入落地时前端会按后端重读一次
+  ipc.overrides.set("set_sidebar_pins", (args) => (configPins = args.pins as string[]));
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   ipc.overrides.set("updater_info", () => ({ current_version: "0.1.0", supported: true, unsupported_reason: null, available: null, downloaded_version: null, install_on_exit: false }));
   // 导入装好时要写封面：实例设置按传入的原样存下
