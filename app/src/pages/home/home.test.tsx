@@ -1627,6 +1627,27 @@ describe("主页：固定服务器的「加入」", () => {
     expect(picker()).toBeNull();
   });
 
+  it("记住的实例正在移到其他游戏目录：「加入」aria-disabled，原因与启动入口同一句，点了不启动", async () => {
+    pinned = [{ name: "晨星", address: "play.example", instance: "创造" }];
+    instances = instances.map((i) => (i.id === "创造" ? { ...i, activity: "moving" } : i));
+    await mount();
+    const join = joinButton();
+    expect(join.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      join.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = join.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("「加入」悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe("实例正在移到其他游戏目录，完成后才能启动");
+    click(join);
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+    expect(picker()).toBeNull();
+  });
+
   it("实例选择里选中的正是运行中的实例：「加入服务器」aria-disabled 并写明原因，点了既不保存也不启动；换一个实例就能加入", async () => {
     await mount();
     await act(async () => {
@@ -1666,6 +1687,42 @@ describe("主页：固定服务器的「加入」", () => {
     await flush();
     expect(callsOf(ipc, "set_pinned_server_instance")).toEqual([{ address: "play.example", instance: "创造" }]);
     expect(launcher.state.launchPrompt).toEqual({ instanceId: "创造", occupantId: "生存", occupantPhase: "running", quickPlay: SERVER });
+  });
+
+  it("实例选择里选中的实例正在移到其他游戏目录：照常列出，「加入服务器」带同一句原因禁用，点了既不保存也不启动；换一个实例就能加入", async () => {
+    instances = instances.map((i) => (i.id === "生存" ? { ...i, activity: "moving" } : i));
+    await mount();
+    click(joinButton());
+    await flush();
+    const panel = picker();
+    if (panel === null) throw new Error("没有弹出实例选择");
+    expect(radios(panel).map((o) => o.getAttribute("aria-checked"))).toEqual(["true", "false", "false"]);
+    const remember = panel.querySelector<HTMLElement>('[role="checkbox"]');
+    if (remember === null) throw new Error("没有「记住这个选择」");
+    click(remember);
+    const submit = buttonByText("加入服务器", panel);
+    expect(submit.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      submit.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = submit.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("「加入服务器」悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe("实例正在移到其他游戏目录，完成后才能启动");
+    click(submit);
+    await flush();
+    expect(callsOf(ipc, "set_pinned_server_instance")).toHaveLength(0);
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+
+    click(radios(panel)[1]);
+    const enabled = buttonByText("加入服务器", panel);
+    expect(enabled.getAttribute("aria-disabled")).toBeNull();
+    click(enabled);
+    await flush();
+    expect(callsOf(ipc, "set_pinned_server_instance")).toEqual([{ address: "play.example", instance: "创造" }]);
+    expect(callsOf(ipc, "launch_game").map((a) => [a.versionId, a.quickPlay])).toEqual([["创造", SERVER]]);
   });
 
   it("「不再记住实例」清掉绑定；「更换加入用的实例」打开实例选择且默认勾选记住", async () => {

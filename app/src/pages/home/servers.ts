@@ -187,12 +187,19 @@ export interface BusySession {
   phase: "loading" | "running";
 }
 
-/** 某个实例此刻为什么不能拿来加入：它自己正在启动或运行，存档正在备份、恢复或导出，或者别的实例正以它为基底（后两种后端拒绝启动）。 */
-export type JoinBlock = { kind: "busy"; phase: BusySession["phase"] } | { kind: "backingUp" } | { kind: "inherited"; usedBy: string };
+/**
+ * 某个实例此刻为什么不能拿来加入：它自己正在启动或运行，正在移到别的游戏目录（排着的移动任务也算），存档正在备份、恢复或导出，
+ * 或者别的实例正以它为基底（后三种后端拒绝启动）。
+ */
+export type JoinBlock = { kind: "busy"; phase: BusySession["phase"] } | { kind: "moving" } | { kind: "backingUp" } | { kind: "inherited"; usedBy: string };
 
-/** 能拿来加入为 null。别的实例占着游戏进程不算：照常启动，由启动拦截弹替换确认。savesBusy 是存档正忙的实例 id。 */
-export function joinBlock(inst: Pick<InstanceSummary, "id" | "usedBy">, busy: BusySession | null, savesBusy: readonly string[]): JoinBlock | null {
+/**
+ * 能拿来加入为 null。别的实例占着游戏进程不算：照常启动，由启动拦截弹替换确认。savesBusy 是存档正忙的实例 id。
+ * 移动与启动胶囊、存档行「进入」同一口径：看实例的 activity，排在存档与基底之前。
+ */
+export function joinBlock(inst: Pick<InstanceSummary, "id" | "usedBy" | "activity">, busy: BusySession | null, savesBusy: readonly string[]): JoinBlock | null {
   if (busy !== null && busy.instanceId === inst.id) return { kind: "busy", phase: busy.phase };
+  if (inst.activity === "moving") return { kind: "moving" };
   if (savesBusy.includes(inst.id)) return { kind: "backingUp" };
   if (inst.usedBy !== null) return { kind: "inherited", usedBy: inst.usedBy };
   return null;
@@ -211,6 +218,8 @@ export type JoinPlan =
   | { kind: "direct"; instanceId: string }
   /** 记住的实例正在启动或运行：按钮带原因禁用。 */
   | { kind: "busy"; instanceId: string; phase: BusySession["phase"] }
+  /** 记住的实例正在移到别的游戏目录：按钮带原因禁用。 */
+  | { kind: "moving"; instanceId: string }
   /** 记住的实例正在备份、恢复或导出存档：按钮带原因禁用。 */
   | { kind: "backingUp"; instanceId: string }
   /** 记住的实例正被别的实例当作基底：按钮带原因禁用。 */

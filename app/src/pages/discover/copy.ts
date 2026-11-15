@@ -230,6 +230,7 @@ export const INSTALL_COPY = {
   installedInWorld: (world: string) => `已装在存档「${world}」`,
   instanceInstalling: "实例正在安装",
   instanceBroken: "实例已损坏，先修复",
+  instanceMoving: "实例正在移到其他游戏目录",
   judging: "正在判断能否安装…",
   readingWorlds: "正在读取存档…",
   worldsFailed: (message: string) => `存档读不出来：${message}`,

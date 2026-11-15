@@ -1131,6 +1131,14 @@ export const TASK_TOAST = {
     title: `「${instance}」已移过去，有 ${items.length} 项要留意`,
     body: items.map(moveFollowUpText).join("；"),
   }),
+  /**
+   * 移动完成时还排在队里、挂在这个实例上的任务开始了也做不成，已随之取消：完成通知之后补一条。正文最多显示三行，
+   * 怎么办写在任务标题前面，标题多了被截掉的部分到下载任务里看。
+   */
+  moveQueueCancelled: (instance: string, titles: readonly string[]) => ({
+    title: `已取消 ${titles.length} 个排队中的任务`,
+    body: `「${instance}」已不在当前游戏目录里，这些任务开始了也会失败，切换过去后重新发起：${titles.join("、")}`,
+  }),
   /** 移动不是下载，失败不并进「n 个下载失败」。 */
   moveFailed: (title: string, reason: string) => ({ title: `${title}没有完成`, body: reason }),
   switchAction: "切换过去",

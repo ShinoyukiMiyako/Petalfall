@@ -146,6 +146,7 @@ import {
   retryTask,
   sharedSavesKeys,
   startComposite,
+  strandedByMove,
   taskByAttempt,
   tasksToStart,
   trimHistory,
@@ -2233,8 +2234,11 @@ export class LauncherStore {
     const repaired = before.spec.command === "repair_instance" ? before.instanceId : null;
     // 补全成功没有占位项，也一样记进 landing：落地重扫回来之前实例照旧按安装中派生
     const keep = this.keepsPlaceholder(before) || (repaired !== null && !this.discardLanding.has(id));
+    // 移走的实例上还排着的任务开始了也做不成（见 strandedByMove）：与完成记在同一次更新里取消，下面的调度才不会先把它们拉起来
+    const stranded = before.spec.command === MOVE_TASK_COMMAND ? strandedByMove(this.raw.tasks, before) : [];
     this.set((raw) => {
-      const done = trimHistory(markDone(raw.tasks, id, attempt, Date.now()));
+      const now = Date.now();
+      const done = trimHistory(stranded.reduce((tasks, t) => markCancelled(tasks, t.id, now), markDone(raw.tasks, id, attempt, now)));
       return { tasks: repaired === null ? done : dropSuperseded(done, repaired, before.gameDir), ...(keep ? { landing: [...raw.landing, id] } : {}) };
     });
     this.tasksChanged();
@@ -2242,8 +2246,19 @@ export class LauncherStore {
     if (this.discardLanding.has(id)) return;
     this.background(
       ACTION_ERROR.landTask(before.title),
-      this.landTask(before, result).finally(() => this.endLanding(id)),
+      this.landTask(before, result).finally(() => {
+        this.endLanding(id);
+        // 排在完成通知与跟进提醒之后：先说移到了哪里，再说哪些任务因此取消；落地失败也照样说，任务已经取消了
+        if (stranded.length > 0) this.reportStranded(before, stranded);
+      }),
     );
+  }
+
+  /** 移动完成时随之取消的排队任务：补一条通知列出它们，「查看」去下载任务的失败与取消。 */
+  private reportStranded(move: Task, stranded: readonly Task[]): void {
+    if (move.instanceId === null) throw new Error(`移动任务 ${move.id} 没有挂在实例上`);
+    const copy = TASK_TOAST.moveQueueCancelled(move.instanceId, stranded.map((t) => t.title));
+    this.pushToast("warning", copy.title, copy.body, { label: TASK_TOAST.viewAction, to: { page: "tasks", filter: "failed" } });
   }
 
   /**
