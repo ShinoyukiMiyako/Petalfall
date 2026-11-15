@@ -44,6 +44,14 @@
 
 比它更早的测试版安装包（包括 1.0.0-beta.1、1.0.0-beta.2）不认这套检查，不要拿它们覆盖安装。
 
+## 使用须知、隐私与安全
+
+- [使用须知](docs/usage-notice.md)：落樱做什么、不做什么，下载来源、账户与免责的说明。官方发布的程序第一次启动时会先请你确认它。
+- [隐私说明](docs/privacy.md)：落樱联网访问哪些地址、在你的电脑上存了什么，以及怎样删除这些数据。
+- [SECURITY.md](SECURITY.md)：怎样私密报告安全漏洞，以及怎样核对安装包。
+
+使用须知与隐私说明也可以在应用的「设置 · 关于」里查看。
+
 ## 技术栈
 
 | 层 | 选型 |
@@ -171,7 +179,7 @@ pnpm tauri build
 
 游戏目录里的元数据目录名由 `petalfall_instance::PETALFALL_META_DIR` 给出（`.petalfall`）。crate 名、Rust 类型名、IPC 事件名前缀 `petalfall://`、材质协议 `petalfall-tex` 与环境变量名 `PETALFALL_*` 直接写成字面量，不引用品牌常量。前四者只在同一份构建内部使用；环境变量名是对外接口，改名后机器上设着的旧名不再生效。
 
-向他人提供修改版的构建产物时，附加条款要求改用不会混淆的名称，并换掉像素花瓣徽记与应用图标（[LICENSE-ADDITIONAL-TERMS.md](LICENSE-ADDITIONAL-TERMS.md) 第 3 节），上面这些内部标识符不在此列。改名从上面两处常量入手，两份 `tauri.conf.json` 与 `index.html`、`setup.html` 里的产品名各写一份，也要跟着改；徽记的母版是 `app/src/art/petal-mark.json`，换掉后运行 `pnpm build:icons` 重新生成 `app/src-tauri/icons/`。
+向他人提供修改版的构建产物时，附加条款要求改用不会混淆的名称，并换掉像素花瓣徽记与应用图标（[LICENSE-ADDITIONAL-TERMS.md](LICENSE-ADDITIONAL-TERMS.md) 第 3 节），上面这些内部标识符不在此列。改名从上面两处常量入手，两份 `tauri.conf.json` 与 `index.html`、`setup.html` 里的产品名各写一份，也要跟着改；徽记的母版是 `app/src/art/petal-mark.json`，换掉后运行 `pnpm build:icons` 重新生成 `app/src-tauri/icons/` 与安装向导的页眉图 `app/src-tauri/installer-header.bmp`。
 
 ## 许可
 
