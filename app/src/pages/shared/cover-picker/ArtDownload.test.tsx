@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { ART_DOWNLOAD_COPY } from "../../../copy/cover";
 import type { ArtDownloadProgressDto, ArtStatusDto } from "../../../ipc/art";
 import { IpcError } from "../../../ipc/errors";
@@ -14,7 +14,7 @@ import { OverlayProvider, OverlayRoot } from "../../../shell/overlay";
 import { getArtDownloadState, settleArtDownload } from "../../../state/art-download";
 import { render, stubMatchMedia, type Rendered } from "../../../test/dom";
 import { Appear } from "../../../ui/Appear";
-import { ArtDownload } from "./ArtDownload";
+import { ArtDownload, type ArtDownloadProps } from "./ArtDownload";
 
 interface Pending {
   resolve(status: ArtStatusDto): void;
@@ -82,6 +82,16 @@ function mount(compact = false) {
   view = render(
     <OverlayProvider>
       <ArtDownload compact={compact} />
+      <OverlayRoot />
+    </OverlayProvider>,
+  );
+  return view.container;
+}
+
+function mountWith(props: ArtDownloadProps) {
+  view = render(
+    <OverlayProvider>
+      <ArtDownload {...props} />
       <OverlayRoot />
     </OverlayProvider>,
   );
@@ -315,6 +325,79 @@ describe("下载原版材质部件", () => {
     expect(paragraphs()).toEqual(["本机的原版材质不全", ART_DOWNLOAD_COPY.degradedBody]);
     expect(text()).toContain("上次没下完");
     expect(button("重试")).toBeDefined();
+  });
+
+  it("紧凑档换一句说明、按钮用幽灵档（账户页之外的默认皮肤入口）：失败后的重试也是幽灵档，说明照旧", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const container = mountWith({ compact: true, quiet: true, note: ART_DOWNLOAD_COPY.skinNoteShort });
+    const paragraphs = () => [...container.querySelectorAll("p")].map((p) => p.textContent);
+    expect(paragraphs()).toEqual(["本机还没有原版材质，默认皮肤画不出来。"]);
+    expect(button("下载原版材质").dataset.variant).toBe("ghost");
+
+    await startDownload();
+    await act(async () => art.pending[0].reject(new IpcError("download_failed", "所有下载源都连不上")));
+    await flush();
+    expect(paragraphs()).toEqual(["本机还没有原版材质，默认皮肤画不出来。"]);
+    expect(button("重试").dataset.variant).toBe("ghost");
+  });
+
+  it("不传 quiet：下载按钮是次按钮", () => {
+    mountWith({ compact: true, note: ART_DOWNLOAD_COPY.skinNote });
+    expect([...(view?.container.querySelectorAll("p") ?? [])].map((p) => p.textContent)).toEqual([
+      "本机还没有原版材质，默认皮肤画不出来。整包约 20 到 40 MB，下完只留不到 1 MB。",
+    ]);
+    expect(button("下载原版材质").dataset.variant).toBe("secondary");
+  });
+
+  it("断网：下载与重下带原因禁用，点了不调后端；下好了只是目录没载入时，重试只重查本机，断网照样能点", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+    });
+    const remount = (onLine: boolean) => {
+      view?.unmount();
+      vi.stubGlobal("navigator", { onLine, userAgent: "Windows" });
+      mount(true);
+    };
+    const reason = async (label: string) => {
+      const host = button(label).closest("[data-tooltip-host]");
+      if (host === null) throw new Error(`「${label}」外面没有提示宿主`);
+      act(() => void host.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body })));
+      await vi.waitFor(() => expect(document.querySelector('[role="tooltip"]')?.textContent).toBe("联网后才能下载"), { timeout: 3000 });
+    };
+
+    remount(false);
+    expect(button("下载原版材质").getAttribute("aria-disabled")).toBe("true");
+    await reason("下载原版材质");
+    act(() => button("下载原版材质").click());
+    await flush();
+    expect(art.log).toEqual([]);
+    expect(getArtDownloadState()).toEqual({ phase: "idle" });
+
+    // 联网时下载失败，断网后再来：重下同样要联网
+    remount(true);
+    await startDownload();
+    await act(async () => art.pending[0].reject(new IpcError("download_failed", "所有下载源都连不上")));
+    await flush();
+    remount(false);
+    expect(button("重试").getAttribute("aria-disabled")).toBe("true");
+    act(() => button("重试").click());
+    await flush();
+    expect(art.pending).toHaveLength(1);
+
+    // 联网时下完、目录没载入，断网后再来：重试不碰网络，照样能点，也不再调后端
+    remount(true);
+    act(() => button("重试").click());
+    await vi.waitFor(() => expect(art.pending).toHaveLength(2));
+    await act(async () => art.pending[1].resolve(READY));
+    await flush();
+    act(() => settleArtDownload(false));
+    remount(false);
+    expect(button("重试").hasAttribute("aria-disabled")).toBe(false);
+    act(() => button("重试").click());
+    await flush();
+    expect(text()).toContain("正在载入材质…");
+    expect(art.pending).toHaveLength(2);
   });
 });
 

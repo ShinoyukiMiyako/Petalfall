@@ -258,6 +258,18 @@
   color: var(--sk-text-2);
 }
 
+/*
+ * 本机没有原版材质时成功区末尾顺带的下载入口：铺满整行，说明靠左、按钮靠右，下载中进度条占满整行；
+ * 上面的成功信息居中排，这一行靠一道分隔线与它们分开，读起来是附注
+ */
+.artEntry {
+  align-self: stretch;
+  margin-top: var(--sk-space-12);
+  padding-top: var(--sk-space-12);
+  border-top: 1px solid var(--sk-line);
+  text-align: left;
+}
+
 /* ---- 离线账户 ---- */
 .offline {
   display: grid;

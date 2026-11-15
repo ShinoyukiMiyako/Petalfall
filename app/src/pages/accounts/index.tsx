@@ -3,6 +3,7 @@
 // 所以从标题栏、启动拦截发起的登录进到本页同样可见。
 
 import { memo, useDeferredValue, useId, useMemo, useState, type ReactNode } from "react";
+import { ART_DOWNLOAD_COPY } from "../../copy/cover";
 import { ACTION_ERROR, BOOT_SLICE_ERROR, MSA_CLIENT_ID_MISSING, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { Account } from "../../domain/adapt";
 import type { AccountKind } from "../../domain/types";
@@ -26,6 +27,7 @@ import { EntranceBlock, numberEntrance, Page, useEntranceIndex } from "../../ui/
 import { PageHeader } from "../../ui/PageHeader";
 import { SectionTitle } from "../../ui/SectionTitle";
 import { Skeleton } from "../../ui/Skeleton";
+import { ArtDownload, useSkinArtMissing } from "../shared/cover-picker/ArtDownload";
 import { AccountCard } from "./AccountCard";
 import styles from "./accounts.module.css";
 import { AddCard } from "./AddCard";
@@ -76,6 +78,7 @@ const AccountsView = memo(function AccountsView({ view }: { view: AccountsSnapsh
   const online = useOnline();
   const microsoftUnavailable = useLauncherSelector(microsoftLoginUnavailable);
   const act = useAccountActions(accounts, currentAccountId);
+  const artMissing = useSkinArtMissing();
   const gridRef = useReflow<HTMLDivElement>();
 
   // 上一次落定的读取结果。读取出错后点重试的这一轮不开加载门：错误卡留在原处、重试按钮转圈，结果回来再原位换掉。
@@ -180,6 +183,14 @@ const AccountsView = memo(function AccountsView({ view }: { view: AccountsSnapsh
                       </div>
                     }
                   />
+                </Card>
+              )}
+            </Appear>
+            {/* 本机没有原版材质时默认皮肤画不出来：立绘下面一行说明加下载按钮。下完后立绘就地换上皮肤，这一行原地淡出，「全部账户」由让位滑上来 */}
+            <Appear>
+              {ready && accounts.length > 0 && artMissing && (
+                <Card key="art" padding="md">
+                  <ArtDownload compact note={ART_DOWNLOAD_COPY.skinNote} />
                 </Card>
               )}
             </Appear>

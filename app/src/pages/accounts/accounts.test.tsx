@@ -5,15 +5,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, type CanvasStub } from "../../art/illustrations/test-canvas";
 import { fallbackDrawn, mannequinFigure } from "../../art/skin/test-mannequin";
 import type { AccountDto } from "../../ipc/accounts";
+import { ART_DOWNLOAD_EVENT, type ArtStatusDto } from "../../ipc/art";
 import { IpcError } from "../../ipc/errors";
 import { NO_ART, setArtStatus } from "../../mc/art";
+import { setBlockCatalog } from "../../mc/catalog";
 import { clearArtCache } from "../../mc/useArt";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
+import { getArtDownloadState } from "../../state/art-download";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { accountDto, bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { accountDto, bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import AccountsPage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -437,6 +440,131 @@ describe("账户页：皮肤", () => {
     expect(skinWarnings).toEqual(["[accounts] Hanami 的皮肤信息读不出来，显示人偶", "[accounts] Hanami 的皮肤信息读不出来，显示人偶"]);
     expect(arts()).toEqual(["mannequin", "mannequin", "mannequin"]);
     expect(toastTitles()).toEqual(["success:账户信息已更新"]);
+  });
+});
+
+describe("账户页：下载原版材质", () => {
+  // 后端给 Hanami（UUID 哈希 593896604）的默认皮肤：18 款里的宽臂 noor
+  const FALLBACK = { kind: "default", path: "entity/player/wide/noor", model: "wide" } as const;
+  const MODERN: ArtStatusDto = { source: { version_id: "1.21.4", degraded: false, legacy_skins: false }, panorama: false };
+  const NOTE = "本机还没有原版材质，默认皮肤画不出来。整包约 20 到 40 MB，下完只留不到 1 MB。";
+  const NOOR = "http://petalfall-tex.localhost/art/entity/player/wide/noor.png?v=1.21.4";
+  let drawn: string[];
+  // 有材质源时页面上别的点缀（封面方块）也会取图，只看皮肤的
+  const skins = () => drawn.filter((url) => url.includes("/art/entity/"));
+  /** 聚光卡与「全部账户」之间的那张卡（页面上只有它是中号内边距）；退场中（inert）的不算。 */
+  const entry = () => live(page().querySelectorAll<HTMLElement>('[data-pad="md"]')).at(0);
+  const spotFigure = () => (page().querySelector("section") as HTMLElement).querySelector<HTMLElement>('[data-sk-art="skin"]');
+
+  beforeEach(() => {
+    drawn = [];
+    ipc.overrides.set("skin_info", (args) => (args.accountUuid === hanami.uuid ? FALLBACK : null));
+    // 下完后材质绑定接着载入方块目录，载入了下载状态才回到空闲
+    ipc.overrides.set("art_blocks", () => ({ version_id: "1.21.4", blocks: [] }));
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => ({ ok: true, status: 200, blob: async () => new Blob([url]) })));
+    vi.stubGlobal(
+      "createImageBitmap",
+      vi.fn(async (blob: Blob) => {
+        drawn.push(await blob.text());
+        return { width: 64, height: 64 };
+      }),
+    );
+  });
+
+  afterEach(() => {
+    setBlockCatalog(null);
+    // 下载状态全应用只有一份：每条用例都要走完，留在下载中会带进下一条
+    expect(getArtDownloadState()).toEqual({ phase: "idle" });
+  });
+
+  it("本机没有材质源：聚光卡与「全部账户」之间一行说明加次按钮，立绘是剪影", async () => {
+    await mount();
+    await flush();
+    const card = entry();
+    if (card === undefined) throw new Error("没有下载原版材质的那一行");
+    expect([...card.querySelectorAll("p")].map((p) => p.textContent)).toEqual([NOTE]);
+    const download = buttonIn(card, "下载原版材质");
+    expect([download.dataset.variant, download.dataset.size, download.getAttribute("aria-disabled")]).toEqual(["secondary", "sm", null]);
+    // 排在聚光卡后面、「全部账户」分区前面
+    const [spot, all] = [...page().querySelectorAll("section")].filter((s) => s.querySelector("h2") !== null || s.textContent?.startsWith("全部账户") === true);
+    expect(spot.querySelector("h2")?.textContent).toBe("Hanami");
+    expect(all.textContent?.startsWith("全部账户")).toBe(true);
+    expect([spot.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING, card.compareDocumentPosition(all) & Node.DOCUMENT_POSITION_FOLLOWING]).toEqual([
+      Node.DOCUMENT_POSITION_FOLLOWING,
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    ]);
+    expect(spotFigure()?.dataset.art).toBe("silhouette");
+    expect(drawn).toEqual([]);
+  });
+
+  it("本机有材质源：不放这一行，立绘直接画默认皮肤", async () => {
+    ipc.overrides.set("art_status", () => MODERN);
+    await mount();
+    await flush();
+    expect(entry()).toBeUndefined();
+    expect(live(page().querySelectorAll("button")).some((b) => b.textContent === "下载原版材质")).toBe(false);
+    expect(spotFigure()?.dataset.art).toBe("skin");
+    expect(skins()).toEqual([NOOR]);
+  });
+
+  it("还没有账户：空状态里没有立绘，不放这一行", async () => {
+    useAccounts([], null);
+    await mount();
+    expect(liveText()).toContain("还没有账户");
+    expect(entry()).toBeUndefined();
+  });
+
+  it("点下载：连点两下也只发一次 art_download，这一行换成进度；下完后立绘在原节点上换上默认皮肤，这一行退场", async () => {
+    const download = deferred<ArtStatusDto>();
+    ipc.overrides.set("art_download", () => download.promise);
+    await mount();
+    await flush();
+    const figure = spotFigure();
+    expect(figure?.dataset.art).toBe("silhouette");
+
+    const button = buttonIn(entry() as HTMLElement, "下载原版材质");
+    act(() => {
+      button.click();
+      button.click();
+    });
+    await flush();
+    expect(callsOf(ipc, "art_download")).toEqual([{}]);
+    act(() => emit(ART_DOWNLOAD_EVENT, { stage: "client", downloaded: 6 * 1024 * 1024, total: 24 * 1024 * 1024 }));
+    await flush();
+    expect(entry()?.textContent).toContain("正在下载客户端");
+    expect(entry()?.querySelector('[role="progressbar"]')).not.toBeNull();
+
+    // 后端下完时已经换了材质源：之后再查的状态都是下载来的版本
+    ipc.overrides.set("art_status", () => MODERN);
+    await act(async () => {
+      download.resolve(MODERN);
+      await settle(20);
+    });
+    await flush();
+    expect(spotFigure()).toBe(figure);
+    expect(figure?.dataset.art).toBe("skin");
+    expect(skins()).toEqual([NOOR]);
+    expect(entry()).toBeUndefined();
+    expect(callsOf(ipc, "art_download")).toHaveLength(1);
+  });
+
+  it("断网：下载按钮带原因禁用，悬停写明联网后才能下载，点了不发 art_download", async () => {
+    net.onLine = false;
+    await mount();
+    const button = buttonIn(entry() as HTMLElement, "下载原版材质");
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    const host = button.closest("[data-tooltip-host]");
+    if (host === null) throw new Error("下载按钮外面没有提示宿主");
+    act(() => {
+      host.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe("联网后才能下载");
+    await click(button);
+    expect(callsOf(ipc, "art_download")).toEqual([]);
+    expect(getArtDownloadState()).toEqual({ phase: "idle" });
   });
 });
 
@@ -941,10 +1069,12 @@ describe("账户页：断网、加载与读取失败", () => {
 
   it("进页时账户早已读到：空的横幅槽不占序号，聚光卡与分区紧接着页头往下编号，错开入场", async () => {
     await enterWithAccountsRead();
+    // 本文件默认没有材质源：聚光卡与分区之间那一行下载原版材质（div）也领一个号
     expect(entrances()).toEqual([
       ["header", "0"],
       ["section", "1"],
-      ["section", "2"],
+      ["div", "2"],
+      ["section", "3"],
     ]);
     expect(spotlightName()).toBe("Hanami");
   });
@@ -958,7 +1088,8 @@ describe("账户页：断网、加载与读取失败", () => {
       ["header", "0"],
       ["div", "1"],
       ["section", "2"],
-      ["section", "3"],
+      ["div", "3"],
+      ["section", "4"],
     ]);
     expect(spotlightName()).toBe("Hanami");
   });
