@@ -6,7 +6,7 @@ import { releaseVelocity, releaseYaw, REST_POSE, type YawSample } from "./figure
 import { FIGURE_FRAME } from "./layout";
 import { paintSkinFigure, skinFigureCanvas, type LoadedSkin } from "./render";
 
-/** 拖动一个 CSS px 转一度：手指扫过立绘宽度大约转半圈。 */
+/** 拖动一个 CSS px 转一度：手指扫过立绘外框宽度约转三分之一圈（外框宽 20 皮肤像素，6 倍时 120 px 即 120°，5 倍时 100°）。 */
 const RADIANS_PER_PX = Math.PI / 180;
 
 /** 按下后横向移动到这个距离才算拖动：手抖的点击仍是点击，主页的立绘还要响应点按。 */
