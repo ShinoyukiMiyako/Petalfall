@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use petalfall_auth::player_name_has_rejected_char;
 use petalfall_version::{LoaderInfo, LoaderKind, VersionJson};
 use regex::Regex;
 
@@ -240,6 +241,23 @@ pub fn long_player_name(name: &str, mc_version: &str) -> bool {
         None => 0,
     };
     (minor, patch) >= (20, 3)
+}
+
+/// 角色名在这个游戏版本上会不会因为字符被拒绝：1.20.2 与 1.20.3 的游戏不认含空格或非 ASCII 字符的角色名（字符规则见
+/// [`player_name_has_rejected_char`]），进存档（内置服务器）与服务器时都会被拒绝。只认这两个版本号，它们的 `-pre`、
+/// `-rc` 算在内（口径同 [`long_player_name`]）；周快照解析不出版本号，不提醒：猜错了反而误导。
+pub fn player_name_chars_rejected(name: &str, mc_version: &str) -> bool {
+    if !player_name_has_rejected_char(name) {
+        return false;
+    }
+    let Some(caps) = RELEASE_PREFIX.captures(mc_version) else {
+        return false;
+    };
+    let minor = caps[1].parse::<u32>().ok();
+    let patch = caps
+        .get(2)
+        .and_then(|patch| patch.as_str().parse::<u32>().ok());
+    minor == Some(20) && matches!(patch, Some(2 | 3))
 }
 
 /// 自定义 JVM 参数里的内存问题。
@@ -598,6 +616,46 @@ mod tests {
         // 愚人节的 2.0 与年份版本号形似，但它是 1.5 时代的版本。
         assert!(!long_player_name(seventeen, "2.0"));
         assert!(!long_player_name(seventeen, "25w14craftmine"));
+    }
+
+    #[test]
+    fn player_name_chars_are_judged_only_on_1_20_2_and_1_20_3() {
+        for version in [
+            "1.20.2",
+            "1.20.3",
+            "1.20.2-pre1",
+            "1.20.2-rc2",
+            "1.20.3-pre4",
+            "1.20.3-rc1",
+        ] {
+            assert!(
+                player_name_chars_rejected("Petal Player", version),
+                "{version}"
+            );
+            assert!(player_name_chars_rejected("落樱", version), "{version}");
+            assert!(
+                !player_name_chars_rejected("Petal_Player", version),
+                "{version}"
+            );
+            assert!(
+                !player_name_chars_rejected("Petal-1.0", version),
+                "{version}"
+            );
+        }
+        for version in [
+            "1.20.1",
+            "1.20",
+            "1.20.4",
+            "1.20.4-rc1",
+            "1.21",
+            "1.2.3",
+            "1.19.2",
+            "23w43a",
+            "26.1",
+            "b1.7.3",
+        ] {
+            assert!(!player_name_chars_rejected("落樱", version), "{version}");
+        }
     }
 
     fn args(line: &str) -> Vec<String> {

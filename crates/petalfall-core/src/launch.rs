@@ -31,8 +31,8 @@ use petalfall_launch::{
     LaunchCommand, LauncherLevel, LogBatchSink, LogSource, MemoryConfig, PathWarning,
     QuickPlayMode, QuickPlayTarget, SessionClock, SessionLog, SyncProvider, effective_max_heap_mb,
     estimate_memory, jvm_memory_issue, long_player_name, non_ascii_path_at_risk,
-    path_char_outside_code_page, path_warnings, quick_play_support, required_java_major,
-    sync_folder, sync_roots_from_env,
+    path_char_outside_code_page, path_warnings, player_name_chars_rejected, quick_play_support,
+    required_java_major, sync_folder, sync_roots_from_env,
 };
 use petalfall_version::{
     AssetLayout, AssetObjectsIndex, RuntimeContext, VersionJson, detect_loaders, resolve,
@@ -802,6 +802,16 @@ impl Petalfall {
                     "角色名 {} 有 {} 个字符，Minecraft 1.20.3 及更新的版本只认 16 个以内，进入存档或服务器时会被拒绝",
                     auth.player_name,
                     auth.player_name.encode_utf16().count()
+                ))
+                .await;
+        }
+        // 正版名只有字母、数字与下划线，离线名与皮肤站的角色名可能带空格或中文。这一条只写日志、不记进 warnings：
+        // warnings 随崩溃记录与接回记录落盘，已发布的版本读到不认识的取值，会把整份记录当作读不懂。
+        if player_name_chars_rejected(&auth.player_name, game_version) {
+            reporter
+                .warn(format!(
+                    "角色名 {} 含空格或非 ASCII 字符，Minecraft 1.20.2 与 1.20.3 进入存档或服务器时会被拒绝",
+                    auth.player_name
                 ))
                 .await;
         }
@@ -3334,6 +3344,92 @@ mod tests {
             ));
         }
         assert_eq!(warned, vec![("生存 服", 1, true), ("老 存档", 0, false)]);
+    }
+
+    /// 1.20.2、1.20.3 不认含空格或非 ASCII 字符的角色名：这两个版本在验证账户阶段提醒一句，别的版本、只有字母数字与
+    /// 下划线的名字不提醒。临时离线账户的用户名校验另有一句不分版本的提示，排在前面。这一条只写日志，崩溃记录里的
+    /// 提醒不多出取值。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn player_names_with_spaces_or_non_ascii_are_warned_on_1_20_2_and_1_20_3() {
+        const OFFLINE_HINT: &str =
+            "用户名含空格或非 ASCII 字符，Minecraft 1.20.2 与 1.20.3 进不了存档与服务器";
+        let fx = fixture();
+        let java = complete_fake_java(&fx.root, 17, 3);
+        for id in ["1.20.2", "1.20.3", "1.20.4"] {
+            let dir = fx.root.join(".minecraft").join("versions").join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{id}.json")),
+                format!(
+                    r#"{{"id":"{id}","type":"release","mainClass":"net.minecraft.client.main.Main","javaVersion":{{"component":"java-runtime-gamma","majorVersion":17}}}}"#
+                ),
+            )
+            .unwrap();
+            std::fs::write(dir.join(format!("{id}.jar")), b"jar").unwrap();
+        }
+
+        let mut warned = Vec::new();
+        for (id, name) in [
+            ("1.20.2", "Petal Player"),
+            ("1.20.3", "落樱"),
+            ("1.20.4", "落樱"),
+            ("1.20.3", "Petal_Player"),
+        ] {
+            let launch = LaunchRequest {
+                version_id: id.to_owned(),
+                account: LaunchAccount::Offline {
+                    name: name.to_owned(),
+                },
+                ..request()
+            };
+            let (result, events) = launch_request(&fx.petalfall, launch, java.clone()).await;
+            let run = expect_run(result);
+            let mut stage = None;
+            let mut first_stage_warns = Vec::new();
+            for event in &events {
+                match event {
+                    LaunchEvent::Stage(s) => stage = Some(s.index()),
+                    LaunchEvent::Log {
+                        level: LauncherLevel::Warn,
+                        text,
+                        ..
+                    } if stage == Some(0) => first_stage_warns.push(text.clone()),
+                    _ => {}
+                }
+            }
+            run.finish().await;
+            let crash = fx
+                .petalfall
+                .last_crash(id)
+                .await
+                .unwrap()
+                .expect("崩溃应落盘");
+            warned.push((id, name, first_stage_warns, crash.warnings));
+        }
+        let rejected = |name: &str| {
+            format!(
+                "角色名 {name} 含空格或非 ASCII 字符，Minecraft 1.20.2 与 1.20.3 进入存档或服务器时会被拒绝"
+            )
+        };
+        assert_eq!(
+            warned,
+            vec![
+                (
+                    "1.20.2",
+                    "Petal Player",
+                    vec![OFFLINE_HINT.to_owned(), rejected("Petal Player")],
+                    vec![]
+                ),
+                (
+                    "1.20.3",
+                    "落樱",
+                    vec![OFFLINE_HINT.to_owned(), rejected("落樱")],
+                    vec![]
+                ),
+                ("1.20.4", "落樱", vec![OFFLINE_HINT.to_owned()], vec![]),
+                ("1.20.3", "Petal_Player", vec![], vec![]),
+            ]
+        );
     }
 
     /// 新建实例的版本 JSON 把 id 换成实例名、去掉了 inheritsFrom，继承链根就是实例自己。Java 失败的文案要写
