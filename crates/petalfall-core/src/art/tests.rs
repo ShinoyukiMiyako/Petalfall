@@ -638,6 +638,36 @@ async fn unusable_skins_fall_back_to_none() {
     }
 }
 
+/// 下载失败时界面画默认皮肤，这个结果不能被记住：服务端后来能下了，下一次查询就要拿到真实皮肤。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_skin_download_is_retried_on_the_next_query() {
+    let fx = fixture();
+    let server = MockServer::start().await;
+    let skin = SkinRef {
+        url: format!("{}/later.png", server.uri()),
+        model: SkinModel::Slim,
+    };
+    assert_eq!(
+        fx.service.skin_info(&skin).await,
+        None,
+        "还没有这张皮肤时回落"
+    );
+
+    Mock::given(method("GET"))
+        .and(url_path("/later.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(png(64, 64, |_, _| PINK)))
+        .mount(&server)
+        .await;
+    let info = fx
+        .service
+        .skin_info(&skin)
+        .await
+        .expect("服务端能下之后应拿到真实皮肤");
+    assert_eq!(info.sha1, remote::sha1_hex(skin.url.as_bytes()));
+    assert_eq!(info.model, SkinModel::Slim);
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
 /// 皮肤地址来自外置登录服务器的档案，指向超大文件时不能整个读进内存：正文超过上限就中止，界面回落，
 /// 不落缓存。用合规的 64x64 PNG 后面补满 2 MB：PNG 解码会忽略 IEND 之后的字节，只读完再判就会照单全收。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
