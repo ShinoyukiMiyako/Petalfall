@@ -702,6 +702,21 @@ describe("实例详情：后端正在改动实例", () => {
     expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
   });
 
+  it("侧栏已固定满：头图图钉名称换成上限那一句，外观同禁用；点了只给上限提示，不改固定列表", async () => {
+    vi.stubGlobal("innerWidth", 1200);
+    const others = ["一", "二", "三", "四", "五"].map((n) => instanceDto(`固定${n}`));
+    instances = [...instances, ...others];
+    bootOverrides(ipc, { instances, pins: others.map((i) => i.id), config: configDto({ memory: { max_mb: 4096, min_mb: null, auto: false } }) });
+    ipc.overrides.set("list_instances", () => instances);
+    await open("overview");
+    const pin = button("侧栏最多固定 5 个实例，先取消固定一个");
+    expect([pin.getAttribute("aria-pressed"), pin.getAttribute("aria-disabled"), pin.dataset.disabled]).toEqual(["false", "true", "true"]);
+    click(pin);
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+    expect(launcher.state.toasts.map((t) => [t.tone, t.title])).toEqual([["warning", "侧栏最多固定 5 个实例，先取消固定一个"]]);
+  });
+
   it("设置页的重命名与删除按钮带原因禁用，Mod 开关照常可用", async () => {
     instances = instances.map((i) => (i.id === ID ? { ...i, activity: "modifying" } : i));
     await open("settings");

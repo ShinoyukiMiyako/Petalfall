@@ -1326,15 +1326,19 @@ describe("实例库：动作", () => {
     expect(byLabel("把「f」固定到侧栏")).toBe(pin);
     expect(document.activeElement).toBe(pin);
     expect(pin.getAttribute("aria-disabled")).toBeNull();
+    expect(pin.dataset.disabled).toBeUndefined();
   });
 
-  it("侧栏已满 5 个：图钉不写固定列表，只给上限提示；菜单项禁用并说明原因", async () => {
+  it("侧栏已满 5 个：图钉外观同禁用，不写固定列表，只给上限提示；菜单项禁用并说明原因", async () => {
     instances = ["a", "b", "c", "d", "e", "f"].map((id) => instanceDto(id));
     bootOverrides(ipc, { instances, pins: ["a", "b", "c", "d", "e"] });
     ipc.overrides.set("list_instances", () => instances);
     await mount();
     const pin = byLabel("把「f」固定到侧栏");
     expect(pin.getAttribute("aria-disabled")).toBe("true");
+    expect(pin.dataset.disabled).toBe("true");
+    expect(byLabel(LIBRARY_COPY.unpin("a")).dataset.disabled).toBeUndefined();
+    expect(await reasonOf(pin)).toBe(TOAST_COPY.pinLimit);
     click(pin);
     await flush();
     expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);

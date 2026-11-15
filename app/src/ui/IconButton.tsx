@@ -71,6 +71,10 @@ export function IconButton({
   // 不可用而保持可聚焦：带原因的禁用，或要求禁用时留住焦点；只传 disabled 时以原生禁用为准，原因也不显示
   const softDisabled = disabled ? focusableWhenDisabled : disabledReason !== undefined;
   const guard = softDisabledProps(softDisabled, onClick);
+  const ariaDisabled = softDisabled ? true : rest["aria-disabled"];
+  // 调用方自己标 aria-disabled 的按钮（侧栏满时的图钉：点了由状态层弹上限提示）外观同样是禁用：变淡、不铺悬停叠层、按下不缩。
+  // 点击照常交给调用方，不在这里挡
+  const looksDisabled = ariaDisabled === true || ariaDisabled === "true";
 
   const button = (
     <button
@@ -79,11 +83,11 @@ export function IconButton({
       className={cx(styles.button, className)}
       data-variant={variant}
       data-size={size}
-      data-disabled={softDisabled || undefined}
+      data-disabled={looksDisabled || undefined}
       disabled={disabled && !focusableWhenDisabled}
       aria-label={label}
       aria-pressed={pressed}
-      aria-disabled={softDisabled ? true : rest["aria-disabled"]}
+      aria-disabled={ariaDisabled}
       onClick={guard.onClick}
     >
       {/* 换图标（复制换成已复制、固定换成取消固定）时新图标弹出、旧图标淡出，不在同一帧硬切 */}
