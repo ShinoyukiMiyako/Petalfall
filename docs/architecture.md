@@ -724,7 +724,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 
 主窗口的能力文件（`capabilities/default.json`）不用 `core:default`，只逐条授予前端实际调用的命令：事件的 listen、unlisten；窗口的 is_maximized、is_minimized、is_focused、minimize、toggle_maximize、internal_toggle_maximize（拖动区双击）、close、destroy、start_dragging、show、request_user_attention；webview 的 internal_toggle_devtools（只编译进调试构建）；opener 与 dialog 见下文。其余命令都会被拒（`<plugin>.<cmd> not allowed`）：新调用 `@tauri-apps/api` 的其他接口（例如 setTitle、emit、path、app.getVersion）时要在能力文件里加上对应的 allow 项，并同步 `window.rs` 的能力测试：它把能力文件的全集与期望清单（现为 18 条）比对，多一条少一条都挂。`window.rs` 另有一条策略回归测试，删掉策略或误放开时必挂。
 
-真机验证时不碰本机的真实数据：把 `LOCALAPPDATA`（数据目录）、`APPDATA`（默认游戏目录）与 `WEBVIEW2_USER_DATA_FOLDER`（WebView2 用户数据目录；Tauri 定位它用的是已知文件夹 API，不认 `LOCALAPPDATA`）都指到系统临时目录；需要远程调试时经 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<端口>` 追加参数。
+真机验证时不碰本机的真实数据：把 `LOCALAPPDATA`（数据目录，默认游戏目录 `<数据目录>\.minecraft` 也在它下面）、`APPDATA`（官方启动器的 `%APPDATA%\.minecraft` 与别的启动器的 Java 在它下面，启动器只读不写：探测其他游戏文件夹的 `discover_game_directories`、找原版材质源的 `art_candidates`、探测 Java 的 `default_search_roots` 读它）与 `WEBVIEW2_USER_DATA_FOLDER`（WebView2 用户数据目录；Tauri 定位它用的是已知文件夹 API，不认 `LOCALAPPDATA`）都指到系统临时目录；需要远程调试时经 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<端口>` 追加参数。
 
 ### 首次启动的提交
 
@@ -892,7 +892,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | `running-game.broken.json` | 接回记录读不出（坏 JSON、缺字段、认不得的格式版本）时改名留下的现场，不删也不重试，再有读不出的就覆盖这一份；这次启动经 `running_game` 交给前端提示 |
 | `runtime/<主版本>/` | 托管 Java 运行时 |
 | `authlib-injector/authlib-injector-<构建号>.jar` | 第三方验证服务器账户启动时注入的 javaagent。每次用这类账户启动都先查最新构建，本地没有这个构建或校验不过就下到这里；每个构建一个文件、不覆盖旧的，另一局游戏可能正占着旧的那份；查不到最新构建时沿用本地最新的一份 |
-| `logs/<unix 秒>.log` | 启动器日志，每次启动一个文件 |
+| `logs/<unix 秒>.log` | 启动器日志，每次启动一个文件，只保留最近 10 份（含本次，`logging.rs` 的 `KEEP_SESSIONS`）：开新的一份之前按文件名删掉最老的，删不掉不拦启动 |
 | `cache/` | 缓存。`modpacks/<平台>-<版本 id>-<8 位十六进制随机后缀>/` 是平台整合包的下载缓存，每次导入一个（同一版本同时导入两次时，先结束的一路不能删掉另一路手里的包），导入结束或下载失败即删；进程被杀或取消宽限期满留下的目录，在下次下载平台整合包时按七天清掉（修改时间比七天老的算残留，认领暂存位不动）。`modpacks/claims/curseforge-<文件 id>/<文件名>` 是认领到的受限文件，导入后不删。`meta/` 是版本清单与加载器列表的元数据缓存，拉取失败时新建实例页退回它。这两项在设了 `cache_directory` 时改在那里；其余几项始终在数据目录下：`vanilla-art/` 是从原版客户端 jar 抽出的材质，`skins/` 与 `thumbs/` 是下载来的远程皮肤与缩略图，`news.json` 是主页资讯，`server-history.json` 是固定服务器最近一次连通的时刻与在线人数 |
 | `templates/default/` | 新实例的默认设置：白名单里的文件加元数据 `template.json`（来源实例、保存时刻） |
 | `moves/<token>.json` | 移实例的日志（`move_journal.rs`），token 形如 `<unix 毫秒>-<序号>`：这次移动走到了哪一步，以及两边游戏目录里暂存与旧目录的位置。`move_instance` 开工时写下、每过一步改写，调用方改好配置确认之后、残留也清完才删；启动时后台的 `recover_instance_moves` 按它与盘面把中断的移动回滚或补完，移动的预检见到同一实例、涉及同一游戏目录的未收尾日志就拦下。启动收尾读不懂的日志改名为 `<token>.json.broken` 留着、不删：里面可能有人工收尾要用的路径 |
