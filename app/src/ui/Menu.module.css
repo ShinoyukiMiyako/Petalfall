@@ -26,8 +26,9 @@
   cursor: pointer;
 }
 
+/* 与账户菜单、侧栏导航的悬停同用半透明叠层；实色 bg-2 在夜樱与浮层底只差 1.04:1，几乎看不出高亮 */
 .item[data-highlight] {
-  background: var(--sk-bg-2);
+  background: var(--sk-fill-hover);
 }
 
 .icon {
@@ -47,6 +48,15 @@
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
   font-variant-numeric: tabular-nums;
+}
+
+/*
+ * 叠层上 text-2 不到 4.5:1（夜樱 4.22），右侧提示跟着提到 text，图标一并提上去与标签同色。
+ * 危险项高亮铺的是 danger-soft、不铺叠层，图标保持危险色
+ */
+.item[data-highlight]:not([data-danger]) .icon,
+.item[data-highlight]:not([data-danger]) .hint {
+  color: var(--sk-text);
 }
 
 .check {
