@@ -4,7 +4,7 @@
 // 「重试排到队尾」都不需要改写 createdAt。每次尝试的命令 taskId 是「任务 id + 尝试次数」：后端会记住
 // 「取消时不在运行」的 id，同 id 再登记会直接是已取消状态，重试必须换新 id。
 
-import { MOVE_INTERRUPTED_CODE, RETRY_GAME_DIR_REASON, TASK_INTERRUPTED_CODE, taskFailureReason } from "../copy/flows";
+import { MOVE_INTERRUPTED_CODE, RETRY_GAME_DIR_REASON, RETRY_MOVING_REASON, TASK_INTERRUPTED_CODE, taskFailureReason } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
 import { MAX_PARALLEL_TASKS, TASK_HISTORY_LIMIT } from "../domain/limits";
 import { sameGameDir } from "../domain/paths";
@@ -550,13 +550,32 @@ export function commandGameDir(task: Task): string | null {
   return task.gameDir;
 }
 
+/** 正在移到别的游戏目录的实例的锁键（不分大小写，与后端的锁键一致）。排着的移动任务也算：状态容器派生时已记成 moving。 */
+export function movingKeys(instances: readonly Pick<InstanceSummary, "id" | "activity">[]): Set<string> {
+  return new Set(instances.filter((inst) => inst.activity === "moving").map((inst) => inst.id.toLowerCase()));
+}
+
 /**
- * 「全部重试」与断网恢复的批量重试收不收这个任务，current 是此刻的当前游戏目录。要走手动下载清单的不收（见 awaitsManualFiles）；
- * 游戏目录对不上或不知道的不收（见 retryGameDirReason），断网恢复的通知也不数它们。移动一律不收：它不需要网络，是玩家逐个确认过的
- * 大动作，批量里没人看着它从哪移到哪。
+ * 此刻重试被挡住的原因，不挡为 null。current 是当前游戏目录，moving 是正在移到别的游戏目录的实例（见 movingKeys）。
+ * 先看游戏目录（见 retryGameDirReason）：切回去之前一直成立，目录对上了，moving 里的才是这个目录里的那个实例。
+ * 再看实例在不在移动：重试的任务与移动互斥，只能排在它后面，移动成功时被取消（见 strandedByMove），移动期间重试没有意义；
+ * 移动有了结局就不挡。新建与导入不看移动，它们不找移走的这个实例。
+ * 单条重试、「全部重试」、断网恢复的计数与任务行的重试按钮都按它。
  */
-export function batchRetryable(task: Task, current: string | null): boolean {
-  return task.status === "failed" && !awaitsManualFiles(task) && task.spec.command !== MOVE_TASK_COMMAND && retryGameDirReason(task, current) === null;
+export function retryBlockedReason(task: Task, current: string | null, moving: ReadonlySet<string>): string | null {
+  const dir = retryGameDirReason(task, current);
+  if (dir !== null) return dir;
+  if (task.instanceId === null || CREATES_INSTANCE.has(task.spec.command)) return null;
+  return moving.has(task.instanceId.toLowerCase()) ? RETRY_MOVING_REASON : null;
+}
+
+/**
+ * 「全部重试」与断网恢复的批量重试收不收这个任务，current 与 moving 同 retryBlockedReason。要走手动下载清单的不收（见 awaitsManualFiles）；
+ * 游戏目录对不上、不知道或实例正在移动的不收（见 retryBlockedReason），断网恢复的通知也不数它们。移动一律不收：它不需要网络，
+ * 是玩家逐个确认过的大动作，批量里没人看着它从哪移到哪。
+ */
+export function batchRetryable(task: Task, current: string | null, moving: ReadonlySet<string>): boolean {
+  return task.status === "failed" && !awaitsManualFiles(task) && task.spec.command !== MOVE_TASK_COMMAND && retryBlockedReason(task, current, moving) === null;
 }
 
 /** 重试：同一任务回到排队并移到队尾，尝试次数加一。只有失败的任务能重试，重启后已由后端收尾的移动不算。 */

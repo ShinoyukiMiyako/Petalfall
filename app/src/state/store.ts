@@ -141,9 +141,10 @@ import {
   markRunning,
   modFilesBeingUpdated,
   MOVE_TASK_COMMAND,
+  movingKeys,
   newTask,
   restoreJournal,
-  retryGameDirReason,
+  retryBlockedReason,
   retryTask,
   sharedSavesKeys,
   startComposite,
@@ -514,7 +515,7 @@ export interface LauncherActions {
   cancelTask(id: string): Promise<void>;
   cancelAllTasks(): Promise<void>;
   retryTask(id: string): void;
-  /** 把失败的任务重新排进队列（已有同一件事在队列里的跳过；移动、要手动下载的与游戏目录对不上的不收，见 batchRetryable），返回重新排进去的个数。 */
+  /** 把失败的任务重新排进队列（已有同一件事在队列里的跳过；移动、要手动下载的、游戏目录对不上的与实例正在移动的不收，见 batchRetryable），返回重新排进去的个数。 */
   retryFailedTasks(): number;
   clearFinishedTasks(): void;
   /** 打开下载快览或进入下载任务页时调用：此刻的失败都算看过了。 */
@@ -1704,7 +1705,8 @@ export class LauncherStore {
   /** 由离线转回在线：发「网络已恢复」；有失败的下载时正文写个数，操作为全部重试。 */
   private announceRecovered(): void {
     const current = this.currentGameDir();
-    const failed = this.raw.tasks.filter((t) => batchRetryable(t, current)).length;
+    const moving = this.movingInstances();
+    const failed = this.raw.tasks.filter((t) => batchRetryable(t, current, moving)).length;
     const copy = TOAST_COPY.networkRestored(failed);
     const action: ToastAction | undefined =
       failed === 0 ? undefined : { label: TOAST_COPY.retryAllAction, run: () => void this.actions.retryFailedTasks(), errorTitle: ACTION_ERROR.install };
@@ -1743,6 +1745,11 @@ export class LauncherStore {
 
   private instanceIds(): string[] {
     return this.getState().instances.map((i) => i.id);
+  }
+
+  /** 正在移到别的游戏目录的实例（见 movingKeys），按派生后的实例列表取：排着的移动任务也算。 */
+  private movingInstances(): Set<string> {
+    return movingKeys(this.getState().instances);
   }
 
   private currentAccount(): Account | null {
@@ -3752,7 +3759,7 @@ export class LauncherStore {
       retryTask(id) {
         const task = store.findTask(id);
         // 排在下面两个按实例名查当前目录扫描结果的判断前面：目录换过之后它们认出的是另一个目录里的同名实例
-        const blocked = retryGameDirReason(task, store.currentGameDir());
+        const blocked = retryBlockedReason(task, store.currentGameDir(), store.movingInstances());
         if (blocked !== null) throw new Error(blocked);
         const leftover = store.leftoverOfFailedCreate(task);
         if (leftover !== null) {
@@ -3776,8 +3783,9 @@ export class LauncherStore {
       retryFailedTasks() {
         let retried = 0;
         const current = store.currentGameDir();
+        const moving = store.movingInstances();
         try {
-          for (const task of store.raw.tasks.filter((t) => batchRetryable(t, current))) {
+          for (const task of store.raw.tasks.filter((t) => batchRetryable(t, current, moving))) {
             const leftover = store.leftoverOfFailedCreate(task);
             if (leftover !== null) {
               // 与下面一样，已在队列里的同一件事静默跳过，不逐条提示重复

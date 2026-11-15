@@ -373,6 +373,37 @@ describe("下载任务页：历史", () => {
     expect(buttonIn(row("下载 Java failed-java"), "重试").getAttribute("aria-disabled")).toBeNull();
   });
 
+  it("实例正在移到其他游戏目录：挂在它上面的失败任务重试置灰、聚焦写明原因，点了不发命令；别的实例照常可点；移动失败后恢复可点", async () => {
+    const backup = (id: string, instance: string, world: string) =>
+      record(id, "failed", {
+        kind: "world_backup",
+        title: `备份「${world}」`,
+        detail: `「${instance}」`,
+        instance_id: instance,
+        error: { code: "io", message: "磁盘已满" },
+        spec: { command: "backup_world", args: { id: instance, world } },
+      });
+    bootOverrides(ipc, { journal: [backup("failed-mine", "生存", "旧世界"), backup("failed-other", "创造", "主城")] });
+    const move = deferred<unknown>();
+    ipc.overrides.set("move_instance", () => move.promise);
+    await mount();
+    await act(() => launcher.actions.moveInstance("生存", "D:/Games/.minecraft", "E:\\HMCL\\.minecraft", "HMCL"));
+    await flush();
+    const retry = buttonIn(row("备份「旧世界」"), "重试");
+    expect(retry.getAttribute("aria-disabled")).toBe("true");
+    act(() => focusByKeyboard(retry));
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toContain("实例正在移到其他游戏目录");
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toEqual([]);
+    expect(launcher.state.tasks.find((t) => t.id === "failed-mine")).toMatchObject({ status: "failed", attempt: 1 });
+    expect(buttonIn(row("备份「主城」"), "重试").getAttribute("aria-disabled")).toBeNull();
+
+    move.reject(new IpcError("io", "目标盘拒绝访问"));
+    await flush();
+    expect(buttonIn(row("备份「旧世界」"), "重试").getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("上次关闭时中断的移动：行上写已在打开时收尾，不给重试；同样中断的下载照常给重试", async () => {
     bootOverrides(ipc, {
       journal: [
