@@ -282,6 +282,89 @@ describe("实例设置：外观卡的卡面背景", () => {
     expect(callsOf(ipc, "import_cover_image")).toEqual([]);
   });
 
+  it("连点三次切背景：前几次保存的回包先到也不把分段与预览拉回旧选择，最终存下最后一次", async () => {
+    // 已经有背景图：「我的图片」直接写设置，三次点击是三种不同的背景
+    settings = { ...settings, background_image: BG_FILE };
+    patchInstance({ background_image: BG_KEY });
+    // 每次写设置挂到放行为止：保存排成一条链，前一次落定、重读回来时后一次还在路上
+    const gates = [deferred<void>(), deferred<void>(), deferred<void>()];
+    let call = 0;
+    ipc.overrides.set("set_instance_settings", async (args) => {
+      const gate = gates[call++];
+      await gate.promise;
+      settings = args.settings as InstanceSettingsDto;
+      return settings;
+    });
+    await openSettings();
+    act(() => radio("渐变花瓣").click());
+    act(() => radio("方块平铺").click());
+    act(() => radio("我的图片").click());
+    await flush();
+    expect(checked()).toEqual(["我的图片"]);
+    const fromRender = vi.mocked(useCoverBackdrop).mock.calls.length;
+    const shown: string[][] = [];
+    for (const gate of gates) {
+      await act(async () => {
+        gate.resolve();
+        await settle(20);
+      });
+      shown.push(checked());
+    }
+    expect(shown).toEqual([["我的图片"], ["我的图片"], ["我的图片"]]);
+    // 页头的卡面按列表画，列表这里一直是跟随；按编辑器画的预览在回包陆续到来时只出现最后一次的选择
+    const previewedSince = previewed().slice(fromRender);
+    expect(previewedSince).toContain("image");
+    expect(previewedSince.filter((background) => background !== "follow" && background !== "image")).toEqual([]);
+    expect(written().map((s) => s.background)).toEqual(["art", "texture", "image"]);
+    expect(settings.background).toBe("image");
+    expect(textOf(row("卡面背景"))).toContain("用你自己的图片铺满卡面");
+  });
+
+  it("连点时中间一次保存被拒：照常报错，分段停在还在路上的最后一次选择，它落定后存下的就是它", async () => {
+    settings = { ...settings, background_image: BG_FILE };
+    patchInstance({ background_image: BG_KEY });
+    const gates = [deferred<void>(), deferred<void>(), deferred<void>()];
+    let call = 0;
+    ipc.overrides.set("set_instance_settings", async (args) => {
+      const gate = gates[call++];
+      await gate.promise;
+      settings = args.settings as InstanceSettingsDto;
+      return settings;
+    });
+    await openSettings();
+    act(() => radio("渐变花瓣").click());
+    act(() => radio("方块平铺").click());
+    act(() => radio("我的图片").click());
+    await flush();
+    await act(async () => {
+      gates[0].resolve();
+      await settle(20);
+    });
+    await act(async () => {
+      gates[1].reject(new IpcError("io", "磁盘写满了"));
+      await settle(20);
+    });
+    expect(toastTitles()).toEqual(["实例设置没有保存"]);
+    expect(checked()).toEqual(["我的图片"]);
+    await act(async () => {
+      gates[2].resolve();
+      await settle(20);
+    });
+    expect(checked()).toEqual(["我的图片"]);
+    expect(settings.background).toBe("image");
+  });
+
+  it("保存被拒且没有别的保存在路上：分段回到磁盘上的值", async () => {
+    ipc.overrides.set("set_instance_settings", () => {
+      throw new IpcError("io", "磁盘写满了");
+    });
+    await openSettings();
+    await click(radio("渐变花瓣"));
+    expect(toastTitles()).toEqual(["实例设置没有保存"]);
+    expect(checked()).toEqual(["跟随默认"]);
+    expect(settings.background).toBe("follow");
+  });
+
   it("还没有图片时点「我的图片」：先弹选图（只列 PNG、JPEG、WebP），选好经背景位导入才切过去，不另写设置", async () => {
     const picking = deferred<string | null>();
     vi.mocked(pickFile).mockReturnValueOnce(picking.promise);

@@ -79,22 +79,50 @@ export interface SettingsEditor {
   save(patch: Partial<InstanceSettings>): Promise<boolean>;
 }
 
+type SettingsKey = keyof InstanceSettings;
+
+/** 乐观补丁里去掉 keys 中已经没有保存在路上的项（不给 keys 时看全部），什么都没去掉时原样返回。 */
+function dropSettled(patch: Partial<InstanceSettings>, inFlight: ReadonlyMap<SettingsKey, number>, keys: readonly string[] = Object.keys(patch)): Partial<InstanceSettings> {
+  const settled = new Set(keys.filter((key) => !inFlight.has(key as SettingsKey)));
+  if (!Object.keys(patch).some((key) => settled.has(key))) return patch;
+  return Object.fromEntries(Object.entries(patch).filter(([key]) => !settled.has(key))) as Partial<InstanceSettings>;
+}
+
 function useSettingsEditor(id: string, settings: ResourceResult<InstanceSettings>, locked: string | undefined): SettingsEditor | null {
   const actions = useLauncherActions();
   const run = useRunner();
   const [patch, setPatch] = useState<Partial<InstanceSettings>>({});
+  // 每一项还在路上的保存次数，没有保存在路上的项不在表里
+  const inFlight = useRef(new Map<SettingsKey, number>());
   const data = settings.status === "ready" ? settings.data : null;
-  // 重新读到磁盘上的值就以它为准
-  useEffect(() => setPatch({}), [data]);
+  // 重新读到磁盘上的值就以它为准，还有保存在路上的项除外：连着改同一项时，前一次保存落定后的重读先到，
+  // 带回的是那一次的值，拿它盖掉乐观值，控件就先跳回前一次的选择、等后一次的重读回来再跳过去
+  useEffect(() => setPatch((p) => dropSettled(p, inFlight.current)), [data]);
   if (data === null) return null;
   return {
     value: { ...data, ...patch },
     locked,
     save: async (next) => {
+      const keys = Object.keys(next) as SettingsKey[];
+      for (const key of keys) {
+        const count = inFlight.current.get(key);
+        inFlight.current.set(key, count === undefined ? 1 : count + 1);
+      }
       setPatch((p) => ({ ...p, ...next }));
-      const outcome = await run(() => actions.updateInstanceSettings(id, next), ACTION_ERROR.instanceSettings);
-      if (!outcome.ok) setPatch({});
-      return outcome.ok;
+      let ok: boolean;
+      try {
+        ok = (await run(() => actions.updateInstanceSettings(id, next), ACTION_ERROR.instanceSettings)).ok;
+      } finally {
+        for (const key of keys) {
+          const count = inFlight.current.get(key);
+          if (count === undefined) throw new Error(`实例设置的 ${key} 没有登记在路上的保存，却有一次保存落定`);
+          if (count === 1) inFlight.current.delete(key);
+          else inFlight.current.set(key, count - 1);
+        }
+      }
+      // 失败的这几项回到磁盘上的值；同一项后面还有保存在路上的，控件显示的已是那一次的值，留给它自己落定
+      if (!ok) setPatch((p) => dropSettled(p, inFlight.current, keys));
+      return ok;
     },
   };
 }
