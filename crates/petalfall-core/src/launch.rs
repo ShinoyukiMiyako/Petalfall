@@ -131,6 +131,8 @@ pub enum LaunchEvent {
 pub type LaunchEventSink = mpsc::UnboundedSender<LaunchEvent>;
 
 /// 不阻断启动、但值得在崩溃诊断里引用的提醒。
+///
+/// 取值随崩溃记录与接回记录落盘。新增取值照 [`WithAddedWarnings`] 的约定另存，不进记录的 `warnings`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchWarning {
@@ -144,12 +146,119 @@ pub enum LaunchWarning {
     IcloudFolder,
     /// 角色名超过 16 个字符，而游戏版本是 1.20.3 或更新。
     LongPlayerName,
+    /// 角色名含空格或非 ASCII 字符，而游戏版本是 1.20.2 或 1.20.3（见 [`player_name_chars_rejected`]）。
+    PlayerNameChars,
     /// 自定义 JVM 参数里 `-Xmx` / `-Xms` 的写法 Java 不认。
     JvmMemoryUnit,
     /// 生效的最小堆大于最大堆。
     JvmMinOverMax,
     /// 生效的最大堆低于 512 MB。
     JvmMaxTooLow,
+}
+
+impl LaunchWarning {
+    /// 数据格式号为 1 的版本认得的取值，记录的 `warnings` 里只放这些。
+    ///
+    /// 那些版本按封闭的枚举读 `warnings`，碰上别的取值就把整份记录当作读不懂：崩溃页打不开，接回记录被改名留存。
+    /// 之后新增的取值一律答 false，另存进 `added_warnings`，不必为一条提醒给数据格式号加一。
+    pub(crate) fn known_to_format_1(self) -> bool {
+        match self {
+            LaunchWarning::GamePath
+            | LaunchWarning::InstanceName
+            | LaunchWarning::OnedriveFolder
+            | LaunchWarning::IcloudFolder
+            | LaunchWarning::LongPlayerName
+            | LaunchWarning::JvmMemoryUnit
+            | LaunchWarning::JvmMinOverMax
+            | LaunchWarning::JvmMaxTooLow => true,
+            LaunchWarning::PlayerNameChars => false,
+        }
+    }
+
+    /// 查出这条提醒的启动阶段。另存的取值读回时按它归位：崩溃页按启动阶段的先后列提醒，并回时不能一律排到最后。
+    fn stage(self) -> LaunchStage {
+        match self {
+            LaunchWarning::LongPlayerName | LaunchWarning::PlayerNameChars => {
+                LaunchStage::VerifyAccount
+            }
+            LaunchWarning::GamePath
+            | LaunchWarning::InstanceName
+            | LaunchWarning::OnedriveFolder
+            | LaunchWarning::IcloudFolder => LaunchStage::VerifyFiles,
+            LaunchWarning::JvmMemoryUnit
+            | LaunchWarning::JvmMinOverMax
+            | LaunchWarning::JvmMaxTooLow => LaunchStage::BuildArguments,
+        }
+    }
+}
+
+/// 带启动提醒的落盘记录：崩溃记录与接回记录。
+pub(crate) trait RecordsLaunchWarnings {
+    fn launch_warnings(&mut self) -> &mut Vec<LaunchWarning>;
+}
+
+/// 带启动提醒的记录在盘上的样子：记录本身，加上另存的新增提醒。
+///
+/// 数据格式号为 1 的版本认得的取值（[`LaunchWarning::known_to_format_1`]）留在记录的 `warnings` 里，之后新增的
+/// 取值按落盘拼写写进同一层的 `added_warnings`，没有就不写出。那些版本不认得这个键，照常读整份记录，只是不显示
+/// 这几条。读的时候并回 `warnings`，按查出它的启动阶段归位；这一版也认不得的取值（更新的版本写的）跳过，只记日志。
+#[derive(Serialize, serde::Deserialize)]
+pub(crate) struct WithAddedWarnings<T> {
+    #[serde(flatten)]
+    record: T,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    added_warnings: Vec<AddedWarning>,
+}
+
+/// 另存的一条提醒。按字符串收下：认不得的取值不能让整份记录读失败，这道容忍正是另存的用意。
+#[derive(Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum AddedWarning {
+    Known(LaunchWarning),
+    Unknown(String),
+}
+
+impl<T: RecordsLaunchWarnings> WithAddedWarnings<T> {
+    /// 按落盘约定拆开记录里的提醒。
+    pub(crate) fn store(mut record: T) -> Self {
+        let warnings = record.launch_warnings();
+        let added_warnings = warnings
+            .iter()
+            .filter(|warning| !warning.known_to_format_1())
+            .map(|&warning| AddedWarning::Known(warning))
+            .collect();
+        warnings.retain(|warning| warning.known_to_format_1());
+        Self {
+            record,
+            added_warnings,
+        }
+    }
+
+    /// 把另存的提醒并回记录。
+    pub(crate) fn restore(self) -> T {
+        let Self {
+            mut record,
+            added_warnings,
+        } = self;
+        let warnings = record.launch_warnings();
+        for added in added_warnings {
+            match added {
+                AddedWarning::Known(warning) => {
+                    match warnings
+                        .iter()
+                        .position(|kept| kept.stage() > warning.stage())
+                    {
+                        Some(at) => warnings.insert(at, warning),
+                        None => warnings.push(warning),
+                    }
+                }
+                AddedWarning::Unknown(code) => {
+                    tracing::info!(code = %code, "记录里有这一版认不得的启动提醒，不显示");
+                }
+            }
+        }
+        record
+    }
 }
 
 /// 用哪个账户启动。
@@ -806,9 +915,9 @@ impl Petalfall {
                 ))
                 .await;
         }
-        // 正版名只有字母、数字与下划线，离线名与皮肤站的角色名可能带空格或中文。这一条只写日志、不记进 warnings：
-        // warnings 随崩溃记录与接回记录落盘，已发布的版本读到不认识的取值，会把整份记录当作读不懂。
+        // 正版名只有字母、数字与下划线，离线名与皮肤站的角色名可能带空格或中文。
         if player_name_chars_rejected(&auth.player_name, game_version) {
+            warnings.push(LaunchWarning::PlayerNameChars);
             reporter
                 .warn(format!(
                     "角色名 {} 含空格或非 ASCII 字符，Minecraft 1.20.2 与 1.20.3 进入存档或服务器时会被拒绝",
@@ -3348,8 +3457,8 @@ mod tests {
     }
 
     /// 1.20.2、1.20.3 不认含空格或非 ASCII 字符的角色名：这两个版本在验证账户阶段提醒一句，别的版本、只有字母数字与
-    /// 下划线的名字不提醒。临时离线账户的用户名校验另有一句不分版本的提示，排在前面。这一条只写日志，崩溃记录里的
-    /// 提醒不多出取值。
+    /// 下划线的名字不提醒。临时离线账户的用户名校验另有一句不分版本的提示，排在前面。提醒照样记进崩溃记录，经
+    /// `added_warnings` 落盘再读回。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn player_names_with_spaces_or_non_ascii_are_warned_on_1_20_2_and_1_20_3() {
         const OFFLINE_HINT: &str =
@@ -3419,13 +3528,13 @@ mod tests {
                     "1.20.2",
                     "Petal Player",
                     vec![OFFLINE_HINT.to_owned(), rejected("Petal Player")],
-                    vec![]
+                    vec![LaunchWarning::PlayerNameChars]
                 ),
                 (
                     "1.20.3",
                     "落樱",
                     vec![OFFLINE_HINT.to_owned(), rejected("落樱")],
-                    vec![]
+                    vec![LaunchWarning::PlayerNameChars]
                 ),
                 ("1.20.4", "落樱", vec![OFFLINE_HINT.to_owned()], vec![]),
                 ("1.20.3", "Petal_Player", vec![], vec![]),
@@ -4678,6 +4787,7 @@ mod tests {
             LaunchWarning::OnedriveFolder,
             LaunchWarning::IcloudFolder,
             LaunchWarning::LongPlayerName,
+            LaunchWarning::PlayerNameChars,
             LaunchWarning::JvmMemoryUnit,
             LaunchWarning::JvmMinOverMax,
             LaunchWarning::JvmMaxTooLow,
@@ -4690,6 +4800,7 @@ mod tests {
                 "onedrive_folder",
                 "icloud_folder",
                 "long_player_name",
+                "player_name_chars",
                 "jvm_memory_unit",
                 "jvm_min_over_max",
                 "jvm_max_too_low"
@@ -4697,6 +4808,159 @@ mod tests {
         );
         let back: Vec<LaunchWarning> = serde_json::from_value(json).unwrap();
         assert_eq!(back, all);
+    }
+
+    /// 带提醒的最小记录，只为看落盘约定本身。
+    #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+    struct Noted {
+        label: String,
+        warnings: Vec<LaunchWarning>,
+    }
+
+    impl RecordsLaunchWarnings for Noted {
+        fn launch_warnings(&mut self) -> &mut Vec<LaunchWarning> {
+            &mut self.warnings
+        }
+    }
+
+    fn noted(warnings: Vec<LaunchWarning>) -> Noted {
+        Noted {
+            label: "生存服".into(),
+            warnings,
+        }
+    }
+
+    fn stored_json(record: Noted) -> serde_json::Value {
+        serde_json::to_value(WithAddedWarnings::store(record)).unwrap()
+    }
+
+    fn read_back(json: serde_json::Value) -> Noted {
+        serde_json::from_value::<WithAddedWarnings<Noted>>(json)
+            .unwrap()
+            .restore()
+    }
+
+    #[test]
+    fn warnings_added_after_format_1_are_stored_aside_and_put_back_in_stage_order() {
+        let record = noted(vec![
+            LaunchWarning::LongPlayerName,
+            LaunchWarning::PlayerNameChars,
+            LaunchWarning::GamePath,
+            LaunchWarning::OnedriveFolder,
+            LaunchWarning::JvmMaxTooLow,
+        ]);
+        let json = stored_json(record.clone());
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "label": "生存服",
+                "warnings": ["long_player_name", "game_path", "onedrive_folder", "jvm_max_too_low"],
+                "added_warnings": ["player_name_chars"],
+            })
+        );
+        assert_eq!(read_back(json), record);
+
+        // 验证账户阶段的提醒排在校验文件阶段之前：只是接在后面的话，崩溃页会把它列到路径提醒之后。
+        let record = noted(vec![
+            LaunchWarning::PlayerNameChars,
+            LaunchWarning::InstanceName,
+        ]);
+        let json = stored_json(record.clone());
+        assert_eq!(json["warnings"], serde_json::json!(["instance_name"]));
+        assert_eq!(read_back(json), record);
+
+        let record = noted(vec![LaunchWarning::PlayerNameChars]);
+        let json = stored_json(record.clone());
+        assert_eq!(json["warnings"], serde_json::json!([]));
+        assert_eq!(
+            json["added_warnings"],
+            serde_json::json!(["player_name_chars"])
+        );
+        assert_eq!(read_back(json), record);
+    }
+
+    /// 启动按阶段先后记提醒，任一组合存下再读回都与原样相同。
+    #[test]
+    fn every_combination_of_warnings_survives_the_round_trip() {
+        const LAUNCH_ORDER: [LaunchWarning; 9] = [
+            LaunchWarning::LongPlayerName,
+            LaunchWarning::PlayerNameChars,
+            LaunchWarning::GamePath,
+            LaunchWarning::InstanceName,
+            LaunchWarning::OnedriveFolder,
+            LaunchWarning::IcloudFolder,
+            LaunchWarning::JvmMemoryUnit,
+            LaunchWarning::JvmMinOverMax,
+            LaunchWarning::JvmMaxTooLow,
+        ];
+        for mask in 0u32..(1 << LAUNCH_ORDER.len()) {
+            let warnings: Vec<LaunchWarning> = LAUNCH_ORDER
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, &warning)| warning)
+                .collect();
+            let record = noted(warnings);
+            let json = stored_json(record.clone());
+            let kept: Vec<LaunchWarning> =
+                serde_json::from_value(json["warnings"].clone()).unwrap();
+            assert!(
+                kept.iter().all(|warning| warning.known_to_format_1()),
+                "{mask:#b}：{kept:?}"
+            );
+            assert_eq!(read_back(json), record, "{mask:#b}");
+        }
+    }
+
+    #[test]
+    fn records_without_added_warnings_keep_the_old_shape() {
+        let json = stored_json(noted(vec![LaunchWarning::GamePath]));
+        assert_eq!(
+            json,
+            serde_json::json!({ "label": "生存服", "warnings": ["game_path"] })
+        );
+        // 旧版本写下的记录没有这个键，照常读入。
+        assert_eq!(
+            read_back(serde_json::json!({
+                "label": "生存服",
+                "warnings": ["long_player_name", "jvm_min_over_max"],
+            })),
+            noted(vec![
+                LaunchWarning::LongPlayerName,
+                LaunchWarning::JvmMinOverMax
+            ])
+        );
+    }
+
+    #[test]
+    fn added_warnings_this_version_does_not_know_are_skipped() {
+        let record = read_back(serde_json::json!({
+            "label": "生存服",
+            "warnings": ["game_path"],
+            "added_warnings": ["from_a_newer_petalfall", "player_name_chars"],
+        }));
+        assert_eq!(
+            record,
+            noted(vec![
+                LaunchWarning::PlayerNameChars,
+                LaunchWarning::GamePath
+            ])
+        );
+        // 只容忍认不得的字符串：类型对不上仍按记录读不懂报错。
+        let wrong_type = serde_json::from_value::<WithAddedWarnings<Noted>>(serde_json::json!({
+            "label": "生存服",
+            "warnings": [],
+            "added_warnings": [3],
+        }));
+        let message = wrong_type.err().expect("数字不是提醒").to_string();
+        assert!(message.contains("untagged enum AddedWarning"), "{message}");
+        let wrong_type = serde_json::from_value::<WithAddedWarnings<Noted>>(serde_json::json!({
+            "label": "生存服",
+            "warnings": [],
+            "added_warnings": "player_name_chars",
+        }));
+        let message = wrong_type.err().expect("单个字符串不是列表").to_string();
+        assert!(message.contains("expected a sequence"), "{message}");
     }
 
     #[test]

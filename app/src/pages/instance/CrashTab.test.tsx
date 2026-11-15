@@ -795,6 +795,19 @@ describe("崩溃诊断：这次启动时的提醒", () => {
     expect(nav.route).toEqual({ page: "accounts" });
   });
 
+  it("角色名含空格或非 ASCII 字符与超长各占一行，同样去账户页", async () => {
+    setMockLaunchWarnings(["long_player_name", "player_name_chars"]);
+    await crashWith(-1073741819);
+    await open("crash");
+    const rows = [...section("这次启动时的提醒").querySelectorAll("li")];
+    expect(rows.map((li) => textOf(li.querySelector("button") as Element))).toEqual(["管理账户", "管理账户"]);
+    expect(textOf(rows[1])).toContain("角色名含空格或非 ASCII 字符");
+    expect(textOf(rows[1])).toContain("Minecraft 1.20.2 与 1.20.3 进不了存档与服务器。");
+    click(rows[1].querySelector("button") as HTMLButtonElement);
+    await flush();
+    expect(nav.route).toEqual({ page: "accounts" });
+  });
+
   it("多条提醒逐行列出、不用局部提示框：一张卡片至多一条局部提示，留给过期与再次运行的说明", async () => {
     setMockLaunchWarnings(["onedrive_folder", "long_player_name", "jvm_min_over_max"]);
     await crashWith(-1073741819);

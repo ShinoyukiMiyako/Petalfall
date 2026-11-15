@@ -685,7 +685,7 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 诊断不只看会话日志，还扫这一局留下的两份文件（`crashdiag.rs`）：工作目录下 pid 对得上、修改时间不早于会话开始的 `hs_err_pid<pid>.log`，以及 `crash-reports/` 下会话开始后最新的一份崩溃报告。Forge 崩溃报告的 Suspected Mods 段并入可疑 Mod，对到 mods 目录里的文件。文件损坏线索（`corrupted_jar`）的命中行里写着路径时同样：路径落在 mods 目录下、且文件名紧跟在路径分隔符之后对得上已装文件的（不分大小写，停用态的文件也认；子串匹配会把 `pfbad-1.0.0.jar` 认成 `bad-1.0.0.jar`，所以文件名要紧跟分隔符；盘上没有的不猜），该文件也并入可疑 Mod 并排在最前，已被点名并对上同一个文件时不重复；点名为空时也去 mods 目录认，损坏的 jar 读不出 mod id，日志本身点不了它的名。这样的 jar 没有元数据时 `mod_id` 用去掉 `.jar` 后缀的文件名。`last_crash` 的报告带 `exit_code_note`（退出码对照：`0xC0000005`、`0xC0000409` 与 1，表外的码为 null）与 `scanned_files`（参与扫描的文件），线索带来源。规则一条都没命中时按顺序兜底：先看 JVM 致命错误头（`#  EXCEPTION_ACCESS_VIOLATION (0xc0000005) at …`，`jvm_exception_clue`）。JVM 自己接住原生异常时写完 hs_err 就以退出码 1 结束，退出码看不出它死在原生代码里，异常码只留在错误头里，所以给出类别 `native_crash` 的线索，`detail` 是十六进制异常码并指到那一行；没有错误头再看退出码，是访问冲突或紧急中止时给出同一类别的线索；退出码 1 太笼统，只给说明不给线索。规则表的写法：每条规则取第一条命中、且没被更高优先级规则占用的行，并占下它命中的全部行，免得 Fabric 一次版本不符报错的好几行再被算成一条「缺少前置」；新增类别 `jvm_args_invalid`（Java 不接受自定义的 JVM 参数，虚拟机没能起来；一个开关没写 `-` 时 Java 把它当成主类，报的是找不到主类，主类名不带点的才算，真缺主类是文件问题）；新增类别 `loopback_unavailable`（Java 建不起本机回环连接，用到网络选择器的 Mod 起不来）：Windows 上 NIO 的 Selector 靠 TEMP 下的 AF_UNIX 套接字建回环管道，TEMP 缺失、不可写或路径过长时绑定失败，JDK 退回 TCP，不会走到这条报错；产生它的是绑定成功、连接失败（`Invalid argument: connect`），来自带文件系统写虚拟化的打包应用把写进 AppData 的套接字文件重定向了，它的子进程都一样。所以建议指向启动方式（从开始菜单直接打开，或把 TEMP 改到 AppData 之外），不让玩家去查 TEMP 存不存在。Fabric Loader 给玩家看的说明按系统语言翻译，规则认不出，所以也认它同一次失败写的不翻译的原因行（`HARD_DEP_INCOMPATIBLE_PRESELECTED sodium 0.8.13 {depends minecraft @ …}`）：依赖方是游戏或加载器的归版本不符，是 Java 的归 Java 版本不匹配，Mod 之间版本不对的归 `dependency_version_mismatch`，没装的归缺少前置；另认 Fabric 现行的措辞（`Incompatible mods found!`、`Some of your mods are incompatible`，说不清是哪一类不兼容时它们是唯一的线索）、中文系统上的详情行（`模组 'X' (id) 需要 …`）与入口崩溃时的 `provided by 'id'`，后者用来点名 Mod。Fabric Loader 的 `HARD_DEP_NO_CANDIDATE` 在没装和版本不对时写法相同，要看同一次失败的 `Fix:` 行：`add` 是没装，`replace` 且被原因行点名的才是版本不对，这两行都不翻译。`Incompatible mod set`、`Missing or unsupported mandatory dependencies` 和加载不了的连带行，在已有版本线索时让位，不再算一条缺少前置。Quilt Loader 把加载器版本不够也写成 `requires version … of quilt_loader, which is missing`，归为版本不符，不当成缺少前置。Forge 的依赖报错里 `Mod ID: 'fml'` 与 `forge`、`neoforge`、`minecraft` 一样是平台自己，要求没满足归版本不符（加载器版本不够，到发现页搜不到，不是缺前置；没登记成 Mod 时实际版本写 `[MISSING]`，同样如此）；要求方（`Requested by`）是平台 id 时线索不点名它，点名了界面就会让玩家去找 Minecraft 这个 Mod 的新版本，往下取得到 Mod 就取，取不到 `detail` 为空。缺少前置的 `which is missing` 只认 `requires`：Fabric Loader 解析成功之后打的 `recommends` 警告（`Warnings were found!`）游戏照常启动，没装的推荐项不算缺少前置，提取 `detail` 时跳过它，也不会被当成日志指向的 Mod，别的原因崩溃时同样不会因此多出一条缺少前置。Fabric 的 `Mod 'X' (id)` 与中文系统上的 `模组 'X' (id)` 里显示名可能带撇号（`Xaero's Minimap`），点名用懒惰匹配，一行里的依赖方和前置都取得到，不因前置的显示名带撇号让线索消失。崩溃判定（`detect_crash`）里，退出码 1 且输出里有 `Someone is closing me!` 的算玩家关窗，不算崩溃：1.5.2 这一代的窗口关闭回调打这一行再 `System.exit(1)`；日志里另有明确的崩溃标记（崩溃画面关闭时也打这一行）或退出码不是 1 时不开脱。`CrashReport.max_memory_mb` 是这一局实际生效的最大堆，不再是内存设置：自定义 JVM 参数排在启动器的内存参数之后，同一参数 JVM 取最后一次，所以取自定义参数里最后一个写法合法的 `-Xmx`，没写才用内存设置（`effective_max_heap_mb`），启动日志里的「最大内存」同口径，诊断解释内存耗尽时说的是这一局真正用上的数。`last-crash.json` 的格式版本是 2，旧的 1 版照常读。
 
-启动前的几项判断只提醒、不阻断（`petalfall_launch::precheck`），写进启动日志，也记进这一局的崩溃报告（`warnings`）：`game_path`（游戏目录含 `!`，或含非 ASCII 且实例是 1.17 之前的 Forge）、`instance_name`（实例名含同样的字符，且名字落在路径上：隔离实例的工作目录 `versions/<实例名>`，以及继承链根的 client jar 与 natives；不隔离的实例工作目录就是游戏目录，路径上只剩继承链根的名字）、`onedrive_folder`、`icloud_folder`（工作目录在同步文件夹里）、`long_player_name`（角色名超过 16 个字符而游戏是 1.20.3 或更新）、`jvm_memory_unit`、`jvm_min_over_max`、`jvm_max_too_low`（自定义 JVM 参数里 `-Xmx` / `-Xms` 的写法不对、最小堆大于最大堆、最大堆低于 512 MB）。这三项只看堆参数：`-Xmx` / `-Xms` 后紧跟字母的（OpenJ9 的线程栈大小 `-Xmso`）是另一个选项，不参与检查，既不当成写错单位的堆参数，也不把它的值算进最小堆；后面不是字母的（如 `-Xmx=4g`）仍按写错了的堆参数报。
+启动前的几项判断只提醒、不阻断（`petalfall_launch::precheck`），写进启动日志，也记进这一局的崩溃报告（`warnings`）：`game_path`（游戏目录含 `!`，或含非 ASCII 且实例是 1.17 之前的 Forge）、`instance_name`（实例名含同样的字符，且名字落在路径上：隔离实例的工作目录 `versions/<实例名>`，以及继承链根的 client jar 与 natives；不隔离的实例工作目录就是游戏目录，路径上只剩继承链根的名字）、`onedrive_folder`、`icloud_folder`（工作目录在同步文件夹里）、`long_player_name`（角色名超过 16 个字符而游戏是 1.20.3 或更新）、`player_name_chars`（角色名含码值 32 及以下或 127 及以上的字符，即空格与非 ASCII 字符，而游戏是 1.20.2、1.20.3 或它们的预发布与 RC；周快照与 1.20.4 起不算）、`jvm_memory_unit`、`jvm_min_over_max`、`jvm_max_too_low`（自定义 JVM 参数里 `-Xmx` / `-Xms` 的写法不对、最小堆大于最大堆、最大堆低于 512 MB）。`player_name_chars` 是数据格式号为 1 之后新增的取值，落盘时另存在 `added_warnings`，见「数据格式号」的启动提醒另存约定。这三项只看堆参数：`-Xmx` / `-Xms` 后紧跟字母的（OpenJ9 的线程栈大小 `-Xmso`）是另一个选项，不参与检查，既不当成写错单位的堆参数，也不把它的值算进最小堆；后面不是字母的（如 `-Xmx=4g`）仍按写错了的堆参数报。
 
 路径提醒的两项分开报，因为玩家要改的地方不同：游戏目录里的字符要换游戏目录才消得掉，实例名里的字符改个名就够了；两处都有就各报一条，只改一处另一处下一局还会冒出来。`instance_name` 只看真正落在路径上的名字，没落在路径上的改了也不起作用。非 ASCII 字符只对 1.17 之前的 Forge 提醒（版本号解析不出、含周快照时不提醒），`!` 与加载器无关，Java 的 jar URL 解析会把路径段末尾的它当成分隔符。系统代码页表示不了的字符不走这两条提醒，启动前以 `path_unsupported` 拦下（见「安装、补全与启动的约定」）。
 
@@ -1003,6 +1003,8 @@ versions/<实例名>/
 
 旧版本读到不认识的字段会忽略，但保存时多数文件会把它丢掉。例外只有 `config.json`：顶层，以及外观、内存、存档备份三段，都原样保留不认识的键（见「启动提示」）；实例设置等别的文件不保留。所以新字段是一项用户能再设一次的设置时，丢了等于回到默认值，不加一；新字段承载用户找不回来的内容（记录、历史、来源信息、凭据）时，放到会被原样保留的位置，做不到就加一。拿不准时按「要加」处理，并在 `FORMAT_HISTORY` 里写明理由。
 
+**启动提醒的另存约定。** 崩溃记录 `last-crash.json` 与接回记录 `running-game.json` 都带这一局的启动提醒（`warnings`）。号为 1 的版本按封闭的枚举读它，碰上不认识的取值就把整份记录当作读不懂：崩溃页打不开，接回记录被改名留存。所以两份记录的 `warnings` 里只写号为 1 的版本认得的八个取值（`LaunchWarning::known_to_format_1`），之后新增的取值按落盘拼写写进同一层的 `added_warnings`（字符串数组，没有这类取值时不写出）。号为 1 的版本忽略这个键，照常读整份记录，只是不显示这几条。读的时候（`WithAddedWarnings::restore`）把它们并回 `warnings`，按查出它的启动阶段归位，同一阶段里排在 `warnings` 已有的取值之后；这一版也认不得的取值（更新的版本写的）跳过，只记一条 info 日志；`added_warnings` 不是字符串数组时仍按记录读不懂处理。界面经 `last_crash` 拿到的是并回之后的 `warnings`，没有 `added_warnings`。以后新增提醒取值都照此办理：`known_to_format_1` 对它答 false，不加数据格式号；号以后加上去了，`known_to_format_1` 也不改，新增的取值不挪回 `warnings`。`data_format_snapshot.rs` 按号为 1 的版本的结构反序列化这两份样本（提醒是封闭的八个取值，没有 `added_warnings`），读不了就挂。
+
 | 改动 | 加一 | 为什么 |
 | --- | --- | --- |
 | 新增可选的设置项：带 `#[serde(default)]`，取默认值时不写出 | 否 | 旧版本忽略它，保存时丢掉也只是回到默认 |
@@ -1010,6 +1012,7 @@ versions/<实例名>/
 | `config.json` 新增顶层键 | 否 | 原样写回 |
 | `config.json` 里已登记在 `ENUM_FIELDS` 的枚举新增取值 | 否 | 有字段级的容忍：认不出的取值按默认值启动，原值写回 |
 | 实例卡面的背景新增取值 | 否 | 认不出的取值被丢掉（`drop_unknown_background`），回到默认 |
+| 崩溃记录与接回记录的启动提醒（`LaunchWarning`）新增取值 | 否 | 照上面的另存约定写进 `added_warnings`，旧版本忽略这个键 |
 | Mod 卷宗的平台（`Platform`）新增取值 | 是 | 没有容忍，旧版本读 `ledger.json` 整份失败 |
 | 账户类型、账户状态、凭据种类新增取值 | 是 | 凭据库整份读失败，被改名留存 |
 | 未完成标记、Mod 历史、整合包信息里的枚举新增取值 | 是 | 整份读失败 |
@@ -1022,7 +1025,7 @@ versions/<实例名>/
 
 **加号的步骤：**
 
-1. 对照上面的规则判断；能改成不加号的写法就改：能加可选字段就不改类型；新枚举取值能登记容忍就登记（登记进 `ENUM_FIELDS`，或照 `drop_unknown_background` 的做法）；同一个发版周期里有几处破坏性改动，合成一次加号。每加一次，较慢的通道晋级到同一个号之前，用户就换不回那个通道（安装引导程序的数据格式关会拦下），所以加号要克制。
+1. 对照上面的规则判断；能改成不加号的写法就改：能加可选字段就不改类型；新枚举取值能登记容忍就登记（登记进 `ENUM_FIELDS`，或照 `drop_unknown_background` 的做法；启动提醒照另存约定写进 `added_warnings`）；同一个发版周期里有几处破坏性改动，合成一次加号。每加一次，较慢的通道晋级到同一个号之前，用户就换不回那个通道（安装引导程序的数据格式关会拦下），所以加号要克制。
 2. 给 `DATA_FORMAT` 加一，在 `FORMAT_HISTORY` 末尾追加一行，写明这个号改了什么、号更低的版本为什么读不了。
 3. 把每个有快照的位置（见下面的防忘守卫）的 `testdata/data-format/current/` 复制成 `testdata/data-format/<旧号>/` 冻结，再更新 `current/`。
 4. 确保新代码读得了所有冻结的快照，需要时写读时迁移，照 `playtime.json` 从格式版本 1 升到 2 的做法。

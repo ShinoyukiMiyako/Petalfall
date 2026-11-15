@@ -260,6 +260,9 @@
         "kind": "hs_err",
         "path": "hs_err_pid4242.log"
       }
+    ],
+    "added_warnings": [
+      "player_name_chars"
     ]
   }
 }

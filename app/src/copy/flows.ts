@@ -728,6 +728,7 @@ export const LAUNCH_WARNING_CODES = [
   "onedrive_folder",
   "icloud_folder",
   "long_player_name",
+  "player_name_chars",
   "jvm_memory_unit",
   "jvm_min_over_max",
   "jvm_max_too_low",
@@ -744,6 +745,7 @@ export interface LaunchWarningCopy {
 
 const CHANGE_GAME_DIR = { kind: "change_game_dir", label: "更换游戏目录" } as const;
 const OPEN_INSTANCE_SETTINGS = { kind: "instance_settings", label: CRASH_COPY.openInstanceSettings } as const;
+const MANAGE_ACCOUNTS = { kind: "manage_accounts", label: "管理账户" } as const;
 
 /** 启动提醒不中断启动：加载时只写 warn 日志，崩溃后在诊断页的「这次启动时的提醒」里按这张表呈现。 */
 export const LAUNCH_WARNING: Readonly<Record<LaunchWarningCode, LaunchWarningCopy>> = {
@@ -771,7 +773,12 @@ export const LAUNCH_WARNING: Readonly<Record<LaunchWarningCode, LaunchWarningCop
   long_player_name: {
     title: "角色名超过 16 个字符",
     body: "Minecraft 1.20.3 及更新的版本进不了存档与服务器。可以到皮肤站换一个不超过 16 个字符的角色名。",
-    action: { kind: "manage_accounts", label: "管理账户" },
+    action: MANAGE_ACCOUNTS,
+  },
+  player_name_chars: {
+    title: "角色名含空格或非 ASCII 字符",
+    body: "Minecraft 1.20.2 与 1.20.3 进不了存档与服务器。可以换一个只用英文字母、数字与下划线的角色名：离线账户新建一个，皮肤站的到皮肤站改。",
+    action: MANAGE_ACCOUNTS,
   },
   jvm_memory_unit: {
     title: "JVM 参数里的内存写法不对",

@@ -33,7 +33,10 @@
       "uuid": "0123456789abcdef0123456789abcdef",
       "name": "Steve",
       "account_type": "microsoft"
-    }
+    },
+    "added_warnings": [
+      "player_name_chars"
+    ]
   },
   {
     "format": 1,
@@ -69,7 +72,10 @@
       "uuid": "0123456789abcdef0123456789abcdef",
       "name": "Steve",
       "account_type": "offline"
-    }
+    },
+    "added_warnings": [
+      "player_name_chars"
+    ]
   },
   {
     "format": 1,
@@ -105,6 +111,9 @@
       "uuid": "0123456789abcdef0123456789abcdef",
       "name": "Steve",
       "account_type": "authlib_injector"
-    }
+    },
+    "added_warnings": [
+      "player_name_chars"
+    ]
   }
 ]
