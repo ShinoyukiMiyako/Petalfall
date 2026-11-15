@@ -155,8 +155,8 @@
 .coverName {
   max-width: 100%;
   overflow: hidden;
-  font-size: var(--sk-fs-micro);
-  line-height: var(--sk-lh-micro);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
