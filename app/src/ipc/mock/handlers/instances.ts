@@ -118,6 +118,7 @@ type DerivedField =
   | "description"
   | "cover"
   | "cover_image"
+  | "cover_image_hue"
   | "background"
   | "background_image"
   | "memory_mb"
@@ -754,6 +755,8 @@ function toDto(instance: MockInstance): InstanceDto {
     description: instance.settings.description,
     cover: instance.settings.cover,
     cover_image: coverImageKey(instance, instance.settings.cover_image),
+    // 假数据不解码图片，取不出主色调：卡面照旧按方块的色调画
+    cover_image_hue: null,
     background: instance.settings.background,
     background_image: coverImageKey(instance, instance.settings.background_image),
     memory_mb: instance.settings.memory_mb,

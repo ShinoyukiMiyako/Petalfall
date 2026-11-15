@@ -17,6 +17,7 @@ export function summary(id: string, overrides: Partial<InstanceSummary> = {}): I
     description: null,
     cover: null,
     coverImage: null,
+    coverImageHue: null,
     background: "follow",
     backgroundImage: null,
     pinned: false,

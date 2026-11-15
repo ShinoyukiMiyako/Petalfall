@@ -100,6 +100,8 @@ export interface InstanceDto {
   cover: string | null;
   /** 封面方块用的玩家图片在材质协议 /cover/ 下的取图键；没设、设置读不出或文件不见了为 null。 */
   cover_image: string | null;
+  /** 封面方块图片的主色调（HSL 色相 0-359）；cover_image 为 null、图片太灰或是没记色调的旧版本导入的为 null。 */
+  cover_image_hue: number | null;
   /** 卡面背景；设置读不出时为 follow。 */
   background: CoverBackgroundDto;
   /** 卡面背景图片的取图键；何时为 null 同 cover_image。 */

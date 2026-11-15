@@ -397,7 +397,7 @@ describe("离线账户弹窗", () => {
 
     beforeEach(() => {
       // 本机有可用的客户端：默认皮肤从它的游戏文件里读
-      ipc.overrides.set("art_status", () => ({ source: { version_id: "1.21.1" }, panorama: false }));
+      ipc.overrides.set("art_status", () => ({ source: { version_id: "1.21.1", degraded: false }, panorama: false }));
       missing = new Set();
       fetched = [];
       prefetched = [];

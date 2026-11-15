@@ -39,6 +39,8 @@ impl ArtDownloadSlot {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ArtSourceDto {
     pub version_id: String,
+    /// 本机的降级集（1.13 到 1.19）：预设里较新的方块缺材质，前端照样给「下载原版材质」入口，下载来的最新正式版盖过它。
+    pub degraded: bool,
 }
 
 /// 材质服务状态 DTO，也是 `petalfall://art-changed` 的负载。
@@ -53,7 +55,10 @@ pub struct ArtStatusDto {
 impl From<ArtStatus> for ArtStatusDto {
     fn from(status: ArtStatus) -> Self {
         ArtStatusDto {
-            source: status.source.map(|version_id| ArtSourceDto { version_id }),
+            source: status.source.map(|version_id| ArtSourceDto {
+                version_id,
+                degraded: status.degraded,
+            }),
             panorama: status.panorama,
         }
     }
@@ -140,8 +145,9 @@ pub async fn art_blocks(
     Ok(textures.catalog())
 }
 
-/// 本机没有原版游戏时，从官方源（按文件下载源设置，镜像回退）下载最新正式版的客户端，抽方块材质、
-/// 方块状态、模型与名称进缓存，然后重选材质源并返回新状态（状态变了同时推送 `petalfall://art-changed`）。
+/// 本机没有原版游戏、或只有 1.20 之前的版本（材质源是降级集）时，从官方源（按文件下载源设置，镜像回退）下载
+/// 最新正式版的客户端，抽方块材质、方块状态、模型与名称进缓存，然后重选材质源并返回新状态（状态变了同时推送
+/// `petalfall://art-changed`）。下载缓存排在本机降级集之前，下完就换成它。
 ///
 /// 只在玩家点下载时跑。上一次还没下完时报 `task_conflict`。暂存目录只在抽取成功后删：下载或抽取失败时
 /// 已下好的分片与 jar 留着，重试时续传、校验通过就不再重下；成功一次就连同旧版本残留一起清掉。
@@ -203,15 +209,15 @@ where
 }
 
 /// 启动时第一轮选源之后清掉没人再用的下载暂存 `dir`：下载成功后暂存被杀软短暂占着没删掉，或下到一半
-/// 失败后玩家改去装了游戏，有了材质源前端就不再给下载入口，暂存再没有人清（选源时的旧缓存清理特意跳过它）。
-/// 没有材质源时留着，重试要续传；有下载在跑时暂存归它，它成功后自己删。清理期间占住下载位，免得刚开始的
-/// 下载往正被删的目录里写。暂存本来就不在时什么都不做。
+/// 失败后玩家改去装了新版游戏，有了完整的材质源前端就不再给下载入口，暂存再没有人清（选源时的旧缓存清理特意
+/// 跳过它）。没有材质源或只有降级集时留着：前端还给下载入口，重试要续传。有下载在跑时暂存归它，它成功后自己删。
+/// 清理期间占住下载位，免得刚开始的下载往正被删的目录里写。暂存本来就不在时什么都不做。
 pub(crate) async fn discard_staging(
     slot: &ArtDownloadSlot,
     status: &ArtStatus,
     dir: &Path,
 ) -> std::io::Result<()> {
-    if status.source.is_none() {
+    if status.source.is_none() || status.degraded {
         return Ok(());
     }
     let Ok(_running) = slot.claim() else {
@@ -290,10 +296,20 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ArtStatusDto::from(ArtStatus {
                 source: Some("1.21.1".into()),
+                degraded: false,
                 panorama: true,
             }))
             .unwrap(),
-            json!({ "source": { "version_id": "1.21.1" }, "panorama": true })
+            json!({ "source": { "version_id": "1.21.1", "degraded": false }, "panorama": true })
+        );
+        assert_eq!(
+            serde_json::to_value(ArtStatusDto::from(ArtStatus {
+                source: Some("1.16.5".into()),
+                degraded: true,
+                panorama: false,
+            }))
+            .unwrap(),
+            json!({ "source": { "version_id": "1.16.5", "degraded": true }, "panorama": false })
         );
     }
 
@@ -567,6 +583,7 @@ mod tests {
     fn with_source() -> ArtStatus {
         ArtStatus {
             source: Some("1.21.1".into()),
+            degraded: false,
             panorama: false,
         }
     }
@@ -592,6 +609,22 @@ mod tests {
             .await
             .unwrap();
         assert!(dest.join("client.jar").is_file());
+    }
+
+    /// 只有降级集时前端照样给下载入口：上次下到一半的暂存留着续传。
+    #[tokio::test]
+    async fn staging_stays_with_only_a_degraded_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = staged(tmp.path());
+        let slot = ArtDownloadSlot::default();
+        let degraded = ArtStatus {
+            source: Some("1.16.5".into()),
+            degraded: true,
+            panorama: false,
+        };
+        discard_staging(&slot, &degraded, &dest).await.unwrap();
+        assert!(dest.join("client.jar").is_file());
+        assert!(slot.claim().is_ok(), "没动暂存也不占着下载位");
     }
 
     #[tokio::test]

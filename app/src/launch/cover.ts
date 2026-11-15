@@ -16,24 +16,35 @@ function warnOnce(key: string, message: string): void {
   console.warn(message);
 }
 
+/** 解析封面要的实例字段。 */
+export type CoverFields = Pick<InstanceSummary, "id" | "cover" | "coverImage" | "coverImageHue">;
+
 /**
  * 实例的封面方块。没设过用默认封面；预设方块用预设色相；本机材质源目录里的方块用目录给的色相；
  * 两边都查不到（目录还没载入、换了材质源后没有这个方块、手改设置文件）时仍按它画，色相按实例 id 推出，
- * 方块材质读不到会回落到实例徽记，不让整页因为一张封面挂掉。玩家图片的取图键由实例列表给出。
+ * 方块材质读不到会回落到实例徽记，不让整页因为一张封面挂掉。玩家图片的取图键与主色调由实例列表给出：
+ * 方块面画的是图片时色相取图片的主色调，卡面的渐变花瓣跟着图片走；图片太灰、或是没记色调的旧版本导入的，
+ * 仍用方块的色相。
  */
-export function instanceCover(inst: Pick<InstanceSummary, "id" | "cover" | "coverImage">, catalog: BlockCatalog | null): InstanceCover {
+export function instanceCover(inst: CoverFields, catalog: BlockCatalog | null): InstanceCover {
   const image = inst.coverImage === null ? null : coverImageUrl(inst.coverImage);
-  if (inst.cover === null) return { ...DEFAULT_COVER, image };
+  const block = blockCover(inst, catalog);
+  if (image === null) return block;
+  return { ...block, hue: inst.coverImageHue === null ? block.hue : inst.coverImageHue, image };
+}
+
+function blockCover(inst: Pick<InstanceSummary, "id" | "cover">, catalog: BlockCatalog | null): InstanceCover {
+  if (inst.cover === null) return DEFAULT_COVER;
   const preset = coverPreset(inst.cover);
-  if (preset !== undefined) return { ...preset, image };
+  if (preset !== undefined) return preset;
   const listed = catalog?.byId.get(inst.cover);
-  if (listed !== undefined) return { block: listed.id, hue: listed.hue, image };
+  if (listed !== undefined) return { block: listed.id, hue: listed.hue, image: null };
   if (catalog !== null) warnOnce(`${inst.id}:${inst.cover}`, `实例 ${inst.id} 的封面 ${inst.cover} 不在本机材质源里，按实例色相回落`);
-  return { block: inst.cover, hue: hueOf(inst.id), image };
+  return { block: inst.cover, hue: hueOf(inst.id), image: null };
 }
 
 /** 组件里用：订阅方块目录，目录载入或换了材质源时重新解析。 */
-export function useInstanceCover(inst: Pick<InstanceSummary, "id" | "cover" | "coverImage">): InstanceCover {
+export function useInstanceCover(inst: CoverFields): InstanceCover {
   return instanceCover(inst, useBlockCatalog());
 }
 
@@ -68,7 +79,7 @@ export interface CoverBackdropProps {
  * 组件里用：按实例设置与外观里的默认背景解析卡面背景。图片背景不带平铺：图片加载中与读不到时卡面画渐变花瓣，
  * 与列表给不出取图键时的回落一致。
  */
-export function useCoverBackdrop(inst: Pick<InstanceSummary, "id" | "cover" | "coverImage" | "background" | "backgroundImage">): CoverBackdropProps {
+export function useCoverBackdrop(inst: CoverFields & Pick<InstanceSummary, "background" | "backgroundImage">): CoverBackdropProps {
   const fallback = useAppearance().appearance.coverBackground;
   const cover = useInstanceCover(inst);
   const backdrop = instanceBackdrop(inst, fallback);

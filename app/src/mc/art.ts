@@ -24,15 +24,18 @@ export function texOrigin(userAgent: string = navigator.userAgent): string {
 // ---------------------------------------------------------------- 材质可用状态
 
 export interface ArtStatus {
-  /** 当前材质源（本机选中的原版客户端版本）；null 表示本机没有可用的客户端。 */
-  source: { versionId: string } | null;
+  /**
+   * 当前材质源（本机选中的原版客户端版本）；null 表示本机没有可用的客户端。degraded：本机只有 1.20 之前的版本，
+   * 推荐里较新的方块缺材质、画成徽记，下载来的最新正式版会盖过它。
+   */
+  source: { versionId: string; degraded: boolean } | null;
   /** 樱花林全景对象在本机存在且哈希正确。 */
   panorama: boolean;
 }
 
 /** 后端 art_status 的返回形状（serde 默认 snake_case）。 */
 export interface ArtStatusDto {
-  source: { version_id: string } | null;
+  source: { version_id: string; degraded: boolean } | null;
   panorama: boolean;
 }
 
@@ -42,10 +45,10 @@ export function artStatusFromDto(dto: ArtStatusDto): ArtStatus {
   if (typeof dto !== "object" || dto === null) throw new Error(`art_status 返回值不是对象：${JSON.stringify(dto)}`);
   if (typeof dto.panorama !== "boolean") throw new Error(`art_status.panorama 不是布尔值：${JSON.stringify(dto)}`);
   if (dto.source === null) return { source: null, panorama: dto.panorama };
-  if (typeof dto.source !== "object" || typeof dto.source.version_id !== "string" || dto.source.version_id === "") {
+  if (typeof dto.source !== "object" || typeof dto.source.version_id !== "string" || dto.source.version_id === "" || typeof dto.source.degraded !== "boolean") {
     throw new Error(`art_status.source 形状不对：${JSON.stringify(dto)}`);
   }
-  return { source: { versionId: dto.source.version_id }, panorama: dto.panorama };
+  return { source: { versionId: dto.source.version_id, degraded: dto.source.degraded }, panorama: dto.panorama };
 }
 
 let status: ArtStatus = NO_ART;
@@ -61,7 +64,7 @@ export function getArtStatus(): ArtStatus {
  * 首次装好游戏后要重新取），再通知订阅者重绘，全程不需要重启。
  */
 export function setArtStatus(next: ArtStatus): void {
-  const same = next.panorama === status.panorama && next.source?.versionId === status.source?.versionId;
+  const same = next.panorama === status.panorama && next.source?.versionId === status.source?.versionId && next.source?.degraded === status.source?.degraded;
   if (same) return;
   status = next;
   for (const invalidate of [...invalidators]) invalidate();

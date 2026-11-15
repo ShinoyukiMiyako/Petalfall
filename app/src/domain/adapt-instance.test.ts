@@ -20,6 +20,7 @@ function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): Instance
     description: null,
     cover: null,
     cover_image: null,
+    cover_image_hue: null,
     background: "follow",
     background_image: null,
     memory_mb: null,
@@ -156,6 +157,18 @@ describe("实例 DTO 适配：状态", () => {
   it("时长与读取错误对不上是契约破了：不让界面在 0 和读不到之间猜", () => {
     expect(() => instanceFromDto(instanceDto("X", { playtime_min: null }), idle)).toThrow("实例 X 的游玩时长与它的读取错误对不上");
     expect(() => instanceFromDto(instanceDto("Y", { playtime_min: 3, play_error: "坏了" }), idle)).toThrow("实例 Y 的游玩时长与它的读取错误对不上");
+  });
+
+  it("封面方块图片的色调随取图键带过，两端都收；没有取图键却有色调、不是 0-359 的整数是契约破了，抛错", () => {
+    const key = "0123456789abcdef0123456789abcdef01234567";
+    for (const hue of [0, 359, null]) {
+      expect(instanceFromDto(instanceDto("A", { cover_image: key, cover_image_hue: hue }), idle).coverImageHue).toBe(hue);
+    }
+    expect(instanceFromDto(instanceDto("B"), idle).coverImageHue).toBeNull();
+    expect(() => instanceFromDto(instanceDto("C", { cover_image_hue: 120 }), idle)).toThrow("实例 C 的封面方块图片色调不对");
+    for (const hue of [360, -1, 12.5]) {
+      expect(() => instanceFromDto(instanceDto("D", { cover_image: key, cover_image_hue: hue }), idle), String(hue)).toThrow("实例 D 的封面方块图片色调不对");
+    }
   });
 
   it("直达能力逐位带过：旧版只能加入服务器、读不出版本信息为 null", () => {

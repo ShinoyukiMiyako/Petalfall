@@ -2,7 +2,8 @@
 // 不用任何原版界面贴图。网格只渲染可见行（上下带余量），视口高度固定，换页签、搜索时弹窗不跳动。
 // 焦点留在网格上，当前格由 aria-activedescendant 指出：方向键移动、Enter / 空格选中、在网格里直接打字跳到搜索框，
 // Esc 由弹窗关闭（搜索框里有字时先清空）。选中只回调 onPick，关不关由调用方定。
-// 没有材质源时只有推荐与我的图片两页，推荐方块画成徽记，框内顶部放下载原版材质的部件。
+// 没有材质源时只有推荐与我的图片两页，推荐方块画成徽记，框内顶部放下载原版材质的部件；材质源是 1.20 之前的降级集时
+// 七个页签照常，推荐里较新的方块画成徽记，顶部同样放下载部件，下完就补齐。
 
 import { motion } from "framer-motion";
 import { memo, useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
@@ -22,7 +23,7 @@ import { SearchInput } from "../../../ui/SearchInput";
 import { TabPanel, Tabs, type TabItem } from "../../../ui/Tabs";
 import { Tooltip } from "../../../ui/Tooltip";
 import { isTypeaheadKey } from "../../../ui/typeahead";
-import { ArtDownload } from "./ArtDownload";
+import { ArtDownload, useArtDownloadOffered } from "./ArtDownload";
 import styles from "./BlockPicker.module.css";
 import { blockPages, categoryOf, pagesInOrder, searchBlocks, type BlockCategory } from "./categories";
 
@@ -162,23 +163,28 @@ function initialView(value: BlockPickerProps["value"], catalog: BlockCatalog | n
   return listed === undefined ? "recommended" : categoryOf(listed);
 }
 
-/** 选择框的版式只随有没有材质源变：没有时顶部是下载部件、两个页签；有了换成搜索框与七个页签。 */
-export function pickerLayoutKey(catalog: BlockCatalog | null): string {
-  return catalog === null ? "bare" : "catalog";
+/**
+ * 选择框的版式随有没有材质源、顶部有没有下载部件变：没有材质源时是下载部件与两个页签；有了换成搜索框与七个页签，
+ * 材质源不全（降级集）时顶部再多一块下载部件。
+ */
+export function pickerLayoutKey(catalog: BlockCatalog | null, offersDownload: boolean): string {
+  if (catalog === null) return "bare";
+  return offersDownload ? "catalog-download" : "catalog";
 }
 
 export function BlockPicker({ open, instanceId, value, onPick, onPickImage, imageBusy, onClose }: BlockPickerProps) {
-  // 目录在这一层读：材质下完、目录载入时弹窗自己跟着重渲染，面板才量得到新尺寸、沿弹簧形变过去，
+  // 目录与下载部件的去留在这一层读：材质下完、目录载入时弹窗自己跟着重渲染，面板才量得到新尺寸、沿弹簧形变过去，
   // 而不是上下沿各瞬跳高度差的一半。形变只认版式键，其余重渲染不量布局
   const catalog = useBlockCatalog();
+  const offersDownload = useArtDownloadOffered();
   return (
-    <Modal open={open} onClose={onClose} title={BLOCK_PICKER_COPY.title} size="md" layoutKey={pickerLayoutKey(catalog)}>
-      <PickerBody catalog={catalog} instanceId={instanceId} value={value} onPick={onPick} onPickImage={onPickImage} imageBusy={imageBusy} />
+    <Modal open={open} onClose={onClose} title={BLOCK_PICKER_COPY.title} size="md" layoutKey={pickerLayoutKey(catalog, offersDownload)}>
+      <PickerBody catalog={catalog} offersDownload={offersDownload} instanceId={instanceId} value={value} onPick={onPick} onPickImage={onPickImage} imageBusy={imageBusy} />
     </Modal>
   );
 }
 
-function PickerBody({ catalog, instanceId, value, onPick, onPickImage, imageBusy }: Omit<BlockPickerProps, "open" | "onClose"> & { catalog: BlockCatalog | null }) {
+function PickerBody({ catalog, offersDownload, instanceId, value, onPick, onPickImage, imageBusy }: Omit<BlockPickerProps, "open" | "onClose"> & { catalog: BlockCatalog | null; offersDownload: boolean }) {
   // 下载部件淡出、搜索框淡入时，页签与网格从旧位置滑过去
   const reflow = useReflow<HTMLDivElement>();
   const lists = useMemo(() => (catalog === null ? null : catalogLists(catalog)), [catalog]);
@@ -231,7 +237,7 @@ function PickerBody({ catalog, instanceId, value, onPick, onPickImage, imageBusy
 
   return (
     <div ref={reflow} className={styles.body} onKeyDown={onKeyDown}>
-      <Appear>{catalog === null && <ArtDownload key="art-download" />}</Appear>
+      <Appear>{offersDownload && <ArtDownload key="art-download" />}</Appear>
       <Tabs id={tabsId} value={shown} onChange={changeView} items={tabs} variant="pill" size="sm" ariaLabel={BLOCK_PICKER_COPY.tabsLabel} />
       <Appear>
         {lists !== null && (

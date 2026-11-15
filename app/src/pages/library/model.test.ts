@@ -33,6 +33,7 @@ function inst(id: string, overrides: Partial<InstanceSummary> = {}): InstanceSum
     description: null,
     cover: null,
     coverImage: null,
+    coverImageHue: null,
     background: "follow",
     backgroundImage: null,
     pinned: false,

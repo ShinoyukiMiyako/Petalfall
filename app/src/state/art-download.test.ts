@@ -30,7 +30,7 @@ vi.mock("../ipc/art", async (orig) => ({
   },
 }));
 
-const READY: ArtStatusDto = { source: { version_id: "1.21.4" }, panorama: false };
+const READY: ArtStatusDto = { source: { version_id: "1.21.4", degraded: false }, panorama: false };
 
 /** 让 downloadArt 走到调用后端那一步（订阅是异步的）。 */
 const untilInvoked = () => vi.waitFor(() => expect(art.pending.length).toBeGreaterThan(0));
@@ -102,6 +102,14 @@ describe("下载原版材质", () => {
     await untilInvoked();
     art.pending[0].resolve({ source: null, panorama: false });
     await expect(done).rejects.toThrow("原版材质下载完成，后端却仍报告没有材质源");
+    expect(getArtDownloadState()).toEqual({ phase: "failed", stage: "download" });
+  });
+
+  it("后端说下完了却仍在用本机的降级集：下载来的没用上，当作失败抛出、可以重试", async () => {
+    const done = downloadArt();
+    await untilInvoked();
+    art.pending[0].resolve({ source: { version_id: "1.16.5", degraded: true }, panorama: false });
+    await expect(done).rejects.toThrow("原版材质下载完成，后端却仍在用本机的旧版材质 1.16.5");
     expect(getArtDownloadState()).toEqual({ phase: "failed", stage: "download" });
   });
 

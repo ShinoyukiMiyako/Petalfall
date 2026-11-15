@@ -8,6 +8,7 @@ import { stubCanvas } from "../../../art/illustrations/test-canvas";
 import { COVER_PRESETS } from "../../../art/iso/covers";
 import { coverLabel } from "../../../copy/flows";
 import type { ArtDownloadProgressDto, ArtStatusDto, CatalogBlockDto } from "../../../ipc/art";
+import { NO_ART, setArtStatus } from "../../../mc/art";
 import { catalogFromDto, setBlockCatalog } from "../../../mc/catalog";
 import { OverlayProvider, OverlayRoot } from "../../../shell/overlay";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
@@ -374,10 +375,10 @@ describe("没有材质源", () => {
     mount({ block: "cherry_planks", image: false });
     // 挂载时就在的下载部件跟着弹窗出现，不另外播入场
     expect(dialog().querySelector("[inert]")).toBeNull();
-    expect(modal.layoutKeys.at(-1)).toBe(pickerLayoutKey(null));
+    expect(modal.layoutKeys.at(-1)).toBe(pickerLayoutKey(null, true));
     act(() => setBlockCatalog(catalog()));
     // 目录载入的那次渲染里弹窗就拿到新的版式键：面板在这一次量布局、形变过去
-    expect(modal.layoutKeys.at(-1)).toBe(pickerLayoutKey(catalog()));
+    expect(modal.layoutKeys.at(-1)).toBe(pickerLayoutKey(catalog(), false));
     expect(tabs()).toEqual(["推荐", "建筑", "彩色", "自然", "功能", "搜索", "我的图片"]);
     expect(search()).not.toBeNull();
     // 退场中的部件留着最后一帧淡出：它在不可交互的退场层里，框里其余部分已经没有它
@@ -390,7 +391,65 @@ describe("没有材质源", () => {
     // 之后才出现的搜索框淡入并从略小处落到位
     const searchItem = search()?.closest<HTMLElement>('[style*="opacity"]');
     expect(searchItem?.style.opacity).toBe("0");
-    expect(pickerLayoutKey(null)).not.toBe(pickerLayoutKey(catalog()));
+    expect(pickerLayoutKey(null, true)).not.toBe(pickerLayoutKey(catalog(), false));
+  });
+});
+
+describe("材质源是 1.20 之前的降级集", () => {
+  /** 1.16.5 的目录：有羊毛与草方块，没有樱花木板这些较新的方块。 */
+  function oldCatalog() {
+    return catalogFromDto({
+      version_id: "1.16.5",
+      blocks: [dto("red_wool", "Red Wool", "红色羊毛"), dto("grass_block", "Grass Block", "草方块"), dto("stone", "Stone", "石头")],
+    });
+  }
+  const downloadPart = () => [...dialog().querySelectorAll<HTMLElement>("p")].find((p) => p.textContent === "本机的原版材质不全") ?? null;
+
+  beforeEach(() => {
+    setArtStatus({ source: { versionId: "1.16.5", degraded: true }, panorama: false });
+    setBlockCatalog(oldCatalog());
+  });
+  afterEach(() => setArtStatus(NO_ART));
+
+  it("七个页签与搜索框照常，顶部照样有下载部件：说明写不全、大小照已有入口，按钮在", () => {
+    mount({ block: "cherry_planks", image: false });
+    expect(tabs()).toEqual(["推荐", "建筑", "彩色", "自然", "功能", "搜索", "我的图片"]);
+    expect(search()).not.toBeNull();
+    const text = dialog().textContent ?? "";
+    expect(text).toContain("本机最新的原版早于 1.20");
+    expect(text).toContain("整包约 20 到 40 MB，下完只留方块相关的部分，不到 1 MB");
+    expect(text).not.toContain("本机还没有原版材质");
+    expect(text.indexOf("本机的原版材质不全")).toBeLessThan(text.indexOf("推荐"));
+    expect([...dialog().querySelectorAll("button")].some((b) => b.textContent === "下载原版材质")).toBe(true);
+    // 推荐页仍是 16 种预设，本机版本没有的那些由方块自己画成徽记
+    expect(blocksShown()).toEqual(COVER_PRESETS.map((p) => p.block));
+    expect(modal.layoutKeys.at(-1)).toBe(pickerLayoutKey(oldCatalog(), true));
+  });
+
+  it("下完换成完整的材质源：下载部件原地淡出、不再可交互，版式键跟着变，网格换成新目录", () => {
+    mount({ block: "cherry_planks", image: false });
+    expect(downloadPart()).not.toBeNull();
+    act(() => {
+      setArtStatus({ source: { versionId: "1.21.4", degraded: false }, panorama: false });
+      setBlockCatalog(catalog());
+    });
+    const leaving = [...dialog().querySelectorAll<HTMLElement>("[inert]")];
+    expect(leaving).toHaveLength(1);
+    expect(leaving[0].textContent).toContain("本机的原版材质不全");
+    const live = dialog().cloneNode(true) as HTMLElement;
+    for (const node of live.querySelectorAll("[inert]")) node.remove();
+    expect(live.textContent).not.toContain("下载原版材质");
+    expect(modal.layoutKeys.at(-1)).toBe(pickerLayoutKey(catalog(), false));
+    expect(pickerLayoutKey(oldCatalog(), true)).not.toBe(pickerLayoutKey(catalog(), false));
+    act(() => tab("彩色").click());
+    expect(blocksShown()).toContain("red_concrete");
+  });
+
+  it("完整的材质源不给下载部件", () => {
+    act(() => setArtStatus({ source: { versionId: "1.21.4", degraded: false }, panorama: false }));
+    mount({ block: "cherry_planks", image: false });
+    expect(downloadPart()).toBeNull();
+    expect(dialog().textContent).not.toContain("下载原版材质");
   });
 });
 

@@ -621,6 +621,9 @@ pub struct InstanceDto {
     pub cover: Option<String>,
     /// 封面方块用的玩家图片在材质协议 `/cover/` 下的取图键；没设、设置读不出或文件不见了为 null。
     pub cover_image: Option<String>,
+    /// 封面方块图片的主色调（HSL 色相 0-359）；cover_image 为 null、图片太灰或是没记色调的旧版本导入的为 null，
+    /// 此时卡面按 cover 的色调画。
+    pub cover_image_hue: Option<u16>,
     /// 卡面背景：follow / art / texture / image；设置读不出时为 follow。
     pub background: CoverBackground,
     /// 卡面背景图片的取图键；何时为 null 同 cover_image。
@@ -721,6 +724,8 @@ impl From<InstanceSettingsDto> for VersionSettings {
             description: s.description,
             cover: s.cover,
             cover_image: s.cover_image,
+            // 色调不在前端能写的形状里：写设置时按盘上记的随方块图片沿用或清掉，见 Petalfall::set_instance_settings
+            cover_image_hue: None,
             background: s.background,
             background_image: s.background_image,
             isolation: s.isolation,
@@ -1121,8 +1126,9 @@ fn instance_dto(
         isolated: None,
         description,
         cover,
-        // 取图键要登记进材质服务，由 list_instances_with 补上
+        // 取图键要登记进材质服务，由 list_instances_with 补上；色调跟着取图键走，一起补
         cover_image: None,
+        cover_image_hue: None,
         background,
         background_image: None,
         memory_mb,
@@ -1394,17 +1400,25 @@ pub(crate) async fn list_instances_with(
                 Readable::Read(plays) => Readable::Read(plays.get(&summary.id)),
                 Readable::Unreadable(reason) => Readable::Unreadable(reason.clone()),
             };
-            let (cover_image, background_image) = match &summary.settings {
-                Readable::Read(settings) => (
-                    cover_image_key(textures, &summary, settings.cover_image.as_deref()),
-                    cover_image_key(textures, &summary, settings.background_image.as_deref()),
-                ),
-                Readable::Unreadable(_) => (None, None),
+            let (cover_image, cover_image_hue, background_image) = match &summary.settings {
+                Readable::Read(settings) => {
+                    let cover_image =
+                        cover_image_key(textures, &summary, settings.cover_image.as_deref());
+                    // 图片文件不见了时卡面画回 cover，色调也回到 cover 的
+                    let hue = cover_image.as_ref().and(settings.cover_image_hue);
+                    (
+                        cover_image,
+                        hue,
+                        cover_image_key(textures, &summary, settings.background_image.as_deref()),
+                    )
+                }
+                Readable::Unreadable(_) => (None, None, None),
             };
             InstanceDto {
                 used_by,
                 base_busy,
                 cover_image,
+                cover_image_hue,
                 background_image,
                 ..instance_dto(summary, activity, play)
             }
@@ -5718,6 +5732,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(InstanceSettingsDto::from(stored), saved);
+    }
+
+    /// 方块图片的主色调只经列表给出、跟着取图键：导入后列表带上它，设置的读写形状里没有这一项，界面整份写回设置
+    /// 也不把它冲掉；图片文件不见了时与取图键一起为 null。
+    #[tokio::test]
+    async fn list_gives_the_block_image_hue_while_the_image_is_there() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let locks = InstanceLocks::default();
+        let textures = test_textures();
+        let photo = env.dir.path().join("photo.png");
+        opaque_png(&photo, 30, 20);
+        let saved = import_cover_image_with(
+            &env.facade,
+            &locks,
+            "1.21.1",
+            "block",
+            &photo.to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        let written = serde_json::to_value(&saved).unwrap();
+        assert!(written.get("cover_image_hue").is_none(), "{written}");
+        // (40, 160, 90)：(90 - 40) / 120 + 2 = 2.417，即 145 度
+        let dto = list_instances_with(&env.facade, &locks, &textures)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(dto.cover_image_hue, Some(145));
+        assert_eq!(
+            serde_json::to_value(&dto).unwrap()["cover_image_hue"],
+            json!(145)
+        );
+
+        let mut edited = written;
+        edited["memory_mb"] = json!(4096);
+        set_instance_settings_with(&env.facade, &locks, "1.21.1", edited)
+            .await
+            .unwrap();
+        let dto = list_instances_with(&env.facade, &locks, &textures)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            (dto.memory_mb, dto.cover_image_hue),
+            (Some(4096), Some(145))
+        );
+
+        let block = saved.cover_image.unwrap();
+        std::fs::remove_file(petalfall_core::cover_image_dir(&dir).join(block)).unwrap();
+        let dto = list_instances_with(&env.facade, &locks, &textures)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!((dto.cover_image, dto.cover_image_hue), (None, None));
     }
 
     /// 图片与参数的问题都报 invalid_argument，detail.field 指出是哪一项、detail.reason 给原因码；
