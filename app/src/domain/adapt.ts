@@ -103,7 +103,7 @@ export function authServerFromDto(dto: AuthServerDto): AuthServer {
 export interface AuthlibProfile {
   uuid: string;
   name: string;
-  /** 取不到皮肤时为 null，画剪影。 */
+  /** 拿不到远程皮肤时是按角色 UUID 选的默认皮肤；UUID 不是 32 位十六进制时为 null，画剪影。 */
   skin: SkinInfoDto | null;
 }
 

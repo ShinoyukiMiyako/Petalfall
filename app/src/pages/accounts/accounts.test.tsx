@@ -311,6 +311,52 @@ describe("账户页：皮肤", () => {
     expect(figures.map((f) => f.querySelector('canvas[data-tauri-drag-region="false"]') !== null)).toEqual([true, false, false]);
   });
 
+  describe("正版账户拿不到远程皮肤", () => {
+    // 后端给 Hanami（UUID 哈希 593896604）的默认皮肤：18 款里的宽臂 noor
+    const FALLBACK = { kind: "default", path: "entity/player/wide/noor", model: "wide" } as const;
+    const REAL = { kind: "remote", sha1: "cd".repeat(20), model: "slim", hat: true } as const;
+    const MODERN_SOURCE = { source: { version_id: "1.21.4", degraded: false, legacy_skins: false }, panorama: false };
+    let drawn: string[];
+    // 有材质源时页面上别的点缀（方块面）也会取图，只看皮肤的
+    const skins = () => drawn.filter((url) => url.includes("/art/entity/") || url.includes("/skin/"));
+    const spotFigure = () => (page().querySelector("section") as HTMLElement).querySelector<HTMLElement>('[data-sk-art="skin"]');
+
+    beforeEach(() => {
+      drawn = [];
+      ipc.overrides.set("skin_info", (args) => (args.accountUuid === hanami.uuid ? FALLBACK : null));
+      vi.stubGlobal("fetch", vi.fn(async (url: string) => ({ ok: true, status: 200, blob: async () => new Blob([url]) })));
+      vi.stubGlobal(
+        "createImageBitmap",
+        vi.fn(async (blob: Blob) => {
+          drawn.push(await blob.text());
+          return { width: 64, height: 64 };
+        }),
+      );
+    });
+
+    it("立绘画后端给的默认皮肤，图从本机原版材质读；刷新后档案里有了真实皮肤，换成真实皮肤", async () => {
+      ipc.overrides.set("art_status", () => MODERN_SOURCE);
+      ipc.overrides.set("refresh_account", () => ({ ...hanami, last_verified_at: NOW }));
+      await mount();
+      await flush();
+      expect(spotFigure()?.dataset.art).toBe("skin");
+      expect(skins()).toEqual(["http://petalfall-tex.localhost/art/entity/player/wide/noor.png?v=1.21.4"]);
+
+      ipc.overrides.set("skin_info", (args) => (args.accountUuid === hanami.uuid ? REAL : null));
+      await click(buttonIn(page().querySelector("section") as HTMLElement, "刷新账户信息"));
+      await flush();
+      expect(spotFigure()?.dataset.art).toBe("skin");
+      expect(skins()).toEqual(["http://petalfall-tex.localhost/art/entity/player/wide/noor.png?v=1.21.4", `http://petalfall-tex.localhost/skin/${REAL.sha1}.png`]);
+    });
+
+    it("本机没有任何原版材质时默认皮肤的图读不到，才画剪影，也不发取图请求", async () => {
+      await mount();
+      await flush();
+      expect(spotFigure()?.dataset.art).toBe("silhouette");
+      expect(drawn).toEqual([]);
+    });
+  });
+
   it("切换到皮肤信息还没读到的账户：聚光卡舞台留着上一位的立绘，读到「没有皮肤」才换成剪影", async () => {
     const steveSkin = deferred<null>();
     ipc.overrides.set("skin_info", (args) => (args.accountUuid === steve.uuid ? steveSkin.promise : { kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true }));

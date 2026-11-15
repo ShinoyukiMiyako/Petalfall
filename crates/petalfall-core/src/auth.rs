@@ -778,7 +778,7 @@ impl Petalfall {
 
     /// 等待选择的每个角色当前的皮肤，与 `pending.profiles` 一一对应，供角色列表画头像。
     ///
-    /// 并发查询，每个角色限时 [`PROFILE_SKIN_TIMEOUT`]；取不到的记 warn 并为 None，界面画剪影。
+    /// 并发查询，每个角色限时 [`PROFILE_SKIN_TIMEOUT`]；取不到的记 warn 并为 None，界面画按角色 UUID 选的默认皮肤。
     pub async fn authlib_profile_skins(&self, pending: &AuthlibPending) -> Vec<Option<SkinRef>> {
         let mut tasks = tokio::task::JoinSet::new();
         for (index, profile) in pending.profiles.iter().enumerate() {
@@ -793,7 +793,7 @@ impl Petalfall {
                 {
                     Ok(skin) => skin,
                     Err(_) => {
-                        tracing::warn!(profile_id = %id, "查询外置角色皮肤超时，界面将回落到剪影");
+                        tracing::warn!(profile_id = %id, "查询外置角色皮肤超时，界面改画默认皮肤");
                         None
                     }
                 };
@@ -1319,7 +1319,7 @@ async fn profile_skin_or_warn(client: &YggdrasilClient, profile_id: &str) -> Opt
     match client.profile_skin(profile_id).await {
         Ok(skin) => skin,
         Err(err) => {
-            tracing::warn!(profile_id, error = %err, "取外置角色皮肤失败，界面将回落到剪影");
+            tracing::warn!(profile_id, error = %err, "取外置角色皮肤失败，界面改画默认皮肤");
             None
         }
     }

@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { defaultSkin as previewSkin } from "../flows/login/default-skin";
 import {
   authlibLogin,
   cancelMicrosoftLogin,
@@ -225,9 +226,10 @@ describe("账户 mock：外置登录", () => {
     const result = await authlibLogin("skin.example", "multi@example.com", "pw");
     if (result.status !== "select_profile") throw new Error(`应进入选角色，实为 ${result.status}`);
     expect(result.server_name).toBe("skin.example");
+    // 浏览器里拿不到角色的远程皮肤：与后端一样按角色 UUID 给默认皮肤，与离线弹窗预览同一规则
     expect(result.profiles.map((p) => [p.name, p.skin])).toEqual([
-      ["multi_main", null],
-      ["multi_alt", null],
+      ["multi_main", previewSkin(result.profiles[0].uuid, "modern")],
+      ["multi_alt", previewSkin(result.profiles[1].uuid, "modern")],
     ]);
 
     const again = await authlibLogin("skin.example", "multi@example.com", "pw");

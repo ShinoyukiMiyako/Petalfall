@@ -88,8 +88,13 @@ describe("材质 mock", () => {
     expect((await artStatus()).source).toBeNull();
   });
 
-  it("皮肤：正版账户回 null（画剪影），未知账户报 AccountNotFound", async () => {
-    expect(await skinInfo("6a1f0c0e4b5d4c3e9f2a7b8c9d0e1f20")).toBeNull();
+  it("皮肤：浏览器里没有远程皮肤，正版与外置账户与后端一样按 UUID 给默认皮肤、跟着材质源换一套；未知账户报 AccountNotFound", async () => {
+    // 种子里的微软账户哈希为 593896604、外置账户为 -456729892，按 Java 的 UUID.hashCode 另行算出
+    expect(await skinInfo("6a1f0c0e4b5d4c3e9f2a7b8c9d0e1f20")).toEqual({ kind: "default", path: "entity/player/wide/noor", model: "wide" });
+    expect(await skinInfo("b7c2d3e4f5a64b7c8d9e0f1a2b3c4d5e")).toEqual({ kind: "default", path: "entity/player/slim/efe", model: "slim" });
+    setMockArtStatus({ source: { version_id: "1.19.2", degraded: true, legacy_skins: true }, panorama: false });
+    expect(await skinInfo("6a1f0c0e4b5d4c3e9f2a7b8c9d0e1f20")).toEqual({ kind: "default", path: "entity/steve", model: "wide" });
+    expect(await skinInfo("b7c2d3e4f5a64b7c8d9e0f1a2b3c4d5e")).toEqual({ kind: "default", path: "entity/steve", model: "wide" });
     const missing = await rejection(skinInfo("0".repeat(32)));
     expect(missing.code).toBe("AccountNotFound");
     expect(missing.detail).toEqual({ uuid: "0".repeat(32) });

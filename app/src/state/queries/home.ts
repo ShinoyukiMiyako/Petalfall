@@ -45,7 +45,7 @@ export function useServerStatus(): ResourceResult<ServerStatusDto[]> {
   return useResource("servers:status", () => pingServers());
 }
 
-/** skin:<uuid> —— 账户的远程皮肤；没有为 null（画默认皮肤或剪影）。 */
+/** skin:<uuid> —— 账户的皮肤：远程皮肤，拿不到时是默认皮肤；为 null 时画剪影。刷新或重新登录账户、默认皮肤换了一套时失效重取。 */
 export function useSkinInfo(accountUuid: string | null): ResourceResult<SkinInfoDto | null> {
   return useResource(accountUuid === null ? null : `skin:${accountUuid}`, () => {
     if (accountUuid === null) throw new Error("未启用的查询不应发出请求");

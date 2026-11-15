@@ -2,6 +2,7 @@ import type { AccountDto, AccountStatus, AuthlibLoginResult, AuthServerDto, Devi
 import { IpcError } from "../../errors";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
+import { fallbackSkin } from "./art";
 
 // ipc/ 只能以类型方式引用别的模块，事件名在这里按后端各写一份。
 const DEVICE_CODE_EVENT = "petalfall://device-code";
@@ -267,7 +268,7 @@ export const handlers: MockHandlers = {
         status: "select_profile",
         pending_id: pending.id,
         server_name: pending.serverName,
-        profiles: pending.profiles.map((p) => ({ ...p, skin: null })),
+        profiles: pending.profiles.map((p) => ({ ...p, skin: fallbackSkin(p.uuid) })),
       };
     }
     const now = Date.now();
@@ -348,10 +349,6 @@ export const handlers: MockHandlers = {
 /** 给材质 mock 用：账户是否存在。 */
 export function hasMockAccount(uuid: string): boolean {
   return store.credential.some((a) => a.uuid === uuid) || store.offline.some((a) => a.uuid === uuid);
-}
-
-export function isMockOfflineAccount(uuid: string): boolean {
-  return store.offline.some((a) => a.uuid === uuid);
 }
 
 /** 给启动 mock 判定能否以离线方式进单人：账户名、是不是离线账户、登录是否已被判定失效。 */

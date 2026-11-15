@@ -77,7 +77,7 @@ export function GreetingCard({ span, play }: GreetingCardProps) {
   const silhouette = figure === null;
   const skinError = skin.status === "error" ? skin.error : null;
   useEffect(() => {
-    // 皮肤拿不到时画剪影立绘是既定的回落，不弹通知（网络失败、没有皮肤后端已经折成「没有皮肤」）；
+    // 皮肤拿不到时画默认皮肤或剪影立绘是既定的回落，不弹通知（网络失败、没有皮肤后端已经折成默认皮肤）；
     // 走到这里的是账户库读取一类的真错误，原因留在控制台，便于排查。写明画的是剪影还是上一次的皮肤
     if (skinError !== null) console.warn(`[home] 当前账户的皮肤信息读不出来，立绘${silhouette ? "显示剪影" : "沿用上次读到的皮肤"}`, skinError);
   }, [skinError, silhouette]);

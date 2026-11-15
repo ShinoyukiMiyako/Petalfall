@@ -11,7 +11,7 @@ export interface ArtSourceDto {
   version_id: string;
   /** 本机的降级集（1.13 到 1.19）：推荐里较新的方块缺材质；下载来的最新正式版会盖过它。 */
   degraded: boolean;
-  /** 材质源早于 1.19.3，默认皮肤只有 steve 与 alex：离线账户按旧版规则选，skin_info 给的也是这两张之一。 */
+  /** 材质源早于 1.19.3，默认皮肤只有 steve 与 alex：skin_info 给的默认皮肤与离线弹窗的预览都按旧版规则在这两张里选。 */
   legacy_skins: boolean;
 }
 
@@ -26,7 +26,8 @@ export type SkinModel = "wide" | "slim";
 
 /**
  * 远程皮肤就绪：sha1 是协议里皮肤路径的键，hat 表示头像要不要叠帽子层。
- * 离线账户：它进游戏后显示的原版默认皮肤，path 在下面的默认皮肤名单里，从本机游戏文件读。
+ * 拿不到远程皮肤（离线账户永远如此；正版与外置账户档案里没有、档案没取到、下载失败）：它进游戏后显示的原版默认皮肤，
+ * path 在下面的默认皮肤名单里，从本机游戏文件读。
  */
 export type SkinInfoDto =
   | { kind: "remote"; sha1: string; model: SkinModel; hat: boolean }
@@ -132,7 +133,10 @@ export interface ArtDownloadProgressDto {
 /** 只读内存。应先订阅 onArtChanged 再调用，避免漏掉启动时那次刷新带来的变化。 */
 export const artStatus = (): Promise<ArtStatusDto> => invoke<ArtStatusDto>("art_status");
 
-/** 账户当前皮肤；离线账户给默认皮肤，正版与外置账户档案没有皮肤或下载失败时为 null（画剪影）。账户不存在报 AccountNotFound。 */
+/**
+ * 账户当前皮肤：远程皮肤就绪时给它，拿不到时给按 UUID 选的默认皮肤；正版与外置账户的 UUID 不是 32 位十六进制时为 null（画剪影）。
+ * 后端不记住默认皮肤，档案后来取到皮肤、下载后来成功时再查就是远程皮肤。账户不存在报 AccountNotFound。
+ */
 export const skinInfo = (accountUuid: string): Promise<SkinInfoDto | null> =>
   invoke<SkinInfoDto | null>("skin_info", { accountUuid });
 
