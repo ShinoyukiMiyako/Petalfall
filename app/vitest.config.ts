@@ -20,6 +20,11 @@ export default defineConfig({
     include: ["src/**/*.test.{ts,tsx}", "scripts/*.test.ts"],
     css: { modules: { classNameStrategy: "stable" } },
     restoreMocks: true,
+    // 每个用例结束后卸载经 test/dom 渲染的组件、把假时钟上排着的帧排空，再换回真实计时器
+    setupFiles: ["src/test/setup.ts"],
+    // after 类钩子按登记顺序跑（默认 stack 是倒序）：setupFiles 登记的 afterEach 才排在测试文件顶层的 afterEach 之前，
+    // 赶在文件自己换回真实计时器之前把帧排空。同一层写了多个 afterEach、afterAll 的，也按书写顺序跑。
+    sequence: { hooks: "list" },
     maxWorkers: MAX_WORKERS,
     tags: [{ name: "heavy-page", description: "整页、流程弹窗或外壳的渲染测试，单例超时放宽", timeout: HEAVY_PAGE_TEST_TIMEOUT_MS }],
   },

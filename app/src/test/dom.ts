@@ -5,6 +5,7 @@ import { frameData } from "framer-motion";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { onTestFinished, vi } from "vitest";
+import { registerRenderTeardown } from "./teardown";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -14,19 +15,26 @@ export interface Rendered {
   unmount(): void;
 }
 
+/** 经 render 挂上、还没卸载的组件，用例结束时由 test/setup.ts 的全局收尾卸载（见 drainFrames 之后的 afterTest）。 */
+const mounted = new Set<Rendered>();
+
 export function render(ui: ReactNode): Rendered {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  act(() => root.render(ui));
-  return {
+  const rendered: Rendered = {
     container,
     rerender: (next) => act(() => root.render(next)),
     unmount: () => {
+      mounted.delete(rendered);
       act(() => root.unmount());
       container.remove();
     },
   };
+  // 先登记再渲染：首次渲染就抛错的，根与容器同样要在用例结束时收走
+  mounted.add(rendered);
+  act(() => root.render(ui));
+  return rendered;
 }
 
 export interface MediaQueryStub {
@@ -326,7 +334,8 @@ const FRAME_WAIT_TIMEOUT_MS = 3_000;
  * - 换计时器（假换真、真换假，也包括 beforeEach 里每个用例重装一次假时钟）时，要是还有一帧排在旧计时器上：
  *   framer-motion 以为下一帧已经排着，不再排新的；jsdom 也以为计时器还在，不再起新的。旧的是假时钟时那一帧永远不来，
  *   同文件后面的用例连页面根的入场、Page 的首帧闸门都推不动；旧的是真实计时器时，换上假时钟后最初几步推进会扑空。
- *   换之前先卸载、再 drainFrames 把帧循环排空。
+ *   换之前先卸载、再 drainFrames 把帧循环排空。用例结束时这一步由 test/setup.ts 统一做（见 afterTest）；
+ *   用例中途换计时器、beforeEach 里由真换假、describe 里的 afterEach 换回真实计时器的，仍要自己排空。
  * - 经窗口排的动画帧回调（产品代码里现取的 requestAnimationFrame）不归 framer-motion 管，假定时器下排在假时钟上。
  *   lib/reflow 的等待队列是模块级的，排着时恰好有一个这样的回调，按帧数一帧一排：丢了这一帧，队列以为还排着，
  *   同文件后面挂进来的让位一个也不播。drainFrames 连这一路一起排空。
@@ -394,6 +403,16 @@ export async function drainFrames(): Promise<void> {
   }
   throw new Error(`帧循环走了 ${FRAME_WAIT_TIMEOUT_MS} ms 仍没停下：还有动画或每帧再排的动画帧回调，先卸载再排空`);
 }
+
+/**
+ * 每个用例结束后的组件收尾，test/setup.ts 经 test/teardown 调用：卸载还挂着的组件，停在假定时器上的再把帧循环排空，
+ * 之后 setup 才换回真实计时器。真实计时器上排着的帧不会卡住，照常按真实时间到点，不为它多等两个帧长。
+ */
+async function afterTest(): Promise<void> {
+  for (const rendered of [...mounted]) rendered.unmount();
+  if (vi.isFakeTimers()) await drainFrames();
+}
+registerRenderTeardown(afterTest);
 
 /** 固定元素的布局矩形（jsdom 不做布局，getBoundingClientRect 恒为 0）。 */
 export function setRect(el: Element, rect: { left: number; top: number; width: number; height: number }): void {

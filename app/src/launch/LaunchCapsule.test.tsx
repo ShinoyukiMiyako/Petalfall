@@ -680,16 +680,21 @@ describe("形变起步的回调", () => {
     // 每读一次时钟往前走一点：回调里另读的时刻必定晚于冲刷时写下的帧时间，两者分得开
     let clock = 5000 + Math.random() * 1000;
     const now = vi.spyOn(performance, "now").mockImplementation(() => (clock += 0.3 + Math.random()));
-    onTestFinished(() => now.mockRestore());
     const seen: { startedAt: number; timestamp: number; processing: boolean; readAfter: number }[] = [];
     morphStart = (startedAt) => {
       seen.push({ startedAt, timestamp: frameData.timestamp, processing: frameData.isProcessing, readAfter: performance.now() });
     };
-    sizedCapsule();
-    act(() => buttonByText(LAUNCH_COPY.launch).click());
-    await act(async () => {
-      await Promise.resolve();
-    });
+    // 形变起步、回调记下两个时刻就换回假时钟上的 performance.now：卸载后形变仍按自己的时长放完，用例收尾排空帧循环时
+    // 还按这个读一次只走一点的时钟算，几百帧也放不完
+    try {
+      sizedCapsule();
+      act(() => buttonByText(LAUNCH_COPY.launch).click());
+      await act(async () => {
+        await Promise.resolve();
+      });
+    } finally {
+      now.mockRestore();
+    }
     expect(seen).toHaveLength(1);
     const [call] = seen;
     // 回调在 framer 处理这一帧的途中：形变的 startTime 取的就是这时的帧时间
