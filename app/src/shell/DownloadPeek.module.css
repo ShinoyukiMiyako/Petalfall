@@ -19,7 +19,21 @@
     color var(--sk-dur-hover) var(--sk-ease);
 }
 
-.entry:hover,
+/*
+ * 悬停与按下铺半透明叠层，与标题栏的搜索图标、窗口三键一致：入口落在右上角的氛围晕染里，实色 bg-2 在晕染渐淡的途中
+ * 总有一处与底一样亮，悬停看不出。叠层上的图标提到 text，键盘按住空格时只有 :active，按下也写上。
+ * 浮层打开中是另一种状态，仍铺 bg-2，悬停与按下不变
+ */
+.entry:hover:not([data-open]) {
+  background: var(--sk-fill-hover);
+  color: var(--sk-text);
+}
+
+.entry:active:not([data-open]) {
+  background: var(--sk-fill-press);
+  color: var(--sk-text);
+}
+
 .entry[data-open] {
   background: var(--sk-bg-2);
   color: var(--sk-text);
@@ -154,8 +168,16 @@
   border-radius: var(--sk-r-sm);
 }
 
+/*
+ * 行悬停铺半透明叠层：实色 bg-2 落在夜樱浮层的 surface 底上只差 1.04:1，看不出悬停。
+ * 叠层上 text-2 的第三行夜樱只剩 4.22:1，悬停时提到 text
+ */
 .row:hover {
-  background: var(--sk-bg-2);
+  background: var(--sk-fill-hover);
+}
+
+.row:hover .rowMeta {
+  color: var(--sk-text);
 }
 
 .rowHead {

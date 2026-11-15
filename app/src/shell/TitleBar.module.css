@@ -194,8 +194,18 @@
     color var(--sk-dur-hover) var(--sk-ease);
 }
 
+/*
+ * 悬停与按下铺半透明叠层，与同一条栏上的窗口三键一致。图标入口落在右上角的氛围晕染里：实色 bg-2 日樱比窗口底深、
+ * 比晕染最浓处浅（夜樱反过来），晕染渐淡的途中总有一处与它一样亮，悬停看不出；叠层不论落在哪一处都朝同一方向压一档。
+ * text-2 留在晕染最浓处的叠层上夜樱悬停最低 3.14:1、按下 2.60:1，图标提到 text；键盘按住空格时只有 :active，按下也写上
+ */
 .searchIcon:hover {
-  background: var(--sk-bg-2);
+  background: var(--sk-fill-hover);
+  color: var(--sk-text);
+}
+
+.searchIcon:active {
+  background: var(--sk-fill-press);
   color: var(--sk-text);
 }
 
