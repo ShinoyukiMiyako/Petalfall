@@ -276,15 +276,16 @@
   line-height: 1.25;
 }
 
+/* 行高随 .text 的 1.25，不换 body 的 22：中号胶囊内高 34，22 加副行就超出了；按 1.25 两行合计 32.5 */
 .title {
-  font-size: 13.5px;
+  font-size: var(--sk-fs-body);
   font-weight: var(--sk-w-title);
   font-variant-numeric: tabular-nums;
 }
 
 /*
  * 副行有实例名与失败原因，是中文，字号取 caption；行高随 .text 的 1.25，不换 caption 的 18：
- * 中号胶囊内高 34，标题行 13.5 × 1.25 再加 18 就超出了
+ * 中号胶囊内高 34，标题行 14 × 1.25 再加 18 就超出了
  */
 .sub {
   color: var(--sk-text-2);

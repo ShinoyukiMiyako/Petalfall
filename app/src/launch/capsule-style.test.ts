@@ -5,6 +5,14 @@ import { BREATH_CYCLES } from "./breath";
 
 const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "");
 const css = strip(readFileSync(new URL("./LaunchCapsule.module.css", import.meta.url), "utf8"));
+const tokens = strip(readFileSync(new URL("../styles/tokens.css", import.meta.url), "utf8"));
+
+/** :root 上字号令牌的像素值。 */
+function tokenPx(name: string): number {
+  const declared = new RegExp(`${name}:\\s*(\\d+(?:\\.\\d+)?)px;`).exec(tokens);
+  if (declared === null) throw new Error(`tokens.css 里没有 ${name} 的像素值`);
+  return Number(declared[1]);
+}
 
 /** 选择器完全一致的那条规则的声明块。 */
 function ruleOf(selector: string): string {
@@ -48,6 +56,26 @@ describe("按压", () => {
   it("减少动画时启动按钮不留透明度过渡：松开后即时回到不透明，不按 150 ms 补间，与胶囊内其它按钮一致", () => {
     expect(declaration(ruleOf(":global([data-sk-reduced]) .go"), "transition")).toBe("none");
     for (const selector of [".pill", ".iconAction"]) expect(declaration(ruleOf(selector), "transition")).not.toContain("opacity");
+  });
+});
+
+describe("文字行", () => {
+  it("标题取 body、副行取 caption：两行都会是中文，字号走令牌，不写死半像素", () => {
+    expect(declaration(ruleOf(".title"), "font-size")).toBe("var(--sk-fs-body)");
+    expect(declaration(ruleOf(".sub"), "font-size")).toBe("var(--sk-fs-caption)");
+  });
+
+  it("两行都按 .text 的 1.25 倍行高叠起来，放得进中号胶囊 34 的内高；不各自换成令牌行高", () => {
+    const capsule = ruleOf(".capsule");
+    const inset = /^calc\(var\(--capsule-h\) - (\d+)px\)$/.exec(declaration(capsule, "--capsule-inner"));
+    if (inset === null) throw new Error("--capsule-inner 不是胶囊高减去定值的写法");
+    const inner = Number.parseFloat(declaration(capsule, "--capsule-h")) - Number(inset[1]);
+    const lineHeight = Number(declaration(ruleOf(".text"), "line-height"));
+    for (const line of [".title", ".sub"]) expect(ruleOf(line)).not.toContain("line-height");
+    const twoLines = (tokenPx("--sk-fs-body") + tokenPx("--sk-fs-caption")) * lineHeight;
+    expect(inner).toBe(34);
+    expect(twoLines).toBe(32.5);
+    expect(twoLines).toBeLessThanOrEqual(inner);
   });
 });
 
