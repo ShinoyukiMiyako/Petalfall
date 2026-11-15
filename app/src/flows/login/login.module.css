@@ -187,7 +187,7 @@
 .countdown {
   flex: none;
   font-variant-numeric: tabular-nums;
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .success {
@@ -255,7 +255,7 @@
 .chipLine {
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 /* ---- 离线账户 ---- */
@@ -342,7 +342,7 @@
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
   font-weight: var(--sk-w-medium);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .uuidValue {
@@ -355,7 +355,7 @@
 
 .uuidValue[data-empty] {
   font-family: var(--sk-font);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
   user-select: none;
 }
 
@@ -363,7 +363,7 @@
   margin: 0;
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 /* ---- 外置登录 ---- */
@@ -407,7 +407,7 @@
   gap: var(--sk-space-6);
   font-size: var(--sk-fs-small);
   line-height: var(--sk-lh-small);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
   transition: color var(--sk-dur-hover) var(--sk-ease);
 }
 
@@ -544,7 +544,7 @@
   font-family: var(--sk-mono);
   font-size: var(--sk-fs-mono-sm);
   line-height: var(--sk-lh-mono-sm);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .profiles {
