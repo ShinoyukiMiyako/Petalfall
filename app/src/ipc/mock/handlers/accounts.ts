@@ -130,6 +130,8 @@ function validateUsername(name: string): string[] {
   if (name === "") throw reject("用户名不能为空");
   if (name.includes('"')) throw reject("用户名不能包含双引号");
   if ([...name].length > 16) throw reject("用户名不能超过 16 个字符（1.20.3 及以上版本限制）");
+  // 与后端 player_name_has_rejected_char 同一条线：码元在 ! 到 ~ 之外（含代理对）
+  if (/[^!-~]/.test(name)) return ["用户名含空格或非 ASCII 字符，Minecraft 1.20.2 与 1.20.3 进不了存档与服务器"];
   return /^[A-Za-z0-9_]+$/.test(name) ? [] : ["用户名包含非标准字符，可能无法进入 1.18+ 世界"];
 }
 

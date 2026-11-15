@@ -1543,14 +1543,32 @@ pub async fn list_instance_content(
 
 // ---------------------------------------------------------------- 侧栏固定
 
-/// 侧栏固定的实例（按顺序），已不存在或不在实例库里的不返回。
+/// 侧栏固定的实例（按顺序），已不存在或不在实例库里的不返回。确认已不在游戏目录里的固定项顺带从配置里去掉并落盘，
+/// 否则之后新建或导入的同名实例一出现就是固定的；游戏目录这一刻读不到时照常报错，配置不动（规则见
+/// `Petalfall::read_sidebar_pins`）。
 #[tauri::command]
 pub async fn get_sidebar_pins(facade: State<'_, Facade>) -> Result<Vec<String>, CommandError> {
-    let petalfall = facade.snapshot().await;
-    petalfall
-        .existing_sidebar_pins()
+    get_sidebar_pins_with(&facade).await
+}
+
+pub(crate) async fn get_sidebar_pins_with(facade: &Facade) -> Result<Vec<String>, CommandError> {
+    let pins = facade
+        .snapshot()
         .await
-        .map_err(instance_error)
+        .read_sidebar_pins()
+        .await
+        .map_err(instance_error)?;
+    if !pins.gone.is_empty() {
+        let pruned = facade
+            .update_if_changed(|petalfall| petalfall.prune_sidebar_pins(&pins))
+            .await?;
+        if pruned {
+            tracing::info!(gone = ?pins.gone, "侧栏固定里已不在游戏目录里的实例从配置里去掉了");
+        } else {
+            tracing::debug!(gone = ?pins.gone, "读完之后固定列表或游戏目录变了，这次不去掉");
+        }
+    }
+    Ok(pins.shown)
 }
 
 /// 整份设置侧栏固定列表并落盘，返回写下的列表。超过 5 个、重复或含不存在的实例报 `invalid_argument`，
@@ -4509,9 +4527,57 @@ mod tests {
         env.facade
             .snapshot()
             .await
-            .existing_sidebar_pins()
+            .read_sidebar_pins()
             .await
             .unwrap()
+            .shown
+    }
+
+    async fn pin(env: &Env, pins: &[&str]) {
+        let pins: Vec<String> = pins.iter().map(|pin| (*pin).to_owned()).collect();
+        env.facade
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(pins);
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    /// 在落樱之外删掉的实例：读固定时从门面与配置文件里一起去掉，之后新建的同名实例不带固定。
+    #[tokio::test]
+    async fn reading_pins_saves_away_an_instance_deleted_outside() {
+        let env = Env::new();
+        env.vanilla("生存");
+        let doomed = env.vanilla("旧档");
+        pin(&env, &["旧档", "生存"]).await;
+        std::fs::remove_dir_all(&doomed).unwrap();
+        let survivor = vec!["生存".to_owned()];
+
+        assert_eq!(get_sidebar_pins_with(&env.facade).await.unwrap(), survivor);
+        assert_eq!(env.saved_config().await.sidebar_pins, survivor);
+        assert_eq!(env.facade.read().await.config().sidebar_pins, survivor);
+
+        env.vanilla("旧档");
+        assert_eq!(get_sidebar_pins_with(&env.facade).await.unwrap(), survivor);
+        assert_eq!(env.saved_config().await.sidebar_pins, survivor);
+    }
+
+    /// 读 versions 出错：照常报错，门面与配置文件里的固定都不动，包括盘上确实没有的那个。
+    #[tokio::test]
+    async fn reading_pins_keeps_them_when_versions_cannot_be_read() {
+        let env = Env::new();
+        env.vanilla("生存");
+        pin(&env, &["生存", "旧档"]).await;
+        let versions = env.game_dir().join("versions");
+        std::fs::remove_dir_all(&versions).unwrap();
+        std::fs::write(&versions, b"not a folder").unwrap();
+        let kept = vec!["生存".to_owned(), "旧档".to_owned()];
+
+        let err = get_sidebar_pins_with(&env.facade).await.unwrap_err();
+        assert!(err.message.contains("versions"), "{err:?}");
+        assert_eq!(env.saved_config().await.sidebar_pins, kept);
+        assert_eq!(env.facade.read().await.config().sidebar_pins, kept);
     }
 
     #[tokio::test]

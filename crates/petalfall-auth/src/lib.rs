@@ -41,7 +41,9 @@ pub use account::{
 pub use credential::CredentialStore;
 pub use error::{AuthError, Result};
 pub use microsoft::{DeviceCodeResponse, MicrosoftAuth, MicrosoftSession, MsaEndpoints, MsaToken};
-pub use offline::{UsernameCheck, offline_account, offline_uuid, validate_username};
+pub use offline::{
+    UsernameCheck, offline_account, offline_uuid, player_name_has_rejected_char, validate_username,
+};
 pub use offline_store::{OfflineAccountDb, OfflineAccountStore, OfflineEntry};
 pub use yggdrasil::{
     AliMetadata, AuthenticateResponse, RefreshResponse, YggdrasilClient, YggdrasilMetadata,

@@ -584,7 +584,7 @@ fn stamp_read(file: io::Result<Vec<u8>>) -> StampRead {
 /// 覆盖成低号；看游戏目录时当成目录不存在，关卡就不核对、直接放行，建好目录之后的那次核对也一样。所以只认文件
 /// 不存在、路径不存在（2、3）。
 #[cfg(windows)]
-fn is_missing(err: &io::Error) -> bool {
+pub(crate) fn is_missing(err: &io::Error) -> bool {
     // ERROR_FILE_NOT_FOUND、ERROR_PATH_NOT_FOUND。
     const MISSING: [i32; 2] = [2, 3];
     err.raw_os_error()
@@ -593,7 +593,7 @@ fn is_missing(err: &io::Error) -> bool {
 
 /// 别的平台上 `NotFound` 只表示文件或路径不存在。
 #[cfg(not(windows))]
-fn is_missing(err: &io::Error) -> bool {
+pub(crate) fn is_missing(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::NotFound
 }
 
