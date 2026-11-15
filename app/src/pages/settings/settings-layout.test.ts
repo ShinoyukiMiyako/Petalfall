@@ -1,6 +1,6 @@
 // 设置页样式里与动效、尺寸稳定有关的约定。jsdom 不做样式计算，这里直接读样式表核对：
 // 导航锚点的留白与吸顶对齐；图标底座的渐变只能叠一层淡入淡出，减少动画时选中不上浮；
-// 更新卡状态行在没有次句时也不变矮。
+// 更新卡状态行在没有次句时也不变矮；设置行之间的分隔线不等退场中的块从文档里拿掉。
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -61,10 +61,25 @@ describe("许可弹窗", () => {
   });
 });
 
+/** 设置行样式表里画行间分隔线的那条规则：选择器列表与 border-top 的值。 */
+function rowSeparator(): { selectors: string[]; line: string } {
+  const rowCss = readFileSync(new URL("../../ui/SettingRow.module.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = [...rowCss.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter((m) => /border-top\s*:/.test(m[2]));
+  if (rules.length !== 1) throw new Error(`设置行样式表里画分隔线的规则应正好一条，实际 ${rules.length} 条`);
+  const line = /border-top:\s*([^;]+);/.exec(rules[0][2]);
+  if (line === null) throw new Error("设置行的分隔线规则里没有 border-top 的值");
+  return { selectors: rules[0][1].split(",").map((s) => s.trim()), line: line[1] };
+}
+
+describe("设置行的分隔线", () => {
+  it("画在相邻两行之间，也画在只隔着一块退场块（inert）的两行之间：退场块一开始淡出，线就交给下一行", () => {
+    expect(rowSeparator().selectors).toEqual([".row + .row", ".row + [inert] + .row"]);
+  });
+});
+
 describe("更新通道选项块", () => {
   it("上下两条分隔线与设置行之间的那条同一个写法：状态行与「自动检查更新」之间像隔着一行设置", () => {
-    const rowCss = readFileSync(new URL("../../ui/SettingRow.module.css", import.meta.url), "utf8");
-    const rowLine = /\.row \+ \.row\s*\{[^}]*border-top:\s*([^;]+);/.exec(rowCss)?.[1];
+    const rowLine = rowSeparator().line;
     expect(rowLine).toBe("1px solid var(--sk-line)");
     const channel = block(".channelBlock");
     expect([channel.get("border-top"), channel.get("border-bottom")]).toEqual([rowLine, rowLine]);
