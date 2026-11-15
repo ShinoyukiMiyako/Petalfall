@@ -8,6 +8,7 @@ import { ACTION_ERROR, AUTHLIB_COPY, LITTLESKIN_API, MICROSOFT_LOGIN_COPY, NO_AC
 import { validateOfflineName } from "../../domain/rules";
 import { COPY_FEEDBACK_MS, LOADING_DELAY_MS } from "../../domain/limits";
 import { DEVICE_CODE_EVENT, type AccountDto } from "../../ipc/accounts";
+import { ART_DOWNLOAD_EVENT, type ArtStatusDto } from "../../ipc/art";
 import { IpcError } from "../../ipc/errors";
 import { mockInvoke } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
@@ -20,7 +21,9 @@ import type { IpcRecorder } from "../../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { AUTHLIB_DIALOG_COPY, DEVICE_DIALOG_COPY, OFFLINE_DIALOG_COPY } from "../../copy/login";
 import { NO_ART, setArtStatus } from "../../mc/art";
+import { setBlockCatalog } from "../../mc/catalog";
 import { clearArtCache } from "../../mc/useArt";
+import { getArtDownloadState } from "../../state/art-download";
 import { DEFAULT_SKINS } from "./default-skin";
 import LoginFlow from "./index";
 import { FIGURE_DEBOUNCE_MS, nameDisplay } from "./OfflineDialog";
@@ -799,6 +802,113 @@ describe("微软设备码弹窗", () => {
     await flush();
     expect(launcher.state.login).toBeNull();
     expect(nav.route).toEqual({ page: "settings", section: "general" });
+  });
+
+  describe("成功区的下载原版材质", () => {
+    const MODERN: ArtStatusDto = { source: { version_id: "1.21.4", degraded: false, legacy_skins: false }, panorama: false };
+    const NOTE = "本机还没有原版材质，默认皮肤画不出来。";
+    const sakura = accountDto({ uuid: "0f3c5a7e9b1d4f6a8c2e4a6b8d0f2a4c", name: "Sakura", account_type: "microsoft" });
+    // 档案里没有皮肤：后端按 UUID 给的默认皮肤是细臂 sunny
+    const FALLBACK = { kind: "default", path: "entity/player/slim/sunny", model: "slim" } as const;
+    let drawn: string[];
+    const note = () => [...(dialog()?.querySelectorAll("p") ?? [])].find((p) => p.textContent === NOTE && live(p));
+    const avatar = () => dialog()?.querySelector<HTMLElement>('[data-sk-art="skin"]');
+
+    beforeEach(() => {
+      drawn = [];
+      ipc.overrides.set("skin_info", (args) => (args.accountUuid === sakura.uuid ? FALLBACK : null));
+      // 下完后材质绑定接着载入方块目录，载入了下载状态才回到空闲
+      ipc.overrides.set("art_blocks", () => ({ version_id: "1.21.4", blocks: [] }));
+      vi.stubGlobal("fetch", vi.fn(async (url: string) => ({ ok: true, status: 200, blob: async () => new Blob([url]) })));
+      vi.stubGlobal(
+        "createImageBitmap",
+        vi.fn(async (blob: Blob) => {
+          drawn.push(await blob.text());
+          return { width: 64, height: 64 };
+        }),
+      );
+    });
+
+    afterEach(() => {
+      setBlockCatalog(null);
+      setArtStatus(NO_ART);
+      clearArtCache();
+      // 下载状态全应用只有一份：每条用例都要走完，留在下载中会带进下一条
+      expect(getArtDownloadState()).toEqual({ phase: "idle" });
+    });
+
+    /** 走到设备码登录成功：拿到代码，再由后端交回新账户。 */
+    async function loginSucceeds() {
+      const login = deferred<AccountDto>();
+      ipc.overrides.set("microsoft_login", () => login.promise);
+      await mount();
+      act(() => void launcher.actions.startMicrosoftLogin());
+      await flush();
+      act(() => emit(DEVICE_CODE_EVENT, code));
+      await flush();
+      bootOverrides(ipc, { accounts: [accountDto({ name: "Alex" }), sakura], current: sakura });
+      await act(async () => {
+        login.resolve(sakura);
+        await settle();
+      });
+      await flush();
+      expect(title()).toBe(DEVICE_DIALOG_COPY.doneTitle);
+    }
+
+    it("本机没有材质源：新账户胶囊下面一行说明加幽灵按钮，弹窗按带这一行的版式量布局", async () => {
+      await loginSucceeds();
+      const line = note();
+      if (line === undefined) throw new Error("成功区没有下载原版材质的那一行");
+      const download = button("下载原版材质");
+      expect([download.dataset.variant, download.dataset.size]).toEqual(["ghost", "sm"]);
+      // 主按钮仍是底栏的「完成」
+      expect(button(MICROSOFT_LOGIN_COPY.done).dataset.variant).toBe("primary");
+      expect(modalLayoutKeys.at(-1)).toBe("microsoft:success:content:art");
+      expect(avatar()?.dataset.art).toBe("silhouette");
+    });
+
+    it("本机有材质源：成功区没有这一行，头像直接画默认皮肤", async () => {
+      ipc.overrides.set("art_status", () => MODERN);
+      await loginSucceeds();
+      expect(note()).toBeUndefined();
+      expect(buttons().some((b) => labelOf(b) === "下载原版材质")).toBe(false);
+      expect(modalLayoutKeys.at(-1)).toBe("microsoft:success:content");
+      expect(avatar()?.dataset.art).toBe("skin");
+    });
+
+    it("点下载：连点两下也只发一次 art_download；下完后头像在原节点上换上默认皮肤，这一行退场，弹窗换回不带它的版式", async () => {
+      const download = deferred<ArtStatusDto>();
+      ipc.overrides.set("art_download", () => download.promise);
+      await loginSucceeds();
+      const face = avatar();
+      expect(face?.dataset.art).toBe("silhouette");
+      const trigger = button("下载原版材质");
+      act(() => {
+        trigger.click();
+        trigger.click();
+      });
+      await flush();
+      expect(callsOf(ipc, "art_download")).toEqual([{}]);
+      act(() => emit(ART_DOWNLOAD_EVENT, { stage: "client", downloaded: 1024 * 1024, total: 4 * 1024 * 1024 }));
+      await flush();
+      expect(liveText()).toContain("正在下载客户端");
+      // 按钮与进度同为一行高：下载中不另量布局
+      expect(modalLayoutKeys.at(-1)).toBe("microsoft:success:content:art");
+
+      ipc.overrides.set("art_status", () => MODERN);
+      await act(async () => {
+        download.resolve(MODERN);
+        await settle(20);
+      });
+      await flush();
+      expect(avatar()).toBe(face);
+      expect(face?.dataset.art).toBe("skin");
+      expect(drawn.filter((url) => url.includes("/art/entity/"))).toEqual([expect.stringMatching(/\/art\/entity\/player\/slim\/sunny\.png\?v=1\.21\.4$/)]);
+      expect(note()).toBeUndefined();
+      expect(liveText()).not.toContain("正在下载客户端");
+      expect(modalLayoutKeys.at(-1)).toBe("microsoft:success:content");
+      expect(callsOf(ipc, "art_download")).toHaveLength(1);
+    });
   });
 });
 

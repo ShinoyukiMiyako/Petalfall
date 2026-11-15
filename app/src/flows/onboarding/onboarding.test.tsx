@@ -3,11 +3,15 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { ART_DOWNLOAD_EVENT, type ArtStatusDto } from "../../ipc/art";
 import type { ConfigDto, GameDirectoryDto } from "../../ipc/config";
 import { IpcError } from "../../ipc/errors";
 import { APP_NAME } from "../../lib/app-info";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
+import { NO_ART, setArtStatus } from "../../mc/art";
+import { setBlockCatalog } from "../../mc/catalog";
 import { clearArtCache } from "../../mc/useArt";
+import { getArtDownloadState } from "../../state/art-download";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import type { Appearance } from "../../domain/types";
@@ -16,7 +20,7 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import { resources } from "../../state/resource";
 import { render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { accountDto, callsOf, resetRecorder, settle } from "../../test/launcher";
+import { accountDto, callsOf, deferred, emit, resetRecorder, settle } from "../../test/launcher";
 import OnboardingFlow from "./index";
 import { PickDirectoryProvider, type PickDirectory } from "./platform";
 
@@ -445,6 +449,109 @@ describe("首次启动向导：推进与收尾", () => {
     if (offline === undefined) throw new Error("没有离线账户选项");
     await click(offline);
     expect(launcher.state.login).toMatchObject({ kind: "offline", intent: { kind: "manual" } });
+  });
+
+  describe("第三步：下载原版材质", () => {
+    const MODERN: ArtStatusDto = { source: { version_id: "1.21.4", degraded: false, legacy_skins: false }, panorama: false };
+    const NOTE = "本机还没有原版材质，默认皮肤画不出来。";
+    let drawn: string[];
+    /** 「已添加」区下面那一行的说明；退场中（inert）的不算。 */
+    const note = () => all("p").find((p) => p.textContent === NOTE && p.closest("[inert]") === null);
+    const addedSection = () => all("section").find((section) => section.textContent?.startsWith("已添加") && section.closest("[inert]") === null);
+    const avatars = () => [...(addedSection()?.querySelectorAll<HTMLElement>('[data-sk-art="skin"]') ?? [])];
+
+    beforeEach(() => {
+      drawn = [];
+      // 下完后材质绑定接着载入方块目录，载入了下载状态才回到空闲
+      ipc.overrides.set("art_blocks", () => ({ version_id: "1.21.4", blocks: [] }));
+      vi.stubGlobal("fetch", vi.fn(async (url: string) => ({ ok: true, status: 200, blob: async () => new Blob([url]) })));
+      vi.stubGlobal(
+        "createImageBitmap",
+        vi.fn(async (blob: Blob) => {
+          drawn.push(await blob.text());
+          return { width: 64, height: 64 };
+        }),
+      );
+    });
+
+    afterEach(() => {
+      setBlockCatalog(null);
+      setArtStatus(NO_ART);
+      // 下载状态全应用只有一份：每条用例都要走完，留在下载中会带进下一条
+      expect(getArtDownloadState()).toEqual({ phase: "idle" });
+    });
+
+    it("本机没有材质源：「已添加」区下面一行说明加幽灵按钮，排在登录选项之前", async () => {
+      await mount();
+      await click(button("下一步"));
+      await click(button("下一步"));
+      const line = note();
+      if (line === undefined) throw new Error("没有下载原版材质的那一行");
+      const download = button("下载原版材质");
+      expect([download.dataset.variant, download.dataset.size]).toEqual(["ghost", "sm"]);
+      const added = addedSection() as HTMLElement;
+      const options = button("离线账户");
+      expect([added.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING, line.compareDocumentPosition(options) & Node.DOCUMENT_POSITION_FOLLOWING]).toEqual([
+        Node.DOCUMENT_POSITION_FOLLOWING,
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      ]);
+      expect(avatars().map((a) => a.dataset.art)).toEqual(["silhouette", "silhouette"]);
+    });
+
+    it("本机有材质源：没有这一行，头像直接画默认皮肤", async () => {
+      ipc.overrides.set("art_status", () => MODERN);
+      await mount();
+      await click(button("下一步"));
+      await click(button("下一步"));
+      expect(note()).toBeUndefined();
+      expect(all("button").some((b) => b.closest("[inert]") === null && b.textContent === "下载原版材质")).toBe(false);
+      expect(avatars().map((a) => a.dataset.art)).toEqual(["skin", "skin"]);
+    });
+
+    it("还没有账户：没有头像可画，不放这一行", async () => {
+      ipc.overrides.set("list_accounts", () => []);
+      ipc.overrides.set("current_account", () => null);
+      await mount();
+      await click(button("下一步"));
+      await click(button("下一步"));
+      expect(note()).toBeUndefined();
+    });
+
+    it("点下载：连点两下也只发一次 art_download，下载中换成进度；下完后头像在原节点上换上默认皮肤，这一行退场", async () => {
+      const download = deferred<ArtStatusDto>();
+      ipc.overrides.set("art_download", () => download.promise);
+      await mount();
+      await click(button("下一步"));
+      await click(button("下一步"));
+      const before = avatars();
+      const trigger = button("下载原版材质");
+      act(() => {
+        trigger.click();
+        trigger.click();
+      });
+      await flush();
+      expect(callsOf(ipc, "art_download")).toEqual([{}]);
+      act(() => emit(ART_DOWNLOAD_EVENT, { stage: "client", downloaded: 1024 * 1024, total: 4 * 1024 * 1024 }));
+      await flush();
+      expect(note()).toBeUndefined();
+      expect(text()).toContain("正在下载客户端");
+
+      ipc.overrides.set("art_status", () => MODERN);
+      await act(async () => {
+        download.resolve(MODERN);
+        await settle(20);
+      });
+      await flush();
+      expect(avatars()).toEqual(before);
+      expect(before.map((a) => a.dataset.art)).toEqual(["skin", "skin"]);
+      // 种子里两个账户按 UUID 推算的默认皮肤：Hanami_Walker 是宽臂 noor，Yozakura 是细臂 efe
+      const skins = drawn.map((url) => /\/art\/(entity\/[\w/]+)\.png\?v=1\.21\.4$/.exec(url)?.[1]).filter((path) => path !== undefined);
+      expect(skins.sort()).toEqual(["entity/player/slim/efe", "entity/player/wide/noor"]);
+      // 这一行连同进度一起退场：在场的只剩登录选项
+      expect(all("button").some((b) => b.closest("[inert]") === null && b.textContent === "下载原版材质")).toBe(false);
+      expect(all("[role='progressbar']").filter((bar) => bar.closest("[inert]") === null)).toEqual([]);
+      expect(callsOf(ipc, "art_download")).toHaveLength(1);
+    });
   });
 
   describe("构建里没有微软登录 client_id", () => {

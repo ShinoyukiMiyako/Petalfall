@@ -1,6 +1,7 @@
 // 「下载原版材质」部件：本机没有材质源、或只有 1.20 之前的版本（降级集）时说明材质从哪来、多大，给出下载按钮，
 // 下载中显示阶段与字节进度。用不着下载（见 useArtDownloadOffered）时什么都不渲染：下完后材质绑定载入目录，部件随之消失。
 // 下载、下完后等目录与失败都在状态层，全应用同一份；下载失败经统一错误处理报出，目录载入失败由材质绑定报出，按钮都换成重试。
+// 封面方块选择框与外观页为方块材质放它；账户页、向导的账户步与设备码登录的成功区为默认皮肤放紧凑档（见 useSkinArtMissing）。
 
 import { useIsPresent } from "framer-motion";
 import { useId, useState } from "react";
@@ -11,6 +12,7 @@ import { useDisplayCount } from "../../../lib/progress-display";
 import { cx } from "../../../lib/util";
 import { useRunner } from "../../../shell/useRunner";
 import { useArtDownload, type ArtDownloadProgress } from "../../../state/art-download";
+import { useOnline } from "../../../state/online";
 import { Button } from "../../../ui/Button";
 import { Inset } from "../../../ui/Inset";
 import { ProgressBar } from "../../../ui/ProgressBar";
@@ -22,6 +24,22 @@ export interface ArtDownloadProps {
    * 材质不全时标题与说明照完整档的那一套，设置行的说明看不出不全。
    */
   compact?: boolean;
+  /**
+   * 紧凑档没有材质源时左侧的那句说明。默认只说从哪下、多大，所在设置行的说明已经交代了没有材质；
+   * 账户页、向导与登录成功区周围没有这样的字，换成默认皮肤画不出来的那一句。
+   */
+  note?: string;
+  /** 下载与重试用幽灵按钮：放在已有主按钮的向导步骤与弹窗正文里，入口只是顺带一提，不和主按钮抢。 */
+  quiet?: boolean;
+}
+
+/**
+ * 账户的头像与立绘要不要配一个下载入口：本机没有材质源时默认皮肤（离线账户、没有自定义皮肤的正版与外置账户）读不到。
+ * 只看材质源、不看方块目录：降级集里也有默认皮肤，方块目录没载入也不影响读皮肤。下完后材质源一换上入口就退场，
+ * 默认皮肤随材质状态就地换上（useSkin 订阅着材质状态，换材质源时取图缓存整体作废）。
+ */
+export function useSkinArtMissing(): boolean {
+  return useArtStatus().source === null;
 }
 
 /**
@@ -36,8 +54,9 @@ export function useArtDownloadOffered(): boolean {
   return catalog === null || (source !== null && source.degraded) || state.phase === "failed";
 }
 
-export function ArtDownload({ compact = false }: ArtDownloadProps) {
+export function ArtDownload({ compact = false, note = ART_DOWNLOAD_COPY.compactBody, quiet = false }: ArtDownloadProps) {
   const offered = useArtDownloadOffered();
+  const online = useOnline();
   // 已经有方块目录、只是不全（降级集，或下完后新目录没能载入、留着旧目录）：说明换成「不全」的那一版
   const incomplete = useBlockCatalog() !== null;
   const { state: live, download } = useArtDownload();
@@ -62,6 +81,8 @@ export function ArtDownload({ compact = false }: ArtDownloadProps) {
   if (!offered && present) return null;
 
   const failed = state.phase === "failed";
+  // 下载与重下都要联网；下好了只是目录没载入时，重试只请材质绑定重查本机，断网照样能点
+  const offlineReason = !online && !(state.phase === "failed" && state.stage === "catalog") ? ART_DOWNLOAD_COPY.offlineReason : undefined;
   const enter = phaseChanged || undefined;
   // 各阶段的状态按阶段换 key：同一种外形（空闲与失败都是按钮）之间换也重新挂上，入场淡入才会重播
   const status = state.phase === "running" ? (
@@ -73,7 +94,13 @@ export function ArtDownload({ compact = false }: ArtDownloadProps) {
     </p>
   ) : (
     <div key={state.phase} className={styles.actions} data-enter={enter}>
-      <Button size="sm" icon={failed ? "refresh" : "download"} onClick={() => void run(download, ART_DOWNLOAD_COPY.failed)}>
+      <Button
+        size="sm"
+        variant={quiet ? "ghost" : "secondary"}
+        icon={failed ? "refresh" : "download"}
+        disabledReason={offlineReason}
+        onClick={() => void run(download, ART_DOWNLOAD_COPY.failed)}
+      >
         {failed ? ART_DOWNLOAD_COPY.retry : ART_DOWNLOAD_COPY.download}
       </Button>
       {state.phase === "failed" && (
@@ -92,7 +119,7 @@ export function ArtDownload({ compact = false }: ArtDownloadProps) {
             <p className={styles.body}>{ART_DOWNLOAD_COPY.degradedBody}</p>
           </div>
         ) : (
-          <p className={cx(styles.body, styles.compactBody)}>{ART_DOWNLOAD_COPY.compactBody}</p>
+          <p className={cx(styles.body, styles.compactBody)}>{note}</p>
         ))}
       {status}
     </div>
