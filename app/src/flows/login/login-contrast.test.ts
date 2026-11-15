@@ -19,7 +19,6 @@ const INFO_TEXT: readonly { selector: string; ground: Ground }[] = [
   { selector: ".uuidValue[data-empty]", ground: "dialog" },
   { selector: ".note", ground: "dialog" },
   { selector: ".stepperItem", ground: "dialog" },
-  { selector: '.stepperItem[data-state="done"]', ground: "dialog" },
   { selector: ".serverUrl", ground: ".serverCard" },
 ];
 
@@ -56,7 +55,6 @@ describe("登录弹窗里要被读到的次要文字", () => {
       ".uuidValue[data-empty]": 5.63,
       ".note": 5.63,
       ".stepperItem": 5.63,
-      '.stepperItem[data-state="done"]': 5.63,
       ".serverUrl": 4.9,
     });
     expect(rounded("夜樱 · 樱粉")).toEqual({
@@ -66,9 +64,16 @@ describe("登录弹窗里要被读到的次要文字", () => {
       ".uuidValue[data-empty]": 5.73,
       ".note": 5.73,
       ".stepperItem": 5.73,
-      '.stepperItem[data-state="done"]': 5.73,
       ".serverUrl": 5.94,
     });
+  });
+
+  it("步骤名只有当前这一步另设颜色：已走过与没走到的都沿用 .stepperItem，上面对它的比值就覆盖了这两种状态", () => {
+    const colored = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .filter(([, , body]) => /(^|;)\s*color\s*:/.test(body))
+      .flatMap(([, selectors]) => selectors.split(",").map((s) => s.trim()))
+      .filter((s) => /^\.stepperItem(\[[^\]]*\])*$/.test(s));
+    expect(colored).toEqual([".stepperItem", '.stepperItem[data-state="now"]']);
   });
 
   it("强调色不改中性色：同一明暗下三种强调色的比值相同", () => {

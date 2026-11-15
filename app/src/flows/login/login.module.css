@@ -416,10 +416,6 @@
   color: var(--sk-text);
 }
 
-.stepperItem[data-state="done"] {
-  color: var(--sk-text-2);
-}
-
 .stepperDot {
   display: inline-grid;
   place-items: center;
