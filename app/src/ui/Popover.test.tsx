@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
-// 浮层面板的形变与头尾结构：jsdom 不做布局，形变本身播不出来，这里断言的是它依赖的结构、定位时机与标记。
+// 浮层面板的形变与头尾结构：jsdom 不做布局，形变本身播不出来，这里断言的是它依赖的结构、定位时机与标记；另有打开时初始聚焦的时机。
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MotionConfig, visualElementStore } from "framer-motion";
-import { act, useState } from "react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { act, useRef, useState, type ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { render, setRect, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
-import { Popover } from "./Popover";
+import { keydown, render, setRect, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
+import { refuseHiddenFocus } from "../test/focus-fixup";
+import { Popover, usePopoverInitialFocus } from "./Popover";
 import styles from "./Popover.module.css";
 
 let view: Rendered | undefined;
@@ -225,6 +226,82 @@ describe("减少动画", () => {
     const { mounted, leaving } = await panelTransforms("always");
     expect(leaving).not.toMatch(PLACED);
     expect(mounted).not.toMatch(PLACED);
+  });
+});
+
+// 面板定位前是 visibility: hidden，浏览器不让隐藏的元素获得焦点：refuseHiddenFocus 让 jsdom 照这条规则处理 focus()
+describe("初始聚焦", () => {
+  /** 内容经 usePopoverInitialFocus 把焦点放到第二个按钮上。 */
+  function FocusSecond() {
+    const target = useRef<HTMLButtonElement>(null);
+    usePopoverInitialFocus(() => target.current?.focus());
+    return (
+      <>
+        <button type="button">前一个</button>
+        <button type="button" ref={target}>
+          目标
+        </button>
+      </>
+    );
+  }
+
+  function FocusHost({ autoFocus = false, children }: { autoFocus?: boolean; children: ReactNode }) {
+    const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+    const [open, setOpen] = useState(false);
+    return (
+      <>
+        <button ref={setAnchor} onClick={() => setOpen(true)}>
+          筛选
+        </button>
+        <Popover open={open} anchor={anchor} onClose={() => setOpen(false)} autoFocus={autoFocus} aria-label="筛选">
+          {children}
+        </Popover>
+      </>
+    );
+  }
+
+  /** 焦点先放在锚点上（像真实点击那样），再记录打开这一下之后的每次 focus()。 */
+  function openFrom(ui: ReactNode) {
+    view = render(
+      <OverlayProvider>
+        {ui}
+        <OverlayRoot />
+      </OverlayProvider>,
+    );
+    const anchor = view.container.querySelector("button") as HTMLButtonElement;
+    act(() => anchor.focus());
+    const calls = refuseHiddenFocus();
+    act(() => anchor.click());
+    return { anchor, calls };
+  }
+
+  it("autoFocus：面板定位完、可见之后才把焦点移进面板，隐藏时一次也不聚焦；Esc 关闭后焦点回到锚点", () => {
+    const { anchor, calls } = openFrom(
+      <FocusHost autoFocus>
+        <p>主体</p>
+      </FocusHost>,
+    );
+    expect(panel().style.visibility).toBe("visible");
+    expect(calls.map((c) => [c.target, c.hidden])).toEqual([[panel(), false]]);
+    expect(document.activeElement).toBe(panel());
+    keydown(panel(), "Escape");
+    expect(document.activeElement).toBe(anchor);
+  });
+
+  it("内容经 usePopoverInitialFocus 聚焦：在面板可见的那次提交里执行一次，落在内容指定的元素上", () => {
+    const { calls } = openFrom(
+      <FocusHost>
+        <FocusSecond />
+      </FocusHost>,
+    );
+    const target = [...panel().querySelectorAll("button")].find((b) => b.textContent === "目标");
+    expect(calls.map((c) => [c.target, c.hidden])).toEqual([[target, false]]);
+    expect(document.activeElement).toBe(target);
+  });
+
+  it("usePopoverInitialFocus 用在 Popover 之外直接抛错", () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(() => render(<FocusSecond />)).toThrow("usePopoverInitialFocus 只能用在 Popover 的内容里");
   });
 });
 

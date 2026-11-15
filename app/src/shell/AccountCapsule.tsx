@@ -21,7 +21,7 @@ import { isImeComposing } from "../lib/util";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { skinSource, useSkinInfo } from "../state/queries/home";
 import { activeAccount, busyInstanceId } from "../state/selectors";
-import { Popover } from "../ui/Popover";
+import { Popover, usePopoverInitialFocus } from "../ui/Popover";
 import { Skeleton } from "../ui/Skeleton";
 import { Tooltip } from "../ui/Tooltip";
 import styles from "./AccountCapsule.module.css";
@@ -254,12 +254,12 @@ function AccountMenu({ accounts, currentId, onPick, onManage }: AccountMenuProps
   const listRef = useRef<HTMLDivElement>(null);
   const items = () => (listRef.current === null ? [] : [...listRef.current.querySelectorAll<HTMLElement>("[data-menu-item]")]);
 
-  useLayoutEffect(() => {
+  usePopoverInitialFocus(() => {
     const all = items();
     const target = all.find((el) => el.dataset.current !== undefined);
     if (target === undefined) throw new Error("账户菜单里没有当前账户");
     target.focus();
-  }, []);
+  });
 
   const onKeyDown = (event: ReactKeyboardEvent) => {
     if (isImeComposing(event)) return;

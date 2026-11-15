@@ -8,12 +8,12 @@
 // 这类项与带原因禁用的按钮一样保持可达：跳过它们的话，键盘与读屏用户只知道少了一项，看不到原因；Enter / Space 与点击对它们无效。
 
 import { useIsPresent } from "framer-motion";
-import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Icon, type IconName } from "../art/Icon";
 import { isImeComposing } from "../lib/util";
 import type { Placement } from "../shell/overlay";
 import styles from "./Menu.module.css";
-import { Popover, type PopoverAnchor } from "./Popover";
+import { Popover, usePopoverInitialFocus, type PopoverAnchor } from "./Popover";
 import { Tooltip } from "./Tooltip";
 import { isTypeaheadKey, matchTypeahead, useTypeahead } from "./typeahead";
 
@@ -102,9 +102,11 @@ function MenuList({ items, onClose, openedBy, id, aria }: MenuListProps) {
   // 留到面板卸载才会连同退场动画一起被直接拿掉
   const present = useIsPresent();
 
-  useLayoutEffect(() => {
-    listRef.current?.focus();
-  }, []);
+  usePopoverInitialFocus(() => {
+    const list = listRef.current;
+    if (list === null) throw new Error("菜单列表没有挂上");
+    list.focus();
+  });
 
   const move = (delta: 1 | -1) => {
     const n = items.length;

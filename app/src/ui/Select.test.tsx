@@ -6,6 +6,7 @@ import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
+import { refuseHiddenFocus } from "../test/focus-fixup";
 import { Field } from "./Field";
 import { SELECT_EMPTY_COPY, SELECT_FILTER_THRESHOLD, Select, type SelectOption } from "./Select";
 import { TYPEAHEAD_WINDOW_MS } from "./typeahead";
@@ -256,6 +257,21 @@ describe("过滤框", () => {
     });
     expect(optionLabels()).toEqual([]);
     expect(document.querySelector(`${LIVE} [role="status"]`)?.textContent).toBe(SELECT_EMPTY_COPY);
+  });
+
+  // 面板定位前是隐藏的，浏览器不给隐藏的元素焦点：挂载时就聚焦的话焦点留在触发器上，键入与方向键都到不了过滤框
+  it("过滤框在面板可见之后才聚焦：键盘打开后焦点进过滤框，↓ 经它移动高亮", () => {
+    mount(<Host options={versions(SELECT_FILTER_THRESHOLD + 1)} initial="v0" onChange={() => undefined} />);
+    focusTrigger();
+    const calls = refuseHiddenFocus();
+    press("ArrowDown");
+    const filter = filterBox();
+    if (!filter) throw new Error("没有出现过滤框");
+    expect(calls.map((c) => [c.target, c.hidden])).toEqual([[filter, false]]);
+    expect(document.activeElement).toBe(filter);
+    expect(highlighted()).toBe("1.21");
+    press("ArrowDown");
+    expect(highlighted()).toBe("1.20");
   });
 
   // 安装面板的版本下拉在版本读取中就能点开：读到后超过 12 项，过滤框在顶上插进来、把「自动」行下推，焦点也被抢走
