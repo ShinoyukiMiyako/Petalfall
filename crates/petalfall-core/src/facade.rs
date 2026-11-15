@@ -90,6 +90,9 @@ pub struct Petalfall {
     /// 外置令牌轮换的闸，退出前关上并等进行中的落盘（见 [`crate::auth::RotationGate`]）。随快照共享：轮换多半开在
     /// 命令的快照上。
     pub(crate) rotations: crate::auth::RotationGate,
+    /// 后台改写账户记录的通知（见 [`crate::auth::AccountChanges`]）。随快照共享：后台续期跑在命令的快照上，订阅在
+    /// 常驻门面上。
+    pub(crate) account_changes: crate::auth::AccountChanges,
     /// 测试注入的 CurseForge key：生产只认运行期环境变量与构建时内嵌的 key，测试改不了进程环境，
     /// 有了它 CurseForge 路径上的门面级行为才写得出端到端测试。
     #[cfg(test)]
@@ -189,6 +192,7 @@ impl Petalfall {
             system_language: sys_locale::get_locale,
             account_failures: Default::default(),
             rotations: Default::default(),
+            account_changes: Default::default(),
             #[cfg(test)]
             curseforge_key: None,
             #[cfg(test)]
@@ -641,6 +645,7 @@ impl Petalfall {
             system_language: || None,
             account_failures: Default::default(),
             rotations: Default::default(),
+            account_changes: Default::default(),
             curseforge_key: None,
             curseforge_cdn_scope: None,
             download_resolver: None,

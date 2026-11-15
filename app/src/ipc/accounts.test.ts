@@ -8,19 +8,21 @@ import {
   currentAccount,
   listAccounts,
   microsoftLogin,
+  onAccountChanged,
   onDeviceCode,
   probeAuthServer,
   refreshAccount,
   removeAccount,
   selectAuthlibProfile,
   setCurrentAccount,
+  type AccountChangedEvent,
   type AccountDto,
   type DeviceCode,
 } from "./accounts";
 import { IpcError, isCancelled } from "./errors";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
-import { MOCK_MICROSOFT_LOGIN_MS } from "./mock/handlers/accounts";
+import { changeMockAccountInBackground, MOCK_MICROSOFT_LOGIN_MS } from "./mock/handlers/accounts";
 import { defaultSkin } from "./mock/handlers/art";
 import { onCoreEvent, type CoreEvent } from "./tasks";
 
@@ -267,6 +269,20 @@ describe("账户 mock：刷新", () => {
     const missing = await rejection(refreshAccount("0".repeat(32)));
     expect(missing.code).toBe("AccountNotFound");
     expect(missing.detail).toEqual({ uuid: "0".repeat(32) });
+  });
+});
+
+describe("账户 mock：后台改写", () => {
+  it("改了记录再推 account-changed，带账户 uuid；后台只碰凭据账户，离线账户直接报错", async () => {
+    const received: AccountChangedEvent[] = [];
+    await onAccountChanged((event) => received.push(event));
+    changeMockAccountInBackground(SEED_MICROSOFT, { name: "Hanami_Renamed", last_verified_at: 42 });
+    expect(received).toEqual([{ uuid: SEED_MICROSOFT }]);
+    expect((await listAccounts()).find((a) => a.uuid === SEED_MICROSOFT)).toMatchObject({ name: "Hanami_Renamed", last_verified_at: 42 });
+
+    const offline = await createOfflineAccount("Steve");
+    expect(() => changeMockAccountInBackground(offline.uuid, { name: "Alex" })).toThrow(`mock 里没有凭据账户 ${offline.uuid}`);
+    expect(received).toHaveLength(1);
   });
 });
 

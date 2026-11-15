@@ -7,6 +7,7 @@ import { fallbackSkin } from "./art";
 // ipc/ 只能以类型方式引用别的模块，事件名在这里按后端各写一份。
 const DEVICE_CODE_EVENT = "petalfall://device-code";
 const CORE_EVENT = "petalfall://core-event";
+const ACCOUNT_CHANGED_EVENT = "petalfall://account-changed";
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
@@ -345,6 +346,19 @@ export const handlers: MockHandlers = {
     if (store.credentialCurrent === null && store.offlineCurrent === null) store.offlineCurrent = store.offline[0]?.uuid ?? null;
   },
 };
+
+/**
+ * 模拟后端在后台改写了一个凭据账户（提前续期、启动前的验证、外置角色档案的后台同步）：按 patch 改记录，再与后端一样推
+ * account-changed。给测试与浏览器预览用，mock 的启动与定时器不会自己这样做。后台只碰凭据账户，传离线或不存在的账户直接报错。
+ */
+export function changeMockAccountInBackground(uuid: string, patch: Partial<Pick<AccountDto, "name" | "status" | "last_verified_at">>): AccountDto {
+  const account = store.credential.find((a) => a.uuid === uuid);
+  if (account === undefined) throw new Error(`mock 里没有凭据账户 ${uuid}`);
+  const changed = { ...account, ...patch };
+  store.credential = store.credential.map((a) => (a.uuid === uuid ? changed : a));
+  emitMockEvent(ACCOUNT_CHANGED_EVENT, { uuid });
+  return changed;
+}
 
 /** 给材质 mock 用：账户是否存在。 */
 export function hasMockAccount(uuid: string): boolean {

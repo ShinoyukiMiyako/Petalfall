@@ -122,6 +122,8 @@ pub fn run() {
             let petalfall = petalfall.with_app_version(&app.package_info().version.to_string())?;
             let server_monitor = ServerMonitor::new(petalfall.data_dir());
             let data_dir = petalfall.data_dir().to_path_buf();
+            // 在任何后台续期之前订阅，开头那次提前续期改了的账户也通知得到前端。
+            let account_changes = petalfall.subscribe_account_changes();
             app.manage(Facade::new(petalfall));
             // 用户在安装引导程序里换了通道，偏好要在任何一次更新检查之前跟上。
             tauri::async_runtime::block_on(channel_handoff::consume_on_startup(
@@ -149,6 +151,7 @@ pub fn run() {
             // -- accounts --
             app.manage(commands::accounts::MicrosoftLoginSlot::default());
             app.manage(commands::accounts::AuthlibPendingSlot::default());
+            events::forward_account_changes_to_app(app.handle(), account_changes);
             commands::accounts::renew_ahead_in_background(app.handle());
             // -- art --
             textures::setup(app);
