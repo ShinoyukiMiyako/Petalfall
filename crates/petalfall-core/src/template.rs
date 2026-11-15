@@ -80,7 +80,7 @@ impl TemplateSkip {
     /// 进度阶段里用的中文原因。
     pub fn describe(self) -> &'static str {
         match self {
-            TemplateSkip::Disabled => "新建实例时沿用默认设置已在配置里关闭",
+            TemplateSkip::Disabled => "新建实例时沿用默认设置已在设置的「游戏」分区关闭",
             TemplateSkip::Empty => "还没有默认设置",
             TemplateSkip::SharedWorkingDir => "这个实例与其他未隔离的实例共用 .minecraft 里的设置",
         }

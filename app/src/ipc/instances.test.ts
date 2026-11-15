@@ -783,6 +783,16 @@ describe("mock：新实例的默认设置", () => {
     expect((await install("没有模板", "1.21.1", "fabric", true)).template).toEqual({ status: "skipped", reason: "empty" });
   });
 
+  it("设置里关了沿用：有模板、请求了也跳过，进度阶段点名开关所在的「游戏」分区", async () => {
+    await saveInstanceAsTemplate("1.21");
+    await updateConfig({ newInstanceTemplate: false });
+    const events: CoreEvent[] = [];
+    await onCoreEvent((e) => events.push(e));
+    expect((await install("关了沿用", "1.21.1", "fabric", true)).template).toEqual({ status: "skipped", reason: "disabled" });
+    const stages = events.flatMap((e) => (e.kind === "stage" && e.task_id === "t-关了沿用" ? [e.message] : []));
+    expect(stages).toContain("没有沿用默认设置：新建实例时沿用默认设置已在设置的「游戏」分区关闭");
+  });
+
   it("useTemplate 只收布尔：别的类型在登记任务之前就以 invalid_argument 拒绝", async () => {
     const error = await rejection(installVersion("t-bad", mockGameDir(), "1.21.1", null, null, "坏参数", "yes" as never));
     expect(error.code).toBe("invalid_argument");
