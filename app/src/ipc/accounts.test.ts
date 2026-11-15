@@ -115,7 +115,7 @@ describe("账户 mock：两库仲裁", () => {
     await createOfflineAccount("Petal-1.0");
     expect(warnings).toEqual([
       { kind: "warning", task_id: null, message: "用户名含空格或非 ASCII 字符，Minecraft 1.20.2 与 1.20.3 进不了存档与服务器" },
-      { kind: "warning", task_id: null, message: "用户名包含非标准字符，可能无法进入 1.18+ 世界" },
+      { kind: "warning", task_id: null, message: "用户名含英文字母、数字与下划线以外的符号，部分服务器可能不接受" },
     ]);
   });
 

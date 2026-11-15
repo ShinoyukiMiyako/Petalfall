@@ -163,7 +163,10 @@ export const OFFLINE_NAME_COPY = {
   tooLong: "最多 16 个字符",
   quote: "不能包含双引号",
   duplicate: "已经有同名账户了",
-  nonStandard: "含有非标准字符，可能无法进入 1.18 及以上版本的世界和多数服务器",
+  /** 与后端校验的提示同一句：1.20.2、1.20.3 的游戏拒收这类角色名。 */
+  spaceOrNonAscii: "含空格或非 ASCII 字符，Minecraft 1.20.2 与 1.20.3 进不了存档与服务器",
+  /** 只剩 ASCII 标点一类的符号：没有核对到哪个游戏版本拒收，不写版本号。 */
+  nonStandard: "含英文字母、数字与下划线以外的符号，部分服务器可能不接受",
   tooShort: "少于 3 个字符，多数服务器会拒绝",
   ok: "可以使用",
   submit: "添加并设为当前",

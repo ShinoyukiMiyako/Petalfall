@@ -62,7 +62,7 @@ export const OFFLINE_NAME_MAX_CHARS = 16;
 /** 少于这个长度多数服务器会拒绝，只提醒不阻止。 */
 export const OFFLINE_NAME_MIN_RECOMMENDED = 3;
 
-export type OfflineNameRule = "empty" | "too_long" | "quote" | "duplicate" | "non_standard" | "too_short" | "ok";
+export type OfflineNameRule = "empty" | "too_long" | "quote" | "duplicate" | "space_or_non_ascii" | "non_standard" | "too_short" | "ok";
 
 export interface OfflineNameCheck {
   /** error 不能提交；warn 能提交但给提醒；ok 通过。 */
@@ -72,10 +72,12 @@ export interface OfflineNameCheck {
 }
 
 const STANDARD_NAME = /^[A-Za-z0-9_]*$/;
+/** 与后端 player_name_has_rejected_char 同一条线：码元在 ! 到 ~ 之外，增补平面字符的两个码元都算。 */
+const SPACE_OR_NON_ASCII = /[^!-~]/;
 
 /**
- * 离线用户名校验。错误优先于提醒，同级按「空、超长、双引号、重名」与「非标准字符、过短」的顺序取第一条。
- * 不去首尾空白：后端按原样保存，空格本身就是非标准字符。重名在全部账户里不分大小写比较。
+ * 离线用户名校验。错误优先于提醒，同级按「空、超长、双引号、重名」与「空格或非 ASCII、其他符号、过短」的顺序取第一条。
+ * 不去首尾空白：后端按原样保存，首尾的空格同样要提醒。重名在全部账户里不分大小写比较。
  */
 export function validateOfflineName(name: string, existingNames: readonly string[]): OfflineNameCheck {
   const length = [...name].length;
@@ -84,6 +86,7 @@ export function validateOfflineName(name: string, existingNames: readonly string
   if (name.includes('"')) return { level: "error", rule: "quote", message: OFFLINE_NAME_COPY.quote };
   const folded = name.toLowerCase();
   if (existingNames.some((other) => other.toLowerCase() === folded)) return { level: "error", rule: "duplicate", message: OFFLINE_NAME_COPY.duplicate };
+  if (SPACE_OR_NON_ASCII.test(name)) return { level: "warn", rule: "space_or_non_ascii", message: OFFLINE_NAME_COPY.spaceOrNonAscii };
   if (!STANDARD_NAME.test(name)) return { level: "warn", rule: "non_standard", message: OFFLINE_NAME_COPY.nonStandard };
   if (length < OFFLINE_NAME_MIN_RECOMMENDED) return { level: "warn", rule: "too_short", message: OFFLINE_NAME_COPY.tooShort };
   return { level: "ok", rule: "ok", message: OFFLINE_NAME_COPY.ok };
