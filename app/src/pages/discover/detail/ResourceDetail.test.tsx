@@ -13,7 +13,7 @@ import { OverlayRoot } from "../../../shell/overlay";
 import { ShellProvider } from "../../../shell/shell";
 import { LauncherProvider } from "../../../state/launcher";
 import type { InstanceMatch, ModVersionList, ProjectDetail } from "../../../state/queries/discover";
-import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
+import { render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../../test/launcher";
 import { DETAIL_COPY } from "../copy";
@@ -201,12 +201,7 @@ beforeEach(() => {
   ipc.overrides.set("plan_install", () => ({ items: [], skipped: [] }));
 });
 
-// 有用例在假时钟下逐帧走：先卸载、再排空帧循环、再换回真实计时器，旧时钟上排着的那一帧不落进下一个用例
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
+afterEach(() => {
   vi.unstubAllGlobals();
 });
 

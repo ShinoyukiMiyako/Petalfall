@@ -2,14 +2,13 @@
 // @module-tag heavy-page
 //
 // 要逐帧看面板进出的用例单独一个文件：整个文件走假时钟，帧跟着它一帧一帧走（test/dom 的 stepFrames）。
-// 收尾固定为先卸载、再 drainFrames、再换回真实计时器，同文件后面的用例帧循环才接得上。
 // 减少动画经外观偏好打开：AppearanceProvider 自己包着根部 MotionConfig，在它外面再包一层会被它盖掉。
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { DEFAULT_APPEARANCE, AppearanceProvider } from "../state/appearance";
 import { LauncherProvider } from "../state/launcher";
-import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { render, stepFrames, stubMatchMedia, stubResizeObserver } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { ChromeProvider, type ChromeApi } from "./chrome";
@@ -20,7 +19,6 @@ import { ShellProvider, useShell, type ShellApi } from "./shell";
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
-let view: Rendered | undefined;
 let shell: ShellApi;
 const chrome: ChromeApi = { scrollContentToTop: vi.fn(), focusContent: vi.fn() };
 
@@ -37,7 +35,7 @@ beforeEach(async () => {
   stubCanvas();
   bootOverrides(ipc, { instances: [instanceDto("生存"), instanceDto("创造")] });
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
-  view = render(
+  render(
     <AppearanceProvider initial={{ ...DEFAULT_APPEARANCE, reduceMotion: true }}>
       <LauncherProvider>
         <ShellProvider>
@@ -55,11 +53,7 @@ beforeEach(async () => {
   });
 });
 
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
+afterEach(() => {
   vi.unstubAllGlobals();
 });
 

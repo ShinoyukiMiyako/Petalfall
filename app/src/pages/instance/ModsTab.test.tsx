@@ -19,7 +19,7 @@ import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type Windo
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
-import { drainFrames, fakeAnimate, render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
+import { fakeAnimate, render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
@@ -88,7 +88,6 @@ const ID = "樱花生存";
 const DAY = 24 * 3600 * 1000;
 const NOW = new Date(2026, 9, 31, 12, 0, 0).getTime();
 
-let view: Rendered | undefined;
 let nav: NavApi;
 let launcher: LauncherApi;
 let shell: ShellApi;
@@ -133,7 +132,7 @@ const flush = () =>
   });
 
 async function open(tab: InstanceTab = "mods") {
-  view = render(
+  render(
     <Providers>
       <Probe />
       <Routed />
@@ -330,12 +329,7 @@ beforeEach(() => {
   ipc.overrides.set("update_mod", () => new Promise(() => undefined));
 });
 
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  // 帧排在这个假时钟上时直接换计时器，帧循环就卡在没人推的旧时钟上，后面的用例里出入场一帧都不走（见 test/dom 的 drainFrames）
-  await drainFrames();
-  vi.useRealTimers();
+afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });

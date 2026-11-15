@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 // Appear 逐帧看入场从哪一帧开始走的用例。整个文件走假时钟、用 stepFrames 一帧一帧地推：
-// 每个用例开始前先在真实计时器上把帧循环排空再换假时钟，收尾先卸载、再排空、再换回真实计时器（见 test/dom 的 drainFrames）。
+// 每个用例开始前先在真实计时器上把帧循环排空再换假时钟（见 test/dom 的 drainFrames）。
 import { MotionConfig, type Transition } from "framer-motion";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import { fade } from "../lib/motion";
 import { drainFrames, render, stepFrames, type Rendered } from "../test/dom";
 import { Appear } from "./Appear";
@@ -12,13 +12,6 @@ let view: Rendered | undefined;
 beforeEach(async () => {
   await drainFrames();
   vi.useFakeTimers();
-});
-
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
 });
 
 const tree = (show: boolean, reducedMotion: "never" | "always" = "never", initial?: boolean) => (

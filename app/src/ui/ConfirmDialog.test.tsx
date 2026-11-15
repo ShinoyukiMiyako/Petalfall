@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MotionConfig, motion, visualElementStore } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { drainFrames, render, stepFrames, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -31,19 +31,9 @@ vi.mock("../lib/reflow", async (orig) => {
 });
 
 let view: Rendered | undefined;
-/** 这个用例的帧跟着假时钟走（startFrameClock）：收尾先卸载、再在假时钟上把帧循环排空，才换回真实计时器。 */
-let frameClock = false;
 
 beforeEach(() => {
   stubResizeObserver();
-});
-
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  if (frameClock) await drainFrames();
-  frameClock = false;
-  vi.useRealTimers();
 });
 
 /**
@@ -54,7 +44,6 @@ afterEach(async () => {
 async function startFrameClock() {
   await drainFrames();
   vi.useFakeTimers();
-  frameClock = true;
 }
 
 /** 弹窗的入场与 morph 形变（时长约 350 ms 的弹簧）在这么多帧（约 1 秒）之内都落定。 */

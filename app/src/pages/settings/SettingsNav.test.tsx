@@ -4,12 +4,12 @@
 // jsdom 也不做布局，给目标项一个随机的位置，胶囊的落点必须照它。
 import { MotionConfig } from "framer-motion";
 import { act, useState } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fade } from "../../lib/motion";
 import { ShellProvider } from "../../shell/shell";
 import { LauncherProvider } from "../../state/launcher";
 import type { SettingsSection } from "../../state/route";
-import { drainFrames, render, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered, type SpanAnimationsStub } from "../../test/dom";
+import { render, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered, type SpanAnimationsStub } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, resetRecorder, settle } from "../../test/launcher";
 import { SettingsNav } from "./SettingsNav";
@@ -75,13 +75,6 @@ beforeEach(() => {
   stubMatchMedia(false);
   stubResizeObserver();
   bootOverrides(ipc);
-});
-
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
 });
 
 describe("设置分区导航：选中胶囊", () => {

@@ -73,8 +73,8 @@ function holdAccounts(): Deferred<AccountDto[]> {
   return pending;
 }
 
-// 有用例要在假时钟上逐帧采样：每个用例开始前先在真实计时器上把帧循环排空再换假时钟，收尾先卸载、再排空、再换回真实计时器，
-// 否则上一个用例排在旧时钟上的那一帧永远不来，后面的用例推不动帧
+// 有用例要在假时钟上逐帧采样：每个用例开始前先在真实计时器上把帧循环排空再换假时钟，否则还排在真实计时器上的那一帧
+// 会让换上假时钟之后的头几步推进扑空
 beforeEach(async () => {
   await drainFrames();
   vi.useFakeTimers();
@@ -89,11 +89,7 @@ beforeEach(async () => {
   ipc.overrides.set("skin_info", () => null);
   ipc.overrides.set("set_current_account", () => null);
 });
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
+afterEach(() => {
   vi.unstubAllGlobals();
 });
 

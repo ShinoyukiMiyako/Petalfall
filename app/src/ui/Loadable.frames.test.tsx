@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // Loadable 逐帧看入场从哪一帧开始走的用例。整个文件走假时钟、用 stepFrames 一帧一帧地推：
-// 每个用例开始前先在真实计时器上把帧循环排空再换假时钟，收尾先卸载、再排空、再换回真实计时器（见 test/dom 的 drainFrames）。
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+// 每个用例开始前先在真实计时器上把帧循环排空再换假时钟（见 test/dom 的 drainFrames）。
+import { beforeEach, expect, it, vi } from "vitest";
 import type { LoadingView } from "../lib/loading-gate";
 import { drainFrames, render, stepFrames, type Rendered } from "../test/dom";
 import { Loadable } from "./Loadable";
@@ -11,13 +11,6 @@ let view: Rendered | undefined;
 beforeEach(async () => {
   await drainFrames();
   vi.useFakeTimers();
-});
-
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
 });
 
 const tree = (state: LoadingView) => (

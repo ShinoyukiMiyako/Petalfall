@@ -15,7 +15,7 @@ import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { MANUAL_LOGIN } from "../../state/login";
 import type { ModalProps } from "../../ui/Modal";
-import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
+import { render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { AUTHLIB_DIALOG_COPY, DEVICE_DIALOG_COPY, OFFLINE_DIALOG_COPY } from "../../copy/login";
@@ -62,7 +62,6 @@ describe("离线用户名下方的提示", () => {
   });
 });
 
-let view: Rendered | undefined;
 let launcher: LauncherApi;
 let nav: NavApi;
 let writeText: ReturnType<typeof vi.fn>;
@@ -96,7 +95,7 @@ function Motion({ initial, children }: { initial: boolean; children: ReactNode }
  * reduced：一开始就打开减少动画。
  */
 async function mount({ presence = false, reduced = false }: { presence?: boolean; reduced?: boolean } = {}) {
-  view = render(
+  render(
     <Motion initial={reduced}>
       <LauncherProvider>
         <ShellProvider>
@@ -172,12 +171,7 @@ beforeEach(() => {
     return null;
   });
 });
-// 换回真实计时器之前把帧循环排空：还有一帧排在这个用例的假时钟上时，后面的用例一帧都推不动（抖动这类逐帧采样的断言会落空）
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
+afterEach(() => {
   vi.unstubAllGlobals();
 });
 

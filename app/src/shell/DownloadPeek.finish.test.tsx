@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
 // 快览行的进度文字、完成收尾与退场后的布局键。要让 framer-motion 把百分数的平滑与行的退场播完，帧跟着假时钟走：
-// 用 stepFrames 逐帧推进，收尾时先卸载、再排空帧循环，同文件后面的用例才推得动。
+// 用 stepFrames 逐帧推进。
 import { MotionConfig, visualElementStore } from "framer-motion";
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PEEK_COPY } from "../copy/shell";
 import { formatSpeed } from "../domain/format";
 import { MAX_PARALLEL_TASKS } from "../domain/limits";
@@ -12,7 +12,7 @@ import { IpcError } from "../ipc/errors";
 import { CORE_EVENT } from "../ipc/tasks";
 import { feedSpeed, publishSpeed, SPEED_REFRESH_MS, startSpeed } from "../lib/progress-display";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
-import { drainFrames, render, stepFrames, stubResizeObserver, type Rendered } from "../test/dom";
+import { render, stepFrames, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import type { InstanceDto } from "../ipc/instances";
 import { bootOverrides, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../test/launcher";
@@ -150,12 +150,6 @@ beforeEach(async () => {
   });
   view = render(tree(false));
   await flush();
-});
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
 });
 
 describe("快览行的进度文字", () => {

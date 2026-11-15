@@ -16,7 +16,7 @@ import { ShellProvider } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider } from "../../state/launcher";
 import { DEFAULT_UI_SHAPE, UiShapeProvider } from "../../state/ui-shape";
-import { drainFrames, render, stubMatchMedia, stubResizeObserver, waitForFrames, type Rendered } from "../../test/dom";
+import { render, stubMatchMedia, stubResizeObserver, waitForFrames } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
@@ -33,8 +33,6 @@ const NOW = new Date(2026, 9, 30, 15, 0, 0).getTime();
 const GAME_DIR = "D:\\Games\\.minecraft";
 const RECENT = 'section[aria-labelledby="home-recent-title"]';
 
-let view: Rendered | undefined;
-
 /** 段落里的卡片标题与卡上的启动入口（小号启动钮的可访问名称就是「启动「名称」」）。 */
 const cardTitles = (root: ParentNode) => [...root.querySelectorAll<HTMLButtonElement>('button[aria-label^="打开「"]')].map((b) => b.textContent);
 const launchButtons = (root: ParentNode) => [...root.querySelectorAll<HTMLButtonElement>('button[aria-label^="启动「"]')].map((b) => b.getAttribute("aria-label"));
@@ -46,7 +44,7 @@ function liveRecent(): HTMLElement {
 }
 
 async function mount() {
-  view = render(
+  render(
     <AppearanceProvider initial={DEFAULT_APPEARANCE}>
       <UiShapeProvider initial={DEFAULT_UI_SHAPE}>
         <LauncherProvider>
@@ -98,11 +96,7 @@ beforeEach(() => {
   ipc.overrides.set("ping_servers", () => []);
 });
 
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
+afterEach(() => {
   vi.unstubAllGlobals();
 });
 

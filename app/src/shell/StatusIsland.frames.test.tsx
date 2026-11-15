@@ -3,14 +3,14 @@
 //
 // 要逐帧看动画的用例单独一个文件：假定时器下 framer-motion 的帧跟着假时钟走（jsdom 的 requestAnimationFrame 每次排帧都用
 // 被假掉的 setInterval），推进多少就走多少帧。换计时器之前旧计时器上可能还排着一帧，那一帧永远不来，同文件里之后的用例帧循环就停了：
-// 每个用例开始前先在真实计时器上排空再换假时钟，收尾先卸载、再 drainFrames、再换回真实计时器（见 test/dom.ts）。
+// 每个用例开始前先在真实计时器上排空再换假时钟（见 test/dom.ts）。
 import { MotionConfig } from "framer-motion";
 import { act } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { GAME_EXIT_EVENT, LAUNCH_PHASE_EVENT } from "../ipc/launch";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
-import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { OverlayRoot } from "./overlay";
@@ -20,7 +20,6 @@ import { StatusIsland } from "./StatusIsland";
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
-let view: Rendered | undefined;
 let launcher: LauncherApi;
 
 function Probe() {
@@ -44,11 +43,7 @@ beforeEach(async () => {
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
 });
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
+afterEach(() => {
   vi.unstubAllGlobals();
 });
 
@@ -67,7 +62,7 @@ const islandTree = (reducedMotion: "never" | "always") => (
 it.each(["never", "always"] as const)("状态岛的入场（减少动画 %s）：第一帧画的仍是起点，画出来之后才起步，点击启动那一帧再长也不吃掉入场的开头；之后会话怎么变都不再入场", async (reducedMotion) => {
   // 停在加载中：岛的第二段与尾部之后还会随阶段变，岛本身不该再入场一次
   ipc.overrides.set("launch_game", () => new Promise(() => undefined));
-  view = render(islandTree(reducedMotion));
+  render(islandTree(reducedMotion));
   await act(async () => {
     await settle();
   });
@@ -113,7 +108,7 @@ it.each(["never", "always"] as const)("状态岛的入场（减少动画 %s）�
 });
 
 it("减少动画下状态岛退场只淡出，整段退场里一帧都不缩", async () => {
-  view = render(
+  render(
     <MotionConfig reducedMotion="always">
       <LauncherProvider>
         <ShellProvider>

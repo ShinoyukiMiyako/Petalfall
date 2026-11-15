@@ -16,7 +16,7 @@ import { ShellProvider } from "../../../shell/shell";
 import { LauncherProvider } from "../../../state/launcher";
 import type { ModVersionList, ProjectDetail } from "../../../state/queries/discover";
 import type { ResourceResult } from "../../../state/resource";
-import { drainFrames, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
+import { render, stubMatchMedia, stubResizeObserver } from "../../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../../test/fake-bridge";
 import { bootOverrides, callsOf, instanceDto, resetRecorder, settle } from "../../../test/launcher";
 import { MODPACK_COPY } from "../copy";
@@ -101,7 +101,6 @@ const OUTCOME: ModpackInstallOutcomeDto = {
   },
 };
 
-let view: Rendered | undefined;
 let footer: HTMLDivElement;
 let crashed: unknown;
 let listed: InstanceDto[];
@@ -118,7 +117,7 @@ const advance = (ms: number) =>
 
 async function mount() {
   crashed = undefined;
-  view = render(
+  render(
     <LauncherProvider>
       <ShellProvider>
         <ErrorBoundary
@@ -176,12 +175,8 @@ beforeEach(() => {
   ipc.overrides.set("set_sidebar_pins", (args: IpcArgs) => args.pins);
 });
 
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
+afterEach(() => {
   footer.remove();
-  await drainFrames();
-  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 

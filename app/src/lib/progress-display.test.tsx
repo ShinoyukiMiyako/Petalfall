@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { MotionConfig } from "framer-motion";
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, type Rendered } from "../test/dom";
 import { SPRING_PARAMS } from "./motion";
 import {
@@ -159,11 +159,6 @@ describe("显示速度与收尾的钩子", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(T0);
-  });
-  afterEach(() => {
-    view?.unmount();
-    view = undefined;
-    vi.useRealTimers();
   });
 
   function SpeedProbe({ raw }: { raw: number }) {

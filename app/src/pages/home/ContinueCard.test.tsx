@@ -16,7 +16,7 @@ import { ShellProvider } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { DEFAULT_UI_SHAPE, UiShapeProvider } from "../../state/ui-shape";
-import { drainFrames, fakeAnimate, render, stubMatchMedia, stubResizeObserver, type Rendered, type ResizeObserverStub, type StubAnimation } from "../../test/dom";
+import { fakeAnimate, render, stubMatchMedia, stubResizeObserver, type ResizeObserverStub, type StubAnimation } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
@@ -33,7 +33,6 @@ const NOW = new Date(2026, 9, 30, 15, 0, 0).getTime();
 
 const PLAY_DAYS: PlayDayDto[] = [{ date: "2026-10-30", minutes: 95, instances: [{ version_id: "生存", minutes: 95 }] }];
 
-let view: Rendered | undefined;
 let launcher: LauncherApi;
 let sizes: ResizeObserverStub;
 let instances: InstanceDto[];
@@ -66,7 +65,7 @@ function deferred<T>() {
 }
 
 async function mount() {
-  view = render(
+  render(
     <AppearanceProvider initial={DEFAULT_APPEARANCE}>
       <UiShapeProvider initial={DEFAULT_UI_SHAPE}>
         <LauncherProvider>
@@ -113,13 +112,9 @@ beforeEach(() => {
   ipc.overrides.set("ping_servers", () => []);
 });
 
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
+afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
-  vi.useRealTimers();
 });
 
 /** 「继续游玩」这张卡：加载区的根在卡里，往上找到卡片。 */

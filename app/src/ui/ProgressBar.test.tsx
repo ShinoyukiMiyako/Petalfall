@@ -1,21 +1,12 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { MotionConfig, type MotionValue } from "framer-motion";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { drainFrames, render, stepFrames, waitForFrames, type Rendered } from "../test/dom";
 import { fillOffset, MIN_VISIBLE_PROGRESS, nextProgressTarget, ProgressBar, useSmoothProgress } from "./ProgressBar";
 import { ProgressRing, RING_EMPTY_TEXT, RING_PLACEHOLDER, RING_STROKE, ringHasLabel } from "./ProgressRing";
 
 let view: Rendered | undefined;
-/** 这个用例的帧跟着假时钟走（startFrameClock）：收尾先卸载、再在假时钟上把帧循环排空，才换回真实计时器。 */
-let frameClock = false;
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  if (frameClock) await drainFrames();
-  frameClock = false;
-  vi.useRealTimers();
-});
 
 /**
  * 逐帧数填充走过几个中间值的用例让帧跟着假时钟走，用 stepFrames 逐帧推进。按真实时间走的话，机器满载时帧来得稀，
@@ -25,7 +16,6 @@ afterEach(async () => {
 async function startFrameClock() {
   await drainFrames();
   vi.useFakeTimers();
-  frameClock = true;
 }
 
 /** 进度平滑（settle 弹簧）在这么多帧（约 1 秒）之内落定。 */

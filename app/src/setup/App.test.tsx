@@ -6,11 +6,10 @@
 
 import { MotionGlobalConfig } from "framer-motion";
 import { StrictMode, type ReactElement } from "react";
-import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, stubPetalTokens } from "../art/petals/test-canvas";
 import { APP_NAME } from "../lib/app-info";
-import { stubMatchMedia, stubResizeObserver } from "../test/dom";
+import { renderWithoutAct, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import App, { BLOCKED_POLL_MS, MIN_INSTALLING_MS, UPDATE_EXIT_CHECKS, UPDATE_EXIT_POLL_MS, UPDATE_EXIT_WAIT_MS } from "./App";
 import type { DataBlock, Existing, ExistingKind, Failure, InstallPlan, Probe } from "./contract";
 import { COPY } from "./copy";
@@ -33,15 +32,11 @@ const TOO_NEW: DataBlock = { problem: "too_new", path: "E:\\app\\data-format.jso
 
 const freshEvent = (fake: FakeBridge): SetupEvent => ({ type: "install_requested", mode: "fresh", running: false, check: fake.scenario.checkDir(FAKE_PROBE.defaultDir) });
 
-let root: Root | null = null;
-let host: HTMLElement | null = null;
+let view: Rendered | undefined;
 let headingLog: MutationObserver | null = null;
 
 function mount(ui: ReactElement): void {
-  host = document.createElement("div");
-  document.body.append(host);
-  root = createRoot(host);
-  root.render(ui);
+  view = renderWithoutAct(ui);
 }
 
 function start(overrides: Partial<FakeScenario> = {}, initial?: SetupState): FakeBridge {
@@ -92,10 +87,6 @@ beforeEach(() => {
 afterEach(() => {
   headingLog?.disconnect();
   headingLog = null;
-  root?.unmount();
-  host?.remove();
-  root = null;
-  host = null;
   vi.unstubAllGlobals();
   document.documentElement.removeAttribute("data-sk-reduced");
 });
@@ -749,8 +740,7 @@ describe("窗口", () => {
     start();
     await seeHeading(copy.welcome.title);
     expect(document.querySelector("aside")?.textContent).toContain(copy.frame.versionLine("0.2.0"));
-    root?.unmount();
-    host?.remove();
+    view?.unmount();
 
     const crashed = replay([{ type: "crashed", detail: "x" }]);
     start({}, crashed);

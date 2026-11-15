@@ -2,7 +2,7 @@
 // @module-tag heavy-page
 //
 // 卡片底栏上的进度文字：加载面的百分数、安装面标题里的百分数都跟旁边的进度条走同一条平滑，不随每次上报跳字。
-// 假定时器下 framer-motion 的帧跟着假时钟走，用 stepFrames 逐帧推进；用例收尾先卸载、排空帧循环再换回真实计时器。
+// 假定时器下 framer-motion 的帧跟着假时钟走，用 stepFrames 逐帧推进。
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
@@ -13,7 +13,7 @@ import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { LauncherProvider, useLauncher, useLauncherSelector, type LauncherApi } from "../../state/launcher";
 import { findInstance } from "../../state/selectors";
-import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { render, stepFrames, stubMatchMedia, stubResizeObserver } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { CardStatus } from "./CardStatus";
@@ -22,7 +22,6 @@ import styles from "./library.module.css";
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
-let view: Rendered | undefined;
 let launcher: LauncherApi;
 
 function Probe() {
@@ -50,16 +49,12 @@ beforeEach(() => {
   ipc.overrides.set("launch_game", () => deferred<never>().promise);
   ipc.overrides.set("repair_instance", () => deferred<never>().promise);
 });
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
+afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 async function mount(id: string) {
-  view = render(
+  render(
     <LauncherProvider>
       <ShellProvider>
         <Probe />

@@ -2,8 +2,7 @@
 // @module-tag heavy-page
 //
 // 逐帧看状态岛的进度显示：百分数跟底边进度条一起走，加载走完时进度条与详情里的进度环推满、留一拍再退场。
-// 假定时器下 framer-motion 的帧跟着假时钟走，用 stepFrames 逐帧推进；用例收尾先卸载、排空帧循环再换回真实计时器，
-// 同文件后面的用例才推得动。
+// 假定时器下 framer-motion 的帧跟着假时钟走，用 stepFrames 逐帧推进。
 import { MotionConfig, type MotionValue } from "framer-motion";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -12,7 +11,7 @@ import { PHASE_LABEL } from "../copy/flows";
 import { LAUNCH_PHASE_EVENT } from "../ipc/launch";
 import { COMPLETION_HOLD_S } from "../lib/progress-display";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
-import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, cancelledError, deferred, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { MIN_VISIBLE_PROGRESS } from "../ui/ProgressBar";
@@ -46,11 +45,7 @@ beforeEach(() => {
   // 启动一直停在加载：进入运行由阶段事件推进
   ipc.overrides.set("launch_game", () => deferred<never>().promise);
 });
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
+afterEach(() => {
   vi.unstubAllGlobals();
 });
 

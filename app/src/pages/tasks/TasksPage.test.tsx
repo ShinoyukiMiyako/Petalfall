@@ -2,7 +2,7 @@
 // @module-tag heavy-page
 import { MotionConfig } from "framer-motion";
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../../ipc/errors";
 import { COMPLETION_HOLD_S, SPEED_REFRESH_MS } from "../../lib/progress-display";
 import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
@@ -11,7 +11,7 @@ import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import type { RouteOf } from "../../state/route";
-import { drainFrames, focusByKeyboard, render, stepFrames, stubResizeObserver, type Rendered } from "../../test/dom";
+import { focusByKeyboard, render, stepFrames, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import type { InstanceDto } from "../../ipc/instances";
 import { bootOverrides, callsOf, cancelledError, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
@@ -216,13 +216,6 @@ beforeEach(() => {
     javaRuns.set(String(args.taskId), d);
     return d.promise;
   });
-});
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  // 每个用例都重装一次假时钟：不先排空帧循环，后面的用例 framer-motion 一帧都推不动（见 test/dom 的 drainFrames）
-  await drainFrames();
-  vi.useRealTimers();
 });
 
 describe("下载任务页：空队列", () => {

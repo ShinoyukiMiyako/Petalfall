@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 // 逐帧看进度环的填充弧：平滑用的 settle 弹簧带一点回弹，补满时会略冲过 1，描边偏移要停在 0，不变成负数。
 // 冲过的量只有千分之一上下、只持续几帧，真实计时器下采不采得到看帧时刻；假定时器下帧跟着假时钟走，用 stepFrames 逐帧推进，
-// 每次都落在同样的几帧上。收尾先卸载、再排空帧循环，再换回真实计时器。
+// 每次都落在同样的几帧上。
 import { MotionConfig, type MotionValue } from "framer-motion";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { drainFrames, render, stepFrames, type Rendered } from "../test/dom";
+import { render, stepFrames, type Rendered } from "../test/dom";
 import { useSmoothProgress } from "./ProgressBar";
 import { ProgressRing, RING_STROKE } from "./ProgressRing";
 
@@ -14,12 +14,8 @@ let smooth: MotionValue<number> | undefined;
 beforeEach(() => {
   vi.useFakeTimers();
 });
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
+afterEach(() => {
   smooth = undefined;
-  await drainFrames();
-  vi.useRealTimers();
 });
 
 /** 与进度环同一套平滑、同一次提交起步：读出每一帧的平滑值，用来确认采到了冲过 1 的帧。 */

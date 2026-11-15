@@ -14,7 +14,7 @@ import type { Appearance } from "../../domain/types";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { resources } from "../../state/resource";
-import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
+import { render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { accountDto, callsOf, resetRecorder, settle } from "../../test/launcher";
 import OnboardingFlow from "./index";
@@ -26,7 +26,6 @@ vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridg
 const DEFAULT_DIR = "D:\\Games\\Launcher\\.minecraft";
 const OFFICIAL_DIR = "C:\\Users\\player\\AppData\\Roaming\\.minecraft";
 
-let view: Rendered | undefined;
 let launcher: LauncherApi;
 let picked: string | null;
 
@@ -44,7 +43,7 @@ const flush = () =>
   });
 
 async function mount(appearance: Appearance = DEFAULT_APPEARANCE) {
-  view = render(
+  render(
     <AppearanceProvider initial={appearance}>
       <LauncherProvider>
         <ShellProvider>
@@ -124,18 +123,13 @@ beforeEach(() => {
   vi.spyOn(console, "info").mockImplementation(() => undefined);
 });
 
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  // 排在这一条假时钟上的帧要在换回真实计时器之前放掉：否则帧循环以为下一帧已经排着，后面用例里推进假时钟也走不动动画
-  await drainFrames();
+afterEach(() => {
   document.documentElement.removeAttribute("data-sk-mode");
   document.documentElement.removeAttribute("data-sk-accent");
   document.documentElement.removeAttribute("data-sk-reduced");
   // 桩过的取图与已取到的皮肤位图不带到下一条用例
   clearArtCache();
   vi.unstubAllGlobals();
-  vi.useRealTimers();
 });
 
 describe("首次启动向导：第一步", () => {

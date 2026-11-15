@@ -12,7 +12,7 @@ import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey } from "../../state/route";
 import { DEFAULT_UI_SHAPE, UiShapeProvider } from "../../state/ui-shape";
-import { drainFrames, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { render, stubMatchMedia, stubResizeObserver } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { LIBRARY_COPY } from "../library/copy";
@@ -27,7 +27,6 @@ vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridg
 const PACK = "周末联机";
 const NOW = Date.UTC(2026, 9, 31, 12);
 
-let view: Rendered | undefined;
 let nav: NavApi;
 let launcher: LauncherApi;
 let instances: InstanceDto[];
@@ -100,7 +99,7 @@ async function tipOf(el: HTMLElement): Promise<string | null | undefined> {
  * 导入中的实例就是已固定的。
  */
 async function importPinned(): Promise<void> {
-  view = render(
+  render(
     <Providers>
       <Probe />
       <Routed />
@@ -170,11 +169,7 @@ beforeEach(() => {
   ipc.overrides.set("install_modpack", () => new Promise(() => undefined));
 });
 
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
+afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });

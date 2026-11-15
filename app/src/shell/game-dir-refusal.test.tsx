@@ -16,7 +16,7 @@ import { LauncherProvider, useLauncher, useLauncherSelector, type LauncherApi } 
 import { DEFAULT_UI_SHAPE, UiShapeProvider } from "../state/ui-shape";
 import { PAGE_IDS, type PageProps, type Route } from "../state/route";
 import { getInstance } from "../state/selectors";
-import { drainFrames, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { render, stubMatchMedia, stubResizeObserver } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, deferred, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { AppShell } from "./AppShell";
@@ -51,7 +51,6 @@ function LoginStub({ login }: FlowProps<"login">) {
   return <p data-flow="login">{login.kind}</p>;
 }
 
-let view: Rendered | undefined;
 let nav: NavApi;
 let launcher: LauncherApi;
 let registry: PageRegistry;
@@ -70,7 +69,7 @@ const flush = () =>
 
 async function mount() {
   crashed = undefined;
-  view = render(
+  render(
     <WindowPortProvider port={{ ...browserWindowPort(), show: async () => {} }}>
       <AppearanceProvider initial={{ ...DEFAULT_APPEARANCE, petals: false }}>
         <UiShapeProvider initial={DEFAULT_UI_SHAPE}>
@@ -163,11 +162,7 @@ beforeEach(async () => {
   registry = createPageRegistry(pageTable());
   await Promise.all([registry.load("home"), registry.load("library"), registry.load("instance")]);
 });
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
+afterEach(() => {
   vi.unstubAllGlobals();
 });
 
