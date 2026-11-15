@@ -238,7 +238,7 @@ pub(crate) async fn discard_staging(
 }
 
 /// 账户当前皮肤：远程皮肤就绪时返回取图键与模型；拿不到远程皮肤时返回它进游戏后显示的原版默认皮肤（见
-/// [`account_skin`]），默认皮肤图在本机也读不到时界面画剪影。正版与外置账户的 UUID 不是 32 位十六进制时为 null。
+/// [`account_skin`]），默认皮肤图在本机也读不到时界面画人偶。正版与外置账户的 UUID 不是 32 位十六进制时为 null。
 #[tauri::command]
 pub async fn skin_info(
     account_uuid: String,
@@ -260,7 +260,7 @@ pub async fn skin_info(
 
 /// 账户画哪张皮肤。`remote` 是下载校验好的远程皮肤，就绪时用它。拿不到时（离线账户永远没有；正版与外置账户
 /// 档案里没有皮肤、档案没取到、皮肤下载失败）按 UUID 选原版默认皮肤：游戏里拿不到玩家皮肤时显示的就是这一套，
-/// 界面与游戏一致，不画一个哪里都见不到的剪影。按材质源里的那一套（`set`）选，选出的图才读得到。
+/// 界面与游戏一致，不画一个游戏里见不到的人偶。按材质源里的那一套（`set`）选，选出的图才读得到。
 ///
 /// 默认皮肤只是这一次的回答，不写回账户，也不记「下载失败过」：档案后来取到皮肤、或下载后来成功了，下一次查询
 /// 给的就是真实皮肤，前端换了取图地址，按新地址取图。
@@ -284,7 +284,7 @@ fn account_skin(
 
 /// 正版与外置账户（含外置登录待选的角色）的皮肤：远程皮肤就绪时用它，拿不到时按 UUID 给默认皮肤（理由见
 /// [`account_skin`]）。UUID 来自登录服务器，启动器改不了；不是 32 位十六进制时选不出默认皮肤，为 None，
-/// 界面画剪影，原因记进日志。
+/// 界面画人偶，原因记进日志。
 pub(crate) fn remote_or_default(
     uuid: &str,
     remote: Option<&SkinInfo>,
@@ -297,7 +297,7 @@ pub(crate) fn remote_or_default(
     if skin.is_none() {
         tracing::warn!(
             uuid,
-            "账户 UUID 不是 32 位十六进制，选不出默认皮肤，界面画剪影"
+            "账户 UUID 不是 32 位十六进制，选不出默认皮肤，界面画人偶"
         );
     }
     skin
@@ -647,9 +647,9 @@ mod tests {
         );
     }
 
-    /// 正版与外置账户的 UUID 来自登录服务器：不合规时选不出默认皮肤，画剪影，不当成启动器的错误报出去。
+    /// 正版与外置账户的 UUID 来自登录服务器：不合规时选不出默认皮肤，画人偶，不当成启动器的错误报出去。
     #[test]
-    fn online_account_with_a_broken_uuid_is_a_silhouette() {
+    fn online_account_with_a_broken_uuid_is_a_mannequin() {
         for account in [
             microsoft("not-a-uuid", "Steve"),
             authlib("5627dd98-e6be", "Steve"),

@@ -48,7 +48,7 @@ afterEach(() => {
 });
 
 describe("登录弹窗里的皮肤", () => {
-  it("读不出来时退回剪影（null），原因写进控制台，不经统一错误处理弹通知", async () => {
+  it("读不出来时退回人偶（null），原因写进控制台，不经统一错误处理弹通知", async () => {
     const failure = new IpcError("network_failed", "皮肤服务器连不上");
     ipc.overrides.set("skin_info", () => {
       throw failure;
@@ -59,7 +59,7 @@ describe("登录弹窗里的皮肤", () => {
       await settle();
     });
     expect(seen.at(-1)).toBeNull();
-    expect(warn.mock.calls).toEqual([["[login] 账户 u-1 的皮肤信息读不出来，显示剪影", failure]]);
+    expect(warn.mock.calls).toEqual([["[login] 账户 u-1 的皮肤信息读不出来，显示人偶", failure]]);
   });
 
   it("皮肤信息还在读时是「读取中」而不是「没有皮肤」：头像留着正在显示的脸，读到再换上", async () => {
@@ -73,7 +73,7 @@ describe("登录弹窗里的皮肤", () => {
     expect(seen.at(-1)).toEqual(REMOTE);
   });
 
-  it("重取失败时沿用上次读到的皮肤，控制台写的是沿用而不是剪影", async () => {
+  it("重取失败时沿用上次读到的皮肤，控制台写的是沿用而不是人偶", async () => {
     ipc.overrides.set("skin_info", () => REMOTE);
     view = render(<Probe uuid="u-4" />);
     await flush();
@@ -85,7 +85,7 @@ describe("登录弹窗里的皮肤", () => {
     expect(warn.mock.calls).toEqual([["[login] 账户 u-4 的皮肤信息读不出来，沿用上次读到的皮肤", failure]]);
   });
 
-  it("已知没有皮肤的账户重取失败：仍是剪影，控制台照实写剪影", async () => {
+  it("已知没有皮肤的账户重取失败：仍是人偶，控制台照实写人偶", async () => {
     ipc.overrides.set("skin_info", () => null);
     view = render(<Probe uuid="u-5" />);
     await flush();
@@ -94,7 +94,7 @@ describe("登录弹窗里的皮肤", () => {
     const failure = new IpcError("io", "账户文件读不出来");
     await refetchFailing("u-5", failure);
     expect(seen.at(-1)).toBeNull();
-    expect(warn.mock.calls).toEqual([["[login] 账户 u-5 的皮肤信息读不出来，显示剪影", failure]]);
+    expect(warn.mock.calls).toEqual([["[login] 账户 u-5 的皮肤信息读不出来，显示人偶", failure]]);
   });
 
   it("读到了就给出皮肤", async () => {

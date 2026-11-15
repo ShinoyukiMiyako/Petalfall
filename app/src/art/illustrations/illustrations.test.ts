@@ -8,7 +8,6 @@ import { coverPetals } from "./CoverPattern";
 import { EMPTY_CATEGORIES, EMPTY_SCENES, emptyArtGeometry, sceneGlyphPath, type EmptyScene } from "./empty-art";
 import { glyphPath, PETAL_GLYPHS, PETAL_TONES, pickPetalTone, transformGlyph, type PetalGlyphName } from "./petal-glyphs";
 import { accountHue, fnv1a32, hueOf, mulberry32, serverHue } from "./seed";
-import { armWidth, silhouetteFigure, silhouetteHead, SILHOUETTE_HEAD } from "./silhouette";
 
 describe("fnv1a32 / mulberry32", () => {
   it("FNV-1a 32 位标准向量，按 UTF-8 字节计算", () => {
@@ -188,35 +187,6 @@ describe("空状态图几何", () => {
     expect(EMPTY_CATEGORIES.error).toEqual({ a: { glyph: "P2", tone: "deep" }, b: null });
     expect(EMPTY_CATEGORIES.empty.b).toEqual({ glyph: "P5", tone: "light" });
     expect(scenes.filter((s) => EMPTY_SCENES[s].category === "no-results")).toEqual(["telescope", "empty-branch", "search"]);
-  });
-});
-
-describe("剪影", () => {
-  it("头像 8 × 8：两行发、一行发与脸、眼在第 5 行第 3、6 列", () => {
-    const hue = 200;
-    const head = silhouetteHead(hue);
-    const at = (x: number, y: number) => [...head.data.slice((y * 8 + x) * 4, (y * 8 + x) * 4 + 3)];
-    expect(SILHOUETTE_HEAD[4]).toBe("FFEFFEFF");
-    expect(at(0, 0)).toEqual([...hslToRgb(hue, 28, 46)]);
-    expect(at(1, 2)).toEqual([...hslToRgb(hue, 40, 84)]);
-    expect(at(2, 4)).toEqual([...hslToRgb(hue, 30, 30)]);
-    expect(at(5, 4)).toEqual([...hslToRgb(hue, 30, 30)]);
-    expect(head.data.filter((_, i) => i % 4 === 3).every((a) => a === 255)).toBe(true);
-  });
-
-  it("立绘 16 × 32：宽体型臂宽 4 撑满两侧；细体型两侧各空一列", () => {
-    const alphaAt = (p: ReturnType<typeof silhouetteFigure>, x: number, y: number) => p.data[(y * 16 + x) * 4 + 3];
-    const wide = silhouetteFigure(10, "wide");
-    const slim = silhouetteFigure(10, "slim");
-    expect([armWidth("wide"), armWidth("slim")]).toEqual([4, 3]);
-    expect([alphaAt(wide, 0, 10), alphaAt(wide, 15, 10)]).toEqual([255, 255]);
-    expect([alphaAt(slim, 0, 10), alphaAt(slim, 15, 10), alphaAt(slim, 1, 10), alphaAt(slim, 14, 10)]).toEqual([0, 0, 255, 255]);
-    // 头部两侧、腿部两侧透明
-    expect([alphaAt(wide, 3, 0), alphaAt(wide, 12, 0), alphaAt(wide, 3, 25), alphaAt(wide, 12, 25)]).toEqual([0, 0, 0, 0]);
-    const rgbAt = (x: number, y: number) => [...wide.data.slice((y * 16 + x) * 4, (y * 16 + x) * 4 + 3)];
-    expect(rgbAt(6, 12)).toEqual([...hslToRgb(10, 38, 64)]);
-    expect(rgbAt(6, 25)).toEqual([...hslToRgb(10, 30, 50)]);
-    expect(rgbAt(1, 12)).toEqual([...hslToRgb(10, 40, 84)]);
   });
 });
 

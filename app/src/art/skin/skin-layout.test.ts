@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { AVATAR_SPECS, FACE_RECT, HAT_RECT, skinFormat, type AvatarSize } from "./layout";
+import { armWidth, AVATAR_SPECS, FACE_RECT, HAT_RECT, skinFormat, type AvatarSize } from "./layout";
 
 const avatarCss = readFileSync(new URL("./AccountAvatar.module.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
@@ -26,6 +26,10 @@ describe("皮肤格式", () => {
     expect(skinFormat(128, 128)).toBeNull();
     expect(skinFormat(64, 48)).toBeNull();
     expect(skinFormat(32, 32)).toBeNull();
+  });
+
+  it("臂宽：宽体型 4、细体型 3", () => {
+    expect([armWidth("wide"), armWidth("slim")]).toEqual([4, 3]);
   });
 });
 

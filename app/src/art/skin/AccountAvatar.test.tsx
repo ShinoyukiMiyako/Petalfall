@@ -4,9 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { NO_ART, setArtStatus } from "../../mc/art";
 import { clearArtCache } from "../../mc/useArt";
 import { render, stubMatchMedia, type Rendered } from "../../test/dom";
+import { accountHue } from "../illustrations/seed";
 import { stubCanvas, type CanvasStub } from "../illustrations/test-canvas";
 import { AccountAvatar } from "./AccountAvatar";
 import { AccountFigure } from "./AccountFigure";
+import { mannequinSkin } from "./mannequin";
+import { fallbackDrawn, mannequinFace, mannequinFigure } from "./test-mannequin";
 import { preloadSkins } from "./useSkin";
 
 const REMOTE = "aa".repeat(20);
@@ -49,27 +52,38 @@ const settle = () => act(() => new Promise<void>((resolve) => setTimeout(resolve
 const root = () => view?.container.firstElementChild as HTMLElement;
 
 describe("AccountAvatar", () => {
-  it("没有皮肤信息时是剪影，不发请求；旁边没有名称时 aria-hidden", async () => {
+  it("没有皮肤信息时是人偶，不发请求；旁边没有名称时 aria-hidden", async () => {
     view = render(<AccountAvatar uuid="0123456789abcdef0123456789abcdef" skin={null} size={40} />);
     await settle();
-    expect(root().dataset.art).toBe("silhouette");
+    expect(root().dataset.art).toBe("mannequin");
+    expect(fallbackDrawn(canvas, root())).toBe(mannequinFace("0123456789abcdef0123456789abcdef", 32));
     expect(root().dataset.skArt).toBe("skin");
     expect(root().getAttribute("aria-hidden")).toBe("true");
     expect(root().style.width).toBe("40px");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("默认皮肤在本机没有材质源时不请求，显示剪影", async () => {
+  it("默认皮肤在本机没有材质源时不请求，显示人偶", async () => {
     view = render(<AccountAvatar uuid="u1" skin={{ kind: "default", path: "entity/player/wide/steve", model: "wide" }} size={32} />);
     await settle();
-    expect(root().dataset.art).toBe("silhouette");
+    expect(root().dataset.art).toBe("mannequin");
+    expect(fallbackDrawn(canvas, root())).toBe(mannequinFace("u1", 24));
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("人偶头像是人偶皮肤的正脸叠帽子层，按整数倍放满脸部", async () => {
+    const uuid = "mannequin-face-only";
+    view = render(<AccountAvatar uuid={uuid} skin={null} size={48} />);
+    await settle();
+    const { bitmap } = mannequinSkin(accountHue(uuid), "wide");
+    expect(canvas.sourceRects(bitmap)).toEqual(["8,8,8,8", "40,8,8,8"]);
+    expect(canvas.draws.find((d) => d.source === bitmap)?.canvas).toMatchObject({ width: 40, height: 40 });
   });
 
   it("默认皮肤取到后换成皮肤正脸 + 帽子层，脸 32 px 按 dpr 1 画满 32 × 32", async () => {
     setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
     view = render(<AccountAvatar uuid="u1" skin={{ kind: "default", path: "entity/player/slim/alex", model: "slim" }} size={40} current label="Alex 的头像" />);
-    expect(root().dataset.art).toBe("silhouette");
+    expect(root().dataset.art).toBe("mannequin");
     await settle();
     expect(fetchMock).toHaveBeenCalledWith("http://petalfall-tex.localhost/art/entity/player/slim/alex.png?v=1.21.1", { mode: "cors" });
     expect(root().dataset.art).toBe("skin");
@@ -90,26 +104,28 @@ describe("AccountAvatar", () => {
     expect(canvas.sourceRects(bitmaps[0])).toEqual(["8,8,8,8"]);
   });
 
-  it("尺寸不是 64 × 64 / 64 × 32 的皮肤回落剪影并记 warn", async () => {
+  it("尺寸不是 64 × 64 / 64 × 32 的皮肤回落人偶并记 warn", async () => {
     skinSize = { width: 64, height: 48 };
     view = render(<AccountAvatar uuid="u3" skin={{ kind: "remote", sha1: "bb".repeat(20), model: "wide", hat: true }} size={32} />);
     await settle();
-    expect(root().dataset.art).toBe("silhouette");
+    expect(root().dataset.art).toBe("mannequin");
+    expect(fallbackDrawn(canvas, root())).toBe(mannequinFace("u3", 24));
     expect(warn.mock.calls.some((c) => String(c[0]).includes("64x48"))).toBe(true);
   });
 
-  it("下载失败（404）回落剪影", async () => {
+  it("下载失败（404）回落人偶", async () => {
     fetchMock.mockImplementation(async () => ({ ok: false, status: 404, blob: async () => new Blob() }));
     view = render(<AccountAvatar uuid="u4" skin={{ kind: "remote", sha1: "cc".repeat(20), model: "wide", hat: true }} size={48} />);
     await settle();
-    expect(root().dataset.art).toBe("silhouette");
+    expect(root().dataset.art).toBe("mannequin");
+    expect(fallbackDrawn(canvas, root())).toBe(mannequinFace("u4", 40));
   });
 });
 
 describe("换皮肤（刷新账户后换了一张）", () => {
   const OLD = { kind: "remote", sha1: "a1".repeat(20), model: "wide", hat: true } as const;
   const NEW = { kind: "remote", sha1: "b2".repeat(20), model: "wide", hat: true } as const;
-  /** ArtCrossfade 的叠层：第一层是常驻的剪影，其余是真图层（含正在淡出的）。 */
+  /** ArtCrossfade 的叠层：第一层是常驻的人偶，其余是真图层（含正在淡出的）。 */
   const realLayers = () => [...root().querySelectorAll<HTMLElement>('[class*="layer"]')].slice(1);
   let arrive: () => void;
 
@@ -123,7 +139,7 @@ describe("换皮肤（刷新账户后换了一张）", () => {
     });
   });
 
-  it("新皮肤取到之前仍显示旧皮肤，到了两张叠放交叉淡化，中间不落回剪影", async () => {
+  it("新皮肤取到之前仍显示旧皮肤，到了两张叠放交叉淡化，中间不落回人偶", async () => {
     view = render(<AccountAvatar uuid="u7" skin={OLD} size={40} />);
     await settle();
     const [oldLayer] = realLayers();
@@ -142,20 +158,20 @@ describe("换皮肤（刷新账户后换了一张）", () => {
     expect(canvas.sourceRects(bitmaps[1]).length).toBeGreaterThan(0);
   });
 
-  it("新皮肤取不到：等它落定后回落剪影", async () => {
+  it("新皮肤取不到：等它落定后回落人偶", async () => {
     view = render(<AccountAvatar uuid="u8" skin={OLD} size={40} />);
     await settle();
     fetchMock.mockImplementation(async () => ({ ok: false, status: 404, blob: async () => new Blob() }));
     view.rerender(<AccountAvatar uuid="u8" skin={NEW} size={40} />);
     await settle();
-    expect(root().dataset.art).toBe("silhouette");
+    expect(root().dataset.art).toBe("mannequin");
   });
 
-  it("账户没有皮肤了：不留旧图，直接回落剪影", async () => {
+  it("账户没有皮肤了：不留旧图，直接回落人偶", async () => {
     view = render(<AccountAvatar uuid="u9" skin={OLD} size={40} />);
     await settle();
     view.rerender(<AccountAvatar uuid="u9" skin={null} size={40} />);
-    expect(root().dataset.art).toBe("silhouette");
+    expect(root().dataset.art).toBe("mannequin");
   });
 });
 
@@ -175,7 +191,7 @@ describe("换了账户、皮肤信息还在读（loading）", () => {
     });
   });
 
-  it("头像：读取中留着上一位的脸、不发请求；读到新皮肤后两张叠放交叉淡化，中间不落回剪影", async () => {
+  it("头像：读取中留着上一位的脸、不发请求；读到新皮肤后两张叠放交叉淡化，中间不落回人偶", async () => {
     view = render(<AccountAvatar uuid="prev" skin={PREV} size={40} />);
     await settle();
     const [prevLayer] = realLayers();
@@ -196,20 +212,23 @@ describe("换了账户、皮肤信息还在读（loading）", () => {
     expect(bitmaps.map((b) => b.url)).toEqual([`http://petalfall-tex.localhost/skin/${PREV.sha1}.png`, `http://petalfall-tex.localhost/skin/${NEXT.sha1}.png`]);
   });
 
-  it("头像：读到的是「没有皮肤」才回落剪影", async () => {
+  it("头像：读到的是「没有皮肤」才回落人偶", async () => {
     view = render(<AccountAvatar uuid="prev" skin={PREV} size={40} />);
     await settle();
     view.rerender(<AccountAvatar uuid="next" skin="loading" size={40} />);
     await settle();
     expect(root().dataset.art).toBe("skin");
     view.rerender(<AccountAvatar uuid="next" skin={null} size={40} />);
-    expect(root().dataset.art).toBe("silhouette");
+    expect(root().dataset.art).toBe("mannequin");
+    // 人偶跟着换成新账户的色相
+    expect(fallbackDrawn(canvas, root())).toBe(mannequinFace("next", 32));
   });
 
-  it("头像：挂载时就在读、没有上一张可留：先是剪影，不发请求", async () => {
+  it("头像：挂载时就在读、没有上一张可留：先是人偶，不发请求", async () => {
     view = render(<AccountAvatar uuid="next" skin="loading" size={32} />);
     await settle();
-    expect(root().dataset.art).toBe("silhouette");
+    expect(root().dataset.art).toBe("mannequin");
+    expect(fallbackDrawn(canvas, root())).toBe(mannequinFace("next", 24));
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -262,19 +281,53 @@ describe("AccountFigure", () => {
     expect(root().style.height).toBe("160px");
     const frame = root().firstElementChild as HTMLElement;
     expect([frame.style.left, frame.style.top, frame.style.width, frame.style.height]).toEqual(["-10px", "-10px", "100px", "180px"]);
-    // 六个部位各三个可见面，帽子再加背面三个、正面三个；旧格式身体与四肢没有外层
-    const faces = canvas.draws.filter((d) => d.canvas.width === 100 && d.canvas.height === 180 && (d.source as { width: number }).width <= 8);
+    // 六个部位各三个可见面，帽子再加背面三个、正面三个；旧格式身体与四肢没有外层。垫在下面的人偶也画在同样大的外框上，不算
+    const mannequin = mannequinFigure("u5", "wide", 5);
+    const faces = canvas.draws.filter((d) => d.canvas !== mannequin && d.canvas.width === 100 && d.canvas.height === 180 && (d.source as { width: number }).width <= 8);
     expect(faces).toHaveLength(6 * 3 + 3 + 3);
     expect(canvas.sourceRects(bitmaps[0])).toEqual(["0,0,64,32"]);
   });
 
-  it("没有皮肤时是剪影立绘，尺寸和真皮肤同一套，放在外框中央", async () => {
+  it("没有皮肤时是人偶的立体立绘，外框和真皮肤同一套", async () => {
     view = render(<AccountFigure uuid="u6" skin={null} scale={4} />);
     await settle();
-    expect(root().dataset.art).toBe("silhouette");
+    expect(root().dataset.art).toBe("mannequin");
+    expect(fallbackDrawn(canvas, root())).toBe(mannequinFigure("u6", "wide", 4));
     expect(root().style.height).toBe("128px");
     const display = root().querySelector("canvas");
     expect(display?.style.width).toBe("80px");
     expect(display?.style.height).toBe("144px");
+  });
+
+  it("细体型的默认皮肤在本机读不到：人偶也是细臂，换上真皮肤时轮廓不跳", async () => {
+    view = render(<AccountFigure uuid="u10" skin={{ kind: "default", path: "entity/player/slim/zuri", model: "slim" }} scale={5} />);
+    await settle();
+    expect(root().dataset.art).toBe("mannequin");
+    expect(fallbackDrawn(canvas, root())).toBe(mannequinFigure("u10", "slim", 5));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("人偶换成默认皮肤：人偶垫在下面，皮肤层从透明淡入，两层叠放交叉", async () => {
+    setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
+    let arrive: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      arrive = resolve;
+    });
+    fetchMock.mockImplementation(async (url: string) => {
+      await gate;
+      return { ok: true, status: 200, blob: async () => new Blob([url]) };
+    });
+    view = render(<AccountFigure uuid="u11" skin={{ kind: "default", path: "entity/player/wide/kai", model: "wide" }} scale={6} />);
+    await settle();
+    const layers = () => [...root().querySelectorAll<HTMLElement>('[class*="layer"]')];
+    expect(root().dataset.art).toBe("mannequin");
+    expect(layers()).toHaveLength(1);
+    expect(fallbackDrawn(canvas, root())).toBe(mannequinFigure("u11", "wide", 6));
+    arrive();
+    await settle();
+    expect(root().dataset.art).toBe("skin");
+    const [under, over] = layers();
+    expect(fallbackDrawn(canvas, under)).toBe(mannequinFigure("u11", "wide", 6));
+    expect(Number(over.style.opacity)).toBeLessThan(1);
   });
 });

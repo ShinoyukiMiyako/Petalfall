@@ -134,7 +134,7 @@ export interface ArtDownloadProgressDto {
 export const artStatus = (): Promise<ArtStatusDto> => invoke<ArtStatusDto>("art_status");
 
 /**
- * 账户当前皮肤：远程皮肤就绪时给它，拿不到时给按 UUID 选的默认皮肤；正版与外置账户的 UUID 不是 32 位十六进制时为 null（画剪影）。
+ * 账户当前皮肤：远程皮肤就绪时给它，拿不到时给按 UUID 选的默认皮肤；正版与外置账户的 UUID 不是 32 位十六进制时为 null（画人偶）。
  * 后端不记住默认皮肤，档案后来取到皮肤、下载后来成功时再查就是远程皮肤。账户不存在报 AccountNotFound。
  */
 export const skinInfo = (accountUuid: string): Promise<SkinInfoDto | null> =>

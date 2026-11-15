@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { figureQuads, REST_POSE } from "./figure3d";
 import { FIGURE_FRAME } from "./layout";
-import { paintSkinFigure, silhouetteFigureCanvas, skinFigureCanvas, type LoadedSkin } from "./render";
+import { mannequinSkin } from "./mannequin";
+import { paintSkinFigure, skinFigureCanvas, type LoadedSkin } from "./render";
 
 // 这里的替身比 test-canvas 多做一件事：皮肤像素按坐标编码（R = x，G = y），
 // putImageData 写进去的内容留在画布上，能断言每个面图切的是哪一块、乘了多少亮度。
@@ -178,11 +179,13 @@ describe("默认姿态的缓存", () => {
   });
 });
 
-describe("剪影", () => {
-  it("2D 的 16 × 32 放在外框中央的布局方框上，底边是脚底基线", () => {
-    const canvas = silhouetteFigureCanvas(123, "wide", 5, 1) as unknown as FakeCanvas;
-    expect([canvas.width, canvas.height]).toEqual([100, 180]);
-    expect(canvas.draws).toHaveLength(1);
-    expect(canvas.draws[0].args).toEqual([0, 0, 16, 32, 10, 10, 80, 160]);
+describe("人偶", () => {
+  it("与真皮肤同一条管线：外框同样大小，按新格式带帽子层的几何每面一图，细体型照细臂的几何画", () => {
+    const wide = skinFigureCanvas(mannequinSkin(123, "wide"), 5, 1) as unknown as FakeCanvas;
+    expect([wide.width, wide.height]).toEqual([100, 180]);
+    expect(wide.draws).toHaveLength(figureQuads("modern", "wide", true, REST_POSE).length);
+    const slim = skinFigureCanvas(mannequinSkin(123, "slim"), 5, 1) as unknown as FakeCanvas;
+    const slimQuads = figureQuads("modern", "slim", true, REST_POSE);
+    expect(slim.draws.map((d) => [d.source.width, d.source.height])).toEqual(slimQuads.map((q) => [q.uv.w, q.uv.h]));
   });
 });

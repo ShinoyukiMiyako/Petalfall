@@ -3,7 +3,8 @@
 import { AnimatePresence, MotionConfig } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { stubCanvas, type CanvasStub } from "../../art/illustrations/test-canvas";
+import { fallbackDrawn, mannequinFigure } from "../../art/skin/test-mannequin";
 import { ACTION_ERROR, AUTHLIB_COPY, LITTLESKIN_API, MICROSOFT_LOGIN_COPY, NO_ACCOUNT_COPY, OFFLINE_NAME_COPY, TOAST_COPY } from "../../copy/flows";
 import { validateOfflineName } from "../../domain/rules";
 import { COPY_FEEDBACK_MS, LOADING_DELAY_MS } from "../../domain/limits";
@@ -23,6 +24,7 @@ import { NO_ART, setArtStatus } from "../../mc/art";
 import { clearArtCache } from "../../mc/useArt";
 import { DEFAULT_SKINS } from "./default-skin";
 import LoginFlow from "./index";
+import { offlineUuid } from "./offline-uuid";
 import { FIGURE_DEBOUNCE_MS, nameDisplay } from "./OfflineDialog";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -66,6 +68,7 @@ let launcher: LauncherApi;
 let nav: NavApi;
 let writeText: ReturnType<typeof vi.fn>;
 let opened: string[];
+let canvas: CanvasStub;
 
 function Host({ presence }: { presence: boolean }) {
   launcher = useLauncher();
@@ -160,7 +163,7 @@ beforeEach(() => {
   modalLayoutKeys.length = 0;
   stubResizeObserver();
   stubMatchMedia(false);
-  stubCanvas();
+  canvas = stubCanvas();
   bootOverrides(ipc, { accounts: [accountDto({ name: "Alex" })] });
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   writeText = vi.fn(async () => {});
@@ -465,21 +468,23 @@ describe("离线账户弹窗", () => {
       expect(dialog()?.querySelector("[inert]")?.querySelectorAll('[data-sk-art="skin"]')).toHaveLength(2);
     });
 
-    it("本机没有可用的游戏文件：两个位置都退回剪影，不读任何皮肤", async () => {
+    it("本机没有可用的游戏文件：两个位置都退回人偶，不读任何皮肤", async () => {
       ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
       await openEmpty();
-      expect(figures().map((f) => f.dataset.art)).toEqual(["silhouette", "silhouette"]);
+      expect(figures().map((f) => f.dataset.art)).toEqual(["mannequin", "mannequin"]);
+      // 两位各是自己名字的离线 UUID 色相的人偶，体型照那一套默认皮肤
+      expect(figures().map((f) => fallbackDrawn(canvas, f))).toEqual([mannequinFigure(offlineUuid("Steve"), "wide", 4), mannequinFigure(offlineUuid("Alex"), "slim", 4)]);
       expect(fetched).toEqual([]);
     });
 
-    it("本机游戏文件里读不到选中的那套默认皮肤：退回剪影", async () => {
+    it("本机游戏文件里读不到选中的那套默认皮肤：退回人偶", async () => {
       missing.add("/art/entity/player/slim/makena.png");
       const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
       await openWithName("Alex");
       expect(prefetched.map((url) => new URL(url).pathname)).toContain("/art/entity/player/slim/makena.png");
       // 读不到的结果同样缓存，换上来时不再请求一次
       expect(fetched).toEqual([]);
-      expect(figure().dataset.art).toBe("silhouette");
+      expect(figure().dataset.art).toBe("mannequin");
       expect(warn.mock.calls.some(([message]) => String(message).includes("/art/entity/player/slim/makena.png"))).toBe(true);
       warn.mockRestore();
     });
@@ -514,7 +519,7 @@ describe("离线账户弹窗", () => {
         await settle();
       });
       expect(stageLabel()).toBe("Alex 的角色预览");
-      expect(figure().dataset.art).toBe("silhouette");
+      expect(figure().dataset.art).toBe("mannequin");
       expect(fetched).toEqual([]);
       warn.mockRestore();
     });

@@ -74,13 +74,13 @@ export function GreetingCard({ span, play }: GreetingCardProps) {
 
   const skin = useSkinInfo(account === null ? null : account.uuid);
   const figure = skinSource(skin);
-  const silhouette = figure === null;
+  const mannequin = figure === null;
   const skinError = skin.status === "error" ? skin.error : null;
   useEffect(() => {
-    // 皮肤拿不到时画默认皮肤或剪影立绘是既定的回落，不弹通知（网络失败、没有皮肤后端已经折成默认皮肤）；
-    // 走到这里的是账户库读取一类的真错误，原因留在控制台，便于排查。写明画的是剪影还是上一次的皮肤
-    if (skinError !== null) console.warn(`[home] 当前账户的皮肤信息读不出来，立绘${silhouette ? "显示剪影" : "沿用上次读到的皮肤"}`, skinError);
-  }, [skinError, silhouette]);
+    // 皮肤拿不到时画默认皮肤或人偶立绘是既定的回落，不弹通知（网络失败、没有皮肤后端已经折成默认皮肤）；
+    // 走到这里的是账户库读取一类的真错误，原因留在控制台，便于排查。写明画的是人偶还是上一次的皮肤
+    if (skinError !== null) console.warn(`[home] 当前账户的皮肤信息读不出来，立绘${mannequin ? "显示人偶" : "沿用上次读到的皮肤"}`, skinError);
+  }, [skinError, mannequin]);
 
   // 出错、没有账户与账户标签三种互换时（重试成功、账户被移除）旧的原地淡出、新的淡入，各给一个 key
   const accountLine = () => {

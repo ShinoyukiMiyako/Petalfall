@@ -2,7 +2,8 @@
 // @module-tag heavy-page
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { stubCanvas, type CanvasStub } from "../../art/illustrations/test-canvas";
+import { fallbackDrawn, mannequinFigure } from "../../art/skin/test-mannequin";
 import type { AccountDto } from "../../ipc/accounts";
 import { IpcError } from "../../ipc/errors";
 import { NO_ART, setArtStatus } from "../../mc/art";
@@ -48,6 +49,7 @@ let launcher: LauncherApi;
 let accounts: AccountDto[];
 let currentUuid: string | null;
 let net: { onLine: boolean; clipboard: { writeText: ReturnType<typeof vi.fn> }; userAgent: string };
+let canvas: CanvasStub;
 
 function Probe() {
   launcher = useLauncher();
@@ -167,7 +169,7 @@ beforeEach(() => {
   resetRecorder(ipc);
   stubResizeObserver();
   stubMatchMedia(false);
-  stubCanvas();
+  canvas = stubCanvas();
   net = { onLine: true, clipboard: { writeText: vi.fn(() => Promise.resolve()) }, userAgent: "Windows" };
   vi.stubGlobal("navigator", net);
   useAccounts([hanami, steve], hanami.uuid);
@@ -286,7 +288,7 @@ describe("账户页：当前账户与列表", () => {
 });
 
 describe("账户页：皮肤", () => {
-  it("聚光卡与账户卡用全身立绘（聚光卡 6 倍 96 x 192，账户卡 4 倍 64 x 128）；离线账户没有远程皮肤，画剪影", async () => {
+  it("聚光卡与账户卡用全身立绘（聚光卡 6 倍 96 x 192，账户卡 4 倍 64 x 128）；离线账户没有远程皮肤，画人偶", async () => {
     await mount();
     const figures = [...page().querySelectorAll<HTMLElement>('[data-sk-art="skin"]')];
     expect(figures.map((f) => [f.style.width, f.style.height])).toEqual([
@@ -295,8 +297,8 @@ describe("账户页：皮肤", () => {
       ["64px", "128px"],
     ]);
     const steveFigure = cardOf("Steve").querySelector('[data-sk-art="skin"]');
-    expect(steveFigure?.getAttribute("data-art")).toBe("silhouette");
-    // 离线账户同样问一次后端；后端按 UUID 给它进游戏后显示的原版默认皮肤，这里没有材质源，默认皮肤的图取不到，所以画剪影
+    expect(steveFigure?.getAttribute("data-art")).toBe("mannequin");
+    // 离线账户同样问一次后端；后端按 UUID 给它进游戏后显示的原版默认皮肤，这里没有材质源，默认皮肤的图取不到，所以画人偶
     expect(callsOf(ipc, "skin_info")).toContainEqual({ accountUuid: steve.uuid });
   });
 
@@ -349,15 +351,19 @@ describe("账户页：皮肤", () => {
       expect(skins()).toEqual(["http://petalfall-tex.localhost/art/entity/player/wide/noor.png?v=1.21.4", `http://petalfall-tex.localhost/skin/${REAL.sha1}.png`]);
     });
 
-    it("本机没有任何原版材质时默认皮肤的图读不到，才画剪影，也不发取图请求", async () => {
+    it("本机没有任何原版材质时默认皮肤的图读不到，才画人偶，也不发取图请求", async () => {
       await mount();
       await flush();
-      expect(spotFigure()?.dataset.art).toBe("silhouette");
+      expect(spotFigure()?.dataset.art).toBe("mannequin");
       expect(drawn).toEqual([]);
+      // 聚光卡与两张账户卡画的都是各自账户色相的人偶，不是空白
+      const [spot, ...cards] = [...page().querySelectorAll<HTMLElement>('[data-sk-art="skin"]')];
+      expect(fallbackDrawn(canvas, spot)).toBe(mannequinFigure(hanami.uuid, "wide", 6));
+      expect(cards.map((card) => fallbackDrawn(canvas, card))).toEqual([mannequinFigure(hanami.uuid, "wide", 4), mannequinFigure(steve.uuid, "wide", 4)]);
     });
   });
 
-  it("切换到皮肤信息还没读到的账户：聚光卡舞台留着上一位的立绘，读到「没有皮肤」才换成剪影", async () => {
+  it("切换到皮肤信息还没读到的账户：聚光卡舞台留着上一位的立绘，读到「没有皮肤」才换成人偶", async () => {
     const steveSkin = deferred<null>();
     ipc.overrides.set("skin_info", (args) => (args.accountUuid === steve.uuid ? steveSkin.promise : { kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true }));
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["skin"]) })));
@@ -371,10 +377,10 @@ describe("账户页：皮肤", () => {
     expect(spotFigure()?.dataset.art).toBe("skin");
     steveSkin.resolve(null);
     await flush();
-    expect(spotFigure()?.dataset.art).toBe("silhouette");
+    expect(spotFigure()?.dataset.art).toBe("mannequin");
   });
 
-  it("皮肤查询失败：舞台照常画剪影立绘，不弹通知，原因写进控制台", async () => {
+  it("皮肤查询失败：舞台照常画人偶立绘，不弹通知，原因写进控制台", async () => {
     ipc.overrides.set("skin_info", () => {
       throw new IpcError("io", "账户文件读不出来");
     });
@@ -382,12 +388,12 @@ describe("账户页：皮肤", () => {
     await mount();
     const figures = [...page().querySelectorAll('[data-sk-art="skin"]')];
     // 聚光卡一个，两张账户卡各一个
-    expect(figures.map((f) => f.getAttribute("data-art"))).toEqual(["silhouette", "silhouette", "silhouette"]);
+    expect(figures.map((f) => f.getAttribute("data-art"))).toEqual(["mannequin", "mannequin", "mannequin"]);
     expect(launcher.state.toasts).toEqual([]);
     expect(warn.mock.calls.some(([message]) => String(message).includes("皮肤信息读不出来"))).toBe(true);
   });
 
-  it("刷新账户后皮肤信息重取失败：沿用上次读到的皮肤，不退回剪影，也不重取材质；原因写进控制台", async () => {
+  it("刷新账户后皮肤信息重取失败：沿用上次读到的皮肤，不退回人偶，也不重取材质；原因写进控制台", async () => {
     ipc.overrides.set("skin_info", () => ({ kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true }));
     ipc.overrides.set("refresh_account", () => ({ ...hanami, last_verified_at: NOW }));
     const texture = vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["skin"]) }));
@@ -415,12 +421,12 @@ describe("账户页：皮肤", () => {
     expect(toastTitles()).toEqual(["success:账户信息已更新"]);
   });
 
-  it("已知没有皮肤的账户刷新后重取失败：仍是剪影，不弹错误通知", async () => {
+  it("已知没有皮肤的账户刷新后重取失败：仍是人偶，不弹错误通知", async () => {
     ipc.overrides.set("refresh_account", () => ({ ...hanami, last_verified_at: NOW }));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     await mount();
     const arts = () => [...page().querySelectorAll<HTMLElement>('[data-sk-art="skin"]')].map((f) => f.dataset.art);
-    expect(arts()).toEqual(["silhouette", "silhouette", "silhouette"]);
+    expect(arts()).toEqual(["mannequin", "mannequin", "mannequin"]);
 
     ipc.overrides.set("skin_info", () => {
       throw new IpcError("io", "账户文件读不出来");
@@ -428,8 +434,8 @@ describe("账户页：皮肤", () => {
     await click(buttonIn(page().querySelector("section") as HTMLElement, "刷新账户信息"));
     await flush();
     const skinWarnings = warn.mock.calls.filter(([message]) => String(message).includes("皮肤信息读不出来")).map(([message]) => message);
-    expect(skinWarnings).toEqual(["[accounts] Hanami 的皮肤信息读不出来，显示剪影", "[accounts] Hanami 的皮肤信息读不出来，显示剪影"]);
-    expect(arts()).toEqual(["silhouette", "silhouette", "silhouette"]);
+    expect(skinWarnings).toEqual(["[accounts] Hanami 的皮肤信息读不出来，显示人偶", "[accounts] Hanami 的皮肤信息读不出来，显示人偶"]);
+    expect(arts()).toEqual(["mannequin", "mannequin", "mannequin"]);
     expect(toastTitles()).toEqual(["success:账户信息已更新"]);
   });
 });

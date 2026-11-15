@@ -330,7 +330,7 @@ describe("胶囊与切换菜单头像用的皮肤", () => {
     expect(launcher.state.toasts.map((t) => `${t.tone}:${t.title}`)).toEqual([`error:${SHELL_ACTION_ERROR.skin}`]);
   });
 
-  it("从没读到过就失败：没有可沿用的，头像画剪影（null）", async () => {
+  it("从没读到过就失败：没有可沿用的，头像画人偶（null）", async () => {
     ipc.overrides.set("skin_info", () => {
       throw new IpcError("io", "账户文件读不出来");
     });

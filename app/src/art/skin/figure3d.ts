@@ -3,9 +3,8 @@
 // x 指向玩家左手（玩家面朝屏幕时的画面右侧）、y 向上、z 指向玩家正前方。
 
 import { springAt } from "../../lib/motion";
-import { armWidth } from "../illustrations/silhouette";
 import { FACE_SHADE, type Matrix } from "../iso/geometry";
-import { FIGURE_FRAME, FIGURE_FRAME_PAD, type SkinModel } from "./layout";
+import { armWidth, FIGURE_FRAME, FIGURE_FRAME_PAD, type SkinModel } from "./layout";
 
 export type Vec3 = readonly [x: number, y: number, z: number];
 

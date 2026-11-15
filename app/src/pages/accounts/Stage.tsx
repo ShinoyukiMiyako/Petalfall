@@ -1,5 +1,5 @@
 // 账户舞台：浅底 + 半透明花枝插画，角色立绘站在椭圆投影上。聚光卡与账户卡共用，尺寸按所在位置给。
-// 皮肤取不到时立绘自己回落成按账户色相上色的剪影，这里不另做回落；皮肤信息重取失败时沿用上一次读到的皮肤。
+// 皮肤取不到时立绘自己回落成按账户色相上色的人偶，这里不另做回落；皮肤信息重取失败时沿用上一次读到的皮肤。
 
 import { useEffect, type ReactNode } from "react";
 import { BlossomBranch } from "../../art/illustrations/BlossomBranch";
@@ -31,14 +31,14 @@ export function Stage({ account, variant, children }: StageProps) {
   const { tier } = useShell();
   const skin = useSkinInfo(account.uuid);
   const figure = skinSource(skin);
-  const silhouette = figure === null;
+  const mannequin = figure === null;
   const branch = variant === "spot" ? BRANCH_SIZE.spot[tier] : BRANCH_SIZE.card;
   const pedestal = PEDESTAL[variant];
 
   useEffect(() => {
-    // 皮肤读不出来时照样画立绘，但原因要留在控制台里，便于排查材质源与网络问题；写明画的是剪影还是上一次的皮肤，免得对着皮肤找剪影
-    if (skin.status === "error") console.warn(`[accounts] ${account.name} 的皮肤信息读不出来，${silhouette ? "显示剪影" : "沿用上次读到的皮肤"}`, skin.error);
-  }, [account.name, skin.status, skin.error, silhouette]);
+    // 皮肤读不出来时照样画立绘，但原因要留在控制台里，便于排查材质源与网络问题；写明画的是人偶还是上一次的皮肤，免得对着皮肤找人偶
+    if (skin.status === "error") console.warn(`[accounts] ${account.name} 的皮肤信息读不出来，${mannequin ? "显示人偶" : "沿用上次读到的皮肤"}`, skin.error);
+  }, [account.name, skin.status, skin.error, mannequin]);
 
   return (
     <div className={styles.stage} data-variant={variant}>
