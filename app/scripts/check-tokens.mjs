@@ -19,7 +19,7 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 export const RULES = {
   T0: "豁免缺少理由",
   T1: "字面色值",
-  T2: "页面写死样式",
+  T2: "写死样式",
   T3: "Tailwind 任意值与数字间距",
   T4: "颜色透明度修饰",
   T5: "视口断点",
@@ -108,6 +108,16 @@ const TOKEN_DECLARATION = /--sk-[a-z0-9-]+["']?\s*:|setProperty\(\s*["'`]--sk-/;
 const T2_PROPERTY = /^(padding|margin)(-[a-z]+)*$|^(gap|row-gap|column-gap|border-radius|box-shadow|color|border-color|outline-color|fill|stroke|font-size|font-weight)$|^background(-[a-z]+)*$/;
 const T2_KEYWORDS = new Set(["0", "none", "auto", "inherit", "initial", "unset", "transparent", "currentColor", "currentcolor", "normal"]);
 const T2_INLINE = /\b(padding\w*|margin\w*|gap|borderRadius|boxShadow|color|background\w*|borderColor|outlineColor|fill|stroke|fontSize|fontWeight)\s*:\s*(-?\d|["'`](?!var\())/;
+// 这几个目录里的间距与圆角常是组件按自身尺寸定的私有值，不归 T2 管（字面色值另由 T1 查）；字号在哪里都只取字阶，所以只查字号
+const T2_FONT_SIZE_ZONES = ["launch", "ui", "shell", "art"];
+const T2_INLINE_FONT_SIZE = /\bfontSize\s*:\s*(-?\d|["'`](?!var\())/;
+const CSS_DECLARATION = /^\s*([a-z-]+)\s*:\s*([^;{}]+?)\s*;?\s*$/;
+
+/** 单行 CSS 声明的属性与值；去掉行内注释，不是声明的行（选择器、括号、跨行写法的续行）为 null。 */
+function cssDeclaration(line) {
+  const m = line.replace(/\/\*.*?\*\//g, "").match(CSS_DECLARATION);
+  return m && !m[1].startsWith("--") ? { property: m[1], value: m[2] } : null;
+}
 
 /** 按顶层空白拆分 CSS 值（括号内的空白不拆）。 */
 function splitValue(value) {
@@ -229,13 +239,21 @@ function checkSourceFile(srcRel, text, allowedUiLiterals, report) {
 
     if (inZones("pages", "flows", "setup")) {
       if (isCss) {
-        const decl = line.replace(/\/\*.*?\*\//g, "").match(/^\s*([a-z-]+)\s*:\s*([^;{}]+?)\s*;?\s*$/);
-        if (decl && !decl[1].startsWith("--") && T2_PROPERTY.test(decl[1]) && !isTokenValue(decl[2])) report(i, "T2", line);
+        const decl = cssDeclaration(line);
+        if (decl && T2_PROPERTY.test(decl.property) && !isTokenValue(decl.value)) report(i, "T2", line);
       }
       if (isTsx) {
         for (const style of line.matchAll(/style=\{\{(.*?)\}\}/g)) if (T2_INLINE.test(style[1])) report(i, "T2", line);
         if (OPACITY_MODIFIER.test(line)) report(i, "T4", line);
       }
+    }
+
+    if (inZones(...T2_FONT_SIZE_ZONES)) {
+      if (isCss) {
+        const decl = cssDeclaration(line);
+        if (decl && decl.property === "font-size" && !isTokenValue(decl.value)) report(i, "T2", line);
+      }
+      if (isTsx) for (const style of line.matchAll(/style=\{\{(.*?)\}\}/g)) if (T2_INLINE_FONT_SIZE.test(style[1])) report(i, "T2", line);
     }
 
     if (inZones("pages", "flows", "shell", "setup") && isTsx && TAILWIND_ARBITRARY.some((re) => re.test(line))) report(i, "T3", line);

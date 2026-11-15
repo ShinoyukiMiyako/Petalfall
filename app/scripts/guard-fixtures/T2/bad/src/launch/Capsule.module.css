@@ -1,0 +1,10 @@
+.go {
+  padding: 0 26px 0 22px;
+  border-radius: 999px;
+  font-size: 15px; /* expect T2 */
+}
+
+.pill {
+  gap: 6px;
+  font-size: 12.5px; /* expect T2 */
+}

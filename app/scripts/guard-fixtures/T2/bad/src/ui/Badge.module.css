@@ -1,0 +1,8 @@
+.badge {
+  width: 13px;
+  font-size: 9px; /* expect T2 */
+}
+
+.label {
+  font-size: 0.75em; /* expect T2 */
+}
