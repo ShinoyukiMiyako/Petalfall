@@ -2,11 +2,13 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OFFLINE_PROBE_MS } from "../domain/limits";
+import { skinInfo } from "../ipc/art";
 import { IpcError } from "../ipc/errors";
 import { render, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, deferred, resetRecorder, settle, type Deferred } from "../test/launcher";
 import { isConnectionError, network, NetworkMonitor, useOnline, type NetworkHooks } from "./online";
+import { resources } from "./resource";
 import { LauncherStore } from "./store";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -269,6 +271,28 @@ describe("网络恢复通知", () => {
     expect(toast).toMatchObject({ tone: "info", title: "网络已恢复" });
     expect(toast?.body).toBeUndefined();
     expect(toast?.action).toBeUndefined();
+    store.stop();
+  });
+
+  it("恢复联网时皮肤查询全部失效：有人在看的立即重新发出 skin_info，断网那一刻不发，别的查询不动", async () => {
+    const store = new LauncherStore({ network: monitor });
+    store.start();
+    await settle();
+    ipc.overrides.set("skin_info", () => ({ kind: "default", path: "entity/player/wide/noor", model: "wide" }));
+    const fetchPins = vi.fn(() => Promise.resolve([]));
+    const offSkins = ["ms-1", "ys-1"].map((uuid) => resources.subscribe(`skin:${uuid}`, () => skinInfo(uuid), () => undefined));
+    const offPins = resources.subscribe("servers:pinned", fetchPins, () => undefined);
+    await settle();
+    expect(callsOf(ipc, "skin_info")).toEqual([{ accountUuid: "ms-1" }, { accountUuid: "ys-1" }]);
+
+    goOffline();
+    await settle();
+    expect(callsOf(ipc, "skin_info")).toHaveLength(2);
+    goOnline();
+    await settle();
+    expect(callsOf(ipc, "skin_info")).toEqual([{ accountUuid: "ms-1" }, { accountUuid: "ys-1" }, { accountUuid: "ms-1" }, { accountUuid: "ys-1" }]);
+    expect(fetchPins).toHaveBeenCalledTimes(1);
+    for (const off of [...offSkins, offPins]) off();
     store.stop();
   });
 });

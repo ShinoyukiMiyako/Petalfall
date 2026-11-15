@@ -47,7 +47,7 @@ export function useServerStatus(): ResourceResult<ServerStatusDto[]> {
 
 /**
  * skin:<uuid> —— 账户的皮肤：远程皮肤，拿不到时是默认皮肤；为 null 时画剪影。刷新或重新登录账户、后端在后台改写了这个账户、
- * 默认皮肤换了一套时失效重取。
+ * 默认皮肤换了一套、断网恢复时失效重取。
  */
 export function useSkinInfo(accountUuid: string | null): ResourceResult<SkinInfoDto | null> {
   return useResource(accountUuid === null ? null : `skin:${accountUuid}`, () => {
