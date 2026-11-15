@@ -52,12 +52,12 @@ describe("单个目标的判定", () => {
     const moving = summary("生存", { activity: "moving" });
     for (const resourceType of ["mod", "resource_pack"] as const) {
       const v = targetVerdict({ instance: moving, match: match("生存"), resourceType });
-      expect([v.kind, v.selectable, v.reason, v.version]).toEqual(["unavailable", false, "实例正在移到其他游戏目录", null]);
+      expect([v.kind, v.selectable, v.reason, v.version]).toEqual(["unavailable", false, "正在移到其他游戏目录", null]);
     }
     // 矩阵还没覆盖到时也直接说在移动，不写「正在判断」
-    expect(targetVerdict({ instance: moving, match: null, resourceType: "mod" }).reason).toBe("实例正在移到其他游戏目录");
+    expect(targetVerdict({ instance: moving, match: null, resourceType: "mod" }).reason).toBe("正在移到其他游戏目录");
     // 数据包、光影不必等存档与 Iris 的结果
-    expect(targetVerdict({ instance: moving, match: match("生存"), resourceType: "data_pack", worlds: { status: "ready", worlds: [world("w", 1)] } }).reason).toBe("实例正在移到其他游戏目录");
+    expect(targetVerdict({ instance: moving, match: match("生存"), resourceType: "data_pack", worlds: { status: "ready", worlds: [world("w", 1)] } }).reason).toBe("正在移到其他游戏目录");
     expect(targetVerdict({ instance: moving, match: match("生存"), resourceType: "shader", shaderLoader: true }).kind).toBe("unavailable");
     const rows = [{ instance: moving, verdict: targetVerdict({ instance: moving, match: match("生存"), resourceType: "mod" }) }];
     expect(defaultPick(rows, null, "生存")).toEqual([]);
