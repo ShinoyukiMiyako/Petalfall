@@ -1,5 +1,5 @@
 // 头图与概览的几条防位移、防跳变规则。jsdom 不做布局，这里直接读样式表核对：
-// 让位要认得到动作行里的每一项、改名的校验错误不进流、改名钮与速览方格的按压反馈没被盖掉。
+// 让位要认得到动作行里的每一项、改名的校验错误不进流、改名钮与速览方格的按压反馈没被盖掉、速览方格的聚焦环画得出来。
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -63,5 +63,15 @@ describe("按压反馈", () => {
     expect(declarations(".peekMore:active")).toContain("transform: scale(0.94);");
     expect(declarations(":global([data-sk-reduced]) .peekTile:active")).toContain("transform: none;");
     expect(declarations(".peekTile")).toContain("transform var(--sk-spring-tap-dur) var(--sk-spring-tap)");
+  });
+});
+
+describe("聚焦环", () => {
+  it("速览方格与「+N」的聚焦环画在 box-shadow 上，并关掉兜底 outline：--sk-focus 是阴影列表，代进 outline 整条声明作废，键盘聚焦时什么都不画", () => {
+    for (const selector of [".peekTile:focus-visible", ".peekMore:focus-visible"]) {
+      const own = declarations(selector);
+      expect(own).toContain("box-shadow: var(--sk-focus);");
+      expect(own).toContain("outline: none;");
+    }
   });
 });

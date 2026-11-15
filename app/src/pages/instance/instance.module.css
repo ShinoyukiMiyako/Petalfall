@@ -454,8 +454,8 @@
 
 .peekTile:focus-visible,
 .peekMore:focus-visible {
-  outline: 2px solid var(--sk-focus);
-  outline-offset: 2px;
+  outline: none;
+  box-shadow: var(--sk-focus);
 }
 
 /* 方格是按钮：悬停铺浅底，按下与方形图标按钮同样缩到 0.94，不等 280 ms 后的提示气泡才知道点得动 */
@@ -1308,7 +1308,8 @@
 }
 
 .tlTime:focus-visible {
-  outline: 2px solid var(--sk-focus);
+  outline: none;
+  box-shadow: var(--sk-focus);
 }
 
 .tlVersion {

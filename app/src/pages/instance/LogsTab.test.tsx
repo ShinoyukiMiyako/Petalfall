@@ -487,6 +487,14 @@ describe("变更历史：「显示更早」与滚动区", () => {
   });
 });
 
+describe("变更历史：时间的聚焦环", () => {
+  it("可聚焦的时间画 box-shadow 聚焦环并关掉兜底 outline：--sk-focus 是阴影列表，代进 outline 整条声明作废，键盘聚焦时什么都不画", () => {
+    const decl = rule(".tlTime:focus-visible");
+    expect(decl).toMatch(/box-shadow:\s*var\(--sk-focus\);/);
+    expect(decl).toMatch(/outline:\s*none;/);
+  });
+});
+
 function click(el: HTMLElement) {
   act(() => el.click());
 }
