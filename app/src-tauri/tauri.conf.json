@@ -71,6 +71,7 @@
       "nsis": {
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "installer-header.bmp",
         "languages": ["English", "SimpChinese"],
         "installerHooks": "installer-hooks.nsh"
       },
