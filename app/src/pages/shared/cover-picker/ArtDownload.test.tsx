@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ArtDownloadProgressDto, ArtStatusDto } from "../../../ipc/art";
 import { IpcError } from "../../../ipc/errors";
 import { SPEED_REFRESH_MS } from "../../../lib/progress-display";
+import { NO_ART, setArtStatus } from "../../../mc/art";
 import { catalogFromDto, setBlockCatalog, useBlockCatalog } from "../../../mc/catalog";
 import { OverlayProvider, OverlayRoot } from "../../../shell/overlay";
 import { getArtDownloadState, settleArtDownload } from "../../../state/art-download";
@@ -52,7 +53,7 @@ vi.mock("../../../shell/useRunner", async (orig) => {
   };
 });
 
-const READY: ArtStatusDto = { source: { version_id: "1.21.4" }, panorama: false };
+const READY: ArtStatusDto = { source: { version_id: "1.21.4", degraded: false }, panorama: false };
 
 let view: Rendered | undefined;
 
@@ -69,6 +70,7 @@ afterEach(() => {
   view?.unmount();
   view = undefined;
   setBlockCatalog(null);
+  setArtStatus(NO_ART);
   vi.restoreAllMocks();
   // 每个用例结束时不能还在下；收尾时替材质绑定报告目录载入了，把下完后的等待与失败都清回 idle
   settleArtDownload(true);
@@ -231,6 +233,58 @@ describe("下载原版材质部件", () => {
     expect(button("重试")).toBeDefined();
   });
 
+  it("材质源是 1.20 之前的降级集：已有目录也给下载入口，说明写不全；下完、材质源换成完整的并载入新目录后部件消失", async () => {
+    act(() => {
+      setArtStatus({ source: { versionId: "1.16.5", degraded: true }, panorama: false });
+      setBlockCatalog(catalogFromDto({ version_id: "1.16.5", blocks: [] }));
+    });
+    mount();
+    expect(text()).toContain("本机的原版材质不全");
+    expect(text()).toContain("本机最新的原版早于 1.20");
+    expect(text()).toContain("整包约 20 到 40 MB，下完只留方块相关的部分，不到 1 MB");
+    expect(text()).not.toContain("本机还没有原版材质");
+
+    await startDownload();
+    expect(art.log).toEqual(["listen", "invoke"]);
+    await act(async () => art.pending[0].resolve(READY));
+    await flush();
+    expect(text()).toContain("正在载入材质…");
+
+    // 与材质绑定的顺序一致：先换状态，再放进新目录并报告载入成功
+    act(() => {
+      setArtStatus({ source: { versionId: "1.21.4", degraded: false }, panorama: false });
+      setBlockCatalog(catalog());
+      settleArtDownload(true);
+    });
+    expect(text()).toBe("");
+  });
+
+  it("降级集下完后新目录没能载入：材质状态已是完整的、旧目录还在，部件照样留着给重试", async () => {
+    act(() => {
+      setArtStatus({ source: { versionId: "1.16.5", degraded: true }, panorama: false });
+      setBlockCatalog(catalogFromDto({ version_id: "1.16.5", blocks: [] }));
+    });
+    mount();
+    await startDownload();
+    await act(async () => art.pending[0].resolve(READY));
+    await flush();
+    act(() => {
+      setArtStatus({ source: { versionId: "1.21.4", degraded: false }, panorama: false });
+      settleArtDownload(false);
+    });
+    expect(text()).toContain("下好了，但没能载入");
+    expect(button("重试")).toBeDefined();
+  });
+
+  it("完整的材质源、没在下载：什么都不渲染", () => {
+    act(() => {
+      setArtStatus({ source: { versionId: "1.21.4", degraded: false }, panorama: false });
+      setBlockCatalog(catalog());
+    });
+    mount();
+    expect(text()).toBe("");
+  });
+
   it("紧凑档：没有标题，一句话说明加按钮", () => {
     mount(true);
     expect(text()).not.toContain("本机还没有原版材质");
@@ -345,6 +399,8 @@ describe("下载原版材质部件的状态切换", () => {
     const leaving = view.container.querySelector<HTMLElement>("[inert]");
     expect(leaving?.textContent).toContain("正在载入材质…");
     expect(leaving?.querySelector("button")).toBeNull();
+    // 退场的那一帧说明也照旧：目录载入的那一刻不换成「不全」的那一版
+    expect(leaving?.textContent).toContain("本机还没有原版材质");
   });
 
   it("状态区按最高的状态（小号按钮、一行字加细进度条，都是 30）常驻占位", () => {

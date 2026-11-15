@@ -506,7 +506,7 @@ describe("实例设置：外观卡的封面方块", () => {
     patchInstance({ cover, cover_image: withImage ? BLOCK_KEY : null });
     // 外壳的材质绑定开机就按材质状态载入目录：有材质源才有目录
     if (withCatalog) {
-      ipc.overrides.set("art_status", () => ({ source: { version_id: "1.21.1" }, panorama: false }));
+      ipc.overrides.set("art_status", () => ({ source: { version_id: "1.21.1", degraded: false }, panorama: false }));
       ipc.overrides.set("art_blocks", () => OAK_CATALOG);
     }
     await openSettings();

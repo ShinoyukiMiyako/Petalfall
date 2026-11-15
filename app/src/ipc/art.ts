@@ -9,6 +9,8 @@ export const ART_CHANGED_EVENT = "petalfall://art-changed";
 
 export interface ArtSourceDto {
   version_id: string;
+  /** 本机的降级集（1.13 到 1.19）：推荐里较新的方块缺材质；下载来的最新正式版会盖过它。 */
+  degraded: boolean;
 }
 
 export interface ArtStatusDto {

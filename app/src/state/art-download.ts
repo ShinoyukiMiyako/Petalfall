@@ -1,4 +1,4 @@
-// 下载原版材质：本机没有原版游戏时由玩家手动触发，不在启动时静默下载。整个应用同一时刻只有一次下载，
+// 下载原版材质：本机没有原版游戏、或只有 1.20 之前的版本时由玩家手动触发，不在启动时静默下载。整个应用同一时刻只有一次下载，
 // 选择框与设置页的部件看的是同一份状态，关掉选择框再打开，进度、「正在载入」与失败都还在。下完后后端重选材质源并推送
 // 材质变化，方块目录由材质绑定重新载入，这里不碰目录：下完时经登记的入口请绑定重查一次，再等绑定经 settleArtDownload
 // 报告载入结果。下载失败原样抛给调用方，由最外层统一报错；目录载入失败由材质绑定报错，这里只转为可重试，重试只重查、不重下。
@@ -87,6 +87,8 @@ async function runDownload(): Promise<void> {
     try {
       const status = await artDownload();
       if (status.source === null) throw new Error("原版材质下载完成，后端却仍报告没有材质源");
+      // 下载来的排在本机降级集之前：下完还是降级集，说明下载缓存没能用上
+      if (status.source.degraded) throw new Error(`原版材质下载完成，后端却仍在用本机的旧版材质 ${status.source.version_id}`);
       downloaded = true;
     } finally {
       unlisten();

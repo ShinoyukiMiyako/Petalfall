@@ -140,7 +140,7 @@ async function artDownload(): Promise<ArtStatusDto> {
       await sleep(DOWNLOAD_STEP_MS);
       emitMockEvent(ART_DOWNLOAD_EVENT, step);
     }
-    setMockArtStatus({ source: { version_id: MOCK_DOWNLOADED_VERSION }, panorama: status.panorama });
+    setMockArtStatus({ source: { version_id: MOCK_DOWNLOADED_VERSION, degraded: false }, panorama: status.panorama });
     return status;
   } finally {
     downloading = false;

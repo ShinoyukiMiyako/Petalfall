@@ -81,6 +81,9 @@ impl PanoramaSpec {
 pub struct ArtStatus {
     /// 材质源版本 id；没有可用材质源时为 None，前端不发任何材质请求、全部画回落件。
     pub source: Option<String>,
+    /// 材质源是本机的降级集（1.13 到 1.19，没有 1.20 的材质标志）：预设里较新的方块缺材质，前端画徽记并给下载入口，
+    /// 下载来的最新正式版会盖过它（见 [`TextureService::refresh`] 的选源顺序）。没有材质源时为 false。
+    pub degraded: bool,
     /// 标题全景对象是否在某个候选目录里且哈希正确。
     pub panorama: bool,
 }
@@ -137,6 +140,8 @@ struct Active {
     dir: PathBuf,
     files: BTreeSet<String>,
     catalog: BlockCatalog,
+    /// 本机降级集（见 [`ArtStatus::degraded`]）；下载来的总是某个时点最新的正式版，不算。
+    degraded: bool,
 }
 
 struct State {
@@ -251,11 +256,7 @@ impl TextureService {
 
     /// 当前状态（只读内存）。
     pub fn status(&self) -> ArtStatus {
-        let state = lock(&self.inner.state);
-        ArtStatus {
-            source: state.active.as_ref().map(|a| a.catalog.version_id.clone()),
-            panorama: state.panorama.is_some(),
-        }
+        status_of(&lock(&self.inner.state))
     }
 
     /// 当前材质源的方块目录（只读内存）；没有材质源时为 None。
@@ -284,10 +285,7 @@ impl TextureService {
         state.active = active;
         state.panorama = panorama;
         state.lru.clear();
-        ArtStatus {
-            source: state.active.as_ref().map(|a| a.catalog.version_id.clone()),
-            panorama: state.panorama.is_some(),
-        }
+        status_of(&state)
     }
 
     /// 按「本机完整集 > 下载缓存 > 本机降级集」取第一个准备得起来的：下载的是某个时点最新正式版的完整
@@ -326,7 +324,7 @@ impl TextureService {
         match prepared {
             Ok(Ok(prepared)) => {
                 tracing::info!(version = %source.version_id, full = source.full, files = prepared.files.len(), blocks = prepared.catalog.blocks.len(), "原版材质源就绪");
-                Some(active(prepared))
+                Some(active(prepared, !source.full))
             }
             Ok(Err(reason)) => {
                 tracing::warn!(version = %source.version_id, %reason, "准备原版材质缓存失败");
@@ -351,7 +349,7 @@ impl TextureService {
         match loaded {
             Ok(Some(prepared)) => {
                 tracing::info!(version = %prepared.catalog.version_id, files = prepared.files.len(), blocks = prepared.catalog.blocks.len(), "使用下载来的原版材质");
-                Some(active(prepared))
+                Some(active(prepared, false))
             }
             Ok(None) => None,
             Err(err) => {
@@ -757,11 +755,20 @@ impl TextureService {
     }
 }
 
-fn active(prepared: disk_cache::Prepared) -> Active {
+fn active(prepared: disk_cache::Prepared, degraded: bool) -> Active {
     Active {
         dir: prepared.dir,
         files: prepared.files,
         catalog: prepared.catalog,
+        degraded,
+    }
+}
+
+fn status_of(state: &State) -> ArtStatus {
+    ArtStatus {
+        source: state.active.as_ref().map(|a| a.catalog.version_id.clone()),
+        degraded: state.active.as_ref().is_some_and(|a| a.degraded),
+        panorama: state.panorama.is_some(),
     }
 }
 

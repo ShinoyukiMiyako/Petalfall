@@ -242,6 +242,7 @@ async fn picks_the_newest_trustworthy_release_with_the_full_set() {
     let status = fx.refresh().await;
     // 加载器版本、快照与哈希不符的 1.21.2 都更新，却都被跳过。
     assert_eq!(status.source.as_deref(), Some("1.21.1"));
+    assert!(!status.degraded, "含 1.20 材质标志的是完整集");
     assert!(status.panorama);
     assert_eq!(fx.service.status(), status);
 }
@@ -250,7 +251,10 @@ async fn picks_the_newest_trustworthy_release_with_the_full_set() {
 async fn falls_back_to_a_degraded_source_then_to_none() {
     let fx = fixture();
     std::fs::remove_dir_all(fx.settings.join("versions/1.21.1")).unwrap();
-    assert_eq!(fx.refresh().await.source.as_deref(), Some("1.16.5"));
+    let status = fx.refresh().await;
+    assert_eq!(status.source.as_deref(), Some("1.16.5"));
+    assert!(status.degraded, "只有扁平化方块路径的是降级集");
+    assert_eq!(fx.service.status(), status);
 
     // 降级源里名单内的方块一个都没有：请求合法，但是 404。
     let missing = fx
@@ -262,6 +266,7 @@ async fn falls_back_to_a_degraded_source_then_to_none() {
     std::fs::remove_dir_all(fx.settings.join("versions/1.16.5")).unwrap();
     let status = fx.refresh().await;
     assert_eq!(status.source, None);
+    assert!(!status.degraded, "没有材质源不算降级");
     let none = fx
         .service
         .respond("/art/block/cherry_planks.png", Some("1.16.5"))
@@ -1354,18 +1359,24 @@ async fn source_priority_is_local_full_then_download_then_local_degraded() {
     fx.adopt("26.4", true).await;
 
     // 本机完整集优先，即使下载来的更新；下载缓存留着。
-    assert_eq!(fx.refresh().await.source.as_deref(), Some("26.3"));
+    let local_full = fx.refresh().await;
+    assert_eq!(local_full.source.as_deref(), Some("26.3"));
+    assert!(!local_full.degraded);
     assert!(fx.art(".download-cache/manifest.json").is_file());
 
-    // 本机只剩降级集：用下载缓存，本机旧缓存被清掉。
+    // 本机只剩降级集：用下载缓存，本机旧缓存被清掉。下载来的是最新正式版，不算降级，前端不再给下载入口。
     std::fs::remove_dir_all(fx.game.join("versions/26.3")).unwrap();
-    assert_eq!(fx.refresh().await.source.as_deref(), Some("26.4"));
+    let downloaded = fx.refresh().await;
+    assert_eq!(downloaded.source.as_deref(), Some("26.4"));
+    assert!(!downloaded.degraded);
     assert_eq!(fx.service.catalog().unwrap().version_id, "26.4");
     assert!(!fx.art("26.3").exists());
 
     // 下载缓存也没了：退到本机降级集。
     std::fs::remove_dir_all(fx.art(".download-cache")).unwrap();
-    assert_eq!(fx.refresh().await.source.as_deref(), Some("1.16.5"));
+    let local_degraded = fx.refresh().await;
+    assert_eq!(local_degraded.source.as_deref(), Some("1.16.5"));
+    assert!(local_degraded.degraded);
     let degraded = fx.service.catalog().unwrap();
     assert_eq!(degraded.version_id, "1.16.5");
     assert_eq!(degraded.blocks, Vec::new(), "降级源的 jar 里没有方块状态");

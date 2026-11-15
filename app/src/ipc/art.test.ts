@@ -78,7 +78,7 @@ describe("材质 mock", () => {
     setMockArtStatus({ source: null, panorama: false });
     expect(received).toEqual([]);
 
-    const next: ArtStatusDto = { source: { version_id: "1.21.1" }, panorama: true };
+    const next: ArtStatusDto = { source: { version_id: "1.21.1", degraded: false }, panorama: true };
     setMockArtStatus(next);
     expect(received).toEqual([next]);
     expect(await artStatus()).toEqual(next);
@@ -161,7 +161,7 @@ describe("方块目录 mock", () => {
   });
 
   it("有材质源时给一份合成目录：版本与材质源一致，按 id 排序，前端校验能通过", async () => {
-    setMockArtStatus({ source: { version_id: "1.21.1" }, panorama: false });
+    setMockArtStatus({ source: { version_id: "1.21.1", degraded: false }, panorama: false });
     const dto = await artBlocks();
     if (dto === null) throw new Error("有材质源时目录不应为 null");
     expect(dto.version_id).toBe("1.21.1");
@@ -182,7 +182,7 @@ describe("方块目录 mock", () => {
   });
 
   it("每次返回独立的副本：改了返回值不影响下一次", async () => {
-    setMockArtStatus({ source: { version_id: "1.21.1" }, panorama: false });
+    setMockArtStatus({ source: { version_id: "1.21.1", degraded: false }, panorama: false });
     const first = await artBlocks();
     first?.blocks.splice(0);
     expect((await artBlocks())?.blocks).toHaveLength(28);
@@ -207,7 +207,7 @@ describe("下载原版材质 mock", () => {
     expect(client.map((p) => p.downloaded)).toEqual([6837504, 13675008, 20512512, 27350016]);
     expect(client.every((p) => p.total === 27350016)).toBe(true);
     expect(progress.at(-2)).toEqual({ stage: "names", downloaded: 684032, total: 684032 });
-    const expected: ArtStatusDto = { source: { version_id: MOCK_DOWNLOADED_VERSION }, panorama: false };
+    const expected: ArtStatusDto = { source: { version_id: MOCK_DOWNLOADED_VERSION, degraded: false }, panorama: false };
     expect(result).toEqual(expected);
     expect(changed).toEqual([expected]);
     expect(await artStatus()).toEqual(expected);
@@ -221,7 +221,7 @@ describe("下载原版材质 mock", () => {
     setMockArtStatus({ source: null, panorama: true });
     const pending = artDownload();
     await vi.runAllTimersAsync();
-    expect(await pending).toEqual({ source: { version_id: MOCK_DOWNLOADED_VERSION }, panorama: true });
+    expect(await pending).toEqual({ source: { version_id: MOCK_DOWNLOADED_VERSION, degraded: false }, panorama: true });
   });
 
   it("上一次没下完再调报 task_conflict；下完之后可以再下", async () => {
@@ -233,7 +233,7 @@ describe("下载原版材质 mock", () => {
     await first;
     const again = artDownload();
     await vi.runAllTimersAsync();
-    expect((await again).source).toEqual({ version_id: MOCK_DOWNLOADED_VERSION });
+    expect((await again).source).toEqual({ version_id: MOCK_DOWNLOADED_VERSION, degraded: false });
   });
 
   it("重置后回到没有材质源", async () => {
@@ -254,10 +254,10 @@ describe("Tauri 窗口里的材质命令", () => {
 
   it("命令名与参数键与 Rust 签名一致", async () => {
     vi.mocked(tauriInvoke)
-      .mockResolvedValueOnce({ source: { version_id: "1.21.1" }, panorama: false })
+      .mockResolvedValueOnce({ source: { version_id: "1.21.1", degraded: false }, panorama: false })
       .mockResolvedValueOnce({ kind: "remote", sha1: "a".repeat(40), model: "slim", hat: true })
       .mockResolvedValueOnce("b".repeat(40));
-    expect(await artStatus()).toEqual({ source: { version_id: "1.21.1" }, panorama: false });
+    expect(await artStatus()).toEqual({ source: { version_id: "1.21.1", degraded: false }, panorama: false });
     expect(await skinInfo("c".repeat(32))).toEqual({ kind: "remote", sha1: "a".repeat(40), model: "slim", hat: true });
     expect(await thumbRegister("https://cdn.modrinth.com/x.png")).toBe("b".repeat(40));
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([

@@ -44,6 +44,9 @@ export const BLOCK_PICKER_COPY = {
 export const ART_DOWNLOAD_COPY = {
   title: "本机还没有原版材质",
   body: "下载后可以从全部完整方块里挑。按「设置 → 下载」里的文件下载源从 Mojang 官方源或镜像下载，整包约 20 到 40 MB，下完只留方块相关的部分，不到 1 MB。",
+  /** 本机只有 1.20 之前的版本（材质源是降级集）时的标题与说明。 */
+  degradedTitle: "本机的原版材质不全",
+  degradedBody: "本机最新的原版早于 1.20，推荐里有些方块那时还没有，只能画成实例徽记。下载最新正式版的材质就能补齐：按「设置 → 下载」里的文件下载源从 Mojang 官方源或镜像下载，整包约 20 到 40 MB，下完只留方块相关的部分，不到 1 MB。",
   compactBody: "从 Mojang 官方源或镜像下载原版材质，整包约 20 到 40 MB，下完只留不到 1 MB。",
   download: "下载原版材质",
   retry: "重试",
