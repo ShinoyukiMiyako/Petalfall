@@ -398,34 +398,31 @@ describe("第三方许可清单", () => {
   });
 
   it("超过加载延迟还没读到才说「读取中」（看得见的和读屏播报的同一刻），读到后至少再停一个延迟才换成清单", async () => {
+    // 换回真实计时器交给 test/setup 的统一收尾：它先卸载、把假时钟上排着的淡入帧排空再换，自己在这里换会把那些帧连同计时器一起丢掉
     vi.useFakeTimers();
-    try {
-      const manifest = deferred<ThirdPartyManifest>();
-      await show({ loadThirdParty: () => manifest.promise });
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS - 1);
-      });
-      expect(loadingNoteVisible()).toBe(false);
-      expect(listStatus().textContent).toBe("");
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1);
-      });
-      expect(loadingNoteVisible()).toBe(true);
-      expect(listStatus().textContent).toBe(legal.thirdPartyLoading);
+    const manifest = deferred<ThirdPartyManifest>();
+    await show({ loadThirdParty: () => manifest.promise });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS - 1);
+    });
+    expect(loadingNoteVisible()).toBe(false);
+    expect(listStatus().textContent).toBe("");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(loadingNoteVisible()).toBe(true);
+    expect(listStatus().textContent).toBe(legal.thirdPartyLoading);
 
-      await act(async () => manifest.resolve(MANIFEST));
-      expect(packageList()).toBeNull();
-      expect(listBusy()).toBe(true);
-      expect(listStatus().textContent).toBe(legal.thirdPartyLoading);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
-      });
-      expect(listBusy()).toBe(false);
-      expect(listStatus().textContent).toBe("");
-      expect(rows()).toHaveLength(3);
-    } finally {
-      vi.useRealTimers();
-    }
+    await act(async () => manifest.resolve(MANIFEST));
+    expect(packageList()).toBeNull();
+    expect(listBusy()).toBe(true);
+    expect(listStatus().textContent).toBe(legal.thirdPartyLoading);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
+    });
+    expect(listBusy()).toBe(false);
+    expect(listStatus().textContent).toBe("");
+    expect(rows()).toHaveLength(3);
   });
 
   it("播报区交给 Loadable 的 busyLabel：协议页样式表里不再自带一份视觉隐藏规则", () => {
