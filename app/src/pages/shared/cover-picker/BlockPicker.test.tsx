@@ -141,46 +141,62 @@ function scrollGrid(top: number) {
 
 describe("网格导航（纯函数）", () => {
   it("←→ 逐格且到边就停，↑↓ 隔一行，下面一行不满时 ↓ 落到最后一格", () => {
-    expect(gridMove(0, 20, "ArrowLeft", false)).toBe(0);
-    expect(gridMove(8, 20, "ArrowRight", false)).toBe(9);
-    expect(gridMove(19, 20, "ArrowRight", false)).toBe(19);
-    expect(gridMove(3, 20, "ArrowUp", false)).toBe(3);
-    expect(gridMove(12, 20, "ArrowUp", false)).toBe(3);
-    expect(gridMove(3, 20, "ArrowDown", false)).toBe(12);
-    expect(gridMove(10, 20, "ArrowDown", false)).toBe(19);
-    expect(gridMove(8, 15, "ArrowDown", false)).toBe(14);
-    expect(gridMove(19, 20, "ArrowDown", false)).toBe(19);
+    expect(gridMove(0, 20, "ArrowLeft", false, 6)).toBe(0);
+    expect(gridMove(8, 20, "ArrowRight", false, 6)).toBe(9);
+    expect(gridMove(19, 20, "ArrowRight", false, 6)).toBe(19);
+    expect(gridMove(3, 20, "ArrowUp", false, 6)).toBe(3);
+    expect(gridMove(12, 20, "ArrowUp", false, 6)).toBe(3);
+    expect(gridMove(3, 20, "ArrowDown", false, 6)).toBe(12);
+    expect(gridMove(10, 20, "ArrowDown", false, 6)).toBe(19);
+    expect(gridMove(8, 15, "ArrowDown", false, 6)).toBe(14);
+    expect(gridMove(19, 20, "ArrowDown", false, 6)).toBe(19);
   });
 
   it("Home / End 到本行首尾，带 Ctrl 到全部首尾；最后一行不满时 End 停在最后一格", () => {
-    expect(gridMove(13, 20, "Home", false)).toBe(9);
-    expect(gridMove(13, 20, "End", false)).toBe(17);
-    expect(gridMove(19, 20, "Home", false)).toBe(18);
-    expect(gridMove(18, 20, "End", false)).toBe(19);
-    expect(gridMove(13, 20, "Home", true)).toBe(0);
-    expect(gridMove(3, 20, "End", true)).toBe(19);
+    expect(gridMove(13, 20, "Home", false, 6)).toBe(9);
+    expect(gridMove(13, 20, "End", false, 6)).toBe(17);
+    expect(gridMove(19, 20, "Home", false, 6)).toBe(18);
+    expect(gridMove(18, 20, "End", false, 6)).toBe(19);
+    expect(gridMove(13, 20, "Home", true, 6)).toBe(0);
+    expect(gridMove(3, 20, "End", true, 6)).toBe(19);
   });
 
   it("PageUp / PageDown 翻 6 行，不满一屏时停在首行或末行的同一列", () => {
-    expect(gridMove(60, 400, "PageUp", false)).toBe(6);
-    expect(gridMove(40, 400, "PageUp", false)).toBe(4);
-    expect(gridMove(4, 400, "PageDown", false)).toBe(58);
-    expect(gridMove(380, 400, "PageDown", false)).toBe(398);
-    expect(gridMove(372, 400, "PageDown", false)).toBe(399);
-    expect(gridMove(360, 400, "PageDown", false)).toBe(396);
+    expect(gridMove(60, 400, "PageUp", false, 6)).toBe(6);
+    expect(gridMove(40, 400, "PageUp", false, 6)).toBe(4);
+    expect(gridMove(4, 400, "PageDown", false, 6)).toBe(58);
+    expect(gridMove(380, 400, "PageDown", false, 6)).toBe(398);
+    expect(gridMove(372, 400, "PageDown", false, 6)).toBe(399);
+    expect(gridMove(360, 400, "PageDown", false, 6)).toBe(396);
+  });
+
+  it("可见 5 行时 PageUp / PageDown 翻 5 行", () => {
+    expect(gridMove(60, 400, "PageUp", false, 5)).toBe(15);
+    expect(gridMove(40, 400, "PageUp", false, 5)).toBe(4);
+    expect(gridMove(4, 400, "PageDown", false, 5)).toBe(49);
+    // 6 行时这一步翻不满一屏、停在末行的 399；5 行时还翻得满
+    expect(gridMove(350, 400, "PageDown", false, 5)).toBe(395);
+    expect(gridMove(350, 400, "PageDown", false, 6)).toBe(399);
+    expect(gridMove(380, 400, "PageDown", false, 5)).toBe(398);
   });
 
   it("不是导航键、或网格是空的，返回 null", () => {
-    expect(gridMove(0, 20, "a", false)).toBeNull();
-    expect(gridMove(0, 0, "ArrowRight", false)).toBeNull();
+    expect(gridMove(0, 20, "a", false, 6)).toBeNull();
+    expect(gridMove(0, 0, "ArrowRight", false, 6)).toBeNull();
   });
 
   it("渲染可见的 6 行与上下各 2 行余量，当前格所在的行即使滚出去也渲染", () => {
-    expect(renderedRows(0, 45, 0)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
-    expect(renderedRows(52 * 30, 45, 31)).toEqual([27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38]);
-    expect(renderedRows(52 * 30, 45, 2)).toEqual([2, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38]);
-    expect(renderedRows(52 * 39, 45, 44)).toEqual([36, 37, 38, 39, 40, 41, 42, 43, 44]);
-    expect(renderedRows(0, 6, 0)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(renderedRows(0, 45, 0, 6)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(renderedRows(52 * 30, 45, 31, 6)).toEqual([27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38]);
+    expect(renderedRows(52 * 30, 45, 2, 6)).toEqual([2, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38]);
+    expect(renderedRows(52 * 39, 45, 44, 6)).toEqual([36, 37, 38, 39, 40, 41, 42, 43, 44]);
+    expect(renderedRows(0, 6, 0, 6)).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+
+  it("可见 5 行时少渲染一行", () => {
+    expect(renderedRows(0, 45, 0, 5)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(renderedRows(52 * 30, 45, 31, 5)).toEqual([27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37]);
+    expect(renderedRows(0, 5, 0, 5)).toEqual([0, 1, 2, 3, 4]);
   });
 });
 
@@ -197,6 +213,10 @@ describe("有材质源", () => {
     expect(activeBlock()).toBe("white_wool");
     // 不满一屏时补空槽位：6 行 × 9 格
     expect(grid().querySelectorAll('[role="presentation"] > [aria-hidden="true"]').length).toBe(6 * 9 - 3);
+    // 顶部没有下载部件：可见 6 行。外框连上下各 1px 描边是 318，内容区 316 正好放下 6 行网格，不多出一截滚动
+    expect(grid().style.height).toBe("318px");
+    expect(grid().style.getPropertyValue("--picker-frame")).toBe("1px");
+    expect(grid().querySelector<HTMLElement>(":scope > div")?.style.height).toBe("316px");
   });
 
   it("有正面的熔炉在功能页，草方块在自然页", () => {
@@ -355,6 +375,17 @@ describe("没有材质源", () => {
     expect(text.indexOf("本机还没有原版材质")).toBeLessThan(text.indexOf("推荐"));
     expect(blocksShown()).toEqual(COVER_PRESETS.map((p) => p.block));
     expect([...grid().querySelectorAll<HTMLElement>("[data-sk-art='iso']")].every((b) => b.dataset.art === "emblem")).toBe(true);
+    // 下载部件占掉的高度由网格让出一行：可见 5 行，外框 266（内容区 264 加上下描边），空槽位只补到 5 行
+    expect(grid().style.height).toBe("266px");
+    expect(grid().querySelector<HTMLElement>(":scope > div")?.style.height).toBe("264px");
+    expect(grid().querySelectorAll('[role="presentation"] > [aria-hidden="true"]').length).toBe(5 * 9 - COVER_PRESETS.length);
+  });
+
+  it("我的图片页与 5 行的网格视口同高，换页签时弹窗不跳动", () => {
+    mount({ block: "cherry_planks", image: false });
+    act(() => tab("我的图片").click());
+    const page = [...dialog().querySelectorAll<HTMLElement>("div")].find((d) => d.style.minHeight !== "");
+    expect(page?.style.minHeight).toBe("266px");
   });
 
   it("打字不跳搜索：没有搜索框可跳", () => {
@@ -392,6 +423,9 @@ describe("没有材质源", () => {
     const searchItem = search()?.closest<HTMLElement>('[style*="opacity"]');
     expect(searchItem?.style.opacity).toBe("0");
     expect(pickerLayoutKey(null, true)).not.toBe(pickerLayoutKey(catalog(), false));
+    // 部件一走网格就恢复 6 行，与版式键同一次渲染：面板形变的终点已经是 6 行的高
+    expect(grid().style.height).toBe("318px");
+    expect(grid().querySelectorAll('[role="presentation"] > [aria-hidden="true"]').length).toBe(6 * 9 - COVER_PRESETS.length);
   });
 });
 
@@ -445,6 +479,31 @@ describe("材质源是 1.20 之前的降级集", () => {
     expect(blocksShown()).toContain("red_concrete");
   });
 
+  it("顶部有下载部件时网格可见 5 行：第 6 行才要滚、翻页翻 5 行；换成完整源、部件一走就恢复 6 行", () => {
+    act(() => setBlockCatalog(catalog()));
+    mount({ block: "filler_000", image: false });
+    expect(downloadPart()).not.toBeNull();
+    expect(selectedTab()).toBe("建筑");
+    const g = grid();
+    expect(g.style.height).toBe("266px");
+    expect(renderedRowIndexes()).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    for (let i = 0; i < 4; i++) keydown(g, "ArrowDown");
+    expect(activeBlock()).toBe("filler_036");
+    expect(g.scrollTop).toBe(0);
+    // 6 行时第 6 行（filler_045 所在）整行可见、不用滚；5 行时要滚一行
+    keydown(g, "ArrowDown");
+    expect(activeBlock()).toBe("filler_045");
+    expect(g.scrollTop).toBe(52);
+    keydown(g, "PageDown");
+    expect(activeBlock()).toBe("filler_090");
+
+    act(() => setArtStatus({ source: { versionId: "1.21.4", degraded: false }, panorama: false }));
+    expect(grid()).toBe(g);
+    expect(g.style.height).toBe("318px");
+    keydown(g, "PageDown");
+    expect(activeBlock()).toBe("filler_144");
+  });
+
   it("完整的材质源不给下载部件", () => {
     act(() => setArtStatus({ source: { versionId: "1.21.4", degraded: false }, panorama: false }));
     mount({ block: "cherry_planks", image: false });
@@ -494,6 +553,14 @@ describe("下载部件退场的定位基准（读样式表）", () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "BlockPicker.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
     const body = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].find((m) => m[1].trim() === ".body");
     expect(body?.[2]).toMatch(/position:\s*relative/);
+  });
+});
+
+describe("网格视口的描边（读样式表）", () => {
+  it("描边宽取脚本给的 --picker-frame：视口外框高按同一个值把上下描边算进去", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "BlockPicker.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const viewport = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].find((m) => m[1].trim() === ".viewport");
+    expect(viewport?.[2]).toMatch(/border:\s*var\(--picker-frame\) solid var\(--sk-line\);/);
   });
 });
 

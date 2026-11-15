@@ -47,6 +47,8 @@ export interface BlockPickerProps {
 export const GRID_COLUMNS = 9;
 /** 可见 6 行。 */
 export const GRID_VISIBLE_ROWS = 6;
+/** 框顶有下载部件时可见 5 行：部件占掉的高度由网格让出一行，矮窗口里网格外面少套一层主体滚动（没有材质源时的版式在 640 高下放得下）。 */
+const GRID_VISIBLE_ROWS_WITH_DOWNLOAD = 5;
 /** 可见范围上下各多渲染 2 行：滚动时新露出的行已经画好。 */
 export const GRID_OVERSCAN_ROWS = 2;
 /** 格子边长与间距（px）：格里放 32 宽的等距方块（高 36）。 */
@@ -55,22 +57,25 @@ const GAP = 4;
 const PITCH = CELL + GAP;
 /** 网格四周的留白：当前格的焦点环外扩 4px，贴着视口边时不被裁掉。 */
 const INSET = 4;
-const VIEWPORT_HEIGHT = INSET * 2 + GRID_VISIBLE_ROWS * PITCH - GAP;
+/** 视口描边宽：视口按 border-box 定高，外框要把上下描边算进去，内容区才正好放下可见行，不多出一截滚动。 */
+const FRAME = 1;
 const GRID_WIDTH = INSET * 2 + GRID_COLUMNS * PITCH - GAP;
 
 const spacerHeight = (rowCount: number) => INSET * 2 + rowCount * PITCH - GAP;
+/** 可见 rows 行时视口的外框高；我的图片页与无结果页也取这个高，换页签时弹窗不跳动。 */
+const viewportHeight = (rows: number) => spacerHeight(rows) + FRAME * 2;
 
 /**
  * 导航键之后的当前格，不是导航键返回 null。到边就停、不绕回：←→ 逐格（跨行接续），↑↓ 隔一行，
- * 下面一行不满时 ↓ 落到最后一格；Home / End 到本行首尾，带 Ctrl 到全部首尾；PageUp / PageDown 翻一屏（6 行），
+ * 下面一行不满时 ↓ 落到最后一格；Home / End 到本行首尾，带 Ctrl 到全部首尾；PageUp / PageDown 翻一屏（可见的 rows 行），
  * 翻不满一屏时停在首行或末行的同一列。
  */
-export function gridMove(index: number, count: number, key: string, ctrl: boolean): number | null {
+export function gridMove(index: number, count: number, key: string, ctrl: boolean, rows: number): number | null {
   if (count <= 0) return null;
   const col = index % GRID_COLUMNS;
   const rowStart = index - col;
   const lastRowStart = Math.floor((count - 1) / GRID_COLUMNS) * GRID_COLUMNS;
-  const page = GRID_COLUMNS * GRID_VISIBLE_ROWS;
+  const page = GRID_COLUMNS * rows;
   switch (key) {
     case "ArrowLeft":
       return Math.max(0, index - 1);
@@ -93,10 +98,10 @@ export function gridMove(index: number, count: number, key: string, ctrl: boolea
   }
 }
 
-/** 要渲染的行：可见行上下各加余量，再加上当前格所在的行（滚到别处时 aria-activedescendant 仍指得到它）。 */
-export function renderedRows(scrollTop: number, rowCount: number, activeRow: number): number[] {
+/** 要渲染的行：可见的 visibleRows 行上下各加余量，再加上当前格所在的行（滚到别处时 aria-activedescendant 仍指得到它）。 */
+export function renderedRows(scrollTop: number, rowCount: number, activeRow: number, visibleRows: number): number[] {
   const first = Math.max(0, Math.floor((scrollTop - INSET) / PITCH) - GRID_OVERSCAN_ROWS);
-  const last = Math.min(rowCount - 1, Math.floor((scrollTop + VIEWPORT_HEIGHT - INSET) / PITCH) + GRID_OVERSCAN_ROWS);
+  const last = Math.min(rowCount - 1, Math.floor((scrollTop + spacerHeight(visibleRows) - INSET) / PITCH) + GRID_OVERSCAN_ROWS);
   const rows: number[] = [];
   for (let r = first; r <= last; r++) rows.push(r);
   if (activeRow >= 0 && activeRow < rowCount && (activeRow < first || activeRow > last)) rows.push(activeRow);
@@ -104,17 +109,18 @@ export function renderedRows(scrollTop: number, rowCount: number, activeRow: num
 }
 
 /** 打开时让选中格所在的行落在视口中部。 */
-function centeredScrollTop(row: number, rowCount: number): number {
+function centeredScrollTop(row: number, rowCount: number, visibleRows: number): number {
   if (row < 0) return 0;
-  return clamp(row * PITCH - Math.floor((GRID_VISIBLE_ROWS - 1) / 2) * PITCH, 0, Math.max(0, spacerHeight(rowCount) - VIEWPORT_HEIGHT));
+  return clamp(row * PITCH - Math.floor((visibleRows - 1) / 2) * PITCH, 0, Math.max(0, spacerHeight(rowCount) - spacerHeight(visibleRows)));
 }
 
 /** 键盘移到 row 时要滚到的位置：已经整行可见就不动。 */
-function scrollTopToShow(row: number, scrollTop: number): number {
+function scrollTopToShow(row: number, scrollTop: number, visibleRows: number): number {
   const top = row * PITCH;
   const bottom = top + CELL + INSET * 2;
+  const height = spacerHeight(visibleRows);
   if (top < scrollTop) return top;
-  if (bottom > scrollTop + VIEWPORT_HEIGHT) return bottom - VIEWPORT_HEIGHT;
+  if (bottom > scrollTop + height) return bottom - height;
   return scrollTop;
 }
 
@@ -196,6 +202,8 @@ function PickerBody({ catalog, offersDownload, instanceId, value, onPick, onPick
   const views = lists === null ? BARE_VIEWS : CATALOG_VIEWS;
   // 打开期间材质源没了（目录变回 null）时，分类页与搜索页随之撤掉
   const shown = views.includes(view) ? view : "recommended";
+  // 行数只随下载部件的去留变，与弹窗的版式键同一刻换：面板形变时网格一起长高或变矮
+  const rows = offersDownload ? GRID_VISIBLE_ROWS_WITH_DOWNLOAD : GRID_VISIBLE_ROWS;
   const tabs: TabItem<PickerView>[] = views.map((v) => ({ value: v, label: BLOCK_PICKER_COPY.tab[v] }));
 
   const items = useMemo((): readonly PickerItem[] => {
@@ -254,7 +262,7 @@ function PickerBody({ catalog, offersDownload, instanceId, value, onPick, onPick
       </Appear>
       <TabPanel tabsId={tabsId} value={shown} motion="card" className={styles.panel}>
         {shown === "image" ? (
-          <div className={styles.page} style={{ minHeight: VIEWPORT_HEIGHT }}>
+          <div className={styles.page} style={{ minHeight: viewportHeight(rows) }}>
             <EmptyState
               icon="image"
               title={value.image ? BLOCK_PICKER_COPY.image.currentTitle : BLOCK_PICKER_COPY.image.title}
@@ -269,13 +277,14 @@ function PickerBody({ catalog, offersDownload, instanceId, value, onPick, onPick
         ) : (
           <ResultSwap empty={items.length === 0}>
             {items.length === 0 ? (
-              <div className={styles.page} style={{ minHeight: VIEWPORT_HEIGHT }}>
+              <div className={styles.page} style={{ minHeight: viewportHeight(rows) }}>
                 <EmptyState icon="search" title={BLOCK_PICKER_COPY.noMatch(query.trim())} body={BLOCK_PICKER_COPY.noMatchBody} />
               </div>
             ) : (
               <BlockGrid
                 key={`${shown}|${query}`}
                 items={items}
+                rows={rows}
                 instanceId={instanceId}
                 selected={value.image ? null : value.block}
                 label={BLOCK_PICKER_COPY.gridLabel[shown]}
@@ -314,6 +323,8 @@ function ResultSwap({ empty, children }: { empty: boolean; children: ReactNode }
 
 interface BlockGridProps {
   items: readonly PickerItem[];
+  /** 可见行数：视口高、翻页步长与不满一屏时补的空槽位都按它。 */
+  rows: number;
   instanceId: string;
   /** 主色描边的那一格；方块正在用玩家图片时没有。 */
   selected: string | null;
@@ -321,14 +332,14 @@ interface BlockGridProps {
   onPick(block: string): void;
 }
 
-function BlockGrid({ items, instanceId, selected, label, onPick }: BlockGridProps) {
+function BlockGrid({ items, rows: visibleRows, instanceId, selected, label, onPick }: BlockGridProps) {
   const domId = useId();
   const viewportRef = useRef<HTMLDivElement>(null);
   const count = items.length;
-  const rowCount = Math.max(Math.ceil(count / GRID_COLUMNS), GRID_VISIBLE_ROWS);
+  const rowCount = Math.max(Math.ceil(count / GRID_COLUMNS), visibleRows);
   const selectedIndex = items.findIndex((item) => item.cover.block === selected);
   const [active, setActive] = useState(selectedIndex >= 0 ? selectedIndex : 0);
-  const [scrollTop, setScrollTop] = useState(() => centeredScrollTop(Math.floor(selectedIndex / GRID_COLUMNS), rowCount));
+  const [scrollTop, setScrollTop] = useState(() => centeredScrollTop(Math.floor(selectedIndex / GRID_COLUMNS), rowCount, visibleRows));
   // 键盘在操作网格：当前格画焦点环并弹出名称提示；指针一按下就收起
   const [keyboard, setKeyboard] = useState(false);
   const activeIndex = Math.min(active, count - 1);
@@ -355,14 +366,14 @@ function BlockGrid({ items, instanceId, selected, label, onPick }: BlockGridProp
       pickAt(activeIndex);
       return;
     }
-    const next = gridMove(activeIndex, count, event.key, event.ctrlKey || event.metaKey);
+    const next = gridMove(activeIndex, count, event.key, event.ctrlKey || event.metaKey, visibleRows);
     if (next === null) return;
     event.preventDefault();
     setKeyboard(true);
     setActive(next);
     const el = viewportRef.current;
     if (el === null) return;
-    const top = scrollTopToShow(Math.floor(next / GRID_COLUMNS), el.scrollTop);
+    const top = scrollTopToShow(Math.floor(next / GRID_COLUMNS), el.scrollTop, visibleRows);
     if (top !== el.scrollTop) {
       el.scrollTop = top;
       setScrollTop(top);
@@ -370,7 +381,7 @@ function BlockGrid({ items, instanceId, selected, label, onPick }: BlockGridProp
   };
 
   const optionId = (index: number) => `${domId}-option-${index}`;
-  const rows = renderedRows(scrollTop, rowCount, Math.floor(activeIndex / GRID_COLUMNS));
+  const rows = renderedRows(scrollTop, rowCount, Math.floor(activeIndex / GRID_COLUMNS), visibleRows);
 
   return (
     <div
@@ -380,7 +391,7 @@ function BlockGrid({ items, instanceId, selected, label, onPick }: BlockGridProp
       aria-activedescendant={optionId(activeIndex)}
       tabIndex={0}
       className={styles.viewport}
-      style={{ ...cssVars({ "--picker-columns": GRID_COLUMNS, "--picker-cell": `${CELL}px`, "--picker-gap": `${GAP}px` }), height: VIEWPORT_HEIGHT }}
+      style={{ ...cssVars({ "--picker-columns": GRID_COLUMNS, "--picker-cell": `${CELL}px`, "--picker-gap": `${GAP}px`, "--picker-frame": `${FRAME}px` }), height: viewportHeight(visibleRows) }}
       data-keyboard={keyboard || undefined}
       onKeyDown={onKeyDown}
       onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}

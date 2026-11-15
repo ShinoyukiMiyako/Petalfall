@@ -43,7 +43,7 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-  border: 1px solid var(--sk-line);
+  border: var(--picker-frame) solid var(--sk-line);
   border-radius: var(--sk-r);
   background: var(--sk-bg-2);
   outline: none;
