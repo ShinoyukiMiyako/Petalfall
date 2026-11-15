@@ -203,6 +203,7 @@
  * ---- 窗口三键：命中区铺满栏高，可见底色只是 34 的圆 ----
  * 三个圆之间与关闭键到窗口右缘都是 8px：关闭键的圆贴命中区左侧 4px 放，多出的宽度留在右边，
  * 鼠标甩到右上角仍落在关闭键上。关闭键悬停只染浅红，按下才转正红，免得指针路过时一块红色闪过。
+ * 窗口失焦时字形不降色：text-3 对窗口底日樱只有约 2.1:1，叠上右上角的晕染后日夜都不到 3:1；失焦由标题降色交代。
  */
 .window {
   display: flex;
@@ -264,8 +265,4 @@
 
 .winButton:focus-visible .winFace {
   box-shadow: var(--sk-focus);
-}
-
-.bar[data-blurred] .winButton:not(:hover) {
-  color: var(--sk-text-3);
 }
