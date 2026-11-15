@@ -572,6 +572,21 @@ describe("实例设置：外观卡的封面方块", () => {
     expect(() => row("背景图片")).toThrow("外观卡里没有「背景图片」这一行");
   });
 
+  it("方块用着图片：预览的渐变花瓣取图片的主色调；移除图片后立即回到方块的色调", async () => {
+    settings = { ...settings, cover_image: BLOCK_FILE, background: "art" };
+    patchInstance({ cover: "grass_block", cover_image: BLOCK_KEY, cover_image_hue: 200, background: "art" });
+    await openSettings();
+    /** 预览卡面最上面那层渐变花瓣的色相。 */
+    const previewHue = () => {
+      const faces = [...card().querySelectorAll<HTMLElement>('[class*="preview"] [class*="art"][style*="--hue"]:not([data-conceal])')];
+      return faces.at(-1)?.style.getPropertyValue("--hue");
+    };
+    expect(previewHue()).toBe("200");
+    await click(button("移除图片", row("封面方块")));
+    // 草方块预设的色相
+    expect(previewHue()).toBe("118");
+  });
+
   it("有方块图片时「移除图片」只清 cover_image，方块不动", async () => {
     settings = { ...settings, cover_image: BLOCK_FILE };
     patchInstance({ cover: "grass_block", cover_image: BLOCK_KEY });

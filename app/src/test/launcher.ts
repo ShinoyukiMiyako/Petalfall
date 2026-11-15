@@ -85,6 +85,7 @@ export function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): I
     description: null,
     cover: null,
     cover_image: null,
+    cover_image_hue: null,
     background: "follow",
     background_image: null,
     modpack: null,

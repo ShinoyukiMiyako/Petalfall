@@ -216,6 +216,7 @@ fn settings_samples() -> Vec<VersionSettings> {
             description: Some("樱花林里的生存档".into()),
             cover: Some("cherry_planks".into()),
             cover_image: Some(cover_image.clone()),
+            cover_image_hue: Some(330),
             background: COVER_BACKGROUNDS[i % COVER_BACKGROUNDS.len()],
             background_image: Some(background_image.clone()),
             isolation: ISOLATION_OVERRIDES[i % ISOLATION_OVERRIDES.len()],

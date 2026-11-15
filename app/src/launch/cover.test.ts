@@ -8,7 +8,7 @@ import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
 import { render, stubMatchMedia, type Rendered } from "../test/dom";
 import { instanceBackdrop, instanceCover, useCoverBackdrop, type CoverBackdropProps } from "./cover";
 
-type CoverFields = Pick<InstanceSummary, "id" | "cover" | "coverImage" | "background" | "backgroundImage">;
+type CoverFields = Pick<InstanceSummary, "id" | "cover" | "coverImage" | "coverImageHue" | "background" | "backgroundImage">;
 
 const KEY_A = "0123456789abcdef0123456789abcdef01234567";
 const KEY_B = "fedcba9876543210fedcba9876543210fedcba98";
@@ -36,7 +36,7 @@ function block(id: string, hue: number): CatalogBlockDto {
 const CATALOG = catalogFromDto({ version_id: "1.21.1", blocks: [block("oak_log", 30), block("blue_ice", 199)] });
 
 function inst(id: string, fields: Partial<CoverFields> = {}): CoverFields {
-  return { id, cover: null, coverImage: null, background: "follow", backgroundImage: null, ...fields };
+  return { id, cover: null, coverImage: null, coverImageHue: null, background: "follow", backgroundImage: null, ...fields };
 }
 
 describe("instanceCover", () => {
@@ -69,6 +69,23 @@ describe("instanceCover", () => {
 
   it("取图键不是 40 位小写十六进制：直接抛错", () => {
     expect(() => instanceCover(inst("a", { coverImage: "not-a-key" }), CATALOG)).toThrow("not-a-key");
+  });
+
+  it("方块画玩家图片且记着图片的主色调：色相随图片，预设、目录方块与目录外的方块都一样，方块本身不变", () => {
+    const image = `${COVER_ORIGIN}/${KEY_A}`;
+    expect(instanceCover(inst("a", { coverImage: KEY_A, coverImageHue: 200 }), CATALOG)).toEqual({ block: "cherry_planks", hue: 200, image });
+    expect(instanceCover(inst("a", { cover: "blue_ice", coverImage: KEY_A, coverImageHue: 0 }), CATALOG)).toEqual({ block: "blue_ice", hue: 0, image });
+    expect(instanceCover(inst("a", { cover: "oak_log", coverImage: KEY_A, coverImageHue: 359 }), CATALOG)).toEqual({ block: "oak_log", hue: 359, image });
+    expect(instanceCover(inst("改过的实例", { cover: "mystery_block", coverImage: KEY_A, coverImageHue: 120 }), CATALOG)).toEqual({ block: "mystery_block", hue: 120, image });
+    // 随机取一个色相：照原样用，不经方块色相换算
+    const hue = Math.floor(Math.random() * 360);
+    expect(instanceCover(inst("a", { cover: "oak_log", coverImage: KEY_B, coverImageHue: hue }), CATALOG).hue).toBe(hue);
+  });
+
+  it("图片太灰或是旧版本导入的（没有色调）：仍用方块的色相；图片不见了（没有取图键）时色调也不用", () => {
+    expect(instanceCover(inst("a", { cover: "oak_log", coverImage: KEY_A, coverImageHue: null }), CATALOG).hue).toBe(30);
+    expect(instanceCover(inst("a", { coverImage: KEY_A, coverImageHue: null }), CATALOG).hue).toBe(345);
+    expect(instanceCover(inst("a", { cover: "oak_log", coverImage: null, coverImageHue: 200 }), CATALOG)).toEqual({ block: "oak_log", hue: 30, image: null });
   });
 });
 
@@ -113,6 +130,12 @@ describe("useCoverBackdrop", () => {
     setBlockCatalog(CATALOG);
     mount(inst("a", { cover: "oak_log", coverImage: KEY_B }), "texture");
     expect(last).toEqual({ remoteUrl: null, texture: { block: "oak_log", hue: 30, image: `${COVER_ORIGIN}/${KEY_B}` } });
+  });
+
+  it("材质平铺的方块画玩家图片：平铺交出去的方块带图片与它的主色调", () => {
+    setBlockCatalog(CATALOG);
+    mount(inst("a", { cover: "oak_log", coverImage: KEY_B, coverImageHue: 280, background: "texture" }), "art");
+    expect(last).toEqual({ remoteUrl: null, texture: { block: "oak_log", hue: 280, image: `${COVER_ORIGIN}/${KEY_B}` } });
   });
 
   it("跟随默认的渐变花瓣：两项都空", () => {

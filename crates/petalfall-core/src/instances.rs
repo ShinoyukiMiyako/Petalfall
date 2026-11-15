@@ -241,10 +241,18 @@ impl Petalfall {
     /// 整份写入实例设置；任一字段不合法报 [`InstanceError::InvalidSettings`]，不改动文件。保存后删掉
     /// 卡面图片目录里不再被引用的图片（玩家清除图片、换回方块时旧文件随之删掉）。
     ///
+    /// `cover_image_hue` 不经这里写，给了也不算数：方块图片没换时沿用盘上记的，换掉或清掉时一起清空，
+    /// 只有导入图片（[`Petalfall::import_cover_image`]）写它。
+    ///
     /// 先以「使用」方式核对游戏目录的数据格式记号，被拒时原样报错、什么都不写：任务重试与列实例被拒后
     /// 留下的旧列表都不经过列实例，不能指望调用方核对过。
     pub async fn set_instance_settings(&self, id: &str, settings: &VersionSettings) -> Result<()> {
         self.guard_game_dir(GuardMode::Use).await?;
+        // 调用方多半是拿读到的设置改了几项再整份写回：清掉方块图片时带着的旧色调不该让校验拒掉这次保存
+        let settings = VersionSettings {
+            cover_image_hue: None,
+            ..settings.clone()
+        };
         settings
             .validate()
             .map_err(|violation| InstanceError::InvalidSettings {
@@ -252,7 +260,7 @@ impl Petalfall {
                 reason: violation.reason,
             })?;
         let dir = self.existing_instance_dir(id).await?;
-        crate::cover_image::save_settings_and_prune(&dir, settings).await
+        crate::cover_image::save_settings_and_prune(&dir, &settings).await
     }
 
     /// 版本 JSON 可用的实例；目录不在报未安装，JSON 缺失或损坏报 [`InstanceError::Broken`]。

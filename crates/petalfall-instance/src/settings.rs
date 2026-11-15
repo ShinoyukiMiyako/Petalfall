@@ -25,6 +25,8 @@ pub const RESOLUTION_HEIGHT: (u32, u32) = (240, 4320);
 const COVER_MAX_LEN: usize = 64;
 /// 卡面图片在实例元数据目录下的子目录：`versions/<id>/.petalfall/cover/`。
 pub const COVER_IMAGE_DIR: &str = "cover";
+/// 色相一圈的度数：记下的色相在 0 到它之间（不含）。
+const HUE_DEGREES: u16 = 360;
 
 /// 卡面背景。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -100,6 +102,9 @@ pub struct VersionSettings {
     pub cover: Option<String>,
     /// 封面方块用的玩家图片（[`COVER_IMAGE_DIR`] 下的文件名）；有值时方块画这张图，`cover` 只在图片读不到时兜底。
     pub cover_image: Option<String>,
+    /// `cover_image` 的主色调（HSL 色相 0-359），导入图片时算出，卡面的渐变花瓣按它画。图片太灰、或是不记这一项的
+    /// 旧版本导入的图为 `None`，卡面照旧用 `cover` 的色调。只随 `cover_image` 一起有。
+    pub cover_image_hue: Option<u16>,
     /// 卡面背景。
     pub background: CoverBackground,
     /// 卡面背景用的玩家图片（[`COVER_IMAGE_DIR`] 下的文件名）。背景换成别的样式时仍保留，换回来不用重选。
@@ -206,6 +211,20 @@ impl VersionSettings {
                 format!("封面方块图片应形如 block-<16 位十六进制>.png：{name:?}"),
             );
         }
+        if let Some(hue) = self.cover_image_hue {
+            if self.cover_image.is_none() {
+                return violation(
+                    "cover_image_hue",
+                    format!("没有封面方块图片时不该记着它的色调：{hue}"),
+                );
+            }
+            if hue >= HUE_DEGREES {
+                return violation(
+                    "cover_image_hue",
+                    format!("封面方块图片的色调应在 0-{}，收到 {hue}", HUE_DEGREES - 1),
+                );
+            }
+        }
         if let Some(name) = &self.background_image
             && !CoverImageSlot::Background.accepts(name)
         {
@@ -288,6 +307,13 @@ impl VersionSettings {
                 tracing::warn!(path = %path.display(), field, value = ?value, "实例设置里的卡面图片文件名不合规，当作没有");
                 *name = None;
             }
+        }
+        // 色调跟着图：图没了（手改，或上面文件名不合规被丢掉）色调也不留，界面回到方块色调
+        if let Some(hue) = self.cover_image_hue
+            && (self.cover_image.is_none() || hue >= HUE_DEGREES)
+        {
+            tracing::warn!(path = %path.display(), hue, has_image = self.cover_image.is_some(), "实例设置里的封面方块色调用不了，当作没有");
+            self.cover_image_hue = None;
         }
         if self.background == CoverBackground::Image && self.background_image.is_none() {
             tracing::warn!(path = %path.display(), "实例设置的卡面背景是图片却没有图片，按跟随读");
@@ -476,6 +502,21 @@ mod tests {
             ),
             (
                 VersionSettings {
+                    cover_image_hue: Some(120),
+                    ..base.clone()
+                },
+                "cover_image_hue",
+            ),
+            (
+                VersionSettings {
+                    cover_image: Some("block-0123456789abcdef.png".into()),
+                    cover_image_hue: Some(360),
+                    ..base.clone()
+                },
+                "cover_image_hue",
+            ),
+            (
+                VersionSettings {
                     background_image: Some("background-0123456789ABCDEF.png".into()),
                     ..base.clone()
                 },
@@ -611,9 +652,17 @@ mod tests {
         // 背景换成别的样式后图片仍留在设置里，换回图片不用重选
         let kept = VersionSettings {
             background: CoverBackground::Texture,
-            ..s
+            ..s.clone()
         };
         assert_eq!(kept.validate(), Ok(()));
+        // 色调的两端
+        for hue in [0, 359] {
+            let tinted = VersionSettings {
+                cover_image_hue: Some(hue),
+                ..s.clone()
+            };
+            assert_eq!(tinted.validate(), Ok(()), "{hue}");
+        }
     }
 
     #[test]
@@ -687,6 +736,7 @@ mod tests {
             description: Some("测试整合包".into()),
             cover: Some("amethyst_block".into()),
             cover_image: Some("block-0123456789abcdef.png".into()),
+            cover_image_hue: Some(330),
             background: CoverBackground::Image,
             background_image: Some("background-0123456789abcdef.png".into()),
             isolation: IsolationOverride::Disabled,
@@ -722,6 +772,7 @@ mod tests {
         assert_eq!(loaded.java, JavaSelection::Auto);
         // 卡面几项是后来加的：旧文件里没有，读出来是跟随、没有图片
         assert_eq!(loaded.cover_image, None);
+        assert_eq!(loaded.cover_image_hue, None);
         assert_eq!(loaded.background, CoverBackground::Follow);
         assert_eq!(loaded.background_image, None);
         assert_eq!(loaded.validate(), Ok(()));
@@ -743,6 +794,7 @@ mod tests {
             "description": "周末一起玩",
             "cover": "oak_log",
             "cover_image": "block-0123456789abcdef.png",
+            "cover_image_hue": 28,
             "background": "aurora_shader",
             "background_image": "background-fedcba9876543210.jpg",
             "isolation": "disabled",
@@ -759,6 +811,7 @@ mod tests {
                 description: Some("周末一起玩".into()),
                 cover: Some("oak_log".into()),
                 cover_image: Some("block-0123456789abcdef.png".into()),
+                cover_image_hue: Some(28),
                 background: CoverBackground::Follow,
                 background_image: Some("background-fedcba9876543210.jpg".into()),
                 isolation: IsolationOverride::Disabled,
@@ -869,6 +922,49 @@ mod tests {
                 "background-0123456789abcdef.png"
             ]
         );
+    }
+
+    /// 封面方块的色调只随图片一起有：图片没有、文件名不合规被丢掉，或色调不在 0-359（手改）时色调当作没有，
+    /// 别的字段照常读出，读出来能原样写回。
+    #[tokio::test]
+    async fn cover_image_hue_without_a_usable_image_is_dropped_on_load() {
+        for raw in [
+            serde_json::json!({ "cover": "oak_log", "cover_image_hue": 200 }),
+            serde_json::json!({ "cover": "oak_log", "cover_image": null, "cover_image_hue": 200 }),
+            serde_json::json!({ "cover": "oak_log", "cover_image": "../block-0123456789abcdef.png", "cover_image_hue": 200 }),
+        ] {
+            let loaded = load_raw(&raw).await.unwrap();
+            assert_eq!(
+                loaded,
+                VersionSettings {
+                    cover: Some("oak_log".into()),
+                    ..VersionSettings::default()
+                },
+                "{raw}"
+            );
+            assert_eq!(loaded.validate(), Ok(()), "{raw}");
+        }
+
+        let out_of_range = load_raw(&serde_json::json!({
+            "cover_image": "block-0123456789abcdef.png",
+            "cover_image_hue": 360
+        }))
+        .await
+        .unwrap();
+        assert_eq!(
+            out_of_range.cover_image.as_deref(),
+            Some("block-0123456789abcdef.png")
+        );
+        assert_eq!(out_of_range.cover_image_hue, None);
+        assert_eq!(out_of_range.validate(), Ok(()));
+
+        let kept = load_raw(&serde_json::json!({
+            "cover_image": "block-0123456789abcdef.png",
+            "cover_image_hue": 359
+        }))
+        .await
+        .unwrap();
+        assert_eq!(kept.cover_image_hue, Some(359));
     }
 
     /// 背景是图片却没有图片（手改，或文件名不合规被丢掉）按跟随读，界面整份保存时不会被 validate 拒。

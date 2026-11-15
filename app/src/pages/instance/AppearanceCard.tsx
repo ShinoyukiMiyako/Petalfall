@@ -97,8 +97,8 @@ function AppearanceSkeleton() {
 }
 
 /**
- * 预览用的实例摘要：背景与方块取编辑器里的值，改了立即看到。取图键只由实例列表给出，乐观补丁只会把图片清掉，
- * 清掉时预览跟着去掉；新导入的图要等列表重扫回来才有键。
+ * 预览用的实例摘要：背景与方块取编辑器里的值，改了立即看到。取图键与方块图片的色调只由实例列表给出，乐观补丁只会
+ * 把图片清掉，清掉时预览跟着去掉、色调回到方块的；新导入的图要等列表重扫回来才有键与色调。
  */
 function previewSummary(inst: InstanceSummary, value: InstanceSettings): InstanceSummary {
   return {
@@ -106,6 +106,7 @@ function previewSummary(inst: InstanceSummary, value: InstanceSettings): Instanc
     cover: value.cover,
     background: value.background,
     coverImage: value.coverImage === null ? null : inst.coverImage,
+    coverImageHue: value.coverImage === null ? null : inst.coverImageHue,
     backgroundImage: value.backgroundImage === null ? null : inst.backgroundImage,
   };
 }

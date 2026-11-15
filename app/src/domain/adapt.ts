@@ -160,6 +160,8 @@ export interface InstanceSummary {
   cover: string | null;
   /** 封面方块用的玩家图片在材质协议 /cover/ 下的取图键；没设或文件不见了为 null。 */
   coverImage: string | null;
+  /** 封面方块图片的主色调（色相 0-359），卡面的渐变花瓣按它画；没有图片、图片太灰或没记色调时为 null，按方块的色调画。 */
+  coverImageHue: number | null;
   /** 卡面背景；follow 跟随外观设置里的默认。 */
   background: CoverBackground;
   /** 卡面背景图片的取图键；没设或文件不见了为 null。 */
@@ -279,6 +281,10 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
   if (dto.activity === "inherited" && dto.used_by === null) throw new Error(`实例 ${dto.id} 被当作基底占着，却没说是哪个实例在用`);
   if (dto.used_by !== null && dto.activity === null) throw new Error(`实例 ${dto.id} 正被 ${dto.used_by} 使用，却没有报出占用`);
   if ((dto.playtime_min === null) !== (dto.play_error !== null)) throw new Error(`实例 ${dto.id} 的游玩时长与它的读取错误对不上`);
+  const hue = dto.cover_image_hue;
+  if (hue !== null && (dto.cover_image === null || !Number.isInteger(hue) || hue < 0 || hue >= 360)) {
+    throw new Error(`实例 ${dto.id} 的封面方块图片色调不对（${String(hue)}，取图键 ${String(dto.cover_image)}）`);
+  }
   return {
     id: dto.id,
     name: dto.id,
@@ -292,6 +298,7 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     description: dto.description,
     cover: dto.cover,
     coverImage: dto.cover_image,
+    coverImageHue: hue,
     background: oneOf(dto.background, COVER_BACKGROUNDS, "卡面背景"),
     backgroundImage: dto.background_image,
     pinned: ctx.pins.includes(dto.id),
