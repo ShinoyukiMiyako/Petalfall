@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { motion } from "framer-motion";
+import { cancelFrame, frame, frameData, motion } from "framer-motion";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { drainFrames, render, stepFrames, stubSpanAnimations, waitForFrames, type Rendered } from "./dom";
 
@@ -100,6 +100,30 @@ describe("drainFrames", () => {
     view.unmount();
     view = undefined;
     await drainFrames();
+    vi.useRealTimers();
+
+    view = render(fadeIn("next", 0.1));
+    await waitForFrames(() => expect(box("next").style.opacity).toBe("1"));
+  });
+
+  it("新装的假时钟上第一帧与上一个假时钟的最后一帧同在第 16 ms：照样认出这一帧，等帧循环停下才返回，换回真实计时器后帧循环照常走", async () => {
+    vi.useFakeTimers();
+    frame.render(() => undefined);
+    await stepFrames(1);
+    expect(frameData.timestamp).toBe(16);
+    await drainFrames();
+    vi.useRealTimers();
+
+    // 新的假时钟又从 0 计时，frameData 还停在 16：保持活跃的回调每帧都跑，跑满三帧撤掉自己
+    vi.useFakeTimers();
+    const seen: number[] = [];
+    const tick = () => {
+      seen.push(frameData.timestamp);
+      if (seen.length === 3) cancelFrame(tick);
+    };
+    frame.update(tick, true);
+    await drainFrames();
+    expect(seen).toEqual([16, 32, 48]);
     vi.useRealTimers();
 
     view = render(fadeIn("next", 0.1));

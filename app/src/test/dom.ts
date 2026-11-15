@@ -389,7 +389,7 @@ export async function stepFrames(count: number): Promise<void> {
 }
 
 /**
- * 把帧循环排空：在当前的计时器上一段一段地走，直到走完一段 framer-motion 没有处理任何一帧（帧时间戳不再变）、
+ * 把帧循环排空：在当前的计时器上一段一段地走，直到走完一段 framer-motion 没有处理任何一帧（帧时间戳没落在这一段里）、
  * 也没有谁经窗口新排动画帧回调（lib/reflow 的等待队列这类一帧一排的，framer-motion 的时间戳看不出来）。
  * 换计时器之前在旧计时器下调用：用例收尾时先卸载，再 drainFrames，再 useRealTimers，同文件后面的用例帧循环才接得上。
  * 假定时器下每段推进一帧；真实计时器下每段等两个帧长，排着的那一帧一定先于这次等待到点，它在回调里再排的下一帧数得到。
@@ -409,10 +409,14 @@ export async function drainFrames(): Promise<void> {
   };
   try {
     for (let i = 0; i < limit; i++) {
-      const before = frameData.timestamp;
+      const start = performance.now();
       requested = 0;
       await step();
-      if (frameData.timestamp === before && requested === 0) return;
+      // 不拿走之前的帧时间戳来比：frameData 是模块级的，停在上一个用例最后一帧的时刻，而假时钟每装一次都从 0 计时。
+      // 这一段恰好在同一毫秒走了一帧（都是装上假时钟后的第 16 ms）时前后两值相同，会被认成没走帧，帧循环还排着下一帧就返回，
+      // 换计时器后同文件后面的用例 framer-motion 一帧都推不动。旧值碰巧落在这一段里只是多走一段
+      const ran = frameData.timestamp >= start && frameData.timestamp <= performance.now();
+      if (!ran && requested === 0) return;
     }
   } finally {
     // 换回原来的那一个：假时钟卸下时按它身上的标记决定还原还是删掉全局的 requestAnimationFrame
