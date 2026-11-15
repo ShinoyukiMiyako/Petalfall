@@ -279,13 +279,12 @@
   transition: opacity var(--sk-dur-in) var(--sk-ease-out);
 }
 
-/* ---- 新建实例 ---- */
+/* ---- 新建实例：加号是按钮唯一的内容，颜色沿用条目共用的 text-2，不另降一档（非文字至少 3:1） ---- */
 .create {
   width: 40px;
   height: 40px;
   margin: var(--sk-space-2) 0;
   border: 1.5px dashed var(--sk-line-2);
-  color: var(--sk-text-3);
 }
 
 .create:hover {
