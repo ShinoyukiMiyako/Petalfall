@@ -133,7 +133,7 @@
 .headMeta {
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 /* 让位挂在列表上而不是滚动区上：列表的高度随行增删变化才量得到，滚动区封顶后高度不变 */
@@ -182,7 +182,7 @@
   gap: var(--sk-space-12);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .rowDetail {

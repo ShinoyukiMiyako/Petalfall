@@ -274,7 +274,7 @@
   border-radius: var(--sk-r-sm);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .queueLine {
