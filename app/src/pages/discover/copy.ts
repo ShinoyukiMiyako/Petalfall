@@ -1,6 +1,6 @@
 // 发现页、资源详情、安装面板与整合包导入的文案。插值一律经 domain/format 格式化，页面组件只引用这里。
 
-import { joinMixed } from "../../copy/flows";
+import { joinMixed, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
 import { formatBytes, formatCount } from "../../domain/format";
 import { PLATFORM_TIMEOUT_MS } from "../../domain/limits";
 import type { Platform } from "../../domain/types";
@@ -192,8 +192,9 @@ export const DETAIL_COPY = {
     [author === null ? CARD_COPY.authorUnknown : author, latest === null ? DETAIL_COPY.noVersion : latest].join(" · "),
   depOpen: (title: string) => `查看前置 ${title}`,
   onlyFits: "只看能装进我的实例的版本",
-  beta: "测试版",
-  alpha: "预览版",
+  // Mod 版本的不稳定通道沿用启动器自己发布通道的叫法，与实例页的 MOD_CHANNEL_LABEL 同源
+  beta: RELEASE_CHANNEL_LABEL.beta,
+  alpha: RELEASE_CHANNEL_LABEL.preview,
   loadMore: "加载更多",
   versionsEmptyFit: "没有能装进你的实例的版本",
   versionsEmpty: "这个资源还没有发布版本",
