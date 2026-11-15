@@ -188,7 +188,9 @@ describe("执行", () => {
     const pending = moveInstance("t-cross", "樱花生存", SOURCE, OFFICIAL);
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
     expect((await listInstances()).find((i) => i.id === "樱花生存")?.activity).toBe("moving");
-    expect((await rejection(renameInstance("樱花生存", "换个名"))).detail).toEqual({ id: "樱花生存", activity: "moving" });
+    const busy = await rejection(renameInstance("樱花生存", "换个名"));
+    expect(busy.detail).toEqual({ id: "樱花生存", activity: "moving" });
+    expect(busy.message).toBe("实例 樱花生存 正在移到其他游戏目录，请稍后再试");
     await vi.advanceTimersByTimeAsync(3 * PHASE_MS + MOCK_STEP_MS);
     const outcome: MoveOutcomeDto = await pending;
     expect(outcome).toEqual({ id: "樱花生存", source: SOURCE, target: OFFICIAL, target_name: "官方启动器", registered: false, follow_ups: [] });

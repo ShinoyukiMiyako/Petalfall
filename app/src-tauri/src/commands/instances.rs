@@ -78,7 +78,7 @@ impl InstanceActivity {
             InstanceActivity::Modifying => "改动 Mod、资源或设置",
             InstanceActivity::Inherited => "被其他实例使用",
             InstanceActivity::BackingUp => "备份或恢复存档",
-            InstanceActivity::Moving => "移到另一个游戏目录",
+            InstanceActivity::Moving => "移到其他游戏目录",
         }
     }
 
@@ -8449,7 +8449,7 @@ mod tests {
                 json!({ "id": "pack", "activity": "moving" }),
                 "{activity:?}"
             );
-            assert_eq!(err.message, "实例 pack 正在移到另一个游戏目录，请稍后再试");
+            assert_eq!(err.message, "实例 pack 正在移到其他游戏目录，请稍后再试");
         }
         let err = locks
             .acquire_with_bases("Fabric", Launching, &["PACK".to_owned()])

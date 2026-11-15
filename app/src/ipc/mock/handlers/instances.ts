@@ -556,7 +556,7 @@ const ACTIVITY_LABELS: Record<InstanceActivity, string> = {
   modifying: "改动 Mod、资源或设置",
   inherited: "被其他实例使用",
   backing_up: "备份或恢复存档",
-  moving: "移到另一个游戏目录",
+  moving: "移到其他游戏目录",
 };
 
 /**
