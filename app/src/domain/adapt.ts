@@ -408,6 +408,8 @@ export interface Settings {
   extraJavaPaths: string[];
   preferDedicatedGpu: boolean;
   skipAccessibilityOnboarding: boolean;
+  /** 新建实例与导入整合包时沿用默认设置。 */
+  newInstanceTemplate: boolean;
   /** 存档备份：退出游戏后是否自动备份，自动备份每个存档留几份、全部备份的总量上限（GB）。 */
   worldBackup: WorldBackup;
 }
@@ -446,6 +448,7 @@ export function settingsFromDto(dto: ConfigDto): Settings {
     extraJavaPaths: [...dto.extra_java_paths],
     preferDedicatedGpu: dto.prefer_dedicated_gpu,
     skipAccessibilityOnboarding: dto.skip_accessibility_onboarding,
+    newInstanceTemplate: dto.new_instance_template,
     worldBackup: { auto: dto.world_backup.auto, keepPerWorld: dto.world_backup.keep_per_world, maxTotalGb: dto.world_backup.max_total_gb },
   };
 }
@@ -469,6 +472,7 @@ export interface SettingsPatch {
   language?: UiLanguage;
   preferDedicatedGpu?: boolean;
   skipAccessibilityOnboarding?: boolean;
+  newInstanceTemplate?: boolean;
   /** 三项一起写：后端要求一次给全。 */
   worldBackup?: WorldBackup;
 }

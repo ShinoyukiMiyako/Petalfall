@@ -51,6 +51,7 @@ import {
   mockDirectoryVersions,
   mockGameDir,
   mockGameDirectoryName,
+  mockNewInstanceTemplate,
   mockWorldBackupSettings,
   recordMockMovedVersions,
   samePath,
@@ -1085,12 +1086,14 @@ function manifestDto(): ManifestDto {
 // ---------------------------------------------------------------- 默认设置
 
 function templateInfo(): TemplateInfoDto {
-  if (template === null) return { present: false, files: [], source_instance: null, saved_at: null, enabled: true };
-  return { present: template.files.length > 0, files: template.files, source_instance: template.source_instance, saved_at: template.saved_at, enabled: true };
+  const enabled = mockNewInstanceTemplate();
+  if (template === null) return { present: false, files: [], source_instance: null, saved_at: null, enabled };
+  return { present: template.files.length > 0, files: template.files, source_instance: template.source_instance, saved_at: template.saved_at, enabled };
 }
 
 /** 与后端同一个判断顺序：配置开关、模板是否为空、新实例是否隔离（不隔离的共用游戏目录根下的设置，一个文件都不碰）。 */
 function applyTemplate(instance: MockInstance): TemplateOutcomeDto {
+  if (!mockNewInstanceTemplate()) return { status: "skipped", reason: "disabled" };
   if (template === null || template.files.length === 0) return { status: "skipped", reason: "empty" };
   if (!isolatedOf(instance)) return { status: "skipped", reason: "shared_working_dir" };
   // 新建的实例目录里还没有任何设置文件：模板里的全都补上

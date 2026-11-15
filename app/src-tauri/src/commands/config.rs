@@ -83,6 +83,8 @@ pub struct ConfigDto {
     pub prefer_dedicated_gpu: bool,
     /// 启动前是否跳过游戏的首次无障碍引导。
     pub skip_accessibility_onboarding: bool,
+    /// 新建实例与导入整合包时是否沿用默认设置（数据目录里的模板）。
+    pub new_instance_template: bool,
     /// 存档自动备份：`{ auto, keep_per_world, max_total_gb }`。
     pub world_backup: WorldBackupSettings,
 }
@@ -122,6 +124,7 @@ pub(crate) fn config_dto(petalfall: &Petalfall) -> ConfigDto {
             .collect(),
         prefer_dedicated_gpu: config.prefer_dedicated_gpu,
         skip_accessibility_onboarding: config.skip_accessibility_onboarding,
+        new_instance_template: config.new_instance_template,
         world_backup: config.world_backup,
     }
 }
@@ -178,6 +181,7 @@ pub(crate) struct ConfigPatch {
     language: Option<UiLanguage>,
     prefer_dedicated_gpu: Option<bool>,
     skip_accessibility_onboarding: Option<bool>,
+    new_instance_template: Option<bool>,
     world_backup: Option<WorldBackupSettings>,
 }
 
@@ -202,6 +206,7 @@ pub(crate) struct RawConfigPatch {
     pub language: Option<String>,
     pub prefer_dedicated_gpu: Option<bool>,
     pub skip_accessibility_onboarding: Option<bool>,
+    pub new_instance_template: Option<bool>,
     pub world_backup: Option<WorldBackupInput>,
 }
 
@@ -228,6 +233,7 @@ pub async fn update_config(
     language: Option<String>,
     prefer_dedicated_gpu: Option<bool>,
     skip_accessibility_onboarding: Option<bool>,
+    new_instance_template: Option<bool>,
     world_backup: Option<WorldBackupInput>,
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
@@ -250,6 +256,7 @@ pub async fn update_config(
         language,
         prefer_dedicated_gpu,
         skip_accessibility_onboarding,
+        new_instance_template,
         world_backup,
     };
     update_config_with(&facade, raw).await
@@ -307,6 +314,7 @@ async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
         language: raw.language.as_deref().map(parse_language).transpose()?,
         prefer_dedicated_gpu: raw.prefer_dedicated_gpu,
         skip_accessibility_onboarding: raw.skip_accessibility_onboarding,
+        new_instance_template: raw.new_instance_template,
         world_backup: raw.world_backup.map(validate_world_backup).transpose()?,
     })
 }
@@ -364,6 +372,9 @@ fn apply_patch(petalfall: &mut Petalfall, patch: ConfigPatch) -> Result<(), Comm
     }
     if let Some(enabled) = patch.skip_accessibility_onboarding {
         petalfall.set_skip_accessibility_onboarding(enabled);
+    }
+    if let Some(enabled) = patch.new_instance_template {
+        petalfall.set_new_instance_template(enabled);
     }
     if let Some(settings) = patch.world_backup {
         petalfall.set_world_backup(settings);
@@ -1271,6 +1282,73 @@ mod tests {
         let raw: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(raw["skip_accessibility_onboarding"], true);
+    }
+
+    /// 新实例沿用默认设置默认开；update_config 带 newInstanceTemplate 关掉后 get_config 与 template_info
+    /// 都回读为关，并落了盘；不带这一项的补丁不动它，再打开两处一起回到开。
+    #[tokio::test]
+    async fn new_instance_template_patch_reads_back_in_config_and_template_info() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let initial = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(initial["new_instance_template"], true);
+        assert!(
+            crate::commands::instances::template_info_with(&facade)
+                .await
+                .unwrap()
+                .enabled
+        );
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                new_instance_template: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        let dto = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(dto["new_instance_template"], false);
+        assert!(
+            !crate::commands::instances::template_info_with(&facade)
+                .await
+                .unwrap()
+                .enabled
+        );
+        let reloaded = petalfall_core::ConfigStore::at(dir.path().join("config.json"))
+            .load()
+            .await
+            .unwrap();
+        assert!(!reloaded.new_instance_template);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                check_updates: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!read_config(&facade).await.new_instance_template);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                new_instance_template: Some(true),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(read_config(&facade).await.new_instance_template);
+        assert!(
+            crate::commands::instances::template_info_with(&facade)
+                .await
+                .unwrap()
+                .enabled
+        );
     }
 
     /// 任一字段非法整体拒绝：前面合法的字段也不生效，配置文件不写。

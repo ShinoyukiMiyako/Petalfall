@@ -1337,6 +1337,60 @@ describe("设置页：游戏", () => {
     expect(text()).not.toContain("已有 mods 或 saves");
   });
 
+  describe("新实例沿用默认设置", () => {
+    const TEMPLATE = "沿用默认设置";
+    const stored = async () => (await mockInvoke<{ new_instance_template: boolean }>("get_config")).new_instance_template;
+    const enabledInTemplateInfo = async () => (await mockInvoke<{ enabled: boolean }>("template_info")).enabled;
+
+    it("在「新实例」卡里，卡排在版本隔离之后、游戏目录之前；默认开，说明写清补什么、关掉后怎样", async () => {
+      await mount("game");
+      const toggle = button(TEMPLATE);
+      expect(section("新实例").contains(toggle)).toBe(true);
+      expect(toggle.getAttribute("role")).toBe("switch");
+      expect(toggle.getAttribute("aria-checked")).toBe("true");
+      const titles = all('[role="region"] h3').map((h) => h.textContent);
+      expect(titles.slice(titles.indexOf("版本隔离"), titles.indexOf("游戏目录") + 1)).toEqual(["版本隔离", "新实例", "游戏目录"]);
+      expect(section("新实例").textContent).toContain(
+        "新建实例与导入整合包时，把在实例设置里保存的默认设置（键位、视距、服务器列表）补进新实例，实例里已有的文件不动。关掉后一律不沿用，已保存的默认设置仍然留着。",
+      );
+    });
+
+    it("关掉写入 newInstanceTemplate: false，再打开写回 true；控件、状态层、配置与默认设置的 enabled 都跟着变", async () => {
+      await mount("game");
+      await click(button(TEMPLATE));
+      expect(callsOf(ipc, "update_config")).toEqual([{ newInstanceTemplate: false }]);
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("false");
+      expect(launcher.state.settings?.newInstanceTemplate).toBe(false);
+      expect([await stored(), await enabledInTemplateInfo()]).toEqual([false, false]);
+
+      await click(button(TEMPLATE));
+      expect(callsOf(ipc, "update_config")).toEqual([{ newInstanceTemplate: false }, { newInstanceTemplate: true }]);
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("true");
+      expect([await stored(), await enabledInTemplateInfo()]).toEqual([true, true]);
+    });
+
+    it("配置里已经关掉：打开设置页时开关就是关的", async () => {
+      await mockInvoke("update_config", { newInstanceTemplate: false });
+      await mount("game");
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("false");
+    });
+
+    it("写入中开关先显示关；失败后回到开，error 通知标题点名设置项、正文给原因，配置没变", async () => {
+      const write = deferred<null>();
+      ipc.overrides.set("update_config", () => write.promise);
+      await mount("game");
+      await click(button(TEMPLATE));
+      expect(callsOf(ipc, "update_config")).toEqual([{ newInstanceTemplate: false }]);
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("false");
+
+      write.reject(new IpcError("config_io", "磁盘已满"));
+      await flush();
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("true");
+      expect(toasts()).toContainEqual({ tone: "error", title: `没能保存「${TEMPLATE}」`, body: "磁盘已满" });
+      expect(await stored()).toBe(true);
+    });
+  });
+
   it("其他文件夹：切换前二次确认，确认后切换并刷新列表；访问不到的不能切；移除只删记录", async () => {
     let dirs = [
       { name: "默认目录", path: "D:\\Games\\Launcher\\.minecraft", is_current: true, available: true },

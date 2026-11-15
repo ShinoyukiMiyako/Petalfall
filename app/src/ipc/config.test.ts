@@ -11,6 +11,7 @@ import {
 } from "./config";
 import { IpcError } from "./errors";
 import { invoke } from "./bridge";
+import { templateInfo } from "./instances";
 import { detectJava } from "./java";
 import { resetMocks } from "./mock";
 
@@ -103,6 +104,27 @@ describe("跳过首次无障碍引导", () => {
     const error = await rejection(invoke("update_config", { checkUpdates: false, skipAccessibilityOnboarding: "false" }));
     expect(error).toMatchObject({ code: "unknown", message: "invalid args `skipAccessibilityOnboarding` for command `update_config`: expected a boolean" });
     expect(await getConfig()).toMatchObject({ skip_accessibility_onboarding: true, check_updates: true });
+  });
+});
+
+describe("新实例沿用默认设置", () => {
+  it("默认开，补丁改了读回一致，template_info 的 enabled 跟着变；不带这个键的补丁不动它", async () => {
+    expect((await getConfig()).new_instance_template).toBe(true);
+    expect((await templateInfo()).enabled).toBe(true);
+    await updateConfig({ newInstanceTemplate: false });
+    expect((await getConfig()).new_instance_template).toBe(false);
+    expect((await templateInfo()).enabled).toBe(false);
+    await updateConfig({ checkUpdates: false });
+    expect((await getConfig()).new_instance_template).toBe(false);
+    await updateConfig({ newInstanceTemplate: true });
+    expect((await getConfig()).new_instance_template).toBe(true);
+    expect((await templateInfo()).enabled).toBe(true);
+  });
+
+  it("不是布尔值是 Tauri 参数错误，归为 unknown，同一次补丁里的其它字段也不生效", async () => {
+    const error = await rejection(invoke("update_config", { checkUpdates: false, newInstanceTemplate: "false" }));
+    expect(error).toMatchObject({ code: "unknown", message: "invalid args `newInstanceTemplate` for command `update_config`: expected a boolean" });
+    expect(await getConfig()).toMatchObject({ new_instance_template: true, check_updates: true });
   });
 });
 

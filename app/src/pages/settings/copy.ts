@@ -209,6 +209,13 @@ export const ISOLATION_OPTIONS = [
 
 export const RECOMMENDED_ISOLATION = "mod_loaders_and_non_release";
 
+/** 新实例的默认设置在实例设置里保存，这里只管新建与导入整合包时沿不沿用。 */
+export const NEW_INSTANCE_COPY = {
+  title: "新实例",
+  template: "沿用默认设置",
+  templateDesc: "新建实例与导入整合包时，把在实例设置里保存的默认设置（键位、视距、服务器列表）补进新实例，实例里已有的文件不动。关掉后一律不沿用，已保存的默认设置仍然留着。",
+} as const;
+
 export const GAME_DIR_COPY = {
   title: "游戏目录",
   subtitle: "版本、库文件与共用资源放在这里，实例的存档按隔离策略分开",
