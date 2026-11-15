@@ -1109,9 +1109,12 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
-/* 720 高时首屏露出完整控制台，900 高时给 570 */
+/*
+ * 最小窗口 640 高时首屏也露出完整控制台（给 310），720 高时给 390，900 高时给 570。下限只在最大化到比最小高度还矮的
+ * 工作区时起作用，取 640 时的值：下限再高，最小窗口里控制台的下沿就压到窗口底边外
+ */
 .console {
-  height: max(340px, 100vh - 330px);
+  height: max(310px, 100vh - 330px);
   min-width: 0;
 }
 
@@ -1175,7 +1178,7 @@
 
 .historyCard {
   min-width: 0;
-  max-height: max(340px, 100vh - 330px);
+  max-height: max(310px, 100vh - 330px);
 }
 
 :root[data-sk-tier="compact"] .historyCard {

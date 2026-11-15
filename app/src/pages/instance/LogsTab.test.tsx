@@ -374,6 +374,27 @@ describe("日志控制台：日志区的下角", () => {
   });
 });
 
+describe("日志控制台：首屏高度", () => {
+  const conf = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../../src-tauri/tauri.conf.json"), "utf8")) as {
+    app: { windows: { label: string; minHeight: number }[] };
+  };
+
+  /** `name: max(下限px, 100vh - 偏移px)` 拆成下限与偏移。 */
+  function byWindowHeight(decl: string, name: string): { floor: number; offset: number } {
+    const found = new RegExp(`(?:^|[\\s;])${name}:\\s*max\\((\\d+)px,\\s*100vh - (\\d+)px\\);`).exec(decl);
+    if (found === null) throw new Error(`没有按窗口高度给的 ${name}`);
+    return { floor: Number(found[1]), offset: Number(found[2]) };
+  }
+
+  it("最小窗口高度下首屏也露出完整控制台：高度下限不超过最小窗口高减去偏移，两列时历史卡与它等高", () => {
+    const main = conf.app.windows.find((w) => w.label === "main");
+    if (main === undefined) throw new Error("tauri.conf.json 里没有主窗口");
+    const card = byWindowHeight(rule(".console"), "height");
+    expect(card.floor).toBeLessThanOrEqual(main.minHeight - card.offset);
+    expect(byWindowHeight(rule(".historyCard"), "max-height")).toEqual(card);
+  });
+});
+
 describe("变更历史：换数据", () => {
   /** 时间线上在场的条目：标题文字与挂载那一刻是否从入场起点（透明）开始。 */
   function timeline(): [string, boolean][] {

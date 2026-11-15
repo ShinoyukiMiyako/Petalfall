@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn repeated_resizes_flip_only_once() {
         let drag: Vec<_> = (0..500)
-            .map(|step| (false, PhysicalSize::new(960 + step, 720 + step / 2)))
+            .map(|step| (false, PhysicalSize::new(960 + step, 640 + step / 2)))
             .collect();
         assert!(replay(&drag).iter().all(Option::is_none));
 
