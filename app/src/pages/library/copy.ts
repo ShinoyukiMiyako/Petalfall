@@ -61,7 +61,7 @@ export const LIBRARY_COPY = {
   },
 
   createTileTitle: "新建实例",
-  createTileBody: "选版本、加载器和封面，装好后自动固定到侧栏",
+  createTileBody: "选版本、加载器和封面，新实例自动固定到侧栏",
 
   emptyTitle: "实例库还是空的",
   emptyBody: "新建一个实例，选好版本、加载器和封面；或者去发现页把整合包导入成实例。",
