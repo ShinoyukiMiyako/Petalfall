@@ -5,7 +5,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Appearance } from "../domain/types";
 import { getAppearance, setAppearance as persist, type AppearanceDto, type AppearancePatchDto } from "../ipc/appearance";
-import { render, stubMatchMedia, type Rendered } from "../test/dom";
+import { render, stubMatchMedia, stubMediaQueries, type Rendered } from "../test/dom";
 import {
   AppearanceProvider,
   appearanceFromDto,
@@ -14,14 +14,20 @@ import {
   DEFAULT_APPEARANCE,
   INSTANT_THEME_ATTR,
   loadAppearance,
+  resolveMode,
   useAppearance,
   type AppearanceApi,
+  type SystemPreferences,
 } from "./appearance";
 
 vi.mock("../ipc/appearance", () => ({ getAppearance: vi.fn(), setAppearance: vi.fn() }));
 
 const html = document.documentElement;
 const DAY_DTO: AppearanceDto = { mode: "day", accent: "sakura", petals: true, panorama: false, reduce_motion: false, cover_background: "texture" };
+/** 系统浅色、没开减少动态效果。 */
+const LIGHT_SYSTEM: SystemPreferences = { reducedMotion: false, dark: false };
+const REDUCED = "(prefers-reduced-motion: reduce)";
+const DARK = "(prefers-color-scheme: dark)";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -86,6 +92,11 @@ describe("DTO 转换", () => {
     expect(() => appearancePatchToDto({ accent: "teal" as never })).toThrow("未知的强调色：teal");
   });
 
+  it("跟随系统原样进出：读进来是 system，补丁写出去也是 system，不在这里换成日樱或夜樱", () => {
+    expect(appearanceFromDto({ ...DAY_DTO, mode: "system" }).mode).toBe("system");
+    expect(appearancePatchToDto({ mode: "system" })).toEqual({ mode: "system" });
+  });
+
   it("loadAppearance 读后端并校验", async () => {
     vi.mocked(getAppearance).mockResolvedValueOnce({ ...DAY_DTO, accent: "amethyst" });
     expect(await loadAppearance()).toEqual({ ...DEFAULT_APPEARANCE, accent: "amethyst" });
@@ -94,9 +105,33 @@ describe("DTO 转换", () => {
   });
 });
 
+describe("resolveMode", () => {
+  it.each([
+    ["day", false, "day"],
+    ["day", true, "day"],
+    ["night", false, "night"],
+    ["night", true, "night"],
+    ["system", false, "day"],
+    ["system", true, "night"],
+  ] as const)("偏好 %s、系统深色 %s -> 画 %s", (mode, dark, shown) => {
+    expect(resolveMode(mode, dark)).toBe(shown);
+  });
+
+  it("未知的明暗直接抛错，不回落成日樱", () => {
+    expect(() => resolveMode("auto" as never, true)).toThrow("未知的外观明暗：auto");
+  });
+});
+
 describe("applyAppearance", () => {
+  it("跟随系统：data-sk-mode 写系统此刻的日樱或夜樱，从不写 system", () => {
+    applyAppearance({ ...DEFAULT_APPEARANCE, mode: "system" }, { reducedMotion: false, dark: true });
+    expect(html.getAttribute("data-sk-mode")).toBe("night");
+    applyAppearance({ ...DEFAULT_APPEARANCE, mode: "system" }, LIGHT_SYSTEM);
+    expect(html.getAttribute("data-sk-mode")).toBe("day");
+  });
+
   it("明暗与强调色永远显式写出", () => {
-    applyAppearance(DEFAULT_APPEARANCE, false);
+    applyAppearance(DEFAULT_APPEARANCE, LIGHT_SYSTEM);
     expect(html.getAttribute("data-sk-mode")).toBe("day");
     expect(html.getAttribute("data-sk-accent")).toBe("sakura");
     expect(html.hasAttribute("data-sk-reduced")).toBe(false);
@@ -108,7 +143,7 @@ describe("applyAppearance", () => {
     [false, true, true],
     [true, true, true],
   ])("应用设置 %s、系统偏好 %s -> 减少动画 %s", (setting, system, reduced) => {
-    applyAppearance({ ...DEFAULT_APPEARANCE, reduceMotion: setting }, system);
+    applyAppearance({ ...DEFAULT_APPEARANCE, reduceMotion: setting }, { reducedMotion: system, dark: false });
     expect(html.hasAttribute("data-sk-reduced")).toBe(reduced);
   });
 
@@ -127,14 +162,24 @@ describe("applyAppearance", () => {
       ["明暗", { ...DEFAULT_APPEARANCE, mode: "night" }],
       ["强调色", { ...DEFAULT_APPEARANCE, accent: "moss" }],
     ] as const)("换%s：先挂上关过渡的标记，改完属性再撤掉", (_name, next) => {
-      applyAppearance(DEFAULT_APPEARANCE, false);
-      expect(writes(() => applyAppearance(next, false))).toEqual([`+${INSTANT_THEME_ATTR}`, "data-sk-mode", "data-sk-accent", `-${INSTANT_THEME_ATTR}`]);
+      applyAppearance(DEFAULT_APPEARANCE, LIGHT_SYSTEM);
+      expect(writes(() => applyAppearance(next, LIGHT_SYSTEM))).toEqual([`+${INSTANT_THEME_ATTR}`, "data-sk-mode", "data-sk-accent", `-${INSTANT_THEME_ATTR}`]);
       expect(html.hasAttribute(INSTANT_THEME_ATTR)).toBe(false);
     });
 
+    it("跟随系统时系统换了深浅色：与手动换明暗一样先关过渡；画出来的明暗没变就不关", () => {
+      const following = { ...DEFAULT_APPEARANCE, mode: "system" } as const;
+      applyAppearance(following, LIGHT_SYSTEM);
+      expect(writes(() => applyAppearance(following, { reducedMotion: false, dark: true }))).toEqual([`+${INSTANT_THEME_ATTR}`, "data-sk-mode", "data-sk-accent", `-${INSTANT_THEME_ATTR}`]);
+      expect(html.getAttribute("data-sk-mode")).toBe("night");
+      // 日樱换成跟随系统、系统正好是浅色：颜色没变，不关过渡
+      applyAppearance(DEFAULT_APPEARANCE, LIGHT_SYSTEM);
+      expect(writes(() => applyAppearance(following, LIGHT_SYSTEM))).toEqual(["data-sk-mode", "data-sk-accent"]);
+    });
+
     it("启动时第一次写入、只改减少动画：不关过渡", () => {
-      expect(writes(() => applyAppearance(DEFAULT_APPEARANCE, false))).toEqual(["data-sk-mode", "data-sk-accent"]);
-      expect(writes(() => applyAppearance({ ...DEFAULT_APPEARANCE, reduceMotion: true }, false))).toEqual(["data-sk-mode", "data-sk-accent", "data-sk-reduced"]);
+      expect(writes(() => applyAppearance(DEFAULT_APPEARANCE, LIGHT_SYSTEM))).toEqual(["data-sk-mode", "data-sk-accent"]);
+      expect(writes(() => applyAppearance({ ...DEFAULT_APPEARANCE, reduceMotion: true }, LIGHT_SYSTEM))).toEqual(["data-sk-mode", "data-sk-accent", "data-sk-reduced"]);
     });
 
     it("全局样式里有这个标记关掉全部过渡的规则", () => {
@@ -361,18 +406,98 @@ describe("AppearanceProvider", () => {
   });
 
   it("系统减少动画偏好变化时实时跟随，卸载后退订", () => {
-    const media = stubMatchMedia(false);
+    const media = stubMediaQueries({ [REDUCED]: false, [DARK]: false });
     mount();
     expect(api.reduced).toBe(false);
-    media.set(true);
+    media[REDUCED].set(true);
     expect(api.reduced).toBe(true);
     expect(html.hasAttribute("data-sk-reduced")).toBe(true);
-    media.set(false);
+    media[REDUCED].set(false);
     expect(html.hasAttribute("data-sk-reduced")).toBe(false);
-    expect(media.listenerCount()).toBe(1);
+    expect([media[REDUCED].listenerCount(), media[DARK].listenerCount()]).toEqual([1, 1]);
     view?.unmount();
     view = undefined;
-    expect(media.listenerCount()).toBe(0);
+    expect([media[REDUCED].listenerCount(), media[DARK].listenerCount()]).toEqual([0, 0]);
+  });
+
+  describe("跟随系统", () => {
+    it("默认仍是日樱：系统是深色时，没选跟随系统的外观照样画日樱", () => {
+      expect(DEFAULT_APPEARANCE.mode).toBe("day");
+      const media = stubMediaQueries({ [REDUCED]: false, [DARK]: true });
+      mount();
+      expect(html.getAttribute("data-sk-mode")).toBe("day");
+      expect(api.resolvedMode).toBe("day");
+      media[DARK].set(false);
+      media[DARK].set(true);
+      expect(html.getAttribute("data-sk-mode")).toBe("day");
+      expect(api.resolvedMode).toBe("day");
+    });
+
+    it("三档切换：日樱、夜樱、跟随系统各写一次后端，<html> 画出对应的明暗，确认值留着 system", async () => {
+      stubMediaQueries({ [REDUCED]: false, [DARK]: false });
+      vi.mocked(persist).mockImplementation(backendMerging(DAY_DTO));
+      mount();
+      await act(() => api.setAppearance({ mode: "night" }));
+      expect([html.getAttribute("data-sk-mode"), api.appearance.mode, api.resolvedMode]).toEqual(["night", "night", "night"]);
+      await act(() => api.setAppearance({ mode: "system" }));
+      // 系统是浅色：跟随系统画日樱，偏好仍记作 system
+      expect([html.getAttribute("data-sk-mode"), api.appearance.mode, api.resolvedMode]).toEqual(["day", "system", "day"]);
+      await act(() => api.setAppearance({ mode: "day" }));
+      expect([html.getAttribute("data-sk-mode"), api.appearance.mode, api.resolvedMode]).toEqual(["day", "day", "day"]);
+      expect(vi.mocked(persist).mock.calls).toEqual([[{ mode: "night" }], [{ mode: "system" }], [{ mode: "day" }]]);
+    });
+
+    it("跟随系统时系统换深浅色：<html> 当场换明暗，resolvedMode 跟着变，不用重新载入；改回日樱后不再跟着变", async () => {
+      const media = stubMediaQueries({ [REDUCED]: false, [DARK]: false });
+      vi.mocked(persist).mockImplementation(backendMerging({ ...DAY_DTO, mode: "system" }));
+      mount({ ...DEFAULT_APPEARANCE, mode: "system" });
+      expect([html.getAttribute("data-sk-mode"), api.resolvedMode]).toEqual(["day", "day"]);
+      media[DARK].set(true);
+      expect([html.getAttribute("data-sk-mode"), api.resolvedMode]).toEqual(["night", "night"]);
+      expect(html.hasAttribute(INSTANT_THEME_ATTR)).toBe(false);
+      media[DARK].set(false);
+      expect([html.getAttribute("data-sk-mode"), api.resolvedMode]).toEqual(["day", "day"]);
+      expect(api.appearance.mode).toBe("system");
+
+      await act(() => api.setAppearance({ mode: "day" }));
+      media[DARK].set(true);
+      expect([html.getAttribute("data-sk-mode"), api.resolvedMode]).toEqual(["day", "day"]);
+      expect(persist).toHaveBeenCalledTimes(1);
+    });
+
+    it("切到跟随系统时用的是系统此刻的明暗：不跟随期间系统变过，切过去当场画对", async () => {
+      const media = stubMediaQueries({ [REDUCED]: false, [DARK]: false });
+      vi.mocked(persist).mockImplementation(backendMerging(DAY_DTO));
+      mount();
+      media[DARK].set(true);
+      expect(html.getAttribute("data-sk-mode")).toBe("day");
+      let done!: Promise<void>;
+      act(() => {
+        done = api.setAppearance({ mode: "system" });
+      });
+      // 乐观值同一帧画上，不等后端确认
+      expect(html.getAttribute("data-sk-mode")).toBe("night");
+      await act(() => done);
+      expect(api.resolvedMode).toBe("night");
+    });
+
+    it("写入跟随系统失败：回到后端确认的明暗，系统之后再变也不跟", async () => {
+      const media = stubMediaQueries({ [REDUCED]: false, [DARK]: true });
+      const failure = new Error("配置文件被占用");
+      vi.mocked(persist).mockRejectedValueOnce(failure);
+      mount();
+      let caught: unknown;
+      await act(async () => {
+        await api.setAppearance({ mode: "system" }).catch((e: unknown) => {
+          caught = e;
+        });
+      });
+      expect(caught).toBe(failure);
+      expect([html.getAttribute("data-sk-mode"), api.appearance.mode]).toEqual(["day", "day"]);
+      media[DARK].set(false);
+      media[DARK].set(true);
+      expect(html.getAttribute("data-sk-mode")).toBe("day");
+    });
   });
 
   it("应用设置开启减少动画时，系统偏好关闭也保持减少", async () => {

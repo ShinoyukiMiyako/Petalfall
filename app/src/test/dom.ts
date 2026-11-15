@@ -60,6 +60,43 @@ export function stubMatchMedia(initial: boolean): MediaQueryStub {
   };
 }
 
+/**
+ * 替换 window.matchMedia：每个查询串各有一个可控的匹配值与各自的监听者。查了没列出的查询直接抛错，
+ * 不让被测代码悄悄拿到一个默认值。
+ */
+export function stubMediaQueries<Q extends string>(initial: Readonly<Record<Q, boolean>>): Readonly<Record<Q, MediaQueryStub>> {
+  const stubs = {} as Record<Q, MediaQueryStub>;
+  const lists = new Map<string, MediaQueryList>();
+  for (const media of Object.keys(initial) as Q[]) {
+    let matches = initial[media];
+    const listeners = new Set<() => void>();
+    lists.set(media, {
+      get matches() {
+        return matches;
+      },
+      media,
+      onchange: null,
+      addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+    } as unknown as MediaQueryList);
+    stubs[media] = {
+      set(next) {
+        matches = next;
+        act(() => {
+          for (const listener of [...listeners]) listener();
+        });
+      },
+      listenerCount: () => listeners.size,
+    };
+  }
+  vi.stubGlobal("matchMedia", (media: string) => {
+    const list = lists.get(media);
+    if (list === undefined) throw new Error(`测试没有替换这个媒体查询：${media}`);
+    return list;
+  });
+  return stubs;
+}
+
 export interface ResizeObserverStub {
   /** 向观察 target 的全部观察者推送一次宽度变化。 */
   resize(target: Element, width: number): void;

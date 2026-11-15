@@ -613,11 +613,18 @@ describe("首次启动向导：推进与收尾", () => {
   it("第四步：明暗立即作用于整个窗口并写后端，「开始使用」收尾", async () => {
     await mount();
     for (let i = 0; i < 3; i++) await click(button("下一步"));
-    // 与设置页同一组件：两张明暗预览都画真实颜色（各按自己的明暗、当前强调色），三枚色块各画各的强调色
+    // 与设置页同一组件、同一组选项：日樱、夜樱各画真实颜色，跟随系统叠画两幅（各按自己的明暗、当前强调色），三枚色块各画各的强调色
     const previews = all('[role="radiogroup"][aria-label="明暗"] [data-mode]').map((p) => [p.getAttribute("data-mode"), p.getAttribute("data-tint")]);
     expect(previews).toEqual([
       ["day", "sakura"],
       ["night", "sakura"],
+      ["day", "sakura"],
+      ["night", "sakura"],
+    ]);
+    expect(all('[role="radiogroup"][aria-label="明暗"] [role="radio"]').map((r) => r.textContent)).toEqual([
+      "日樱浅粉白底，适合白天",
+      "夜樱深紫灰底与紫水晶点缀",
+      "跟随系统随 Windows 的浅色、深色模式切换",
     ]);
     expect(all('[role="radiogroup"][aria-label="强调色"] [data-tint]').map((p) => p.getAttribute("data-tint"))).toEqual(["sakura", "amethyst", "moss"]);
     const night = all<HTMLButtonElement>('[role="radio"]').find((b) => b.textContent?.startsWith("夜樱"));

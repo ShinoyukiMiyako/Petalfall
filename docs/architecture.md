@@ -772,7 +772,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 
 ### 装配与状态
 
-- `main.tsx`：主窗口以不可见状态创建。前端先检查 WebView2 能力、加载字体，并行读取外观偏好与界面形状（`state/ui-shape`，首帧占位用，见「动效与布局稳定」），把明暗模式与强调色写到 `<html>`，画完第一帧后才显示窗口。任何一步失败都渲染错误页并照常显示窗口；后端另有 3 秒的兜底显示。
+- `main.tsx`：主窗口以不可见状态创建。前端先检查 WebView2 能力、加载字体，并行读取外观偏好与界面形状（`state/ui-shape`，首帧占位用，见「动效与布局稳定」），把明暗模式与强调色写到 `<html>`，画完第一帧后才显示窗口。明暗选了跟随系统时按 `prefers-color-scheme` 写日樱或夜樱，系统切换浅色、深色时当场跟着换：WebView2 里这个媒体查询跟着 Tauri 窗口的主题走，窗口不指定主题时 tao 按系统的应用模式定主题、设置变化后重判，tauri-runtime-wry 再把它写进 WebView2 的 `PreferredColorScheme`。任何一步失败都渲染错误页并照常显示窗口；后端另有 3 秒的兜底显示。
 - `App.tsx`：按 `AppearanceProvider -> UiShapeProvider -> LauncherProvider -> ShellProvider -> AppShell` 的顺序装配。页面和流程模块在这里按目录约定收集后传给外壳，外壳本身不引用 `pages/` 和 `flows/`。
 - `state/store.ts`：启动器的状态容器，与 React 解耦，测试里可以直接实例化。事件订阅在 `start()` 时建立；动作返回 Promise，失败时原样抛出。
 - 组件按片订阅状态：`useLauncherSelector(selector, isEqual)` 只在选出的值变了时重渲染，`useLauncherActions()` 只取动作、不订阅。整份订阅的 `useLauncher()` 会随每 100 ms 的下载进度与每批游戏日志重渲染：外壳根与常驻部件（含窗口行为与启动提示的钩子）、`useRunner`、主页、实例库与发现页（含资源详情）都不用它。发现页的结果卡包着 `memo`。`pages/subscriptions.test.tsx` 与 `shell/shell-renders.test.tsx` 数着渲染次数守住这一点。

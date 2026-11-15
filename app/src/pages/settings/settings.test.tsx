@@ -26,7 +26,8 @@ import panelStyles from "../../shell/UpdatePanel.module.css";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { ICON_PATHS } from "../../art/icon-paths";
+import { render, stubMatchMedia, stubMediaQueries, stubResizeObserver, type Rendered } from "../../test/dom";
 import { NAV_ANCHOR_ATTR } from "../../ui/Page";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { callsOf, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
@@ -1518,7 +1519,10 @@ describe("设置页：外观", () => {
   it("非当前的明暗与强调色也画出真实颜色：预览按各自的明暗与当前强调色，色块各画各的", async () => {
     await mount("appearance");
     const previews = () => all('[role="radiogroup"][aria-label="明暗"] [data-mode]').map((p) => [p.getAttribute("data-mode"), p.getAttribute("data-tint")]);
+    // 跟随系统那张卡叠画日樱、夜樱两幅
     expect(previews()).toEqual([
+      ["day", "sakura"],
+      ["night", "sakura"],
       ["day", "sakura"],
       ["night", "sakura"],
     ]);
@@ -1528,8 +1532,35 @@ describe("设置页：外观", () => {
     expect(previews()).toEqual([
       ["day", "moss"],
       ["night", "moss"],
+      ["day", "moss"],
+      ["night", "moss"],
     ]);
     expect(radio("青苔").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("明暗三档：默认选中日樱；选跟随系统写 mode: system，按系统此刻的深浅色画，系统切换时当场换，卡头图标换成显示器", async () => {
+    const media = stubMediaQueries({ "(prefers-reduced-motion: reduce)": false, "(prefers-color-scheme: dark)": true });
+    await mount("appearance");
+    expect(all('[role="radiogroup"][aria-label="明暗"] [role="radio"]').map((r) => [r.textContent?.slice(0, 4), r.getAttribute("aria-checked")])).toEqual([
+      ["日樱浅粉", "true"],
+      ["夜樱深紫", "false"],
+      ["跟随系统", "false"],
+    ]);
+    // 系统是深色也不影响默认的日樱
+    expect(document.documentElement.getAttribute("data-sk-mode")).toBe("day");
+
+    await click(radio("跟随系统"));
+    expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { mode: "system" } }]);
+    expect(radio("跟随系统").getAttribute("aria-checked")).toBe("true");
+    expect(document.documentElement.getAttribute("data-sk-mode")).toBe("night");
+    expect(section("明暗").querySelector("svg > path")?.getAttribute("d")).toBe(ICON_PATHS.monitor.s);
+    expect((await mockInvoke<{ mode: string }>("get_appearance")).mode).toBe("system");
+
+    media["(prefers-color-scheme: dark)"].set(false);
+    await flush();
+    expect(document.documentElement.getAttribute("data-sk-mode")).toBe("day");
+    expect(radio("跟随系统").getAttribute("aria-checked")).toBe("true");
+    expect(callsOf(ipc, "set_appearance")).toHaveLength(1);
   });
 
   it("明暗即时生效并写后端；本机没有樱花林全景时开关禁用并说明原因", async () => {

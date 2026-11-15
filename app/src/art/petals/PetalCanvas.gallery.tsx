@@ -12,7 +12,7 @@ const TIERS: readonly PetalTier[] = ["compact", "regular", "wide"];
 const REGRESSION_SEED = 20231;
 
 function PetalDemo() {
-  const { appearance, reduced } = useAppearance();
+  const { appearance, resolvedMode, reduced } = useAppearance();
   const [show, setShow] = useState(true);
   const [paused, setPaused] = useState(false);
   const [tier, setTier] = useState<PetalTier>("regular");
@@ -47,7 +47,7 @@ function PetalDemo() {
           paused={paused}
           reduced={reduced}
           tier={tier}
-          mode={appearance.mode}
+          mode={resolvedMode}
           accent={appearance.accent}
           seed={fixedSeed ? REGRESSION_SEED : undefined}
           onDowngrade={(event) => setDowngrades((list) => [...list, event])}

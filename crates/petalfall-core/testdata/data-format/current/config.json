@@ -178,7 +178,7 @@
     "appearance": {
       "accent": "moss",
       "cover_background": "art",
-      "mode": "day",
+      "mode": "system",
       "panorama": true,
       "petals": false,
       "reduce_motion": true
@@ -265,7 +265,7 @@
     "appearance": {
       "accent": "sakura",
       "cover_background": "texture",
-      "mode": "night",
+      "mode": "day",
       "panorama": true,
       "petals": false,
       "reduce_motion": true
@@ -352,7 +352,7 @@
     "appearance": {
       "accent": "amethyst",
       "cover_background": "art",
-      "mode": "day",
+      "mode": "night",
       "panorama": true,
       "petals": false,
       "reduce_motion": true
