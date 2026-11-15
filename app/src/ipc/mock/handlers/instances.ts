@@ -1104,7 +1104,7 @@ function applyTemplate(instance: MockInstance): TemplateOutcomeDto {
 }
 
 const TEMPLATE_SKIP_STAGE: Record<Extract<TemplateOutcomeDto, { status: "skipped" }>["reason"], string> = {
-  disabled: "新建实例时沿用默认设置已在配置里关闭",
+  disabled: "新建实例时沿用默认设置已在设置的「游戏」分区关闭",
   empty: "还没有默认设置",
   shared_working_dir: "这个实例与其他未隔离的实例共用 .minecraft 里的设置",
 };

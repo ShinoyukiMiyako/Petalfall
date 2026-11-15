@@ -1218,7 +1218,7 @@ mod tests {
         );
         assert_eq!(
             template_stage(&TemplateOutcome::Skipped(TemplateSkip::Disabled)),
-            "没有沿用默认设置：新建实例时沿用默认设置已在配置里关闭"
+            "没有沿用默认设置：新建实例时沿用默认设置已在设置的「游戏」分区关闭"
         );
     }
 
