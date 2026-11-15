@@ -33,7 +33,7 @@ export function LoadedBody<T>({ resource, loading, failed, retry, children }: Lo
         announce
         fullText
         action={
-          <Button size="sm" onClick={() => resource.reload()}>
+          <Button size="sm" variant="ghost" onClick={() => resource.reload()}>
             {retry}
           </Button>
         }

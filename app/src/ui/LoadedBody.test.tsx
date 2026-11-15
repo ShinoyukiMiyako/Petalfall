@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 // 弹窗里按需读取的内容读失败时的样子：读失败的原因是后端原文，被截掉的往往正是原因本身。
+import { act } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, type Rendered } from "../test/dom";
 import { LoadedBody, type LoadedResource } from "./LoadedBody";
@@ -37,5 +38,20 @@ describe("LoadedBody 读失败", () => {
     const text = error?.parentElement;
     expect(text?.getAttribute("data-full")).toBe("true");
     expect(text?.contains(title ?? null)).toBe(true);
+  });
+
+  it("重读按钮是说明块里通行的幽灵小按钮，提示里只有这一个；点了重读一次", () => {
+    const reload = vi.fn();
+    const { alert } = renderFailure(reload);
+    const buttons = alert.querySelectorAll("button");
+    expect(buttons).toHaveLength(1);
+    const [button] = buttons;
+    expect(button.textContent).toBe(RETRY);
+    expect(button.dataset.variant).toBe("ghost");
+    expect(button.dataset.size).toBe("sm");
+    act(() => {
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 });
