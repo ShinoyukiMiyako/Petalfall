@@ -296,7 +296,7 @@ describe("账户页：皮肤", () => {
     ]);
     const steveFigure = cardOf("Steve").querySelector('[data-sk-art="skin"]');
     expect(steveFigure?.getAttribute("data-art")).toBe("silhouette");
-    // 离线账户同样问一次后端；后端对离线账户回 null（默认皮肤的推算规则未核对前不提供）
+    // 离线账户同样问一次后端；后端按 UUID 给它进游戏后显示的原版默认皮肤，这里没有材质源，默认皮肤的图取不到，所以画剪影
     expect(callsOf(ipc, "skin_info")).toContainEqual({ accountUuid: steve.uuid });
   });
 

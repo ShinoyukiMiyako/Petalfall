@@ -1419,6 +1419,7 @@ export class LauncherStore {
     const subscriptions = [
       tasksIpc.onCoreEvent((e) => this.onCoreEvent(e)),
       accountsIpc.onDeviceCode((code) => this.onDeviceCode(code)),
+      accountsIpc.onAccountChanged((e) => this.onAccountChanged(e)),
       launchIpc.onLaunchPhase((e) => this.onLaunchPhase(e)),
       launchIpc.onGameLog((e) => this.onGameLog(e)),
       launchIpc.onGameExit((e) => this.onGameExit(e)),
@@ -1434,7 +1435,7 @@ export class LauncherStore {
       );
     }
     window.addEventListener("focus", this.onWindowFocus);
-    this.net.start({ onRecovered: () => this.announceRecovered(), onProbeError: (error) => this.report(ACTION_ERROR.probeNetwork, error) });
+    this.net.start({ onRecovered: () => this.onNetworkRecovered(), onProbeError: (error) => this.report(ACTION_ERROR.probeNetwork, error) });
     this.unobserveResources = resources.observeErrors((error) => this.net.reportFailure(error));
     void Promise.allSettled(subscriptions).then(() => {
       // 先订阅再首查：首查期间到达的事件不会漏掉
@@ -1702,7 +1703,16 @@ export class LauncherStore {
     this.net.reportFailure(error);
   }
 
-  /** 由离线转回在线：发「网络已恢复」；有失败的下载时正文写个数，操作为全部重试。 */
+  /**
+   * 由离线转回在线。正版与外置账户的皮肤断网时没下下来就画默认皮肤，后端不记这次失败，重查一次就再下：所以让皮肤查询全部失效。
+   * 后端按皮肤地址把下到的图缓存在本机，已经拿到真皮肤的账户重查只读本机缓存，不重新下载。
+   */
+  private onNetworkRecovered(): void {
+    invalidateResources("skin");
+    this.announceRecovered();
+  }
+
+  /** 发「网络已恢复」；有失败的下载时正文写个数，操作为全部重试。 */
   private announceRecovered(): void {
     const current = this.currentGameDir();
     const moving = this.movingInstances();
@@ -1868,6 +1878,15 @@ export class LauncherStore {
       intervalSec: code.interval,
     };
     this.set({ login: { ...login, device } });
+  }
+
+  /**
+   * 后端在后台改写了账户记录（提前续期、启动前的验证、外置角色档案的后台同步）：重读账户列表，名字、状态与验证时刻跟着换；
+   * 档案里的皮肤可能也换了，这个账户的皮肤重取。界面自己发起的刷新与登录做完就重读，后端不为它们推这个事件。
+   */
+  private onAccountChanged(event: accountsIpc.AccountChangedEvent): void {
+    invalidateResources(`skin:${event.uuid}`);
+    this.background(ACTION_ERROR.refreshAccounts, this.fetchAccounts());
   }
 
   private onLaunchPhase(event: launchIpc.LaunchPhaseEvent): void {
