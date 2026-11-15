@@ -603,6 +603,25 @@ export function trimHistory(tasks: readonly Task[]): Task[] {
   return tasks.filter((t) => isActiveTask(t) || keep.has(t.id));
 }
 
+/** 新建与导入整合包：按名字在当前目录里建一个新实例，不找已有的实例。 */
+const CREATES_INSTANCE: ReadonlySet<string> = new Set(["install_version", "install_modpack"]);
+
+/**
+ * 移动成功时排在队里、挂在被移走的实例上（不分大小写，与后端的锁键一致）的任务。它们只记着实例名与发起时的游戏目录，开工时
+ * 后端在当前目录里按名字找实例：实例已经不在这里，一开工就报 version_not_installed；切到目标目录再重试，又因为发起时的目录
+ * 对不上而不能重试，留着只会多一行做不成的失败。移动与同一实例上的一切互斥，它们只可能排在移动后面、移动期间不会开工，
+ * 所以只在移动成功的这一刻收拾；移动失败或取消时实例还在原处，它们照常开工。
+ * 别的游戏目录里发起的同名任务（见 inGameDir）与新建、导入（它们在原目录里另建一个同名实例，不找移走的这个）不算。
+ */
+export function strandedByMove(tasks: readonly Task[], move: Task): Task[] {
+  if (move.spec.command !== MOVE_TASK_COMMAND || move.instanceId === null) throw new Error(`任务 ${move.id} 不是移动实例`);
+  const key = move.instanceId.toLowerCase();
+  const source = originGameDir(move);
+  return tasks.filter(
+    (t) => t.status === "queued" && t.id !== move.id && t.instanceId !== null && t.instanceId.toLowerCase() === key && !CREATES_INSTANCE.has(t.spec.command) && inGameDir(t, source),
+  );
+}
+
 /**
  * 补全成功后，这个实例失败的新建与补全都没有要重试的了：实例已经好了，留着的话任务页一直报失败，新建那行点重试还会撞名。
  * gameDir 是补全所在的游戏目录：别的目录里同名实例的失败与它无关，留着（见 inGameDir）。

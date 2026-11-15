@@ -28,6 +28,7 @@ import {
   retryTask,
   sharedSavesKeys,
   startComposite,
+  strandedByMove,
   trimHistory,
   tasksToStart,
   type CompositeProgress,
@@ -690,6 +691,31 @@ describe("下载队列：发起时的游戏目录", () => {
     expect(left.map((t) => t.id)).toEqual(["there"]);
     expect(inGameDir(create("there", B), null)).toBe(false);
     expect(inGameDir(create("old", null), null)).toBe(true);
+  });
+
+  it("移动成功时开不了工的任务：同一实例（不分大小写）、同一目录发起、还在排队的；新建导入、别的实例、别的目录、已开工或已结束的不算", () => {
+    const running = { ...move(A), status: "running" as const, error: null };
+    const queued = (id: string, overrides: Partial<Task>) => task(id, { status: "queued", gameDir: A, ...overrides });
+    const mods = { kind: "mod" as const, spec: { command: "install_mods", args: { versionId: "生存", items: [] } } };
+    const tasks = [
+      running,
+      queued("mods", { ...mods, instanceId: "生存" }),
+      queued("pack", { kind: "resourcepack", instanceId: "生存", spec: { command: "install_resource", args: { versionId: "生存" } } }),
+      queued("restore", { kind: "world_restore", instanceId: "生存", spec: { command: "restore_world_backup", args: { id: "生存", world: "w" } } }),
+      queued("create", { kind: "game", instanceId: "生存", spec: { command: "install_version", args: { targetName: "生存" } } }),
+      queued("other", { ...mods, instanceId: "创造" }),
+      queued("elsewhere", { ...mods, instanceId: "生存", gameDir: B }),
+      queued("java", {}),
+      task("done", { ...mods, instanceId: "生存", status: "done", finishedAt: T0 }),
+      task("failed", { ...mods, instanceId: "生存", status: "failed", error: { code: "io", message: "x" }, finishedAt: T0 }),
+    ];
+    expect(strandedByMove(tasks, running).map((t) => t.id)).toEqual(["mods", "pack", "restore"]);
+    // 旧日志里的移动没有 gameDir，按源目录认
+    expect(strandedByMove(tasks, { ...running, gameDir: null }).map((t) => t.id)).toEqual(["mods", "pack", "restore"]);
+    // 实例名不分大小写，与后端的锁键一致
+    const latin = { ...running, instanceId: "Survival", spec: { command: "move_instance", args: { id: "Survival", source: A, target: B } } };
+    expect(strandedByMove([latin, queued("lower", { ...mods, instanceId: "survival" })], latin).map((t) => t.id)).toEqual(["lower"]);
+    expect(() => strandedByMove(tasks, tasks[1])).toThrow("任务 mods 不是移动实例");
   });
 });
 

@@ -204,6 +204,73 @@ describe("完成", () => {
     expect(callsOf(ipc, "set_game_directory")).toEqual([{ path: TARGET }]);
   });
 
+  /** 移动在跑时往同一实例排一个资源包安装与一个存档备份，它们排在移动后面等着。返回移动的结局由调用方给。 */
+  async function queueBehindMove(): Promise<{ settleMove: (result: MoveOutcomeDto | Error) => void }> {
+    const pending = deferred<MoveOutcomeDto>();
+    ipc.overrides.set("move_instance", () => pending.promise);
+    ipc.overrides.set("install_resource", () => new Promise(() => undefined));
+    ipc.overrides.set("backup_world", () => new Promise(() => undefined));
+    await store.actions.moveInstance("生存", SOURCE, TARGET, "HMCL");
+    await settle();
+    await store.actions.installResource({ resourceType: "resource_pack", platform: "modrinth", projectId: "faithful", name: "Faithful", targets: [{ instanceId: "生存", fileVersionId: "f1", world: null }] });
+    await store.actions.backupWorld("生存", "w1", "樱花谷");
+    await settle();
+    expect(store.getState().tasks.map((t) => [t.spec.command, t.status])).toEqual([
+      ["move_instance", "running"],
+      ["install_resource", "queued"],
+      ["backup_world", "queued"],
+    ]);
+    return {
+      settleMove: (result) => {
+        if (result instanceof Error) pending.reject(result);
+        else pending.resolve(result);
+      },
+    };
+  }
+
+  it("移动成功：排在它后面、挂在这个实例上的任务与完成同一次取消，一个也不发给后端；完成通知之后补一条列出它们", async () => {
+    const { settleMove } = await queueBehindMove();
+    const frames: string[][] = [];
+    store.subscribe(() => {
+      const move = store.getState().tasks[0];
+      if (move.status === "done") frames.push(store.getState().tasks.slice(1).map((t) => t.status));
+    });
+    instances = instances.filter((i) => i.id !== "生存");
+    settleMove(outcome());
+    await settle();
+    // 移动落为完成的那一次更新里，它们已经是取消：调度没有机会先把它们拉起来
+    expect(frames[0]).toEqual(["cancelled", "cancelled"]);
+    expect(callsOf(ipc, "install_resource")).toEqual([]);
+    expect(callsOf(ipc, "backup_world")).toEqual([]);
+    expect(store.getState().tasks.map((t) => [t.spec.command, t.status, t.error])).toEqual([
+      ["move_instance", "done", null],
+      ["install_resource", "cancelled", null],
+      ["backup_world", "cancelled", null],
+    ]);
+    const titles = store.getState().toasts.map((t) => t.title);
+    expect(titles.indexOf("已取消 2 个排队中的任务")).toBeGreaterThan(titles.indexOf("已移到「HMCL」"));
+    const dropped = toastOf("已取消 2 个排队中的任务");
+    expect([dropped.tone, dropped.body, dropped.action?.label]).toEqual(["warning", "「生存」已不在当前游戏目录里，这些任务开始了也会失败，切换过去后重新发起：安装 Faithful、备份「樱花谷」", "查看"]);
+    expect(dropped.action !== undefined && "to" in dropped.action ? dropped.action.to : null).toEqual({ page: "tasks", filter: "failed" });
+    // 取消不算失败：不进未读失败的计数，也没有下载失败的通知
+    expect(store.getState().unseenFailures).toBe(0);
+    expect(store.getState().toasts.filter((t) => t.tone === "error")).toEqual([]);
+  });
+
+  it("移动失败：实例还在原处，排着的任务照常开工，不取消也不补通知", async () => {
+    const { settleMove } = await queueBehindMove();
+    settleMove(new IpcError("instance_move_verify_failed", "副本与原件不一致", { path: "x.jar" }));
+    await settle();
+    expect(callsOf(ipc, "install_resource").map((a) => a.versionId)).toEqual(["生存"]);
+    expect(callsOf(ipc, "backup_world").map((a) => a.id)).toEqual(["生存"]);
+    expect(store.getState().tasks.map((t) => [t.spec.command, t.status])).toEqual([
+      ["move_instance", "failed"],
+      ["install_resource", "running"],
+      ["backup_world", "running"],
+    ]);
+    expect(store.getState().toasts.some((t) => t.title.startsWith("已取消"))).toBe(false);
+  });
+
   it("「切换过去」在还有任务进行时不切，原因经通知动作的错误处理报出", async () => {
     ipc.overrides.set("move_instance", (args) => (args.id === "生存" ? outcome() : new Promise(() => undefined)));
     await store.actions.moveInstance("生存", SOURCE, TARGET, "HMCL");
