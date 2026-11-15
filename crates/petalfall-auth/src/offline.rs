@@ -29,7 +29,8 @@ pub fn player_name_has_rejected_char(name: &str) -> bool {
 ///
 /// 硬性规则（返回 `Err`）：非空、不含双引号、长度不超过 16。
 /// 软性规则（进入 `warnings`，至多一条）：含空格或非 ASCII 字符（见 [`player_name_has_rejected_char`]）时提示
-/// 1.20.2 与 1.20.3 进不了存档与服务器；其余 `[A-Za-z0-9_]` 以外的字符提示“可能无法进入 1.18+ 世界”。
+/// 1.20.2 与 1.20.3 进不了存档与服务器；其余 `[A-Za-z0-9_]` 以外的符号只说部分服务器可能不接受，没有核对到哪个
+/// 游戏版本拒收它们，所以不写版本号。
 pub fn validate_username(name: &str) -> Result<UsernameCheck> {
     if name.is_empty() {
         return Err(AuthError::InvalidUsername("用户名不能为空".into()));
@@ -50,7 +51,7 @@ pub fn validate_username(name: &str) -> Result<UsernameCheck> {
             "用户名含空格或非 ASCII 字符，Minecraft 1.20.2 与 1.20.3 进不了存档与服务器".into(),
         );
     } else if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        warnings.push("用户名包含非标准字符，可能无法进入 1.18+ 世界".into());
+        warnings.push("用户名含英文字母、数字与下划线以外的符号，部分服务器可能不接受".into());
     }
     Ok(UsernameCheck { warnings })
 }
@@ -135,13 +136,17 @@ mod tests {
         assert!(check.warnings.is_empty());
     }
 
+    /// 码值 33 到 126 里字母、数字与下划线以外的符号：两端的 `!` 与 `~` 也算，只提醒部分服务器，不点版本号。
     #[test]
     fn nonstandard_chars_yield_warning_but_pass() {
-        let check = validate_username("Petal-1.0").unwrap();
-        assert_eq!(
-            check.warnings,
-            ["用户名包含非标准字符，可能无法进入 1.18+ 世界"]
-        );
+        for name in ["Petal-1.0", "!", "~Steve", "a.b@c"] {
+            let check = validate_username(name).unwrap();
+            assert_eq!(
+                check.warnings,
+                ["用户名含英文字母、数字与下划线以外的符号，部分服务器可能不接受"],
+                "{name}"
+            );
+        }
     }
 
     /// 空格与非 ASCII 字符是 1.20.2、1.20.3 真会拒绝的，换成说清这两个版本的那一句，不再叠一句泛泛的。

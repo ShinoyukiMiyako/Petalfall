@@ -56,7 +56,8 @@ describe("离线用户名下方的提示", () => {
   });
 
   it("提醒与通过", () => {
-    expect(nameDisplay("樱花", check("樱花"), false)).toEqual({ kind: "warn", message: OFFLINE_NAME_COPY.nonStandard });
+    expect(nameDisplay("樱花", check("樱花"), false)).toEqual({ kind: "warn", message: OFFLINE_NAME_COPY.spaceOrNonAscii });
+    expect(nameDisplay("Sakura-1", check("Sakura-1"), false)).toEqual({ kind: "warn", message: OFFLINE_NAME_COPY.nonStandard });
     expect(nameDisplay("Sakura", check("Sakura"), false)).toEqual({ kind: "ok", message: OFFLINE_NAME_COPY.ok });
   });
 });
