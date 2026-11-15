@@ -55,7 +55,7 @@
   height: 56px;
   padding: 0 var(--sk-space-16) 0 var(--sk-space-18);
   border-bottom: 1px solid var(--sk-line);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .input {
@@ -73,7 +73,7 @@
 }
 
 .input::placeholder {
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 /*
@@ -99,7 +99,7 @@
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
   font-weight: var(--sk-w-medium);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .option {
@@ -147,7 +147,7 @@
   white-space: nowrap;
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .optionGo {
@@ -171,7 +171,7 @@
   background: var(--sk-bg-2);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .footItem {
