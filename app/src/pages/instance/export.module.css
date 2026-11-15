@@ -80,7 +80,7 @@
   padding-left: calc(var(--sk-space-18) + 9px);
   font-size: var(--sk-fs-small);
   line-height: var(--sk-lh-small);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .disabledBlock {
@@ -98,7 +98,7 @@
 .kvHint {
   font-size: var(--sk-fs-small);
   line-height: var(--sk-lh-small);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 /* 直接打包进去的 Mod：最多 6 行高，超出在列表内滚动 */
