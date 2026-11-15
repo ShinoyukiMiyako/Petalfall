@@ -218,6 +218,7 @@
   pointer-events: none;
 }
 
+/* 上下内边距 2：有值的行是标签 20 加值行 18，再加上下内边距正好是行的最小高度 42，有值无值的行一样高，滑块的高度对得上 */
 .stepButton {
   display: flex;
   align-items: center;
@@ -225,7 +226,7 @@
   box-sizing: border-box;
   width: 100%;
   min-height: var(--cr-step-min-height);
-  padding: var(--sk-space-4) var(--sk-space-8);
+  padding: var(--sk-space-2) var(--sk-space-8);
   border: 0;
   border-radius: var(--sk-r);
   background: transparent;
@@ -317,8 +318,8 @@
 .stepValue {
   overflow: hidden;
   color: var(--sk-text-2);
-  font-size: var(--sk-fs-micro);
-  line-height: var(--sk-lh-micro);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
   font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -905,7 +906,7 @@
 .path {
   color: var(--sk-text-2);
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
+  font-size: var(--sk-fs-mono);
   font-weight: var(--sk-w-mono);
   overflow-wrap: anywhere;
   white-space: normal;

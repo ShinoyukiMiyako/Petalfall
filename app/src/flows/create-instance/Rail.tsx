@@ -96,7 +96,7 @@ export function StepNav({ visible, current, reached, values, onJump }: StepNavPr
   const placedAt = useRef<StepId | null>(null);
   const fadeIn = useRef<Animation | null>(null);
   const reduced = useReducedMotionConfig() === true;
-  // 值行出没时文字列变高变矮，在按钮里纵向居中的标签跟着上下移 7 px：每一行各自让位，标签从原处滑过去。
+  // 值行出没时文字列变高变矮，在按钮里纵向居中的标签跟着上下移 9 px：每一行各自让位，标签从原处滑过去。
   // 没有值的行标签与圆点照旧居中，不为值行常驻留空。同一个回调挂到每一行上，各行各自观察、各自停止
   const rowReflow = useReflow<HTMLButtonElement>();
   useLayoutEffect(() => {

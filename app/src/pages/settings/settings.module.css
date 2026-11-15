@@ -152,8 +152,8 @@
 
 .navHint {
   overflow: hidden;
-  font-size: var(--sk-fs-micro);
-  line-height: var(--sk-lh-micro);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
   color: var(--sk-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -187,8 +187,8 @@
   display: block;
   color: var(--sk-text-2);
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   overflow-wrap: anywhere;
   user-select: text;
 }
@@ -381,8 +381,8 @@
 .monoLine {
   overflow: hidden;
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   color: var(--sk-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -394,8 +394,8 @@
   display: block;
   overflow: hidden;
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
   user-select: text;
@@ -566,8 +566,8 @@
 .dirPath {
   overflow: hidden;
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   color: var(--sk-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -601,7 +601,7 @@
   min-width: 0;
   overflow: hidden;
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
+  font-size: var(--sk-fs-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
   user-select: text;
@@ -698,8 +698,8 @@
 .licenseText {
   margin: 0;
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   color: var(--sk-text-2);
   white-space: pre-wrap;
   overflow-wrap: anywhere;

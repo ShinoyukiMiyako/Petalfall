@@ -82,8 +82,8 @@
   margin: 0;
   padding: var(--sk-space-10) var(--sk-space-12);
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   color: var(--sk-text-2);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -133,8 +133,8 @@
 .failedDetail {
   margin: 0;
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   color: var(--sk-text-2);
   overflow-wrap: anywhere;
 }

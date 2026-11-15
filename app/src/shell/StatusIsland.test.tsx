@@ -371,7 +371,7 @@ describe("详情的日志区", () => {
   it("固定按 LOG_LINES 行的行高加上下内边距取高度，不随行数长高", () => {
     const logs = block(".logs");
     expect(logs).toMatch(/box-sizing:\s*border-box/);
-    expect(logs).toContain(`height: calc(${LOG_LINES} * var(--sk-lh-mono-sm) + 2 * var(--sk-space-8))`);
+    expect(logs).toContain(`height: calc(${LOG_LINES} * var(--sk-lh-mono) + 2 * var(--sk-space-8))`);
     expect(logs).not.toMatch(/max-height/);
   });
 
