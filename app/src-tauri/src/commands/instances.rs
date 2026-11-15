@@ -55,8 +55,9 @@ pub enum InstanceActivity {
     /// 删除存档备份，或为打开文件夹建出工作目录下的子目录。
     Modifying,
     /// 别的实例正以它为基底（在那个实例的 `inheritsFrom` 链上）：那个实例启动到游戏退出、补全、导入整合包
-    /// 期间都要读写这里的客户端 jar 与 natives。导入还以同样的名义占住要写的加载器版本：不在继承链上，但实例
-    /// JSON 抄自它。只经 [`InstanceLocks::acquire_with_bases`] 占，占用里记着是哪个实例在用。
+    /// 期间都要读写这里的客户端 jar 与 natives，移到另一个游戏目录期间要把这里的版本 JSON 与客户端 jar 补到
+    /// 目标里。导入还以同样的名义占住要写的加载器版本：不在继承链上，但实例 JSON 抄自它。只经
+    /// [`InstanceLocks::acquire_with_bases`] 与 [`InstanceLocks::acquire_with_chain`] 占，占用里记着是哪个实例在用。
     Inherited,
     /// 备份、恢复或导出存档；游戏退出后的自动备份由启动命令把「运行」转成它，备份完才释放，基底在转的时候
     /// 就放开（[`ChainGuard::into_backup`]）。

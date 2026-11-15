@@ -3,14 +3,14 @@
 import type { InstanceSummary } from "./adapt";
 import type { BaseBlockingActivity } from "./types";
 
-/** 别的实例正以它为基底：那个实例启动到游戏退出、补全或导入整合包期间要读写这里的客户端 jar 与 natives。 */
+/** 别的实例正以它为基底：那个实例启动到游戏退出、补全或导入整合包期间要读写这里的客户端 jar 与 natives，移到别的游戏目录期间要把这里的版本 JSON 与客户端 jar 带过去。 */
 export interface InheritedLock {
   kind: "inherited";
   /** 正在用它的实例。 */
   usedBy: string;
 }
 
-/** 继承链上的基底正忙：补全要占住基底，它在运行或目录正被重写时，任务一开工就被后端拒绝。 */
+/** 继承链上的基底正忙：补全与移动要占住基底，它在运行或目录正被重写时，任务一开工就被后端拒绝。 */
 export interface BaseBusyLock {
   kind: "base_busy";
   /** 挡路的那个基底。 */
@@ -29,7 +29,7 @@ export interface InstanceLocks {
   /** 启用、停用、更新、移除 Mod 与回滚。 */
   mods: "running" | "installing" | "moving" | null;
   rename: InstanceLock | null;
-  /** 补全游戏文件：安装中显示「进行中」而不是禁用原因。只有它要占基底，所以只有它看基底忙不忙。 */
+  /** 补全游戏文件：安装中显示「进行中」而不是禁用原因。它要占基底，所以与移动一样看基底忙不忙。 */
   repair: InstanceLock | BaseBusyLock | null;
   delete: "running" | "moving" | HeldActivity | InheritedLock | null;
   /** 启动：正在移走或被当作基底会挡住。存档正忙另由 savesBusy 判定，它还要看前端排着的存档任务。 */
