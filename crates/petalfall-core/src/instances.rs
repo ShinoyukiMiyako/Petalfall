@@ -986,10 +986,12 @@ impl Petalfall {
     /// `id` 继承链上除它自己以外的版本 id，由近及远，最后一个是客户端 jar 与 natives 所在的链根。
     /// 没有 `inheritsFrom` 时为空。
     ///
-    /// 只读链上各环的版本 JSON，不扫整个 `versions/`：启动与补全在开局就要它，用来在任务期间占住
-    /// 这些基底版本。某一环的 JSON 不在或解析不了时停在那一环（它的 id 已经收进结果）：链断在哪、为什么
-    /// 由启动与补全自己按失败码报出，这里提前报错只会把具体的失败原因换成笼统的错误。读文件本身出错
-    /// （权限、磁盘）照实报错。`inheritsFrom` 来自盘上的文件，指向不能安全拼进路径的 id 时不再往下读。
+    /// 只读链上各环的版本 JSON，不扫整个 `versions/`：启动、接回游戏、补全与移动在开局就要它，用来在任务
+    /// 期间占住这些基底版本。某一环的 JSON 不在或解析不了时停在那一环（它的 id 已经收进结果）：链断在哪、
+    /// 为什么由启动与补全自己按失败码报出；移动的预检要合并出完整的版本 JSON，在 `move_deps::read_chain` 里
+    /// 自己沿链再读一遍、另行报错；接回的游戏已经在跑，断处以外的基底不占也就不报。这里提前报错只会把具体的
+    /// 失败原因换成笼统的错误。读文件本身出错（权限、磁盘）照实报错。`inheritsFrom` 来自盘上的文件，
+    /// 指向不能安全拼进路径的 id 时不再往下读。
     pub async fn inheritance_chain(&self, id: &str) -> Result<Vec<String>> {
         if !is_safe_instance_id(id) {
             return Err(InstanceError::InvalidId { id: id.to_owned() }.into());

@@ -91,7 +91,7 @@ impl InstanceActivity {
     /// 几个实例也可以同时以它为基底；挪走或重写它的目录则会让那些实例丢掉客户端 jar 与 natives。基底自己的
     /// 启动与运行也与基底占用互斥：游戏映射着 natives，补全或导入要重写它们时会写到一半报 IO 错误，提前报
     /// `instance_busy` 比让任务半路失败好。占用槽全局只跑一个游戏，「基底运行时启动加载器实例」本来就走不到，
-    /// 被挡住的只有补全与导入。
+    /// 被挡住的只有补全、移动与导入；移动只读基底的版本 JSON 与客户端 jar，被挡是因为它同样以 inherited 占基底。
     ///
     /// 备份与恢复只碰 saves 下的一个存档与游戏目录里的备份区，和 Mod 改动、基底占用都不相交；游戏开着时
     /// 存档随时在写，打包出来的是半截，恢复则会被游戏下次保存覆盖，所以与启动、运行互斥。它的兼容集合比
@@ -188,7 +188,7 @@ impl InstanceLocks {
         assert_ne!(
             activity,
             InstanceActivity::Inherited,
-            "基底占用要记下使用者，只经 acquire_with_bases 占"
+            "基底占用要记下使用者，只经 acquire_with_bases 或 acquire_with_chain 占"
         );
         self.hold(id, activity, None)
     }
@@ -209,7 +209,7 @@ impl InstanceLocks {
     }
 
     /// 同 [`InstanceLocks::acquire_with_bases`]，基底要读盘才知道（`chain` 读实例的继承链）：占住实例自己之后
-    /// 才去读。实例正被安装、补全、改名或删除时它的版本 JSON 可能正被替换或挪走，先读的话报出来的会是读文件
+    /// 才去读。实例正被安装、补全、改名、删除或移走时它的版本 JSON 可能正被替换或挪走，先读的话报出来的会是读文件
     /// 的错误而不是 `instance_busy`；占住之后链也不会再被别的命令改掉。读链失败时实例自己的占用随错误放开。
     pub async fn acquire_with_chain(
         &self,
