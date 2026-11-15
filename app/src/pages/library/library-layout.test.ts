@@ -103,6 +103,13 @@ describe("卡面与新建卡的悬停", () => {
     for (const property of ["opacity", "transform", "background-color", "border-color", "color"]) expect(transition).toContain(`${property} var(`);
   });
 
+  it("侧栏满时标着不可用的图钉随卡片悬停、聚焦出现时停在禁用的不透明度，不被「出现」那条提回满格", () => {
+    expect(declarations(".card:hover .pin").opacity).toBe("1");
+    for (const selector of ['.card:hover .pin[aria-disabled="true"]', '.card:focus-within .pin[aria-disabled="true"]']) {
+      expect(declarations(selector).opacity).toBe("var(--sk-disabled)");
+    }
+  });
+
   it("卡面版本号的字色随卡面形态换时与卡面、标签同一档淡过去（入场时长、减速曲线）；带模糊的文字阴影不过渡，随形态瞬切", () => {
     expect(declarations(".coverVersion").transition).toBe("color var(--sk-dur-in) var(--sk-ease-out)");
     // 阴影仍随媒体形态挂上，只是不补间（那条规则的选择器里带逗号，declarations 按逗号拆分组匹配不到它）

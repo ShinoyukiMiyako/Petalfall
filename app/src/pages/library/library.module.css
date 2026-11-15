@@ -181,6 +181,12 @@
   opacity: 1;
 }
 
+/* 侧栏满时图钉标着不可用：出现时停在禁用的不透明度，上面那条的权重更高，不压住就会把它提回满格 */
+.card:hover .pin[aria-disabled="true"],
+.card:focus-within .pin[aria-disabled="true"] {
+  opacity: var(--sk-disabled);
+}
+
 /*
  * 字色随卡面形态换时淡过去，不在卡面图片显出来之前一帧跳色。文字阴影不过渡、随形态瞬切（卡面组件自己也是这样）：
  * 它带一层 14px 的模糊，补间时每帧都要重绘，一屏多张卡同时换卡面时开销太大
