@@ -81,6 +81,7 @@ pub mod template;
 pub mod ui_shape;
 pub mod update_prefs;
 pub mod updates;
+pub mod usage_notice;
 pub mod versions;
 mod workdir;
 pub mod world_backup;
@@ -146,6 +147,7 @@ pub use starter::{
 pub use template::{TEMPLATE_FILES, TemplateFile, TemplateInfo, TemplateOutcome, TemplateSkip};
 pub use ui_shape::{MAX_RECENT_CARDS, UiShape, UiShapePatch};
 pub use updates::{ModChangelog, UpdateCandidate};
+pub use usage_notice::UsageNoticeAcceptance;
 pub use world_backup::{
     AutoBackupOutcome, BackupOutcome, ExportOutcome, RestoreOutcome, WorldBackup, WorldBackupList,
 };

@@ -293,6 +293,8 @@ pub fn run() {
             commands::system::memory_advice,
             commands::system::is_first_run,
             commands::system::complete_first_run,
+            commands::system::usage_notice_acceptance,
+            commands::system::accept_usage_notice,
             commands::system::startup_notices,
             commands::system::probe_network,
             commands::servers::list_pinned_servers,

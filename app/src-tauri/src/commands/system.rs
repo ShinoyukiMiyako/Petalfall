@@ -1,9 +1,13 @@
-//! 系统：内存建议、首次启动、启动提示与连通性探测。
+//! 系统：内存建议、首次启动、使用须知的确认、启动提示与连通性探测。
+
+use std::num::NonZeroU32;
 
 use petalfall_base::fs::DataDirResolution;
 use petalfall_core::data_format::GuardMode;
 use petalfall_core::folders::{ensure_game_dir, probe_dir, validate_game_dir, FirstRunBaseline};
-use petalfall_core::{ConfigRecovery, MemoryAdvice, MemoryLimit, NeedFactor};
+use petalfall_core::{
+    ConfigRecovery, MemoryAdvice, MemoryLimit, NeedFactor, UsageNoticeAcceptance,
+};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
@@ -115,6 +119,62 @@ pub(crate) async fn complete_first_run_with(
     facade
         .update(|petalfall| {
             petalfall.complete_first_run(&base, game_dir, extras);
+            Ok::<_, CommandError>(())
+        })
+        .await
+}
+
+// ---- 使用须知 ----
+
+/// 本机确认过的使用须知。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct UsageNoticeAcceptanceDto {
+    /// 确认的是第几版：须知文首「版本：N」的 N，从 1 起。
+    pub version: u32,
+    /// 确认的时刻，Unix 毫秒。
+    pub accepted_at: u64,
+}
+
+impl From<UsageNoticeAcceptance> for UsageNoticeAcceptanceDto {
+    fn from(acceptance: UsageNoticeAcceptance) -> Self {
+        Self {
+            version: acceptance.version.get(),
+            accepted_at: acceptance.accepted_at,
+        }
+    }
+}
+
+/// 本机确认过的使用须知；没确认过（含旧配置没有这一项）为 null。须知的版本号只在前端产物里，
+/// 要不要再展示由前端拿它来比。
+#[tauri::command]
+pub async fn usage_notice_acceptance(
+    facade: State<'_, Facade>,
+) -> Result<Option<UsageNoticeAcceptanceDto>, CommandError> {
+    Ok(facade
+        .read()
+        .await
+        .usage_notice_acceptance()
+        .map(UsageNoticeAcceptanceDto::from))
+}
+
+/// 用户点了同意：记下第 `version` 版与此刻的时间并落盘。`version` 是 0 时报 invalid_argument，什么都不记。
+#[tauri::command]
+pub async fn accept_usage_notice(
+    version: u32,
+    facade: State<'_, Facade>,
+) -> Result<(), CommandError> {
+    accept_usage_notice_with(&facade, version).await
+}
+
+pub(crate) async fn accept_usage_notice_with(
+    facade: &Facade,
+    version: u32,
+) -> Result<(), CommandError> {
+    let version = NonZeroU32::new(version)
+        .ok_or_else(|| CommandError::invalid_argument("使用须知的版本号从 1 起，收到的是 0"))?;
+    facade
+        .update(|petalfall| {
+            petalfall.accept_usage_notice(version);
             Ok::<_, CommandError>(())
         })
         .await
@@ -705,5 +765,68 @@ mod tests {
         let limit = json["limit"]["mb"].as_u64().unwrap();
         assert!(limit * 2 <= json["total_mb"].as_u64().unwrap());
         assert_eq!(json["recommended_mb"].as_u64().unwrap(), limit.min(2560));
+    }
+
+    fn now_millis() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// 同意之后版本与时刻都落了盘，读回来的就是这一份；再同意更新的一版时整条换掉。
+    #[tokio::test]
+    async fn accepting_usage_notice_persists_version_and_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        assert_eq!(facade.read().await.usage_notice_acceptance(), None);
+        let first = 1 + fastrand::u32(..500);
+
+        let before = now_millis();
+        accept_usage_notice_with(&facade, first).await.unwrap();
+        let after = now_millis();
+
+        let saved = ConfigStore::at(dir.path().join("config.json"))
+            .load()
+            .await
+            .unwrap()
+            .usage_notice
+            .expect("同意之后 config.json 里应有记录");
+        assert_eq!(saved.version.get(), first);
+        assert!(
+            (before..=after).contains(&saved.accepted_at),
+            "确认时刻 {} 不在命令前后 {before}..={after} 之间",
+            saved.accepted_at
+        );
+        let read = facade
+            .read()
+            .await
+            .usage_notice_acceptance()
+            .map(UsageNoticeAcceptanceDto::from);
+        assert_eq!(
+            serde_json::to_value(read).unwrap(),
+            serde_json::json!({ "version": first, "accepted_at": saved.accepted_at })
+        );
+
+        accept_usage_notice_with(&facade, first + 1).await.unwrap();
+        let replaced = ConfigStore::at(dir.path().join("config.json"))
+            .load()
+            .await
+            .unwrap()
+            .usage_notice
+            .unwrap();
+        assert_eq!(replaced.version.get(), first + 1);
+        assert!(replaced.accepted_at >= saved.accepted_at);
+    }
+
+    /// 版本号 0 不是任何一版须知：拒绝，内存与盘上都不记。
+    #[tokio::test]
+    async fn zero_usage_notice_version_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let err = accept_usage_notice_with(&facade, 0).await.unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        assert_eq!(facade.read().await.usage_notice_acceptance(), None);
+        assert!(!dir.path().join("config.json").exists());
     }
 }

@@ -2145,10 +2145,86 @@ describe("设置页：关于与启动器更新", () => {
     ]);
   });
 
-  it("支持卡依次列出日志目录、协议全文、附加条款、素材许可、第三方许可与问题反馈", async () => {
+  it("支持卡依次列出日志目录、使用须知、隐私说明、协议全文、附加条款、素材许可、第三方许可与问题反馈", async () => {
     await mount("about");
     const titles = [...section("支持").querySelectorAll("button")].map((b) => b.closest('[class*="row"]')?.firstElementChild?.firstElementChild?.textContent);
-    expect(titles).toEqual(["打开日志目录", "协议全文", "附加条款", "素材许可", "第三方许可", "问题反馈"]);
+    expect(titles).toEqual(["打开日志目录", "使用须知", "隐私说明", "协议全文", "附加条款", "素材许可", "第三方许可", "问题反馈"]);
+  });
+
+  describe.each([
+    { title: "使用须知", url: "/usage-notice.md" },
+    { title: "隐私说明", url: "/privacy.md" },
+  ])("$title", ({ title, url }) => {
+    it("打开弹窗时才读产物里的文件：副标题是文首的版本号，正文按富文本画、加粗照样加粗，文首两行不重复显示；关上再开不重读", async () => {
+      // 随机的版本号与正文：显示的必须是读回来的那份，而不是哪里写死的文本
+      const version = 1 + Math.floor(Math.random() * 999);
+      const marker = Math.random().toString(36).slice(2);
+      const body = `# ${APP_NAME}${title}\n\n版本：${version}\n\n开头一段 ${marker}。\n\n## 1. 小节\n\n- **重要的一条。**\n- 普通的一条。\n`;
+      const fetchMock = vi.fn(async (_url: string) => ({ ok: true, status: 200, text: async () => body }));
+      vi.stubGlobal("fetch", fetchMock);
+      await mount("about");
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      await click(rowButton(title, "查看"));
+      expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([url]);
+      const [dialog] = openDialogs();
+      expect(dialog.querySelector("h2")?.textContent).toBe(title);
+      expect(dialog.className).toContain("licenseDialog");
+      expect(dialog.querySelector("h2 + p")?.textContent).toBe(`第 ${version} 版`);
+      const region = dialog.querySelector<HTMLElement>('[role="region"]');
+      if (region === null) throw new Error("须知的正文区没有画出来");
+      expect(region.getAttribute("aria-label")).toBe(title);
+      expect(region.tabIndex).toBe(0);
+      expect([...region.querySelectorAll("p, h4, li")].map((el) => [el.tagName, el.textContent])).toEqual([
+        ["P", `开头一段 ${marker}。`],
+        ["H4", "1. 小节"],
+        ["LI", "重要的一条。"],
+        ["P", "重要的一条。"],
+        ["LI", "普通的一条。"],
+        ["P", "普通的一条。"],
+      ]);
+      expect([...region.querySelectorAll("strong")].map((el) => el.textContent)).toEqual(["重要的一条。"]);
+      expect(region.textContent).not.toContain("版本：");
+      expect(region.textContent).not.toContain(`${APP_NAME}${title}`);
+      expect(dialog.querySelector("pre")).toBeNull();
+
+      await click(button("关闭"));
+      expect(openDialogs()).toHaveLength(0);
+      await click(rowButton(title, "查看"));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(openDialogs()[0]?.querySelector("h2 + p")?.textContent).toBe(`第 ${version} 版`);
+    });
+
+    it("读不出来：弹窗里写明原因与请求地址，不留白、没有版本号；重试再读一次", async () => {
+      const body = `# ${title}\n\n版本：3\n\n正文\n`;
+      const fetchMock = vi
+        .fn(async (_url: string) => ({ ok: true, status: 200, text: async () => body }))
+        .mockResolvedValueOnce({ ok: false, status: 404, text: async () => "Not Found" });
+      vi.stubGlobal("fetch", fetchMock);
+      await mount("about");
+      await click(rowButton(title, "查看"));
+
+      const [dialog] = openDialogs();
+      const alert = dialog.querySelector('[role="alert"]');
+      expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe(`${title}读不出来`);
+      expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe(`${title}读不出来：${url} 返回 404`);
+      expect(dialog.querySelector("h2 + p")).toBeNull();
+      expect(dialog.querySelector('[role="region"]')).toBeNull();
+
+      await click(all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === "重试") as HTMLButtonElement);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(openDialogs()[0]?.querySelector("h2 + p")?.textContent).toBe("第 3 版");
+      expect(openDialogs()[0]?.querySelector('[role="region"]')?.textContent).toBe("正文");
+    });
+
+    it("文首没有版本号：按读失败显示原因，不当成第 1 版", async () => {
+      vi.stubGlobal("fetch", vi.fn(async (_url: string) => ({ ok: true, status: 200, text: async () => `# ${title}\n\n正文\n` })));
+      await mount("about");
+      await click(rowButton(title, "查看"));
+      const [dialog] = openDialogs();
+      expect(dialog.querySelector('[role="alert"] [class*="errorText"]')?.textContent).toBe(`${title}的文首应是一行「# 标题」，接着一行「版本：N」（N 是从 1 起的整数）`);
+      expect(dialog.querySelector('[role="region"]')).toBeNull();
+    });
   });
 
   describe.each([

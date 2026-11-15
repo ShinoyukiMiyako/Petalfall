@@ -3,7 +3,7 @@
 //! 门面持有一份可读写的全局配置：下载源与版本列表源各自的三档策略（对应功能矩阵「文件下载源 /
 //! 版本列表源」两项独立三档设置）、下载并发、默认内存、版本隔离档位、微软 client_id、可选自定义
 //! 游戏/缓存目录，以及启动后窗口行为、默认 Java、主页固定的服务器、并存的游戏目录、首次启动
-//! 是否完成、启动器更新的检查偏好、更新通道与各通道见过的版本、界面语言，以及前端首帧占位用的界面形状缓存。
+//! 是否完成、启动器更新的检查偏好、更新通道与各通道见过的版本、界面语言、前端首帧占位用的界面形状缓存，以及用户确认过的使用须知。
 //! 凭据不进这里（归 petalfall-auth 的加密存储）。
 //!
 //! 配置以 JSON 落在数据目录（`%LOCALAPPDATA%\Petalfall\config.json`）。缺失时用全默认值；损坏时
@@ -30,6 +30,7 @@ use crate::appearance::Appearance;
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
 use crate::ui_shape::UiShape;
+use crate::usage_notice::UsageNoticeAcceptance;
 
 /// 下载源三档策略。对应功能矩阵的「文件下载源 / 版本列表源」三档设置。
 ///
@@ -251,6 +252,13 @@ pub struct PetalfallConfig {
     /// 读不懂时只有这一段按默认读，不算配置损坏（见 [`crate::ui_shape`]）。
     #[serde(deserialize_with = "crate::ui_shape::read_lenient")]
     pub ui_shape: UiShape,
+    /// 用户确认过的使用须知（第几版、什么时候），没确认过为 `None`、不写出。旧配置没有这一项时按没确认过读入；
+    /// 读不懂时同样按没确认过，不算配置损坏（见 [`crate::usage_notice`]）。
+    #[serde(
+        deserialize_with = "crate::usage_notice::read_lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub usage_notice: Option<UsageNoticeAcceptance>,
     /// 这个版本不认识的顶层设置（多半是更新的版本写的），原样留着、落盘时原样写回。
     ///
     /// 配置整份按内存里的值落盘：不留着的话，降级之后随便改一项设置，新版本的设置就从文件里消失了，
@@ -295,6 +303,7 @@ impl Default for PetalfallConfig {
             new_instance_template: true,
             world_backup: WorldBackupSettings::default(),
             ui_shape: UiShape::default(),
+            usage_notice: None,
             unrecognized: serde_json::Map::new(),
             carried_over: CarriedOver::default(),
         }

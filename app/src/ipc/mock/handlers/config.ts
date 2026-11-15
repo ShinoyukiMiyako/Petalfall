@@ -11,6 +11,7 @@ import type {
 } from "../../config";
 import { UI_LANGUAGES } from "../../config";
 import { IpcError } from "../../errors";
+import type { UsageNoticeAcceptanceDto } from "../../system";
 import { GAME_DIR_CHANGED_ERROR_CODE } from "../../tasks";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
 
@@ -92,6 +93,8 @@ let disk = new Set(SEED_DISK.map(norm));
 let withVersions = new Set(SEED_WITH_VERSIONS.map(norm));
 let versions = seedVersions();
 let firstRunCompleted = false;
+/** 与后端配置的 usage_notice 一致：确认过的须知版本与时刻，没确认过为 null。 */
+let usageNotice: UsageNoticeAcceptanceDto | null = null;
 
 /**
  * 与后端 FirstRunBaseline 一致：首次启动向导第一步之前的目录记录。第一步可以提交不止一次（回到第一步改了再离开），
@@ -259,6 +262,15 @@ export function isFirstRunCompleted(): boolean {
 
 export function markFirstRunCompleted(): void {
   firstRunCompleted = true;
+}
+
+export function usageNoticeAcceptance(): UsageNoticeAcceptanceDto | null {
+  return usageNotice === null ? null : { ...usageNotice };
+}
+
+/** 与后端 accept_usage_notice 一致：替换之前的记录，时刻取此刻。版本号的校验由调用方做。 */
+export function recordUsageNoticeAcceptance(version: number): void {
+  usageNotice = { version, accepted_at: Date.now() };
 }
 
 /** 解析带名目录：路径按游戏目录规则，名字去空白后不能为空。 */
@@ -492,6 +504,7 @@ export function reset(): void {
   versions = seedVersions();
   firstRunCompleted = false;
   firstRunBaseline = null;
+  usageNotice = null;
 }
 
 interface ConfigSnapshot {
@@ -501,17 +514,21 @@ interface ConfigSnapshot {
   withVersions: string[];
   versions: [path: string, names: string[]][];
   firstRunCompleted: boolean;
+  usageNotice: UsageNoticeAcceptanceDto | null;
 }
 
 /** 后来才加进配置、早先存下的快照里没有的字段。 */
 type LaterConfigFields = "extra_java_paths" | "prefer_dedicated_gpu" | "skip_accessibility_onboarding" | "new_instance_template";
-type StoredConfigSnapshot = Omit<ConfigSnapshot, "config"> & { config: Omit<ConfigDto, LaterConfigFields> & Partial<Pick<ConfigDto, LaterConfigFields>> };
+type StoredConfigSnapshot = Omit<ConfigSnapshot, "config" | "usageNotice"> & {
+  config: Omit<ConfigDto, LaterConfigFields> & Partial<Pick<ConfigDto, LaterConfigFields>>;
+  usageNotice?: UsageNoticeAcceptanceDto | null;
+};
 
 // 快照形状一变就升版本：旧快照里的配置缺字段，读回来会在 DTO 适配处出错，不如启用时就明确报版本不符。
 // 版本 4：另存各目录的版本名（移动实例会往里加）。
 export const persist: MockPersist = {
   version: 4,
-  snapshot: (): ConfigSnapshot => ({ config, extras, disk: [...disk], withVersions: [...withVersions], versions: [...versions], firstRunCompleted }),
+  snapshot: (): ConfigSnapshot => ({ config, extras, disk: [...disk], withVersions: [...withVersions], versions: [...versions], firstRunCompleted, usageNotice }),
   restore: (data) => {
     const saved = data as StoredConfigSnapshot;
     // 与后端配置的 serde(default) 一致：手动 Java、独显偏好、跳过无障碍引导与沿用默认设置是后加的字段，之前存下的快照没有它们，按默认值读入
@@ -521,5 +538,7 @@ export const persist: MockPersist = {
     withVersions = new Set(saved.withVersions);
     versions = new Map(saved.versions);
     firstRunCompleted = saved.firstRunCompleted;
+    // 与后端一样，早先存下、还没有这一项的快照按没确认过读入
+    usageNotice = saved.usageNotice === undefined ? null : saved.usageNotice;
   },
 };

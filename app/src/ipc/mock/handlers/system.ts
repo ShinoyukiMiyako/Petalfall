@@ -28,9 +28,11 @@ import {
   isFirstRunCompleted,
   markFirstRunCompleted,
   parseNamedDirectory,
+  recordUsageNoticeAcceptance,
   requireString,
   requireStruct,
   tauriArgError,
+  usageNoticeAcceptance,
   validateGameDir,
 } from "./config";
 import { requireMockInstanceId } from "./instances";
@@ -131,6 +133,20 @@ function completeFirstRun(args: MockArgs): void {
   applyFirstRunDirectory(baseline, gameDir);
   for (const extra of extras) addExtraDirectory(extra.name, extra.path);
   markFirstRunCompleted();
+}
+
+// ---- 使用须知 ----
+
+const U32_MAX = 4_294_967_295;
+
+/** 与后端一致：参数是 u32，缺了或不是 u32 是 Tauri 的参数错误；0 报 invalid_argument，什么都不记。 */
+function acceptUsageNotice(args: MockArgs): void {
+  const version = args.version;
+  if (typeof version !== "number" || !Number.isInteger(version) || version < 0 || version > U32_MAX) {
+    throw tauriArgError("accept_usage_notice", "version", "invalid type, expected u32");
+  }
+  if (version === 0) throw new IpcError("invalid_argument", "使用须知的版本号从 1 起，收到的是 0");
+  recordUsageNoticeAcceptance(version);
 }
 
 // ---- 服务器 ----
@@ -730,6 +746,8 @@ export const handlers: MockHandlers = {
   memory_advice: (args) => memoryAdvice(args),
   is_first_run: () => !isFirstRunCompleted(),
   complete_first_run: (args) => completeFirstRun(args),
+  usage_notice_acceptance: () => usageNoticeAcceptance(),
+  accept_usage_notice: (args) => acceptUsageNotice(args),
   startup_notices: () => startupNotices,
   probe_network: () => networkReachable,
   list_pinned_servers: () => pinned,

@@ -11,3 +11,9 @@ export const LICENSE_TEXT_FILE = "LICENSE.txt";
 export const ADDITIONAL_TERMS_FILE = "LICENSE-ADDITIONAL-TERMS.md";
 /** 美术与品牌素材的许可：启动器与引导程序的产物都带它，安装目录里也有一份。 */
 export const ASSET_LICENSE_FILE = "LICENSE-ASSETS.md";
+
+// 下面两份的源文件在仓库的 docs 下，产物根目录里用同样的文件名
+/** 使用须知：启动器与引导程序的产物都带它。 */
+export const USAGE_NOTICE_FILE = "usage-notice.md";
+/** 隐私说明：启动器与引导程序的产物都带它。 */
+export const PRIVACY_NOTICE_FILE = "privacy.md";

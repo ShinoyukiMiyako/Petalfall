@@ -207,6 +207,19 @@ export const STARTUP_NOTICE_COPY = {
   },
 } as const;
 
+/** 首次启动与须知改版后的第一次启动，进向导或主界面之前整窗展示的使用须知。正文是随产物分发的须知原文，这里只有页面上的说法。 */
+export const USAGE_NOTICE_COPY = {
+  title: "使用须知",
+  /** 标题上方的一行：须知文首记的版本号，与关于页里须知弹窗的副标题同一说法。 */
+  version: (version: number) => `第 ${version} 版`,
+  lead: `开始使用${APP_NAME}之前，请先读完这份须知。`,
+  /** 确认过旧的一版、须知改版之后。 */
+  leadUpdated: "使用须知有了新的一版，请读完后重新确认。",
+  agree: "我已阅读并同意",
+  refuse: "不同意并退出",
+  agreeFailed: "没能记下你的同意",
+} as const;
+
 /** 首次启动却缺少向导模块：构建产物不完整，外壳不能继续（错误原文进整屏错误页）。 */
 export const SHELL_DEFECT_COPY = {
   missingOnboarding: "首次启动向导模块缺失：这个构建不完整，无法完成首次设置",

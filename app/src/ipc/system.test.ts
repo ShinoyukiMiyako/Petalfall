@@ -6,6 +6,7 @@ import { IpcError } from "./errors";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
 import {
+  acceptUsageNotice,
   checkUpdate,
   completeFirstRun,
   downloadUpdate,
@@ -24,6 +25,7 @@ import {
   setUpdateChannel,
   startupNotices,
   updaterInfo,
+  usageNoticeAcceptance,
 } from "./system";
 import {
   setMockNetworkReachable,
@@ -206,6 +208,45 @@ describe("首次启动", () => {
       { name: "New", path: "D:\\Games\\New\\.minecraft", is_current: true, available: true, version_count: 0 },
       { name: "默认目录", path: "D:\\Games\\Launcher\\.minecraft", is_current: false, available: true, version_count: 0 },
       { name: "HMCL", path: "D:\\HMCL\\.minecraft", is_current: false, available: true, version_count: 12 },
+    ]);
+  });
+});
+
+describe("使用须知的确认", () => {
+  it("没确认过为 null；确认后记下版本与此刻，再确认新的一版整条换掉；reset 后回到没确认过", async () => {
+    expect(await usageNoticeAcceptance()).toBeNull();
+    const version = 1 + Math.floor(Math.random() * 900);
+    const before = Date.now();
+    await acceptUsageNotice(version);
+    const first = await usageNoticeAcceptance();
+    if (first === null) throw new Error("确认之后没有记录");
+    expect(first.version).toBe(version);
+    expect(first.accepted_at).toBeGreaterThanOrEqual(before);
+    expect(first.accepted_at).toBeLessThanOrEqual(Date.now());
+    await acceptUsageNotice(version + 1);
+    expect((await usageNoticeAcceptance())?.version).toBe(version + 1);
+    resetMocks();
+    expect(await usageNoticeAcceptance()).toBeNull();
+  });
+
+  it("版本号 0 报 invalid_argument，不是 u32 按 Tauri 参数错误拒绝；都不记", async () => {
+    const zero = await rejection(acceptUsageNotice(0));
+    expect(zero.code).toBe("invalid_argument");
+    for (const bad of [-1, 1.5, Number.NaN, 4_294_967_296]) {
+      const error = await rejection(acceptUsageNotice(bad));
+      expect([error.code, error.message]).toEqual(["unknown", "invalid args `version` for command `accept_usage_notice`: invalid type, expected u32"]);
+    }
+    expect(await usageNoticeAcceptance()).toBeNull();
+  });
+
+  it("Tauri 里读不带参数，确认时带上 version", async () => {
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+    expect(await usageNoticeAcceptance()).toBeNull();
+    await acceptUsageNotice(3);
+    expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
+      ["usage_notice_acceptance", undefined],
+      ["accept_usage_notice", { version: 3 }],
     ]);
   });
 });
