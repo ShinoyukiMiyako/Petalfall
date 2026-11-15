@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ART_DOWNLOAD_COPY } from "../../../copy/cover";
 import type { ArtDownloadProgressDto, ArtStatusDto } from "../../../ipc/art";
 import { IpcError } from "../../../ipc/errors";
 import { SPEED_REFRESH_MS } from "../../../lib/progress-display";
@@ -290,6 +291,30 @@ describe("下载原版材质部件", () => {
     expect(text()).not.toContain("本机还没有原版材质");
     expect(text()).toContain("从 Mojang 官方源或镜像下载原版材质，整包约 20 到 40 MB，下完只留不到 1 MB。");
     expect(button("下载原版材质")).toBeDefined();
+  });
+
+  it("紧凑档、材质源是降级集：标题与说明用不全的那一套；下载中只留进度，失败后标题、说明与重试一起回来", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    act(() => {
+      setArtStatus({ source: { versionId: "1.16.5", degraded: true, legacySkins: true }, panorama: false });
+      setBlockCatalog(catalogFromDto({ version_id: "1.16.5", blocks: [] }));
+    });
+    const container = mount(true);
+    const paragraphs = () => [...container.querySelectorAll("p")].map((p) => p.textContent);
+    expect(paragraphs()).toEqual(["本机的原版材质不全", ART_DOWNLOAD_COPY.degradedBody]);
+    expect(text()).not.toContain("下完只留不到 1 MB。");
+    expect(button("下载原版材质")).toBeDefined();
+
+    await startDownload();
+    emit({ stage: "client", downloaded: 1024 * 1024, total: 4 * 1024 * 1024 });
+    expect(paragraphs()).toEqual([]);
+    expect(text()).toContain("正在下载客户端");
+
+    await act(async () => art.pending[0].reject(new IpcError("download_failed", "所有下载源都连不上")));
+    await flush();
+    expect(paragraphs()).toEqual(["本机的原版材质不全", ART_DOWNLOAD_COPY.degradedBody]);
+    expect(text()).toContain("上次没下完");
+    expect(button("重试")).toBeDefined();
   });
 });
 
