@@ -239,7 +239,12 @@ function assertAnchorInFlow(anchor: HTMLElement, scroller: HTMLElement): void {
  * 加载中与别的读取失败（网络盘暂时连不上等）不算：列表只是没读到，不能据此把人从实例页送走。
  */
 function instanceListKnown(status: SliceStatus): boolean {
-  return status.kind === "ready" || (status.kind === "error" && gameDirDataRejectionOf(status.error) !== null);
+  return status.kind === "ready" || gameDirRefused(status);
+}
+
+/** 列实例因游戏目录的数据格式被拒：目录被更新的版本用过，或记号读不懂。 */
+function gameDirRefused(status: SliceStatus): boolean {
+  return status.kind === "error" && gameDirDataRejectionOf(status.error) !== null;
 }
 
 function scrollMarginTop(el: HTMLElement): number {
@@ -276,6 +281,7 @@ function ShellCore({ children }: { children: ReactNode }) {
   const lastRename = useLauncherSelector((s) => s.lastRename);
   const lastMove = useLauncherSelector((s) => s.lastMove);
   const instancesKnown = useLauncherSelector((s) => instanceListKnown(s.status.instances));
+  const dirRefused = useLauncherSelector((s) => gameDirRefused(s.status.instances));
   const ids = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
   const crashedId = useLauncherSelector((s) => (s.session !== null && s.session.phase === "crashed" ? s.session.instanceId : null));
   const runningSince = useLauncherSelector((s) => (s.session !== null && s.session.phase === "running" ? s.session.runningSince : null));
@@ -359,19 +365,23 @@ function ShellCore({ children }: { children: ReactNode }) {
 
   const instanceIds = useMemo(() => new Set(ids), [ids]);
   useEffect(() => {
+    const alive = (r: Route) => {
+      const id = routeInstanceId(r);
+      return id === null || instanceIds.has(id);
+    };
     let next = historyRef.current;
     if (rename !== null) next = renameInHistory(next, rename.from, rename.to);
     const leaveMoved = move !== null && routeInstanceId(currentEntry(next).route) === move.id;
-    if (leaveMoved) next = navGo(next, LIBRARY_ROUTE);
+    // 游戏目录因数据格式被拒，停着的实例页随列表一起失效：一律去实例库，那里有「换一个游戏目录」。按剪除落回之前最近的
+    // 存活项的话，从主页、或在别的页面点侧栏固定进来的会落回那一页，主页上只有报错与重试
+    const leaveRefused = dirRefused && !alive(currentEntry(next).route);
+    if (leaveMoved || leaveRefused) next = navGo(next, LIBRARY_ROUTE);
     // 实例列表还没读到时不剪：此时列表为空，会把所有实例页都当成失效
-    if (instancesKnown) next = pruneHistory(next, (r) => {
-      const id = routeInstanceId(r);
-      return id === null || instanceIds.has(id);
-    });
-    commit(next, leaveMoved ? "go" : null);
+    if (instancesKnown) next = pruneHistory(next, alive);
+    commit(next, leaveMoved || leaveRefused ? "go" : null);
     if (rename !== null) setAppliedRename(rename.seq);
     if (move !== null) setAppliedMove(move.seq);
-  }, [commit, instanceIds, instancesKnown, rename, move]);
+  }, [commit, dirRefused, instanceIds, instancesKnown, rename, move]);
 
   const current = currentEntry(viewHistory);
   const route = effectiveRoute(current.route, (id) => !instancesKnown || instanceIds.has(id));
