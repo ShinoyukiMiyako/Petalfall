@@ -23,7 +23,7 @@
 //! | 5 | Vi > Vp | 安装包严格更慢 | switch，写交接记录 | newer | 无人值守 switch |
 //! | 6 | Vi > Vp | 安装包更快 | newer | newer | newer |
 //! | 7 | Vi > Vp | 任一侧认不出 | newer | newer | newer |
-//! | 8 | 程序文件缺失或没有版本 | 不看 | broken：repair | broken：repair，不无人值守 | 同「更新」 |
+//! | 8 | 程序文件不完好（缺失、PE 头读不懂或短于节表末端）或没有版本 | 不看 | broken：repair | broken：repair，不无人值守 | 同「更新」 |
 //! | 9 | 没有安装 | 不看 | fresh | fresh，不无人值守 | 同「更新」 |
 //!
 //! newer 什么都不能装。装回较早的版本只有第 5 行这一格：
@@ -79,7 +79,7 @@ pub enum Initiation {
 pub struct Installed<'a> {
     /// 卸载项里的 DisplayVersion；没写或为空时是 `None`。
     pub version: Option<&'a str>,
-    /// 程序文件完好。
+    /// 程序文件完好：在、是文件，PE 头读得懂，长度也不短于节表声明的末端。0 字节的与写了一半的都不算。
     pub program_intact: bool,
 }
 
@@ -92,7 +92,7 @@ pub enum ExistingKind {
     Same,
     /// 已装的更新，又不是能装回去的那一格：第 4、6、7 行，以及不带开关的更新遇到的第 5 行。原因见 [`NewerReason`]。
     Newer,
-    /// 程序文件缺失或卸载项没有版本：第 8 行。半装恢复也会改成它。
+    /// 程序文件不完好或卸载项没有版本：第 8 行。半装恢复也会改成它。
     Broken,
     /// 换到严格更慢的通道、装回较早的版本：交互或带开关时的第 5 行。
     Switch,

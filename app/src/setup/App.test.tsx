@@ -252,6 +252,8 @@ describe("发起安装", () => {
     button(copy.installed.switchTo("测试版")).click();
     await seeHeading("正在换到测试版 1.0.0-beta.5");
     await seeHeading("已换到测试版 1.0.0-beta.5");
+    // 装回的是更早的版本，完成页照「换到」页说预览版里新加的设置项可能回到默认
+    expect(document.querySelector("h1")?.nextElementSibling?.textContent).toBe("账户和游戏文件都留着；预览版里新加的设置项，在测试版里改过设置后可能回到默认值。");
     expect(fake.callsOf("install")).toEqual([[{ mode: "switch", dir: null, desktopShortcut: false }]]);
     expect(fake.callsOf("checkDir")).toEqual([]);
     // 交互确认的那次停在完成页，由用户自己点打开

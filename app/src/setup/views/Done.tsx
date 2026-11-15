@@ -13,8 +13,10 @@ export interface DoneProps {
   mode: InstallMode;
   /** 这次换到的通道（model 的 switchingTo），标题据此说「换到」；为 null 时按模式说。 */
   switching: Channel | null;
+  /** 换到更慢通道之前装着的通道（model 的 switchedFrom），只在 mode 为 switch 时有值，说明据此改用 copy.done.switchKept。 */
+  switchedFrom: Channel | null;
   version: string;
-  /** 为真时说明用 copy.done.kept，否则用 copy.done.firstRun。 */
+  /** 不是换到更慢通道时：为真说明用 copy.done.kept，否则用 copy.done.firstRun。 */
   keptData: boolean;
   /** 提权运行：不提供打开，提示从开始菜单打开。 */
   elevated: boolean;
@@ -24,12 +26,20 @@ export interface DoneProps {
   onClose(): void;
 }
 
+/** 换到更慢通道装上的是更早的版本，原来那个通道里新加的设置项可能回到默认值，不能照别的安装说设置都还在。 */
+function leadOf(copy: SetupCopy, mode: InstallMode, switchedFrom: Channel | null, switching: Channel | null, keptData: boolean): string {
+  const text = copy.done;
+  if (mode !== "switch") return keptData ? text.kept : text.firstRun;
+  if (switchedFrom === null || switching === null) throw new Error(`换通道安装要两边的通道，收到的是 ${switchedFrom} 与 ${switching}`);
+  return text.switchKept(copy.channel[switchedFrom], copy.channel[switching]);
+}
+
 /**
  * 视图自己不打开：由用户点击，引导程序才掌握退出时机；更新模式下 App 替用户走同一条打开的路，这里照样只显示加载。
  * 焦点落在下一步最该按的按钮上，Enter 直接生效。
  * 提权时不给打开：提权启动和普通启动用的是两个数据根。
  */
-export function Done({ copy, mode, switching, version, keptData, elevated, opening, onOpen, onClose }: DoneProps) {
+export function Done({ copy, mode, switching, switchedFrom, version, keptData, elevated, opening, onOpen, onClose }: DoneProps) {
   const text = copy.done;
   return (
     <Frame
@@ -42,7 +52,7 @@ export function Done({ copy, mode, switching, version, keptData, elevated, openi
           {modeTitle(copy, text.title, mode, switching, version)}
         </span>
       }
-      lead={keptData ? text.kept : text.firstRun}
+      lead={leadOf(copy, mode, switchedFrom, switching, keptData)}
       footer={
         <>
           <Button autoFocus={elevated} onClick={onClose}>

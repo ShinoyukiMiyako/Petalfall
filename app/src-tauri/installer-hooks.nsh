@@ -105,6 +105,9 @@ FunctionEnd
     Delete "${ROOT}\playtime.json"
     Delete "${ROOT}\java-probe-cache.json"
     Delete "${ROOT}\window-state.json"
+    ; 接回游戏的记录与读不懂时改名留下的那一份
+    Delete "${ROOT}\running-game.json"
+    Delete "${ROOT}\running-game.broken.json"
     ; 原子写和可写探针在进程崩溃时留下的文件
     Delete "${ROOT}\.*.tmp"
     Delete "${ROOT}\.petalfall-write-probe"
@@ -113,6 +116,8 @@ FunctionEnd
     RMDir /r "${ROOT}\runtime"
     RMDir /r "${ROOT}\authlib-injector"
     RMDir /r "${ROOT}\templates"
+    ; 移实例的日志，没收尾的移动也在里面
+    RMDir /r "${ROOT}\moves"
     Delete "${ROOT}\data-format.json"
     RMDir "${ROOT}"
   ${EndIf}

@@ -30,7 +30,7 @@ function done(overrides: Partial<DoneProps> = {}) {
       <OverlayProvider>
         <FrameChromeProvider value={chromeOf(copy)}>
           <InShell>
-            <Done copy={copy} mode="fresh" switching={null} version={VERSION} keptData={false} elevated={false} opening={false} onOpen={() => undefined} onClose={() => undefined} {...overrides} />
+            <Done copy={copy} mode="fresh" switching={null} switchedFrom={null} version={VERSION} keptData={false} elevated={false} opening={false} onOpen={() => undefined} onClose={() => undefined} {...overrides} />
           </InShell>
           <OverlayRoot />
         </FrameChromeProvider>
@@ -72,19 +72,24 @@ describe("文案", () => {
     expect(heading()).toBe(title);
   });
 
-  it.each([
-    ["switch", "beta", "已换到测试版 0.2.0"],
-    // 在「换到」页上确认的升级：计划是 upgrade，标题照样说换到
-    ["upgrade", "dev", "已换到预览版 0.2.0"],
-  ] as const)("换通道的 %s 说换到哪个通道", (mode, switching, title) => {
-    view = render(done({ mode, switching, keptData: true }));
-    expect(heading()).toBe(title);
+  // 装回的是更早的版本：原来那个通道里新加的设置项可能回到默认值，不说设置都还在
+  it("换到更慢的通道说换到哪个通道，说明照「换到」页说新加的设置项可能回到默认", () => {
+    view = render(done({ mode: "switch", switching: "beta", switchedFrom: "dev", keptData: true }));
+    expect(heading()).toBe("已换到测试版 0.2.0");
+    expect(lead()).toBe("账户和游戏文件都留着；预览版里新加的设置项，在测试版里改过设置后可能回到默认值。");
+  });
+
+  // 在「换到」页上确认的升级：计划是 upgrade，标题照样说换到；装上的是更新的版本，设置都还在
+  it("换到更快的通道说换到哪个通道，说明照常说设置都还在", () => {
+    view = render(done({ mode: "upgrade", switching: "dev", keptData: true }));
+    expect(heading()).toBe("已换到预览版 0.2.0");
     expect(lead()).toBe(zh.done.kept);
   });
 
-  it("英文系统的换通道标题", () => {
-    view = render(done({ copy: COPY.en, mode: "switch", switching: "stable" }));
+  it("英文系统的换通道标题与说明", () => {
+    view = render(done({ copy: COPY.en, mode: "switch", switching: "stable", switchedFrom: "beta", keptData: true }));
     expect(heading()).toBe("Switched to Stable 0.2.0");
+    expect(lead()).toBe("Your accounts and game files are kept; settings added in Beta may return to their defaults once you change settings in Stable.");
   });
 
   it("标题前有成功徽记：挂上时从透明处出来，读屏不念，标题文字照旧", () => {

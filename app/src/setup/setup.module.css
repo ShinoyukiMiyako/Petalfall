@@ -184,11 +184,16 @@
   display: flex;
 }
 
+/*
+ * 与主窗口标题栏的窗口键同款：可见底色是 34 的圆，两个圆之间、关闭键的圆到窗口右缘都是 8px，关闭键的圆贴命中区
+ * 左侧 4px 放，多出的宽度留在右边。这里没有标题栏，命中区高 50 让圆离窗口上缘也是 8px：再矮的话焦点环（外扩 4px）
+ * 会被窗口上缘切掉。关闭键悬停只染浅红，按下才转正红，免得指针路过时一块红色闪过。
+ */
 .winButton {
   display: inline-grid;
   place-items: center;
   width: 42px;
-  height: 40px;
+  height: 50px;
   padding: 0;
   border: 0;
   background: none;
@@ -197,12 +202,21 @@
   outline: none;
 }
 
+.winButton[data-close] {
+  width: 46px;
+  justify-items: start;
+}
+
+.winButton[data-close] .winFace {
+  margin-left: var(--sk-space-4);
+}
+
 .winFace {
   display: inline-grid;
   place-items: center;
   width: 34px;
-  height: 30px;
-  border-radius: var(--sk-r-sm);
+  height: 34px;
+  border-radius: var(--sk-r-pill);
   /* 焦点环（box-shadow）不过渡：键盘聚焦时环要立刻出现、离开时立刻消失 */
   transition:
     background-color var(--sk-dur-hover) var(--sk-ease),
@@ -210,7 +224,7 @@
 }
 
 .winButton:hover .winFace {
-  background: var(--sk-bg-3);
+  background: var(--sk-fill-hover);
   color: var(--sk-text);
 }
 
@@ -219,12 +233,12 @@
 }
 
 .winButton[data-close]:hover .winFace {
-  background: var(--sk-win-close);
-  color: var(--sk-win-close-ink);
+  background: var(--sk-danger-soft);
+  color: var(--sk-danger);
 }
 
 .winButton[data-close]:active .winFace {
-  background: var(--sk-win-close-active);
+  background: var(--sk-win-close);
   color: var(--sk-win-close-ink);
 }
 
