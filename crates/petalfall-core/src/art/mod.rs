@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use petalfall_auth::{SkinModel, SkinRef};
+use petalfall_instance::official_minecraft_dir;
 
 pub use catalog::{BlockCatalog, CatalogBlock};
 pub use default_skin::{DefaultSkin, DefaultSkinSet, default_skin};
@@ -195,12 +196,6 @@ impl Petalfall {
         }
         dirs
     }
-}
-
-/// 官方启动器的默认游戏目录 `%APPDATA%\.minecraft`；没有 APPDATA（非 Windows）时为 None。
-fn official_minecraft_dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
-        .map(|appdata| PathBuf::from(appdata).join(petalfall_instance::MINECRAFT_DIR_NAME))
 }
 
 /// 状态锁只护着内存里的几张表，持锁期间不做 IO 也不 await；中毒不携带需要放弃的状态。

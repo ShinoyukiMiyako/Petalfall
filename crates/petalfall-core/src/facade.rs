@@ -161,7 +161,7 @@ impl Petalfall {
         let game_dir = config
             .game_directory
             .clone()
-            .unwrap_or_else(|| data_dir.join(petalfall_instance::MINECRAFT_DIR_NAME));
+            .unwrap_or_else(|| crate::folders::default_game_dir(&data_dir));
         Ok(Self {
             config,
             http,

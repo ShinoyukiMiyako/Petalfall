@@ -74,7 +74,7 @@ export interface SettingsTabProps {
 export interface SettingsEditor {
   /** 磁盘上的值叠加还没回来的乐观补丁。 */
   value: InstanceSettings;
-  /** 此刻写不了实例设置的原因（安装、补全、改名、删除进行中）；能写为 undefined。锁住时各控件不触发 save。 */
+  /** 此刻写不了实例设置的原因（安装、补全、改名、删除、移到别的游戏目录进行中）；能写为 undefined。锁住时各控件不触发 save。 */
   locked: string | undefined;
   save(patch: Partial<InstanceSettings>): Promise<boolean>;
 }
@@ -965,7 +965,7 @@ const TEMPLATE_SKELETON_WIDTH = 200;
 
 /**
  * 「设为新实例的默认设置」：保存读的是磁盘上的文件，所以游戏运行中也能存（游戏退出时才写入的改动不在其中）；
- * 只在安装、补全、改名、删除挪动实例目录时禁用，原因与改实例设置的锁同一套。清除与本实例无关，不受这把锁约束。
+ * 只在安装、补全、改名、删除、移到别的游戏目录挪动实例目录时禁用，原因与改实例设置的锁同一套。清除与本实例无关，不受这把锁约束。
  */
 function TemplateRow({ id, locked }: { id: string; locked: string | undefined }) {
   const template = useTemplateInfo();

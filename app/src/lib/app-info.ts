@@ -84,7 +84,7 @@ async function loadNotice(file: string, what: string): Promise<LegalNotice> {
   return parseLegalNotice(await loadLegalText(file, what), what);
 }
 
-/** 使用须知：关于页用它，用到时才去读。 */
+/** 使用须知：每次启动都经它读一次，与本机确认过的版本比对（state/usage-notice），使用须知页画的就是这一份；关于页的弹窗打开时另经它读。 */
 export function loadUsageNotice(): Promise<LegalNotice> {
   return loadNotice(USAGE_NOTICE_FILE, "使用须知");
 }
