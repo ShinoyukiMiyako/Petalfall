@@ -7,15 +7,16 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { ACTION_ERROR } from "../copy/flows";
-import { USAGE_NOTICE_COPY } from "../copy/shell";
+import { NOTICE_DIALOG_COPY, USAGE_NOTICE_COPY } from "../copy/shell";
 import { IpcError } from "../ipc/errors";
 import { resetMocks } from "../ipc/mock";
 import { acceptUsageNotice, usageNoticeAcceptance } from "../ipc/system";
 import { LauncherProvider } from "../state/launcher";
 import { loadUsageNoticeState, noticePending, type UsageNoticeState } from "../state/usage-notice";
-import { render, stubMatchMedia, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
+import { keydown, render, stubMatchMedia, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, resetRecorder } from "../test/launcher";
+import { MODAL_CLOSE_LABEL } from "../ui/Modal";
 import { UsageNoticeGate } from "./UsageNoticeGate";
 import { browserWindowPort, WindowPortProvider, type WindowPort } from "./window";
 
@@ -23,7 +24,9 @@ const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }))
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
 const NOTICE_URL = "/usage-notice.md";
+const PRIVACY_URL = "/privacy.md";
 const LINK = "https://example.org/notice-repo";
+const PRIVACY_LINK = "https://example.org/privacy-consent";
 
 let view: Rendered | undefined;
 let port: WindowPort & { show: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn> };
@@ -31,6 +34,8 @@ let port: WindowPort & { show: ReturnType<typeof vi.fn>; destroy: ReturnType<typ
 let order: string[];
 /** 每个用例的随机标记，断言正文时用：显示的必须是文件里的这一份，而不是哪里写死的字。 */
 let marker: string;
+/** 页面经 fetch 读过的地址，按先后。 */
+let fetched: string[];
 
 function randomVersion(): number {
   return 1 + Math.floor(Math.random() * 900);
@@ -41,9 +46,28 @@ function noticeFile(version: number): string {
   return `# 测试须知\r\n\r\n版本：${version}\r\n\r\n第一段 ${marker}。**加粗条款 ${marker}**，见 [仓库](${LINK})。\r\n\r\n## 1. 小节\r\n\r\n- 一项 ${marker}\r\n`;
 }
 
-/** 产物根目录里放着这一份须知；别的地址一律不通。 */
-function serveNotice(text: string): void {
-  vi.stubGlobal("fetch", async (url: string) => (url === NOTICE_URL ? new Response(text, { status: 200 }) : Promise.reject(new TypeError(`测试环境不联网：${url}`))));
+/** 按同一文首约定拼一份隐私说明：标题、版本行、一段带加粗与链接的正文。正文的说法与须知的不同，弹窗里显示的是哪一份一看便知。 */
+function privacyFile(version: number): string {
+  return `# 测试隐私说明\r\n\r\n版本：${version}\r\n\r\n开头一段 ${marker}。**不上传任何东西 ${marker}**，见 [权限页](${PRIVACY_LINK})。\r\n`;
+}
+
+/** 产物根目录里放着这一份须知；给了 privacy 时另有一份隐私说明，每次读都由它现给应答（读失败也由它造）。别的地址一律不通。 */
+function serveNotice(text: string, privacy?: () => Response): void {
+  vi.stubGlobal("fetch", async (url: string) => {
+    fetched.push(url);
+    if (url === NOTICE_URL) return new Response(text, { status: 200 });
+    if (url === PRIVACY_URL && privacy !== undefined) return privacy();
+    return Promise.reject(new TypeError(`测试环境不联网：${url}`));
+  });
+}
+
+const OPEN_DIALOG = '[data-sk-modal-layer]:not([data-exiting]) [role="dialog"]';
+const openDialogs = () => [...document.querySelectorAll<HTMLElement>(OPEN_DIALOG)];
+
+function onlyDialog(): HTMLElement {
+  const dialogs = openDialogs();
+  if (dialogs.length !== 1) throw new Error(`应正好开着一个弹窗，实际 ${dialogs.length} 个`);
+  return dialogs[0];
 }
 
 function Shell() {
@@ -113,6 +137,7 @@ beforeEach(() => {
     }),
   };
   marker = Math.random().toString(36).slice(2);
+  fetched = [];
 });
 
 afterEach(() => {
@@ -263,6 +288,128 @@ describe("首次启动", () => {
     click(link);
     await flush();
     expect(callsOf(ipc, "plugin:opener|open_url")).toEqual([{ url: LINK }]);
+  });
+});
+
+describe("同意之前看隐私说明", () => {
+  it("底栏的入口打开隐私说明弹窗：打开时才读产物里的那一份，标题、文首的版本号与富文本正文；关上回到须知页、什么都没记，再开不重读", async () => {
+    const privacyVersion = randomVersion();
+    serveNotice(noticeFile(randomVersion()), () => new Response(privacyFile(privacyVersion), { status: 200 }));
+    await mount(await loadUsageNoticeState());
+    expect(fetched).toEqual([NOTICE_URL]);
+    expect(openDialogs()).toEqual([]);
+
+    click(button(USAGE_NOTICE_COPY.privacy));
+    await flush();
+    expect(fetched).toEqual([NOTICE_URL, PRIVACY_URL]);
+    const dialog = onlyDialog();
+    expect(dialog.querySelector("h2")?.textContent).toBe(NOTICE_DIALOG_COPY.privacy.title);
+    // 与关于页的须知弹窗同一个组件：打开就取满高
+    expect(dialog.className).toContain("noticeDialog");
+    await waitForFrames(() => expect(dialog.querySelector("h2 + p")?.textContent).toBe(NOTICE_DIALOG_COPY.privacy.version(privacyVersion)));
+    const region = dialog.querySelector<HTMLElement>('[role="region"]');
+    if (region === null) throw new Error("隐私说明的正文区没有画出来");
+    expect(region.getAttribute("aria-label")).toBe(NOTICE_DIALOG_COPY.privacy.title);
+    expect(region.tabIndex).toBe(0);
+    expect(region.textContent).toContain(`开头一段 ${marker}。`);
+    expect([...region.querySelectorAll("strong")].map((el) => el.textContent)).toEqual([`不上传任何东西 ${marker}`]);
+    // 文首两行不进正文，弹窗里也不是须知的正文
+    expect(region.textContent).not.toContain("测试隐私说明");
+    expect(region.textContent).not.toContain("版本：");
+    expect(region.textContent).not.toContain(`第一段 ${marker}`);
+
+    const close = dialog.querySelector<HTMLButtonElement>(`button[aria-label="${MODAL_CLOSE_LABEL}"]`);
+    if (close === null) throw new Error("隐私说明弹窗没有关闭按钮");
+    click(close);
+    await waitForFrames(() => expect(openDialogs()).toEqual([]));
+    expect(screen()).not.toBeNull();
+    expect(shellShown()).toBe(false);
+    expect(callsOf(ipc, "accept_usage_notice")).toEqual([]);
+    expect(await usageNoticeAcceptance()).toBeNull();
+
+    click(button(USAGE_NOTICE_COPY.privacy));
+    await flush();
+    expect(fetched).toEqual([NOTICE_URL, PRIVACY_URL]);
+    await waitForFrames(() => expect(onlyDialog().querySelector("h2 + p")?.textContent).toBe(NOTICE_DIALOG_COPY.privacy.version(privacyVersion)));
+  });
+
+  it("Esc 只关隐私说明弹窗，须知页留着", async () => {
+    serveNotice(noticeFile(randomVersion()), () => new Response(privacyFile(randomVersion()), { status: 200 }));
+    await mount(await loadUsageNoticeState());
+    click(button(USAGE_NOTICE_COPY.privacy));
+    await flush();
+    expect(openDialogs()).toHaveLength(1);
+
+    act(() => {
+      keydown(window, "Escape");
+    });
+    await waitForFrames(() => expect(openDialogs()).toEqual([]));
+    expect(screen()).not.toBeNull();
+    expect(shellShown()).toBe(false);
+    expect(port.destroy).not.toHaveBeenCalled();
+  });
+
+  it("读不出来：弹窗里写明原因与请求地址，没有版本号；重试读到了就显示", async () => {
+    const privacyVersion = randomVersion();
+    let missing = true;
+    serveNotice(noticeFile(randomVersion()), () => (missing ? new Response("Not Found", { status: 404 }) : new Response(privacyFile(privacyVersion), { status: 200 })));
+    await mount(await loadUsageNoticeState());
+    click(button(USAGE_NOTICE_COPY.privacy));
+    await flush();
+
+    const dialog = onlyDialog();
+    const alert = dialog.querySelector('[role="alert"]');
+    expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe(NOTICE_DIALOG_COPY.privacy.failed);
+    expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe(`隐私说明读不出来：${PRIVACY_URL} 返回 404`);
+    expect(dialog.querySelector("h2 + p")).toBeNull();
+    expect(dialog.querySelector('[role="region"]')).toBeNull();
+
+    missing = false;
+    const retry = [...dialog.querySelectorAll("button")].find((b) => b.textContent === NOTICE_DIALOG_COPY.privacy.retry);
+    if (retry === undefined) throw new Error("读失败时弹窗里没有重试");
+    click(retry);
+    await flush();
+    expect(fetched).toEqual([NOTICE_URL, PRIVACY_URL, PRIVACY_URL]);
+    await waitForFrames(() => expect(onlyDialog().querySelector("h2 + p")?.textContent).toBe(NOTICE_DIALOG_COPY.privacy.version(privacyVersion)));
+    expect(onlyDialog().querySelector('[role="region"]')?.textContent).toContain(`开头一段 ${marker}。`);
+  });
+
+  it("隐私说明里的链接与须知正文里的一样，经打开外部网址的出口打开", async () => {
+    serveNotice(noticeFile(randomVersion()), () => new Response(privacyFile(randomVersion()), { status: 200 }));
+    await mount(await loadUsageNoticeState());
+    click(button(USAGE_NOTICE_COPY.privacy));
+    await flush();
+    let link: HTMLAnchorElement | null = null;
+    await waitForFrames(() => {
+      link = onlyDialog().querySelector<HTMLAnchorElement>(`a[href="${PRIVACY_LINK}"]`);
+      expect(link).not.toBeNull();
+    });
+    if (link === null) throw new Error("隐私说明里的链接没有画出来");
+    click(link);
+    await flush();
+    expect(callsOf(ipc, "plugin:opener|open_url")).toEqual([{ url: PRIVACY_LINK }]);
+  });
+
+  it("同意已经在路上：入口不可用，点了不开弹窗、不去读；记下之后照常放行", async () => {
+    let answer: () => void = () => {
+      throw new Error("accept_usage_notice 还没被调用");
+    };
+    ipc.overrides.set("accept_usage_notice", () => new Promise<null>((resolve) => (answer = () => resolve(null))));
+    serveNotice(noticeFile(randomVersion()), () => new Response(privacyFile(randomVersion()), { status: 200 }));
+    await mount(await loadUsageNoticeState());
+
+    click(button(USAGE_NOTICE_COPY.agree));
+    await flush();
+    const entry = button(USAGE_NOTICE_COPY.privacy);
+    expect(entry.getAttribute("aria-disabled")).toBe("true");
+    click(entry);
+    await flush();
+    expect(openDialogs()).toEqual([]);
+    expect(fetched).toEqual([NOTICE_URL]);
+
+    answer();
+    await flush();
+    await waitForFrames(() => expect(shellShown()).toBe(true));
   });
 });
 

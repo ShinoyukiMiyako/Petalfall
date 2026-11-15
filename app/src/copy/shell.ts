@@ -218,6 +218,19 @@ export const USAGE_NOTICE_COPY = {
   agree: "我已阅读并同意",
   refuse: "不同意并退出",
   agreeFailed: "没能记下你的同意",
+  /** 底栏左侧的入口：须知里写着隐私另见「隐私说明」，同意之前就要能打开它的全文。 */
+  privacy: "查看隐私说明",
+} as const;
+
+const noticeVersion = (version: number) => `第 ${version} 版`;
+
+/**
+ * 使用须知与隐私说明的弹窗：关于页的支持卡与使用须知页打开的是同一个弹窗，说法也只在这一处。
+ * 标题也是正文区的名字；副标题是文首记的版本号；读不出来（含文首不合约定）时正文位是失败标题加原因与重试。
+ */
+export const NOTICE_DIALOG_COPY = {
+  usage: { title: "使用须知", loading: "正在读取使用须知…", failed: "使用须知读不出来", retry: "重试", version: noticeVersion },
+  privacy: { title: "隐私说明", loading: "正在读取隐私说明…", failed: "隐私说明读不出来", retry: "重试", version: noticeVersion },
 } as const;
 
 /** 首次启动却缺少向导模块：构建产物不完整，外壳不能继续（错误原文进整屏错误页）。 */

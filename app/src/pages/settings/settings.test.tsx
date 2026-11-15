@@ -2169,7 +2169,7 @@ describe("设置页：关于与启动器更新", () => {
       expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([url]);
       const [dialog] = openDialogs();
       expect(dialog.querySelector("h2")?.textContent).toBe(title);
-      expect(dialog.className).toContain("licenseDialog");
+      expect(dialog.className).toContain("noticeDialog");
       expect(dialog.querySelector("h2 + p")?.textContent).toBe(`第 ${version} 版`);
       const region = dialog.querySelector<HTMLElement>('[role="region"]');
       if (region === null) throw new Error("须知的正文区没有画出来");

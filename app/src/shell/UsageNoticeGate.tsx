@@ -6,22 +6,28 @@
 //
 // 同意之后整页淡出、面板轻微放大，向导或主界面已经挂在它底下，淡出即露出，它们按应用启动时的那一屏处理，不另播入场。
 // 外壳的通知容器在关口后面还没挂上，这一页的失败（记不下同意、窗口操作、打开链接）写在底栏上方。
+//
+// 须知里写着隐私另见「隐私说明」：底栏左侧的入口在同意之前就能打开它的全文，与关于页的隐私说明同一个弹窗、同一份文件。
+// 外壳的浮层根与 Esc 栈同样在关口后面，这一页自带一套，只供这个弹窗用；同意之后随整页一起退场。
 
 import { AnimatePresence, motion, useReducedMotionConfig } from "framer-motion";
 import { useCallback, useId, useMemo, useState, type ReactNode } from "react";
 import { Logo } from "../art/Logo";
 import { ACTION_ERROR } from "../copy/flows";
-import { SHELL_ACTION_ERROR, USAGE_NOTICE_COPY } from "../copy/shell";
+import { NOTICE_DIALOG_COPY, SHELL_ACTION_ERROR, USAGE_NOTICE_COPY } from "../copy/shell";
 import { acceptUsageNotice } from "../ipc/system";
 import type { LegalNotice } from "../lib/legal-notice";
 import { fade } from "../lib/motion";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
+import { usePrivacyNotice } from "../state/queries/about";
 import { noticePending, type UsageNoticeState } from "../state/usage-notice";
 import { Button } from "../ui/Button";
 import { Callout } from "../ui/Callout";
 import { ExternalLinkProvider } from "../ui/external-link";
+import { NoticeDialog } from "../ui/NoticeDialog";
 import { RichText } from "../ui/RichText";
 import { parseMarkdown } from "../ui/richtext-parse";
+import { OverlayProvider, OverlayRoot } from "./overlay";
 import { WindowControls } from "./TitleBar";
 import s from "./UsageNoticeGate.module.css";
 import { runGuarded, type Runner } from "./useRunner";
@@ -61,6 +67,11 @@ interface Failure {
   body: string;
 }
 
+/** 打开时才去读，读过一次之后整个会话复用：同意之后在关于页再打开，不再读一遍。 */
+function PrivacyNoticeDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  return <NoticeDialog open={open} onClose={onClose} notice={usePrivacyNotice(open)} copy={NOTICE_DIALOG_COPY.privacy} />;
+}
+
 function NoticeScreen({ notice, updated, onAgreed }: { notice: LegalNotice; updated: boolean; onAgreed: () => void }) {
   useRevealWindow(true);
   const port = useWindowPort();
@@ -69,6 +80,7 @@ function NoticeScreen({ notice, updated, onAgreed }: { notice: LegalNotice; upda
   const titleId = useId();
   const [busy, setBusy] = useState<Busy>(null);
   const [failure, setFailure] = useState<Failure | null>(null);
+  const [privacyOpen, setPrivacyOpen] = useState(false);
   const run = useCallback<Runner>((work, title) => runGuarded(work, title, { error: (t, body) => setFailure({ title: t, body }) }), []);
   const reportFrame = useCallback((error: unknown) => void run(() => Promise.reject(error), SHELL_ACTION_ERROR.windowState), [run]);
   const frame = useWindowFrame(reportFrame);
@@ -122,6 +134,10 @@ function NoticeScreen({ notice, updated, onAgreed }: { notice: LegalNotice; upda
             </Callout>
           )}
           <footer className={s.footer}>
+            {/* 同意或退出已经在路上时不再开弹窗：这一页马上就要退场或关窗 */}
+            <Button variant="ghost" icon="file-text" className={s.footerStart} disabled={busy !== null} focusableWhenDisabled onClick={() => setPrivacyOpen(true)}>
+              {USAGE_NOTICE_COPY.privacy}
+            </Button>
             {/* 拒绝与同意同样醒目：不同意是正经的选项，不做成不起眼的文字按钮 */}
             <Button variant="secondary" loading={busy === "refuse"} disabled={busy === "agree"} focusableWhenDisabled onClick={() => void refuse()}>
               {USAGE_NOTICE_COPY.refuse}
@@ -132,6 +148,13 @@ function NoticeScreen({ notice, updated, onAgreed }: { notice: LegalNotice; upda
           </footer>
         </motion.section>
       </div>
+      <OverlayProvider>
+        {/* 隐私说明里的链接与须知正文里的一样，经这一页的出口打开，失败写在底栏上方 */}
+        <ExternalLinkProvider open={openLink}>
+          <PrivacyNoticeDialog open={privacyOpen} onClose={() => setPrivacyOpen(false)} />
+        </ExternalLinkProvider>
+        <OverlayRoot />
+      </OverlayProvider>
     </motion.div>
   );
 }
