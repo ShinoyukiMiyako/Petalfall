@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
 // 导入中的整合包本来就已固定（配置里留着同名的旧固定，半成品目录被扫到后后端就认了它）：实例库卡片与详情页头图的
-// 取消固定入口与固定按同一个判断禁用，悬停原因要说取消固定，不能照搬「才能固定」那一句。
+// 取消固定入口与新建的实例一样照常可用，点了从固定列表里去掉这一条，装好后也不再自动固定回来。
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
@@ -18,7 +18,7 @@ import { bootOverrides, callsOf, instanceDto, resetRecorder, settle } from "../.
 import { LIBRARY_COPY } from "../library/copy";
 import LibraryPage from "../library/index";
 import { resetLibraryView } from "../library/view-state";
-import { HERO_COPY, LOCK_REASON } from "./copy";
+import { HERO_COPY } from "./copy";
 import InstancePage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -141,7 +141,10 @@ async function importPinned(): Promise<void> {
   });
   expect(launcher.state.tasks.map((t) => [t.kind, t.status])).toEqual([["modpack", "running"]]);
   expect(launcher.state.instances.find((i) => i.id === PACK)).toMatchObject({ placeholder: false, status: "installing", pinned: true });
+  expect(launcher.state.unsavedPins).toEqual([]);
 }
+
+const pinned = () => launcher.state.instances.find((i) => i.id === PACK)?.pinned;
 
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW });
@@ -176,41 +179,57 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-describe("导入中的实例本来就已固定：取消固定的入口禁用，原因说取消固定", () => {
-  it("实例库卡片：图钉与菜单项都写要等导入完成才能取消固定，点了不写固定列表", async () => {
+describe("导入中的实例本来就已固定：取消固定的入口照常可用", () => {
+  it("实例库卡片：图钉照常可点、提示只写名称，点了从固定列表里去掉并通知；菜单项随之换成固定", async () => {
     await importPinned();
     act(() => nav.go({ page: "library" }));
     await flush();
-    const before = callsOf(ipc, "set_sidebar_pins").length;
 
     const pin = byLabel(LIBRARY_COPY.unpin(PACK));
-    expect(pin.getAttribute("aria-disabled")).toBe("true");
-    expect(await tipOf(pin)).toBe(LIBRARY_COPY.unpin(PACK) + LOCK_REASON.unpinImporting);
+    expect(pin.getAttribute("aria-disabled")).toBeNull();
+    expect(await tipOf(pin)).toBe(LIBRARY_COPY.unpin(PACK));
     click(pin);
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["樱花生存"] }]);
+    expect(pinned()).toBe(false);
+    expect(launcher.state.toasts.map((t) => [t.tone, t.title])).toEqual([["success", LIBRARY_COPY.unpinned(PACK)]]);
+
+    click(byLabel(LIBRARY_COPY.moreLabel(PACK)));
+    await flush();
+    expect(menuItem(LIBRARY_COPY.menu.pin).getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("实例库卡片：菜单里的取消固定照常可点，从固定列表里去掉", async () => {
+    await importPinned();
+    act(() => nav.go({ page: "library" }));
     await flush();
 
     click(byLabel(LIBRARY_COPY.moreLabel(PACK)));
     await flush();
     const item = menuItem(LIBRARY_COPY.menu.unpin);
-    expect(item.getAttribute("aria-disabled")).toBe("true");
-    expect(await tipOf(item)).toBe(LOCK_REASON.unpinImporting);
+    expect(item.getAttribute("aria-disabled")).toBeNull();
     click(item);
     await flush();
-    expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(before);
-    expect(launcher.state.toasts).toEqual([]);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["樱花生存"] }]);
+    expect(pinned()).toBe(false);
   });
 
-  it("详情页头图：图钉的提示在名称下写要等导入完成才能取消固定", async () => {
+  it("详情页头图：图钉照常可点、提示只写名称，点了从固定列表里去掉", async () => {
     vi.stubGlobal("innerWidth", 1200);
     await importPinned();
     act(() => nav.go({ page: "instance", id: PACK, tab: "overview" }));
     await flush();
     const pin = byLabel(HERO_COPY.unpin);
-    expect(pin.getAttribute("aria-disabled")).toBe("true");
-    expect(await tipOf(pin)).toBe(HERO_COPY.unpin + LOCK_REASON.unpinImporting);
+    expect(pin.getAttribute("aria-disabled")).toBeNull();
+    expect(await tipOf(pin)).toBe(HERO_COPY.unpin);
+    click(pin);
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["樱花生存"] }]);
+    expect(pinned()).toBe(false);
+    expect(byLabel(HERO_COPY.pin).getAttribute("aria-pressed")).toBe("false");
   });
 
-  it("详情页头图 compact 档：菜单里的取消固定项禁用，原因放进提示气泡", async () => {
+  it("详情页头图 compact 档：菜单里的取消固定项照常可点", async () => {
     vi.stubGlobal("innerWidth", 1024);
     await importPinned();
     act(() => nav.go({ page: "instance", id: PACK, tab: "overview" }));
@@ -218,7 +237,10 @@ describe("导入中的实例本来就已固定：取消固定的入口禁用，�
     click(byLabel(HERO_COPY.more));
     await flush();
     const item = menuItem(HERO_COPY.unpin);
-    expect(item.getAttribute("aria-disabled")).toBe("true");
-    expect(await tipOf(item)).toBe(LOCK_REASON.unpinImporting);
+    expect(item.getAttribute("aria-disabled")).toBeNull();
+    click(item);
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["樱花生存"] }]);
+    expect(pinned()).toBe(false);
   });
 });

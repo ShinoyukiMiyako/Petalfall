@@ -1073,7 +1073,7 @@ function unsettled(cover: boolean, pin: boolean): string | null {
 export const TASK_TOAST = {
   ready: (name: string) => ({ title: `「${name}」已就绪`, body: "可以启动游戏了" }),
   readyElsewhere: (name: string, dir: string, cover: boolean, pin: boolean) => ({ title: `「${name}」已就绪`, body: landedElsewhere(dir, unsettled(cover, pin)) }),
-  importedElsewhere: (name: string, dir: string, cover: boolean) => ({ title: `「${name}」已导入`, body: landedElsewhere(dir, unsettled(cover, true)) }),
+  importedElsewhere: (name: string, dir: string, cover: boolean, pin: boolean) => ({ title: `「${name}」已导入`, body: landedElsewhere(dir, unsettled(cover, pin)) }),
   repairedElsewhere: (name: string, dir: string, reinstalledLoader: boolean, launchAfter: boolean) => ({
     title: reinstalledLoader ? `「${name}」的加载器已重新安装` : `「${name}」已修复`,
     body: landedElsewhere(dir, launchAfter ? "没有接着启动" : null),
@@ -1620,17 +1620,6 @@ export const MODPACK_REIMPORT_COPY = {
 export function modpackLabel(pack: { name: string; version: string | null }): string {
   return pack.version === null ? pack.name : `${pack.name} ${pack.version}`;
 }
-
-// ---------------------------------------------------------------- 导入中的整合包与侧栏固定
-
-/**
- * 有进行中的整合包导入指向这个实例时不改它的固定（原因见状态层的 importingModpack）。实例库卡片、头图与侧栏固定项菜单
- * 上禁用的原因，与状态层兜住没禁用的入口时报的错，说的是同一句。本来就已固定（配置里留着同名的旧固定）时说取消固定。
- */
-export const PIN_IMPORTING_COPY = {
-  pin: "整合包导入完成后才能固定",
-  unpin: "整合包导入完成后才能取消固定",
-} as const;
 
 // ---------------------------------------------------------------- 实例被当作基底
 

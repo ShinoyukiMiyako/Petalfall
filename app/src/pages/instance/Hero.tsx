@@ -20,7 +20,7 @@ import { useMounted } from "../../lib/useMounted";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncherSelector } from "../../state/launcher";
 import { reimportRoute } from "../../state/route";
-import { canPinMore, importingModpack, installTask } from "../../state/selectors";
+import { canPinMore, installTask } from "../../state/selectors";
 import { Card } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
 import { IconButton } from "../../ui/IconButton";
@@ -30,7 +30,7 @@ import type { MenuEntry } from "../../ui/Menu";
 import { MoreMenu } from "../../ui/MoreMenu";
 import { Tag } from "../../ui/Tag";
 import { TextInput } from "../../ui/TextInput";
-import { HERO_COPY, LOCK_REASON, SOURCE_LABEL } from "./copy";
+import { HERO_COPY, SOURCE_LABEL } from "./copy";
 import { ExportModpackModal } from "./ExportModpackModal";
 import styles from "./instance.module.css";
 import { CREATE_COMMANDS } from "./model";
@@ -58,7 +58,6 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   const cover = useInstanceCover(inst);
   const backdrop = useCoverBackdrop(inst);
   const pinBlocked = useLauncherSelector((s) => !inst.pinned && !canPinMore(s));
-  const importing = useLauncherSelector((s) => importingModpack(s, inst));
   const renameReason = lockReason(ops.locks.rename, "rename");
   const repairReason = lockReason(ops.locks.repair, "repair");
   const deleteReason = lockReason(ops.locks.delete, "delete");
@@ -83,11 +82,9 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   const [edited, setEdited] = useState(false);
   if (editing && !edited) setEdited(true);
 
-  // 导入中：图钉按带原因的禁用画，点击无效，悬停提示在名称下写原因。侧栏满了不同：点了由状态层弹上限提示，
-  // 所以图钉只标 aria-disabled、名称换成上限那一句
-  const pinLabel = pinBlocked && !importing ? TOAST_COPY.pinLimit : inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin;
-  const importReason = inst.pinned ? LOCK_REASON.unpinImporting : LOCK_REASON.pinImporting;
-  const pinReason = importing ? importReason : pinBlocked ? TOAST_COPY.pinLimit : undefined;
+  // 侧栏满了：点了由状态层弹上限提示，所以图钉只标 aria-disabled、名称换成上限那一句
+  const pinLabel = pinBlocked ? TOAST_COPY.pinLimit : inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin;
+  const pinReason = pinBlocked ? TOAST_COPY.pinLimit : undefined;
   // 禁用原因走菜单项的悬停提示气泡，不放右侧提示位：那一位与标签同一行、不折行，长原因会把标签挤成省略号
   const menu: MenuEntry[] = [
     { label: HERO_COPY.rename, icon: "edit", disabled: renameReason !== undefined, disabledReason: renameReason, onSelect: () => onRenamingChange(true) },
@@ -194,7 +191,6 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
                 size="lg"
                 variant="secondary"
                 pressed={inst.pinned}
-                disabledReason={importing ? importReason : undefined}
                 aria-disabled={pinBlocked || undefined}
                 onClick={ops.togglePin}
               />

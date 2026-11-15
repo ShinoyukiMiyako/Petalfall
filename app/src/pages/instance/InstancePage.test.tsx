@@ -949,9 +949,8 @@ describe("实例详情：新建还没落盘的实例", () => {
 });
 
 describe("实例详情：导入中的整合包占位项", () => {
-  // 导入命令一直不返回：实例目录建好之前后端不认这个名字，固定只会写进固定列表再报找不到
+  // 导入命令一直不返回：实例目录建好之前后端不认这个名字，与新建的占位项一样只改装好后要不要固定，不写固定列表
   const PACK = "周末联机";
-  const IMPORTING = "整合包导入完成后才能固定";
 
   async function openImporting(tab: InstanceTab) {
     ipc.overrides.set("install_modpack", () => new Promise(() => undefined));
@@ -991,15 +990,18 @@ describe("实例详情：导入中的整合包占位项", () => {
     return document.getElementById(tipId)?.textContent;
   }
 
-  it("头图的图钉带原因禁用：提示在名称下写要等导入完成，点了不写固定列表；新建的占位项照常能固定", async () => {
+  it("头图的图钉入队就按已固定画、照常可点：提示只写名称，点了只改装好后要不要固定，不写固定列表；新建的占位项同样", async () => {
     vi.stubGlobal("innerWidth", 1200);
     await openImporting("overview");
     const before = callsOf(ipc, "set_sidebar_pins").length;
-    const pin = button("固定到侧栏");
-    expect(pin.getAttribute("aria-disabled")).toBe("true");
-    expect(await tipOf(pin)).toBe(`固定到侧栏${IMPORTING}`);
+    const pin = button("从侧栏取消固定");
+    expect(pin.getAttribute("aria-disabled")).toBeNull();
+    expect(pin.getAttribute("aria-pressed")).toBe("true");
+    expect(await tipOf(pin)).toBe("从侧栏取消固定");
     click(pin);
     await flush();
+    expect(launcher.state.instances.find((i) => i.id === PACK)).toMatchObject({ placeholder: true, pinned: false });
+    expect(button("固定到侧栏").getAttribute("aria-pressed")).toBe("false");
     expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(before);
     expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
 
@@ -1009,23 +1011,22 @@ describe("实例详情：导入中的整合包占位项", () => {
     expect(text()).toContain("安装完成后可用");
     expect(document.querySelector('[role="switch"][aria-label="固定到侧栏"]')).toBeNull();
 
-    // 新建的占位项由状态层记着装好后要不要固定，图钉不受影响
     act(() => nav.go({ page: "instance", id: "周末生存", tab: "overview" }));
     await flush();
-    expect(button(/^(固定到侧栏|从侧栏取消固定)$/).getAttribute("aria-disabled")).toBeNull();
+    expect(button("从侧栏取消固定").getAttribute("aria-disabled")).toBeNull();
   });
 
-  it("compact 档：头图菜单里的固定项禁用，原因放进提示气泡；点了不写固定列表", async () => {
+  it("compact 档：头图菜单里的固定项照常可点，只改装好后要不要固定，不写固定列表", async () => {
     vi.stubGlobal("innerWidth", 1024);
     await openImporting("overview");
     const before = callsOf(ipc, "set_sidebar_pins").length;
     click(button("更多操作"));
-    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "固定到侧栏");
-    if (item === undefined) throw new Error("菜单里没有只写标签的「固定到侧栏」");
-    expect(item.getAttribute("aria-disabled")).toBe("true");
-    expect(await tipOf(item)).toBe(IMPORTING);
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "从侧栏取消固定");
+    if (item === undefined) throw new Error("菜单里没有只写标签的「从侧栏取消固定」");
+    expect(item.getAttribute("aria-disabled")).toBeNull();
     click(item);
     await flush();
+    expect(launcher.state.instances.find((i) => i.id === PACK)).toMatchObject({ placeholder: true, pinned: false });
     expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(before);
     expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
   });

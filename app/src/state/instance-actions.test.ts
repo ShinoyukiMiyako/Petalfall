@@ -1893,21 +1893,24 @@ describe("重启后重试上次关闭时中断的新建与导入", () => {
     expect(store.getState().tasks).toEqual([]);
   });
 
-  it("导入整合包：全部重试期间同样有占位项，失败后重扫落定才撤下", async () => {
+  it("导入整合包：全部重试期间同样有占位项、按有空位就固定排在侧栏末尾，失败后重扫落定才一起撤下", async () => {
     await restartWith(interrupted("t-pack", "modpack", "整合包", "install_modpack", { source: { kind: "file", path: "C:/packs/pack.mrpack" }, name: "整合包" }));
     const pack = deferred<unknown>();
     ipc.overrides.set("install_modpack", () => pack.promise);
     expect(store.actions.retryFailedTasks()).toBe(1);
     await settle();
-    expect(entry("整合包")).toMatchObject({ placeholder: true, status: "installing" });
+    expect(entry("整合包")).toMatchObject({ placeholder: true, status: "installing", pinned: true });
+    expect(store.getState().sidebarPins).toEqual(["整合包"]);
 
     const scan = deferred<InstanceDto[]>();
     ipc.overrides.set("list_instances", () => scan.promise);
     pack.reject(new IpcError("modpack_invalid", "清单读不出来"));
     await settle();
     expect(entry("整合包")).toMatchObject({ placeholder: true });
+    expect(store.getState().sidebarPins).toEqual(["整合包"]);
     scan.resolve(instances);
     await settle();
     expect(entry("整合包")).toBeUndefined();
+    expect(store.getState().sidebarPins).toEqual([]);
   });
 });
