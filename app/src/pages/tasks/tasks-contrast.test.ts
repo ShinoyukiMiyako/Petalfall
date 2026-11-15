@@ -1,7 +1,7 @@
 // 并行通道空出时虚线框里的「空闲」：交代这条通道眼下没有任务，是要被读到的状态，不是装饰也不是禁用态，不能用 text-3
 // （日樱落在卡片上约 2.17:1），按文字 4.5:1 验收。虚线框没有自己的底，字落在并行通道卡上。
 import { describe, expect, it } from "vitest";
-import { APPEARANCES, contrast, declarationOf, declarationsOf, readCss, resolveColor, tokensOf, type AppearanceName, type Rgb } from "../../test/contrast";
+import { APPEARANCES, contrast, declarationOf, readCss, resolveColor, tokensOf, type AppearanceName, type Rgb } from "../../test/contrast";
 
 const css = readCss(new URL("./tasks.module.css", import.meta.url));
 const cardCss = readCss(new URL("../../ui/Card.module.css", import.meta.url));
@@ -42,10 +42,9 @@ describe("并行通道里空闲通道的「空闲」", () => {
 const BADGE_TONES = ["ok", "danger", "muted"] as const;
 type BadgeTone = (typeof BADGE_TONES)[number];
 
-/** 色调规则特异性高于 .badge：自己写了就用自己的，没写就是 .badge 上的。 */
+/** 每种色调在自己的规则里成对写填充与图标色，少写一样直接报错，不从 .badge 上继承。 */
 function badgeDeclaration(tone: BadgeTone, property: string): string {
-  const selector = `.badge[data-tone="${tone}"]`;
-  return declarationsOf(css, selector).has(property) ? declarationOf(css, selector, property) : declarationOf(css, ".badge", property);
+  return declarationOf(css, `.badge[data-tone="${tone}"]`, property);
 }
 
 function badgeRatio(appearance: AppearanceName, tone: BadgeTone): number {
@@ -58,6 +57,14 @@ function badgeRatio(appearance: AppearanceName, tone: BadgeTone): number {
 
 const BADGE_CASES = (Object.keys(APPEARANCES) as AppearanceName[]).flatMap((appearance) => BADGE_TONES.map((tone) => [appearance, tone] as const));
 const isNight = (appearance: AppearanceName) => appearance.startsWith("夜樱");
+
+// 状态色实心底的两种色调：日樱的 -ink 与卡面色同为白，夜樱的 -ink 是比卡面更深的墨色
+const INK_TONES = ["ok", "danger"] as const;
+const INK_PINNED: Record<(typeof INK_TONES)[number], { day: number; night: number }> = {
+  ok: { day: 6.3541, night: 8.5207 },
+  danger: { day: 6.1951, night: 6.3908 },
+};
+const INK_CASES = (Object.keys(APPEARANCES) as AppearanceName[]).flatMap((appearance) => INK_TONES.map((tone) => [appearance, tone] as const));
 
 describe("任务行的结局角标", () => {
   it("样式表里写了的角标色调正好是这里逐一验收的三种", () => {
@@ -73,5 +80,11 @@ describe("任务行的结局角标", () => {
     expect(badgeDeclaration("muted", "background")).toBe("var(--sk-text-2)");
     expect(badgeDeclaration("muted", "color")).toBe("var(--sk-surface)");
     expect(badgeRatio(appearance, "muted")).toBeCloseTo(isNight(appearance) ? 5.7334 : 5.6325, 4);
+  });
+
+  it.each(INK_CASES)("%s · %s：状态色实心底配对应的 -ink 图标，完成日樱 6.3541、夜樱 8.5207，失败日樱 6.1951、夜樱 6.3908", (appearance, tone) => {
+    expect(badgeDeclaration(tone, "background")).toBe(`var(--sk-${tone})`);
+    expect(badgeDeclaration(tone, "color")).toBe(`var(--sk-${tone}-ink)`);
+    expect(badgeRatio(appearance, tone)).toBeCloseTo(INK_PINNED[tone][isNight(appearance) ? "night" : "day"], 4);
   });
 });
