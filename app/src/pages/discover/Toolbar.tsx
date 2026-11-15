@@ -200,7 +200,8 @@ export function Toolbar({ tabsId, filters, onKind, onFit, onFilters, fitCandidat
           reserveWidth
         />
       </div>
-      <Popover open={anchor !== null} anchor={anchor} onClose={() => setAnchor(null)} placement="bottom-end" aria-label={SEARCH_COPY.filterPanel} className={styles.filterPanel}>
+      {/* 面板 portal 在文档末尾：焦点不进来的话 Tab 从筛选按钮走到排序下拉，面板一直开着，键盘到不了里面的条件 */}
+      <Popover open={anchor !== null} anchor={anchor} onClose={() => setAnchor(null)} placement="bottom-end" autoFocus aria-label={SEARCH_COPY.filterPanel} className={styles.filterPanel}>
         <FilterPanel filters={filters} onFilters={onFilters} />
       </Popover>
     </div>
