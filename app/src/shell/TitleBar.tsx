@@ -2,7 +2,7 @@
 // 右列搜索入口、下载快览、账户胶囊与窗口三键。
 //
 // 整条是拖动区（data-tauri-drag-region="deep"）：子树里的按钮等可交互元素自然挡住拖动，
-// 其余空白与标题文字都能拖动窗口、双击切换最大化。窗口失焦时标题与三键字形降一级颜色。
+// 其余空白与标题文字都能拖动窗口、双击切换最大化。窗口失焦时标题降一级颜色，窗口三键不降。
 
 import { LayoutGroup, motion } from "framer-motion";
 import { useCallback } from "react";
