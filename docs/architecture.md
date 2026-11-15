@@ -929,7 +929,7 @@ versions/<实例名>/
     ├── settings.json      实例设置
     ├── incomplete.json    未完成标记：新建、补全或整合包导入没有完成时存在
     ├── install-record.json 装好时记下的 InstallSpec（实际装上的游戏版本与加载器版本，不记 use_template）：版本 JSON 不可用时修复照它重装
-    ├── logs/              每局的会话日志（日志页与崩溃报告读它；游戏自己写的 logs 在工作目录下）
+    ├── logs/              每局的会话日志，只保留最近 5 份（含本局的 latest.log，`logfile.rs` 的 `KEEP_SESSIONS`；日志页与崩溃报告读它；游戏自己写的 logs 在工作目录下）
     ├── ledger.json        Mod 卷宗：mods 目录里每个 jar 的平台来源与版本
     ├── history.json       Mod 变更历史，只追加，作为回滚的凭据
     ├── modpack.json       从整合包导入的实例记录的整合包信息
