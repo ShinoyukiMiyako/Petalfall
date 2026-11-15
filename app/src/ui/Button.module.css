@@ -121,8 +121,12 @@
   color: var(--sk-text-2);
 }
 
-.button[data-variant="ghost"]:hover:not(:disabled, [aria-disabled="true"]) {
-  background: var(--sk-bg-2);
+/*
+ * 悬停与按下的底是下方的叠层：实色 bg-2 在夜樱的卡片、浮层与弹窗上只差 1.01-1.04:1，落在凹陷区与行悬停（本身就是 bg-2）上完全看不出。
+ * text-2 留在叠层上悬停最低 3.68:1、按下最低 3.02:1，字与图标一并提到 text；按下也要提，键盘按住空格时只有 :active、没有 :hover
+ */
+.button[data-variant="ghost"]:hover:not(:disabled, [aria-disabled="true"]),
+.button[data-variant="ghost"]:active:not(:disabled, [aria-disabled="true"]) {
   color: var(--sk-text);
 }
 
@@ -143,11 +147,11 @@
 }
 
 /*
- * 实心变体的悬停与按下：只朝提高文字对比度的方向叠一层（日樱叠暗、夜樱叠亮），叠层做透明度过渡。
+ * 悬停与按下叠一层，叠层做透明度过渡。实心变体只朝提高文字对比度的方向叠（日樱叠暗、夜樱叠亮）；幽灵变体没有底，叠层就是它的悬停底。
  * 不用 filter: brightness()：它会把强调底上的字压回 4.5:1 以下。
+ * 每个变体都挂着这一层（次按钮的一直透明）：幽灵与次按钮互换（分类胶囊选中、取消）时叠层淡出，而不是随伪元素消失在一帧里跳掉。
  */
-.button[data-variant="primary"]::before,
-.button[data-variant="danger"]::before {
+.button::before {
   content: "";
   position: absolute;
   inset: -1px;
@@ -160,12 +164,14 @@
 }
 
 .button[data-variant="primary"]:hover:not(:disabled, [aria-disabled="true"])::before,
-.button[data-variant="danger"]:hover:not(:disabled, [aria-disabled="true"])::before {
+.button[data-variant="danger"]:hover:not(:disabled, [aria-disabled="true"])::before,
+.button[data-variant="ghost"]:hover:not(:disabled, [aria-disabled="true"])::before {
   opacity: 1;
 }
 
 .button[data-variant="primary"]:active:not(:disabled, [aria-disabled="true"])::before,
-.button[data-variant="danger"]:active:not(:disabled, [aria-disabled="true"])::before {
+.button[data-variant="danger"]:active:not(:disabled, [aria-disabled="true"])::before,
+.button[data-variant="ghost"]:active:not(:disabled, [aria-disabled="true"])::before {
   background: var(--sk-fill-press);
   opacity: 1;
 }
