@@ -2,7 +2,7 @@ import { cx } from "../lib/util";
 import { SakuraMark } from "./Logo";
 import styles from "./Spinner.module.css";
 
-/** 16 / 20 / 24 / 32 为独立加载指示的四档；18 只给 md 按钮的加载态用，与按钮图标同尺寸。 */
+/** 16 / 20 / 24 / 32 为独立加载指示的四档；18 只用在与 18 号图标互换的位置：md 按钮的加载态，以及设备码登录弹窗等待行里与时钟图标互换的那一格。 */
 export type SpinnerSize = 16 | 18 | 20 | 24 | 32;
 
 /**
