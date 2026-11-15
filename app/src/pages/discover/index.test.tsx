@@ -14,9 +14,9 @@ import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type Windo
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import type { ProjectDetail, SearchArgs, SearchEntry, SearchResultDto } from "../../state/queries/discover";
 import type { BlockedFileDto, PackModDto } from "../../state/store";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
-import { emulateFocusFixup } from "../../test/focus-fixup";
+import { emulateFocusFixup, refuseHiddenFocus } from "../../test/focus-fixup";
 import { bootOverrides, callsOf, cancelledError, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { entry, match, modVersion, result } from "./fixtures";
 import DiscoverPage from "./index";
@@ -404,6 +404,24 @@ describe("发现页：搜索", () => {
     if (filter === null) throw new Error("找不到带条件数的筛选按钮");
     const badge = [...filter.querySelectorAll("span")].find((el) => el.className.split(" ").some((c) => c.includes("filterBadge")));
     expect(badge?.textContent).toBe("2");
+  });
+
+  // 面板 portal 在文档末尾：焦点不进面板的话 Tab 从筛选按钮走到排序下拉，面板一直开着，键盘到不了里面的条件
+  it("打开筛选浮层：面板可见之后焦点进入面板容器，隐藏时一次也不聚焦；Esc 关闭后焦点回到筛选按钮", async () => {
+    await mount();
+    const filter = document.querySelector<HTMLButtonElement>('button[aria-label="筛选"]');
+    if (filter === null) throw new Error("找不到筛选按钮");
+    act(() => filter.focus());
+    const calls = refuseHiddenFocus();
+    act(() => filter.click());
+    await flush();
+    const panel = document.querySelector<HTMLElement>('[role="dialog"][aria-label="筛选条件"]');
+    if (panel === null) throw new Error("筛选浮层没有打开");
+    expect(calls.map((c) => [c.target, c.hidden])).toEqual([[panel, false]]);
+    expect(document.activeElement).toBe(panel);
+    keydown(panel, "Escape");
+    expect(filter.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(filter);
   });
 
   /** 触发器里叠着撑宽的候选文案（不进文字内容）。 */

@@ -274,4 +274,21 @@ describe("下载入口", () => {
     expect(nav.route).toEqual({ page: "tasks" });
     expect(document.querySelector("header")?.textContent).toContain(PAGE_LABEL.tasks);
   });
+
+  // 面板 portal 在文档末尾：焦点不进面板的话 Tab 从入口走到账户胶囊，面板一直开着，键盘到不了快览里的按钮
+  it("打开快览：面板可见之后焦点进入面板容器，隐藏时一次也不聚焦；Esc 关闭后焦点回到入口", async () => {
+    await mount();
+    const entry = byLabel(PEEK_COPY.button(0, 0));
+    act(() => entry.focus());
+    const calls = refuseHiddenFocus();
+    act(() => entry.click());
+    await flush();
+    const panel = document.querySelector<HTMLElement>(`[role="dialog"][aria-label="${PEEK_COPY.title}"]`);
+    if (panel === null) throw new Error("快览没有打开");
+    expect(calls.map((c) => [c.target, c.hidden])).toEqual([[panel, false]]);
+    expect(document.activeElement).toBe(panel);
+    keydown(panel, "Escape");
+    expect(entry.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(entry);
+  });
 });

@@ -224,11 +224,14 @@ export function DownloadPeek() {
           )}
         </AnimatePresence>
       </motion.button>
+      {/* 面板 portal 在文档末尾：焦点不进来的话 Tab 从入口走到账户胶囊，面板一直开着，键盘到不了里面的按钮。
+          落在面板容器而不是第一个按钮：有任务时第一个按钮是首行的「取消任务」，一个回车就可能把下载取消了 */}
       <Popover
         open={open}
         anchor={anchor}
         onClose={close}
         placement="bottom-end"
+        autoFocus
         aria-label={PEEK_COPY.title}
         className={styles.popover}
         layoutKey={layoutKey}

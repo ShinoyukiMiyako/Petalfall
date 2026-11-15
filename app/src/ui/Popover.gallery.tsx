@@ -22,7 +22,7 @@ function Anchored({ placement, label }: { placement: Placement; label: string })
       >
         {label}
       </Button>
-      <Popover open={open} anchor={anchor} onClose={() => setOpen(false)} placement={placement} aria-label={label}>
+      <Popover open={open} anchor={anchor} onClose={() => setOpen(false)} placement={placement} autoFocus aria-label={label}>
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--sk-space-12)", padding: "var(--sk-space-14)" }}>
           <span style={{ color: "var(--sk-text-2)", fontSize: "var(--sk-fs-small)" }}>面板里可以放任意交互内容；Tab 移出面板即关闭。</span>
           <Button size="sm" onClick={() => setOpen(false)}>
@@ -59,6 +59,7 @@ function Morphing({ placement, label }: { placement: Placement; label: string })
         anchor={anchor}
         onClose={() => setOpen(false)}
         placement={placement}
+        autoFocus
         aria-label={label}
         layoutKey={layoutKey}
         header={<div style={{ ...pad, fontWeight: "var(--sk-w-title)" }}>{rows.length} 行</div>}
