@@ -245,7 +245,9 @@ describe("下载任务页按片订阅", () => {
     expect(rowText(hot.title)).toContain("30.0 MB / 100 MB");
     const rowsBefore = new Map(renders.rows);
     const cardBefore = renders.ThroughputCard;
-    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SPEED_REFRESH_MS);
+    });
     expect(rowText(hot.title)).toContain("40.0 MB / 100 MB");
     expect(renders.rows.get(hot.id)).toBe(rowsBefore.get(hot.id));
     expect(renders.ThroughputCard).toBe(cardBefore);
@@ -270,7 +272,9 @@ describe("下载任务页按片订阅", () => {
     expect(flowSpeed()).toBe("2.0 MB/s");
     const rowsBefore = new Map(renders.rows);
     const cardBefore = renders.ThroughputCard;
-    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SPEED_REFRESH_MS);
+    });
     // 间隔满时补上平滑后的值：6 - (6 - 2) * e^-0.5 ≈ 3.57 MB/s，行与卡同一拍换
     expect(rowText(hot.title)).toContain("3.6 MB/s");
     expect(flowSpeed()).toBe("3.6 MB/s");
@@ -294,7 +298,11 @@ describe("下载任务页按片订阅", () => {
     const { running, queued } = await mountBusy();
     const rowsBefore = new Map(renders.rows);
     const cardBefore = renders.ThroughputCard;
-    for (let i = 0; i < 3; i++) act(() => void vi.advanceTimersByTime(1000));
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+    }
     for (const t of running) expect(renders.rows.get(t.id)).toBe((rowsBefore.get(t.id) as number) + 3);
     for (const id of queued.map((t) => t.id).concat(HISTORY.map((r) => r.id))) expect(renders.rows.get(id)).toBe(rowsBefore.get(id));
     expect(renders.ThroughputCard).toBe(cardBefore + 3);
@@ -307,7 +315,7 @@ describe("下载任务页按片订阅", () => {
     const row = rowOf(next.title);
     const cancel = row.querySelector<HTMLButtonElement>('button[aria-label="取消任务"]');
     if (cancel === null) throw new Error("排队中的任务行没有取消键");
-    cancel.focus();
+    act(() => cancel.focus());
     expect(document.activeElement).toBe(cancel);
 
     await act(async () => {

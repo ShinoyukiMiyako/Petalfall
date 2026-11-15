@@ -555,10 +555,15 @@ describe("换面与文字", () => {
     report(1, MB);
     report(2, 5 * MB);
     expect(sub()).toEqual([SESSION_COPY.downloadProgress(2, 10, MB)]);
+    // 这一局的头一条阶段事件让状态容器在后台重扫实例列表，结果晚几个微任务才落地、胶囊跟着重渲染一次；等它落地再开始数，
+    // 下面推进时钟时数到的才只是速度到点补字
+    await flush();
     const before = iconRenders.get("x");
     if (before === undefined) throw new Error("加载面的取消键没有画过");
 
-    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SPEED_REFRESH_MS);
+    });
     const averaged = publishSpeed(feedSpeed(startSpeed(MB, t0), 5 * MB, t0), t0 + SPEED_REFRESH_MS).shown;
     expect(sub()).toEqual([SESSION_COPY.downloadProgress(2, 10, averaged)]);
     expect(iconRenders.get("x")).toBe(before);
