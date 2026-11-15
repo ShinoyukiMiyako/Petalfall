@@ -26,7 +26,7 @@
 
 .stats {
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
+  font-size: var(--sk-fs-mono);
   color: var(--sk-text-2);
   user-select: text;
 }
