@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfigFromFile, type ConfigEnv, type Plugin, type PluginOption } from "vite";
 import { describe, expect, it } from "vitest";
 import * as appInfo from "../src/lib/app-info";
-import { ADDITIONAL_TERMS_FILE, ASSET_LICENSE_FILE, LICENSE_TEXT_FILE as scriptLicenseFile, THIRD_PARTY_LICENSES_FILE as scriptFile } from "./licenses-file.mjs";
+import { ADDITIONAL_TERMS_FILE, ASSET_LICENSE_FILE, LICENSE_TEXT_FILE as scriptLicenseFile, PRIVACY_NOTICE_FILE, THIRD_PARTY_LICENSES_FILE as scriptFile, USAGE_NOTICE_FILE } from "./licenses-file.mjs";
 
 const APP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TSC = createRequire(import.meta.url).resolve("typescript/bin/tsc");
@@ -63,19 +63,30 @@ describe("构建配置", () => {
     expect(existsSync(join(APP_DIR, "..", ADDITIONAL_TERMS_FILE))).toBe(true);
     expect(existsSync(join(APP_DIR, "..", ASSET_LICENSE_FILE))).toBe(true);
   });
+
+  it("前端读取使用须知与隐私说明用的文件名与构建时写出的是同一个，也和 docs 下的源文件同名", () => {
+    expect(USAGE_NOTICE_FILE).toBe("usage-notice.md");
+    expect(PRIVACY_NOTICE_FILE).toBe("privacy.md");
+    expect(appInfo.USAGE_NOTICE_FILE).toBe(USAGE_NOTICE_FILE);
+    expect(appInfo.PRIVACY_NOTICE_FILE).toBe(PRIVACY_NOTICE_FILE);
+    expect(existsSync(join(APP_DIR, "..", "docs", USAGE_NOTICE_FILE))).toBe(true);
+    expect(existsSync(join(APP_DIR, "..", "docs", PRIVACY_NOTICE_FILE))).toBe(true);
+  });
 });
 
 // 关于页与引导程序的协议页都按这些文件名去读；哪个产物漏了哪份，界面上那份就打不开
-describe("协议全文、附加条款与素材许可随两个前端分发", () => {
+describe("协议全文、附加条款、素材许可、使用须知与隐私说明随两个前端分发", () => {
   const root = (file: string) => readFileSync(join(APP_DIR, "..", file), "utf8");
   // 产物文件名、仓库根目录的源文件、开发服务器给的类型
   const texts: readonly [file: string, source: string, contentType: string][] = [
     ["LICENSE.txt", "LICENSE", "text/plain; charset=utf-8"],
     ["LICENSE-ADDITIONAL-TERMS.md", "LICENSE-ADDITIONAL-TERMS.md", "text/markdown; charset=utf-8"],
     ["LICENSE-ASSETS.md", "LICENSE-ASSETS.md", "text/markdown; charset=utf-8"],
+    ["usage-notice.md", "docs/usage-notice.md", "text/markdown; charset=utf-8"],
+    ["privacy.md", "docs/privacy.md", "text/markdown; charset=utf-8"],
   ];
 
-  it.each(["production", "setup"])("%s 模式构建时把仓库根目录的三份文本逐字写进产物根目录", async (mode) => {
+  it.each(["production", "setup"])("%s 模式构建时把仓库里的五份文本逐字写进产物根目录", async (mode) => {
     const plugin = await licenseTextPlugin({ command: "build", mode });
     const emitted: unknown[] = [];
     const generateBundle = plugin.generateBundle as unknown as (this: { emitFile(file: unknown): void }) => void;

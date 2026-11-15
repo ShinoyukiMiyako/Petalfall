@@ -11,7 +11,9 @@ import {
   loadAdditionalTerms,
   loadAssetLicense,
   loadLicenseText,
+  loadPrivacyNotice,
   loadThirdPartyLicenses,
+  loadUsageNotice,
   type ThirdPartyManifest,
 } from "./app-info";
 
@@ -98,5 +100,29 @@ describe.each([
   it("文件不在时报错，带上称呼、地址与状态码", async () => {
     vi.stubGlobal("fetch", async () => new Response("Not Found", { status: 404 }));
     await expect(load()).rejects.toThrow(`${name}读不出来：${url} 返回 404`);
+  });
+});
+
+describe.each([
+  { name: "使用须知", load: loadUsageNotice, url: "/usage-notice.md" },
+  { name: "隐私说明", load: loadPrivacyNotice, url: "/privacy.md" },
+])("$name", ({ name, load, url }) => {
+  it("从产物根目录读构建时写出的文件，拆出文首的版本号与正文", async () => {
+    const version = 1 + Math.floor(Math.random() * 999);
+    const marker = Math.random().toString(36).slice(2);
+    const fetch = vi.fn(async () => new Response(`# ${name}\r\n\r\n版本：${version}\r\n\r\n正文 ${marker}\r\n`, { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(load()).resolves.toEqual({ version, body: `正文 ${marker}` });
+    expect(fetch.mock.calls).toEqual([[url]]);
+  });
+
+  it("文件不在时报错，带上称呼、地址与状态码", async () => {
+    vi.stubGlobal("fetch", async () => new Response("Not Found", { status: 404 }));
+    await expect(load()).rejects.toThrow(`${name}读不出来：${url} 返回 404`);
+  });
+
+  it("文首没有版本号时报错，不当成第 1 版", async () => {
+    vi.stubGlobal("fetch", async () => new Response(`# ${name}\n\n正文\n`, { status: 200 }));
+    await expect(load()).rejects.toThrow(`${name}的文首应是一行「# 标题」，接着一行「版本：N」`);
   });
 });

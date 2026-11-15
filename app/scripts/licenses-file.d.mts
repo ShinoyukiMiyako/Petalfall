@@ -6,3 +6,7 @@ export const LICENSE_TEXT_FILE: "LICENSE.txt";
 export const ADDITIONAL_TERMS_FILE: "LICENSE-ADDITIONAL-TERMS.md";
 /** 美术与品牌素材的许可：仓库根目录与产物根目录同名。 */
 export const ASSET_LICENSE_FILE: "LICENSE-ASSETS.md";
+/** 使用须知：源文件是仓库的 docs/usage-notice.md，产物根目录里同名。 */
+export const USAGE_NOTICE_FILE: "usage-notice.md";
+/** 隐私说明：源文件是仓库的 docs/privacy.md，产物根目录里同名。 */
+export const PRIVACY_NOTICE_FILE: "privacy.md";

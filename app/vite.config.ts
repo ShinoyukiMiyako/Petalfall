@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { readBuildInfo } from "./scripts/build-info.mjs";
 import { buildTarget } from "./scripts/build-target.mjs";
 import { thirdPartyManifest } from "./scripts/third-party-licenses.mjs";
-import { ADDITIONAL_TERMS_FILE, ASSET_LICENSE_FILE, LICENSE_TEXT_FILE, THIRD_PARTY_LICENSES_FILE } from "./scripts/licenses-file.mjs";
+import { ADDITIONAL_TERMS_FILE, ASSET_LICENSE_FILE, LICENSE_TEXT_FILE, PRIVACY_NOTICE_FILE, THIRD_PARTY_LICENSES_FILE, USAGE_NOTICE_FILE } from "./scripts/licenses-file.mjs";
 
 const host = process.env.TAURI_DEV_HOST;
 
@@ -38,11 +38,13 @@ const LEGAL_TEXTS: readonly { source: string; file: string; contentType: string 
   { source: "LICENSE", file: LICENSE_TEXT_FILE, contentType: "text/plain; charset=utf-8" },
   { source: ADDITIONAL_TERMS_FILE, file: ADDITIONAL_TERMS_FILE, contentType: "text/markdown; charset=utf-8" },
   { source: ASSET_LICENSE_FILE, file: ASSET_LICENSE_FILE, contentType: "text/markdown; charset=utf-8" },
+  { source: `docs/${USAGE_NOTICE_FILE}`, file: USAGE_NOTICE_FILE, contentType: "text/markdown; charset=utf-8" },
+  { source: `docs/${PRIVACY_NOTICE_FILE}`, file: PRIVACY_NOTICE_FILE, contentType: "text/markdown; charset=utf-8" },
 ];
 
 /**
- * 协议全文、附加条款与素材许可随启动器与引导程序一起分发：AGPL 第 5(d) 条要界面上能看到协议，
- * 附加条款与素材许可要和协议在同一处能查到，离线也要能看。
+ * 协议全文、附加条款、素材许可、使用须知与隐私说明随启动器与引导程序一起分发：AGPL 第 5(d) 条要界面上能看到协议，
+ * 附加条款与素材许可要和协议在同一处能查到；使用须知与隐私说明要在关于页查得到。离线也要能看。
  * 不用 ?raw 导入：路径出了 src，开发服务器还得放开 fs.allow。
  */
 function licenseText(): Plugin {
