@@ -169,7 +169,7 @@
   color: var(--sk-accent-ink);
   box-shadow: var(--sk-accent-glow), var(--sk-gloss);
   font-family: inherit;
-  font-size: 15px;
+  font-size: var(--sk-fs-section);
   font-weight: var(--sk-w-title);
   white-space: nowrap;
   cursor: pointer;
@@ -180,9 +180,9 @@
     opacity var(--sk-dur-hover) var(--sk-ease);
 }
 
+/* 大号只放宽内边距；字号与中号同取 section，字阶里没有 16 这一档 */
 .capsule[data-size="lg"] .go {
   padding: 0 30px 0 26px;
-  font-size: 16px;
 }
 
 /* 悬停叠一层，只朝提高对比度的方向，不用 filter */
@@ -324,7 +324,7 @@
   flex: none;
   padding: 0 var(--sk-space-4);
   color: var(--sk-accent-strong);
-  font-size: 18px;
+  font-size: var(--sk-fs-heading);
   font-weight: var(--sk-w-title);
   font-variant-numeric: tabular-nums;
   text-align: end;
@@ -362,7 +362,7 @@
   background: var(--sk-bg-2);
   color: var(--sk-text);
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: var(--sk-fs-small);
   font-weight: var(--sk-w-title);
   white-space: nowrap;
   cursor: pointer;

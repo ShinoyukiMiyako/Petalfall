@@ -65,6 +65,15 @@ describe("文字行", () => {
     expect(declaration(ruleOf(".sub"), "font-size")).toBe("var(--sk-fs-caption)");
   });
 
+  it("启动按钮取 section、百分比取 heading、胶囊按钮取 small：字号走令牌，大号胶囊只放宽内边距、不另放大字号", () => {
+    expect(declaration(ruleOf(".go"), "font-size")).toBe("var(--sk-fs-section)");
+    expect(ruleOf('.capsule[data-size="lg"] .go')).not.toContain("font-size");
+    expect(declaration(ruleOf('.capsule[data-size="lg"] .go'), "padding")).toBe("0 30px 0 26px");
+    expect(declaration(ruleOf(".pct"), "font-size")).toBe("var(--sk-fs-heading)");
+    expect(declaration(ruleOf(".pill"), "font-size")).toBe("var(--sk-fs-small)");
+    expect([tokenPx("--sk-fs-section"), tokenPx("--sk-fs-heading"), tokenPx("--sk-fs-small")]).toEqual([15, 18, 13]);
+  });
+
   it("两行都按 .text 的 1.25 倍行高叠起来，放得进中号胶囊 34 的内高；不各自换成令牌行高", () => {
     const capsule = ruleOf(".capsule");
     const inset = /^calc\(var\(--capsule-h\) - (\d+)px\)$/.exec(declaration(capsule, "--capsule-inner"));

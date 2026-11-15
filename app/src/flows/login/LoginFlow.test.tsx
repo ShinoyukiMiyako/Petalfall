@@ -963,6 +963,9 @@ describe("外置登录弹窗", () => {
     expect(dialog()?.textContent).toContain("服务器出了故障，不是账户或密码的问题。稍后重试。");
     expect(inputs()[1].value).toBe("secret");
     expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
+    // 说明块里的操作是文字之后的幽灵小按钮，不是自成一块的次按钮
+    const retry = button(AUTHLIB_COPY.retry);
+    expect([retry.dataset.variant, retry.dataset.size]).toEqual(["ghost", "sm"]);
 
     // 重试在途时说明块留着、重试键转圈，结果回来才收起：不先缩回再撑开
     const retried = deferred<void>();
@@ -1185,6 +1188,47 @@ describe("外置登录弹窗", () => {
     expect(document.activeElement).toBe(retry);
     expect(said?.isConnected).toBe(false);
     expect(block.querySelector("strong")?.textContent).toBe(AUTHLIB_COPY.loginServiceDown.title);
+  });
+
+  it("登录这一步连不上：danger 说明块写「网络连接失败」，重试是文字之后带刷新图标的幽灵小按钮，在途时就地转圈", async () => {
+    await openAuthlib();
+    typeInto(inputs()[0], "skin.example.com");
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    const [username, password] = inputs();
+    typeInto(username, "multi@example.com");
+    typeInto(password, "secret");
+    const unreachable = () => {
+      throw new IpcError("Http", "HTTP 请求失败（账号密码认证）");
+    };
+    ipc.overrides.set("authlib_login", unreachable);
+    act(() => button(AUTHLIB_COPY.login).click());
+    await flush();
+    const block = alertBlock();
+    expect([block.dataset.tone, block.textContent]).toEqual(["danger", `${AUTHLIB_COPY.network}${AUTHLIB_COPY.retry}`]);
+    const retry = button(AUTHLIB_COPY.retry);
+    expect(block.contains(retry)).toBe(true);
+    expect([retry.dataset.variant, retry.dataset.size, retry.dataset.hasIcon, retry.dataset.loading]).toEqual(["ghost", "sm", "true", undefined]);
+
+    const retried = deferred<void>();
+    ipc.overrides.set("authlib_login", async () => {
+      await retried.promise;
+      unreachable();
+    });
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "authlib_login")).toHaveLength(2);
+    expect(alertBlock()).toBe(block);
+    expect([retry.dataset.variant, retry.dataset.loading, retry.getAttribute("aria-busy")]).toEqual(["ghost", "true", "true"]);
+    // 刷新图标的位置换成加载指示，按钮不换成别的变体
+    expect(retry.querySelectorAll("svg")).toHaveLength(1);
+    expect(retry.querySelector("[data-tone]")?.getAttribute("aria-hidden")).toBe("true");
+
+    retried.resolve();
+    await flush();
+    expect(callsOf(ipc, "authlib_login")).toHaveLength(2);
+    expect(alertBlock().textContent).toBe(`${AUTHLIB_COPY.network}${AUTHLIB_COPY.retry}`);
+    expect([button(AUTHLIB_COPY.retry).dataset.loading, button(AUTHLIB_COPY.retry).getAttribute("aria-busy")]).toEqual([undefined, null]);
   });
 
   it("从皮肤站拖进服务器链接：弹窗打开即填好地址并执行一次「下一步」，停在登录这一步", async () => {
