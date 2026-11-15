@@ -43,7 +43,7 @@ export const ACCOUNTS_COPY = {
   addOptions: {
     microsoft: { name: "微软账户", description: "正版验证，能进所有在线服务器" },
     offline: { name: "离线账户", description: "无需联网，单人与离线服使用" },
-    authlib: { name: "外置登录", description: "LittleSkin 等第三方验证服务器" },
+    authlib: { name: "外置登录", description: "LittleSkin 等第三方认证服务器" },
   },
 
   empty: {

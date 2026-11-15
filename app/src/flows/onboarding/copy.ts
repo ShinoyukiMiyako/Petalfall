@@ -94,7 +94,7 @@ export const ACCOUNT_STEP_COPY = {
 export const LOGIN_OPTIONS: readonly { kind: "microsoft" | "offline" | "authlib"; name: string; desc: string; icon: IconName; online: boolean }[] = [
   { kind: "microsoft", name: "微软账户", desc: "正版验证，能进所有在线服务器", icon: "shield", online: true },
   { kind: "offline", name: "离线账户", desc: "无需联网，单人与离线服使用", icon: "user", online: false },
-  { kind: "authlib", name: "外置登录", desc: "LittleSkin 等第三方验证服务器", icon: "server", online: true },
+  { kind: "authlib", name: "外置登录", desc: "LittleSkin 等第三方认证服务器", icon: "server", online: true },
 ];
 
 export const APPEARANCE_STEP_COPY = {

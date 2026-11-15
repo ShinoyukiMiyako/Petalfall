@@ -595,7 +595,7 @@ describe("账户页：添加", () => {
     expect(rows.map((r) => r.textContent)).toEqual([
       "微软账户正版验证，能进所有在线服务器",
       "离线账户无需联网，单人与离线服使用",
-      "外置登录LittleSkin 等第三方验证服务器",
+      "外置登录LittleSkin 等第三方认证服务器",
     ]);
     await click(rows[1]);
     expect(launcher.state.login).toEqual({ kind: "offline", intent: { kind: "manual" } });
@@ -738,7 +738,7 @@ describe("账户页：断网、加载与读取失败", () => {
     expect(rows.map((r) => [r.textContent, r.disabled])).toEqual([
       ["微软账户这个版本没有内置微软登录，在设置里填入 client_id 后可用", true],
       ["离线账户无需联网，单人与离线服使用", false],
-      ["外置登录LittleSkin 等第三方验证服务器", false],
+      ["外置登录LittleSkin 等第三方认证服务器", false],
     ]);
     await click(rows[0]);
     expect(callsOf(ipc, "microsoft_login")).toEqual([]);
