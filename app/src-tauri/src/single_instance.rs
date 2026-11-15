@@ -123,7 +123,7 @@ impl Instance {
         self.waited_for_exit
     }
 
-    /// 应答事件。退出时要拉起安装程序的，用它先打发走在等的后来者。
+    /// 应答事件。要拉起安装程序的，在更新插件的退出前钩子里用它先打发走在等的后来者。
     pub fn answer(&self) -> Answer {
         self.answer.clone()
     }

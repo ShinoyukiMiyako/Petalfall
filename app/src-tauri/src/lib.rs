@@ -167,7 +167,7 @@ pub fn run() {
             window::setup_main_window(app)?;
             #[cfg(windows)]
             if let Some(instance) = instance {
-                // 退出时要拉起安装程序的，先用它打发走在等的后来者（见 `install_on_exit`）。
+                // 要拉起安装程序的，先用它打发走在等的后来者（见更新插件的退出前钩子 `before_installer_launch`）。
                 app.manage(instance.answer());
                 window::front_on_second_launch(app, instance)?;
             }
