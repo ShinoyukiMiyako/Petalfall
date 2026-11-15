@@ -19,7 +19,7 @@ import { Card } from "../ui/Card";
 import { Page } from "../ui/Page";
 import { RichText } from "../ui/RichText";
 import { parseMarkdown } from "../ui/richtext-parse";
-import { AppShell, PAGE_PRELOAD_DELAY_MS, type AppShellProps, type ShellFlows } from "./AppShell";
+import { AppShell, PAGE_PRELOAD_IDLE_TIMEOUT_MS, type AppShellProps, type ShellFlows } from "./AppShell";
 import { DROP_COPY, PAGE_ERROR_COPY, SHELL_ACTION_ERROR, SHELL_DEFECT_COPY } from "../copy/shell";
 import { ErrorBoundary } from "./ErrorBoundary";
 import type { PageTable } from "./nav";
@@ -118,6 +118,26 @@ async function mount(flows: Partial<ShellFlows> = {}, startupNotices?: AppShellP
 
 const pageShown = () => document.querySelector("[data-page]")?.getAttribute("data-page");
 
+/** 接管空闲回调：登记的回调不自己跑，由用例决定空闲时段什么时候到来。 */
+function stubIdleCallbacks() {
+  const requests: { handle: number; callback: IdleRequestCallback; options: IdleRequestOptions | undefined }[] = [];
+  const cancelled: number[] = [];
+  vi.stubGlobal("requestIdleCallback", (callback: IdleRequestCallback, options?: IdleRequestOptions) => {
+    const handle = requests.length + 1;
+    requests.push({ handle, callback, options });
+    return handle;
+  });
+  vi.stubGlobal("cancelIdleCallback", (handle: number) => void cancelled.push(handle));
+  return {
+    requests,
+    cancelled,
+    /** 空闲时段到来：跑一遍登记着、没撤掉的回调。 */
+    run() {
+      for (const request of requests) if (!cancelled.includes(request.handle)) request.callback({ didTimeout: false, timeRemaining: () => 10 });
+    },
+  };
+}
+
 beforeEach(async () => {
   vi.useFakeTimers();
   resetRecorder(ipc);
@@ -152,17 +172,97 @@ describe("外壳布局", () => {
     expect(pageShown()).toBe("home");
     expect(document.querySelector("nav")).not.toBeNull();
     expect(port.show).not.toHaveBeenCalled();
-    act(() => void vi.advanceTimersByTime(20));
+    // 显示命令应答后外壳记下窗口已显示（预载据此开始），那次重渲染也要落在 act 里
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20);
+    });
     expect(port.show).toHaveBeenCalledTimes(1);
   });
 
-  it("挂载后延时预载其余页面", async () => {
+  it("首屏画完、窗口显示之后的第一个空闲时段预载其余页面：显示命令应答之前不登记，空闲到来之前不拉，不再等 800 ms", async () => {
+    const idle = stubIdleCallbacks();
+    const answers: (() => void)[] = [];
+    port.show.mockImplementation(() => new Promise<void>((resolve) => void answers.push(resolve)));
     await mount();
+    expect(port.show).not.toHaveBeenCalled();
+    expect(idle.requests).toEqual([]);
+    expect(loads).toEqual(["home"]);
+    // 首屏那一帧请求显示窗口；命令还没应答（宿主的 UI 线程还没显示窗口），空闲回调不登记
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20);
+    });
+    expect(port.show).toHaveBeenCalledTimes(1);
+    expect(idle.requests).toEqual([]);
     expect(loads).toEqual(["home"]);
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(PAGE_PRELOAD_DELAY_MS);
+      answers.forEach((answer) => answer());
+      await settle();
+    });
+    expect(idle.requests.map((r) => r.options)).toEqual([{ timeout: PAGE_PRELOAD_IDLE_TIMEOUT_MS }]);
+    expect(loads).toEqual(["home"]);
+    // 主线程忙着、空闲迟迟不来：再走几帧也不自己开始，也不重复登记
+    const busyFrames = 1 + Math.floor(Math.random() * 4);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(busyFrames * 16);
+    });
+    expect(idle.requests).toHaveLength(1);
+    expect(loads).toEqual(["home"]);
+    await act(async () => {
+      idle.run();
+      await settle();
     });
     expect([...loads].sort()).toEqual([...PAGE_IDS].sort());
+  });
+
+  it("显示窗口失败：失败进控制台，预载照常在之后的空闲时段开始", async () => {
+    const idle = stubIdleCallbacks();
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    port.show.mockImplementation(async () => {
+      throw new Error("显示失败");
+    });
+    await mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20);
+      await settle();
+    });
+    expect(error.mock.calls.filter((call) => call[0] === "窗口没能显示").map((call) => (call[1] as Error).message)).toEqual(["显示失败"]);
+    expect(idle.requests).toHaveLength(1);
+    await act(async () => {
+      idle.run();
+      await settle();
+    });
+    expect([...loads].sort()).toEqual([...PAGE_IDS].sort());
+    error.mockRestore();
+  });
+
+  it("首屏之前不预载：「是否首次启动」还没读回时窗口不显示，过了 800 ms 与空闲超时也不登记空闲回调", async () => {
+    const idle = stubIdleCallbacks();
+    ipc.overrides.set("is_first_run", () => new Promise(() => undefined));
+    await mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(800 + 2 * PAGE_PRELOAD_IDLE_TIMEOUT_MS);
+    });
+    expect(port.show).not.toHaveBeenCalled();
+    expect(idle.requests).toEqual([]);
+    expect(loads).toEqual(["home"]);
+  });
+
+  it("空闲到来之前外壳就卸载：撤掉登记的空闲回调，不再预载", async () => {
+    const idle = stubIdleCallbacks();
+    await mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20);
+      await settle();
+    });
+    expect(idle.requests.map((r) => r.handle)).toEqual([1]);
+    view?.unmount();
+    view = undefined;
+    expect(idle.cancelled).toEqual([1]);
+    await act(async () => {
+      idle.run();
+      await settle();
+    });
+    expect(loads).toEqual(["home"]);
   });
 
   it("主界面出来后预取一次游戏目录列表，实例库第一帧就有目录选择；首次启动向导期间不取", async () => {

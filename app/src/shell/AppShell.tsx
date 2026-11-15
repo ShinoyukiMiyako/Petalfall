@@ -62,8 +62,8 @@ export interface AppShellProps {
   startupNotices?: () => Promise<readonly StartupNotice[]>;
 }
 
-/** 首帧与窗口显示之后再预载其余页面，不和首屏抢主线程。 */
-export const PAGE_PRELOAD_DELAY_MS = 800;
+/** 预载其余页面的空闲回调最多等这么久：主线程一直忙、空闲时段迟迟不来时也照常开始，不拖到冷启动后点进别的页面的时候。 */
+export const PAGE_PRELOAD_IDLE_TIMEOUT_MS = 500;
 
 // 资源图标、资讯配图、服务器图标的地址解析：同一地址整个进程只向后端登记一次，所以解析函数只建一份
 const resolveRemoteImage = createThumbResolver(thumbRegister);
@@ -79,17 +79,22 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
   // 组件库里的外部链接（资源介绍、更新说明）与其他打开网址的入口走同一个出口，失败经统一错误处理弹通知
   const openLink = useCallback((url: string) => void run(() => actions.openExternal(url), SHELL_ACTION_ERROR.openLink), [actions, run]);
 
-  useRevealWindow(firstRunKnown);
+  const revealed = useRevealWindow(firstRunKnown);
   useCloseGuard();
   useAfterLaunch();
   useBackgroundAttention();
   useStartupNotices(startupNotices);
   useDocumentLang();
 
+  // 其余页面在首屏画完之后的第一个空闲时段预载。首屏是知道要不要进首次启动向导之后的那一屏，画完它才显示窗口，
+  // 这时与「是否首次启动」同一批的首查（配置、账户、实例列表）也已发出。要等显示窗口的命令应答再登记空闲回调：
+  // 页面块与命令都经宿主的 UI 线程应答，页面块的请求排在显示窗口前面时，窗口要等这一批都应答完才显示出来。
+  // 也不能再晚：冷启动后马上点进没加载过的页面，内容区要空过 React 的 Suspense 占位节流（300 ms）
   useEffect(() => {
-    const timer = window.setTimeout(() => void run(() => pages.preloadAll(), SHELL_ACTION_ERROR.pagePreload), PAGE_PRELOAD_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [pages, run]);
+    if (!revealed) return;
+    const idle = requestIdleCallback(() => void run(() => pages.preloadAll(), SHELL_ACTION_ERROR.pagePreload), { timeout: PAGE_PRELOAD_IDLE_TIMEOUT_MS });
+    return () => cancelIdleCallback(idle);
+  }, [revealed, pages, run]);
 
   // 主界面一出来就把游戏目录列表取进缓存：实例库工具条的目录选择要在第一帧就在，不等进页面才去要、晚到再淡入插进来。
   // 首次启动向导期间不取：目录还没选定，取到的是向导之前的旧记录
