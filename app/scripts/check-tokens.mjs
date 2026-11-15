@@ -142,7 +142,8 @@ const PAGE_SHELL_NAMES = new Set(["useShell", "useNav", "useRunner"]);
 /** 目录 -> 允许引入的目录或模块（不带扩展名，前缀匹配到目录边界）；不在表中的目录不受目录约束。 */
 const DEPENDENCY_ALLOW = {
   pages: ["pages", "ui", "art", "launch", "shell", "state", "domain", "copy", "lib"],
-  flows: ["flows", "ui", "art", "launch", "shell", "state", "domain", "copy", "lib"],
+  // pages/shared 是页面与流程共用的部件（下载原版材质：账户页与向导、登录弹窗同一个）；各页面自己的目录流程仍然不能引入
+  flows: ["flows", "ui", "art", "launch", "shell", "state", "domain", "copy", "lib", "pages/shared"],
   // shell/overlay 是浮层机制（浮层根、Esc 栈、焦点圈定），不含应用状态；提示气泡等组件必须挂进它
   ui: ["ui", "art", "lib", "domain/format", "shell/overlay"],
   art: ["art", "lib"],

@@ -760,7 +760,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | 目录 | 内容 | 允许引入 |
 | --- | --- | --- |
 | `pages/` | 七个页面：home、library、instance、discover、accounts、tasks、settings | pages、ui、art、launch、shell（仅 `useShell`、`useNav`、`useRunner`）、state、domain、copy、lib |
-| `flows/` | 跨页面的流程：登录、新建实例、首次启动向导 | flows、ui、art、launch、shell（仅 `useShell`、`useNav`、`useRunner`）、state、domain、copy、lib。不能引入 pages：两边共用的规则放进 `domain/` |
+| `flows/` | 跨页面的流程：登录、新建实例、首次启动向导 | flows、ui、art、launch、shell（仅 `useShell`、`useNav`、`useRunner`）、state、domain、copy、lib、`pages/shared`。不能引入各页面自己的目录：两边共用的规则放进 `domain/`，共用的部件放进 `pages/shared/`（例如「下载原版材质」，账户页、外观页与向导的账户步、设备码登录的成功区是同一个） |
 | `shell/` | 外壳：标题栏、侧栏、命令面板、通知、下载速览、错误边界、浮层机制、窗口行为 | shell、ui、art、launch、state、ipc、mc、domain、copy、lib、dev、styles |
 | `launch/` | 启动胶囊与启动视图 | launch、state、ui、art、domain、copy、lib |
 | `state/` | 状态容器、查询缓存、任务表、通知、路由 | state、ipc、domain、copy、lib |
