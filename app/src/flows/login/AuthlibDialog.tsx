@@ -446,7 +446,7 @@ interface LoginCalloutProps {
 function LoginCallout({ problem, attempt, retrying, onRetry }: LoginCalloutProps) {
   // 重试在途时说明块留着，重试键转圈
   const retry = (
-    <Button variant="secondary" size="sm" icon="refresh" loading={retrying} onClick={onRetry}>
+    <Button variant="ghost" size="sm" icon="refresh" loading={retrying} onClick={onRetry}>
       {AUTHLIB_COPY.retry}
     </Button>
   );
