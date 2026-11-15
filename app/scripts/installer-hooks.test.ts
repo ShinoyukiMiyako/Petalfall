@@ -88,6 +88,7 @@ function expectWrappedByFirstIf(code: string[]): void {
 const brandSource = "crates/petalfall-base/src/brand.rs";
 const authSource = "crates/petalfall-core/src/auth.rs";
 const configSource = "crates/petalfall-core/src/config.rs";
+const reattachSource = "crates/petalfall-core/src/reattach.rs";
 const stampFile = rustConst("crates/petalfall-release/src/data_format.rs", "STAMP_FILE");
 
 describe("卸载钩子的删除名单", () => {
@@ -99,6 +100,9 @@ describe("卸载钩子的删除名单", () => {
     const credentials = rustConst(authSource, "CREDENTIALS_FILE");
     const slug = /macro_rules! app_slug[\s\S]*?"([a-z]+)"/.exec(readSource(brandSource))?.[1];
     expect(readSource("crates/petalfall-base/src/fs.rs")).toContain('concat!(".", crate::app_slug!(), "-write-probe")');
+    // 接回记录和它读不懂时改名的那一份都直接放在数据根下，不在游戏目录里
+    expect(readSource(reattachSource)).toContain("self.data_dir().join(RUNNING_GAME_FILE)");
+    expect(readSource(reattachSource)).toContain("self.data_dir().join(BROKEN_RECORD_FILE)");
     expect(targets(body, "Delete")).toEqual(
       [
         configFile,
@@ -110,6 +114,8 @@ describe("卸载钩子的删除名单", () => {
         rustConst("crates/petalfall-core/src/playtime.rs", "PLAYTIME_FILE"),
         rustConst("crates/petalfall-core/src/java.rs", "PROBE_CACHE_FILE"),
         rustConst("app/src-tauri/src/window_state.rs", "WINDOW_STATE_FILE"),
+        rustConst(reattachSource, "RUNNING_GAME_FILE"),
+        rustConst(reattachSource, "BROKEN_RECORD_FILE"),
         stampFile,
         ".*.tmp",
         `.${slug}-write-probe`,
@@ -125,6 +131,8 @@ describe("卸载钩子的删除名单", () => {
   it("递归删除只落在启动器自有的子目录上", () => {
     const cacheDir = "cache";
     expect(readSource("crates/petalfall-core/src/art/mod.rs")).toContain(`self.data_dir().join("${cacheDir}")`);
+    // 移实例的日志目录挂在数据根下；游戏目录里的中间产物另在 .petalfall/moving，不归这里删
+    expect(readSource("crates/petalfall-core/src/move_journal.rs")).toContain("data_dir.join(MOVES_DIR)");
     expect(targets(body, "RMDir /r")).toEqual(
       [
         rustConst("app/src-tauri/src/logging.rs", "LOGS_DIR"),
@@ -132,6 +140,7 @@ describe("卸载钩子的删除名单", () => {
         rustConst("crates/petalfall-java/src/detect.rs", "MANAGED_RUNTIME_DIR"),
         rustConst("crates/petalfall-core/src/authlib.rs", "AGENT_DIR"),
         rustConst("crates/petalfall-core/src/template.rs", "TEMPLATES_DIR"),
+        rustConst("crates/petalfall-core/src/move_journal.rs", "MOVES_DIR"),
       ].sort(),
     );
     // 上面只数了带子目录名的写法，这里确认整份脚本没有别的递归删除
