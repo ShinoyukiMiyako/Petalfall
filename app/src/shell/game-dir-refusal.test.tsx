@@ -95,12 +95,36 @@ async function mount() {
   await flush();
 }
 
-/** 从实例库点进「生存」的概览，再让之后的列实例一律以 error 失败，隔够节流时间后窗口回到前台触发重扫。 */
-async function refusedWhileOnInstancePage(error: () => Error): Promise<void> {
+/** 进实例页的三种来路：从实例库点进；启动就停在主页、从主页点进；在别的页面（这里是账户页）点侧栏固定。 */
+type Entry = "library" | "home" | "pin";
+
+/** 从 entry 进「生存」的概览，再让之后的列实例一律以 error 失败，隔够节流时间后窗口回到前台触发重扫。 */
+async function refusedWhileOnInstancePage(entry: Entry, error: () => Error): Promise<void> {
+  if (entry === "pin") {
+    ipc.overrides.set("get_sidebar_pins", () => ["生存"]);
+    await registry.load("accounts");
+  }
   await mount();
-  act(() => nav.go({ page: "library" }));
-  act(() => nav.go({ page: "instance", id: "生存", tab: "overview" }));
+  switch (entry) {
+    case "library":
+      act(() => nav.go({ page: "library" }));
+      act(() => nav.go({ page: "instance", id: "生存", tab: "overview" }));
+      break;
+    case "home":
+      expect(nav.route).toEqual({ page: "home" });
+      act(() => nav.go({ page: "instance", id: "生存", tab: "overview" }));
+      break;
+    case "pin": {
+      act(() => nav.go({ page: "accounts" }));
+      await flush();
+      const pin = document.querySelector<HTMLButtonElement>("[data-sidebar-item='pin:生存']");
+      if (pin === null) throw new Error("侧栏里没有固定的「生存」");
+      act(() => pin.click());
+      break;
+    }
+  }
   await flush();
+  expect(nav.route).toEqual({ page: "instance", id: "生存", tab: "overview" });
   expect(document.querySelector("[data-page='instance']")?.textContent).toBe("生存");
 
   ipc.overrides.set("list_instances", () => {
@@ -148,11 +172,20 @@ afterEach(async () => {
 });
 
 describe("停在实例页时游戏目录因数据格式打不开", () => {
-  it.each([
+  const refusals = [
     ["被更新的版本用过", () => new IpcError("game_dir_data_too_new", `游戏目录 ${GAME_DIR} 的数据格式 3 比这一版认得的 2 新`, { path: GAME_DIR, found: 3, supported: 2, written_by: "1.1.0-dev.57", written_by_channel: "dev" })],
     ["记号读不懂", () => new IpcError("data_format_unreadable", `游戏目录 ${GAME_DIR} 的数据格式记号读不懂`, { path: GAME_DIR, reason: "expected value at line 1 column 1" })],
-  ])("%s：重扫被拒后退回实例库，显示打不开与换目录的出路，不进页面错误边界", async (_, error) => {
-    await refusedWhileOnInstancePage(error);
+  ] as const;
+  // 后退回到进实例页之前的那一页：实例库与它之前的主页之间那一项合并了，从实例库进的后退到主页
+  const entries: readonly (readonly [string, Entry, Route])[] = [
+    ["从实例库进", "library", { page: "home" }],
+    ["从主页进", "home", { page: "home" }],
+    ["从侧栏固定进", "pin", { page: "accounts" }],
+  ];
+  const cases = refusals.flatMap(([why, error]) => entries.map(([from, entry, backTo]) => [why, from, entry, backTo, error] as const));
+
+  it.each(cases)("%s，%s：重扫被拒后一律退回实例库，显示打不开与换目录的出路，不进页面错误边界", async (_, __, entry, backTo, error) => {
+    await refusedWhileOnInstancePage(entry, error);
     expect(nav.route).toEqual({ page: "library" });
     // 实例页那一项随列表一起失效，前进不回到它
     expect(nav.canForward).toBe(false);
@@ -161,6 +194,11 @@ describe("停在实例页时游戏目录因数据格式打不开", () => {
     expect(liveButtons()).toContain(LIBRARY_COPY.changeGameDir);
     expect(document.body.textContent).not.toContain(PAGE_ERROR_COPY.title);
     expect(crashed).toBeUndefined();
+
+    act(() => nav.back());
+    await flush();
+    expect(nav.route).toEqual(backTo);
+    expect(nav.canForward).toBe(true);
   });
 
   // 别的读取失败留着旧列表，停着的实例本来就还在列表里，剪不剪都看不出来；要分辨，得有一项历史指向已经离开列表的实例。

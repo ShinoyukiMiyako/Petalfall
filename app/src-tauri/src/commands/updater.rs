@@ -396,8 +396,9 @@ impl UpdaterState {
     }
 
     /// 拉起已下载更新包的安装程序，`current` 是正在运行的版本，先过安装前的关卡（[`installable`]）。Windows 上
-    /// 成功即退出进程，不会返回；拉不起来（`ShellExecuteW` 失败）时插件返回错误，但它在拉起之前已经跑过默认的
-    /// `on_before_exit`（tauri 的 `cleanup_before_exit`），把所有窗口都藏了起来，见 [`install_after_persisting`]。
+    /// 成功即退出进程，不会返回；拉不起来（`ShellExecuteW` 失败）时插件返回错误，但它在拉起之前已经跑过退出前钩子
+    /// （[`before_installer_launch`]，里面调 tauri 的 `cleanup_before_exit`），把所有窗口都藏了起来，见
+    /// [`install_after_persisting`]。
     fn install_downloaded(&self, current: &Version) -> Result<(), CommandError> {
         let slot = self.slot();
         let ready = installable(&slot, current)?;
@@ -834,8 +835,29 @@ fn channel_builder(
         // 都不设，终点不再送数据时下载会一直挂着；这里只补连接与读取超时，不设总时限：慢网下二十多兆的包要
         // 下好几分钟，总时限会把正常下载掐断。检查的总时限另由 CHECK_TIMEOUT 设。
         .configure_client(move |client| plugin_client(client, connect, read))
+        // 同样随检查结果带进 Update，「立即安装」与「退出时安装」装的都是它。
+        .on_before_exit(before_installer_launch(app.clone()))
         .endpoints(endpoint_urls(&[endpoint.to_owned()]))?
         .timeout(CHECK_TIMEOUT))
+}
+
+/// 插件拉起安装程序之前调的钩子，替掉插件自带的那个（只调 tauri 的 `cleanup_before_exit`），所以这里照样调它。
+/// 插件 2.12.0 在 Windows 上安装时先把包解到临时目录，解成了才调钩子，随后 `ShellExecuteW` 拉起安装程序、
+/// `std::process::exit(0)`；解包失败时不调钩子，直接返回错误。拉起之后插件不再回调，这里是离真要退出最近的一处。
+///
+/// 在这里放走等这个进程退出的后来者（见 `single_instance.rs`）：不放走的话，它们会赶在安装程序之前接手，安装
+/// 程序替换文件时就挡在那里，安装完由安装程序重新打开落樱。不在调安装之前放：解包失败、过不了安装前的关卡时
+/// 「退出时安装」不拉起安装程序，进程照常退出，后来者要照常接手，否则那次重开落樱什么都打不开。`ShellExecuteW`
+/// 本身失败时后来者已经被放走，两步之间插件没有回调，补不上。「立即安装」也经过这里，那时窗口还在，后来者本来
+/// 就由监听线程应答。放走排在 `cleanup_before_exit` 之前：tauri 要求它之后不再用 tauri 的接口，取 state 也算。
+fn before_installer_launch(app: AppHandle) -> impl Fn() + Send + Sync + 'static {
+    move || {
+        #[cfg(windows)]
+        if let Some(answer) = app.try_state::<crate::single_instance::Answer>() {
+            answer.release_waiting();
+        }
+        app.cleanup_before_exit();
+    }
 }
 
 /// 自动检查与下载前重查用的检查器：只为严格新于当前版本的清单造出更新，比较之前把清单头记进 `record`
@@ -1822,6 +1844,7 @@ pub async fn set_install_on_exit(
 }
 
 /// 在 `RunEvent::Exit` 里调用：选了「退出时安装」就在进程退出前拉起安装程序，同样先过安装前的关卡（[`installable`]）。
+/// 等这个进程退出的后来者由插件的退出前钩子放走（[`before_installer_launch`]），没拉起安装程序时照常接手。
 pub fn install_on_exit(app: &AppHandle) {
     let updater = app.state::<UpdaterState>();
     if !updater.slot().install_on_exit {
@@ -1835,12 +1858,6 @@ pub fn install_on_exit(app: &AppHandle) {
             return;
         }
     };
-    // 正在等这个进程退出的后来者会赶在安装程序之前接手，安装程序替换文件时它就挡在那里：让它们退出，
-    // 安装完由安装程序重新打开落樱。
-    #[cfg(windows)]
-    if let Some(answer) = app.try_state::<crate::single_instance::Answer>() {
-        answer.release_waiting();
-    }
     // 退出路径上没有前端可以报错，只能记日志；下次启动检查更新时会再次提示。插件藏起的窗口也不重新显示：
     // 进程本来就在退出。
     if let Err(err) = updater.install_downloaded(&app.package_info().version) {
@@ -4284,7 +4301,7 @@ mod tests {
 
     /// 命令层的接线单测里造不出来（要 AppHandle 与插件的 Update），钉住源码：下载一开始就占忙碌标记，先于登记任务
     /// 与重查；下载交回的包先过载荷头关卡再收进槽位；「立即安装」先占忙碌标记再落盘、安装；退出时安装占不到标记就
-    /// 不装，并且在打发走等着的后来者之前判；两条安装路都带着正在运行的版本过安装前的关卡。
+    /// 不装；两条安装路都带着正在运行的版本过安装前的关卡。
     #[test]
     fn downloads_and_installs_take_the_busy_flag_and_pass_the_gates() {
         let (source, _) = include_str!("updater.rs")
@@ -4331,7 +4348,6 @@ mod tests {
             &on_exit,
             "let _busy = match updater.slot().try_begin_busy() {",
         );
-        assert!(busy < at(&on_exit, "answer.release_waiting()"), "{on_exit}");
         assert!(
             busy < at(
                 &on_exit,
@@ -4346,6 +4362,55 @@ mod tests {
             "{state}"
         );
         assert!(!state.contains("slot.ready()"), "{state}");
+    }
+
+    /// 等这个进程退出的后来者只在更新插件的退出前钩子里放走：插件 2.12.0 解包成功之后、拉起安装程序之前才调它，
+    /// 解包失败时不调，进程照常退出，后来者照常接手（接手本身由 `single_instance.rs` 的用例验证）。退出时安装自己
+    /// 不放：放在调安装之前的话，解包失败、过不了安装前的关卡、占不到忙碌标记时那次重开落樱什么都打不开。钩子替掉
+    /// 插件自带的那个，所以要照样调 `cleanup_before_exit`，并在它之前取 state。插件的 `Update` 单测里造不出来，
+    /// 装成了进程又会退出，钉住源码。
+    #[test]
+    fn waiting_starts_are_released_only_by_the_hook_after_unpacking() {
+        let lines = shell_code_lines();
+        let (source, _) = include_str!("updater.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap();
+        let at = |body: &str, needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("找不到 {needle}\n{body}"))
+        };
+        let updater_rs = updater_rs_path(&lines);
+
+        let on_exit = top_level_fn(source, "pub fn install_on_exit(");
+        assert!(!on_exit.contains("release_waiting"), "{on_exit}");
+
+        let builder = top_level_fn(source, "fn channel_builder(");
+        assert!(
+            builder.contains(".on_before_exit(before_installer_launch(app.clone()))"),
+            "{builder}"
+        );
+        assert_eq!(
+            occurrences(&lines, "on_before_exit("),
+            vec![(updater_rs.clone(), 1)],
+            "检查器都从 channel_builder 起步，钩子只在那里挂一次"
+        );
+
+        let hook = top_level_fn(source, "fn before_installer_launch(");
+        let lookup = at(&hook, "app.try_state::<crate::single_instance::Answer>()");
+        let release = at(&hook, "answer.release_waiting();");
+        let cleanup = at(&hook, "app.cleanup_before_exit();");
+        assert!(lookup < release && release < cleanup, "{hook}");
+
+        let outside_single_instance: Vec<(String, usize)> =
+            occurrences(&lines, "release_waiting()")
+                .into_iter()
+                .filter(|(file, _)| !file.ends_with("single_instance.rs"))
+                .collect();
+        assert_eq!(
+            outside_single_instance,
+            vec![(updater_rs, 1)],
+            "单实例模块之外只有这个钩子放走后来者"
+        );
     }
 
     /// 安装前的关卡：槽位里没有包时报还没下好；下好的包严格新于正在运行的版本才交出去，等于（含只差构建元数据的）

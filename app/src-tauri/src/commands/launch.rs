@@ -20,6 +20,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use petalfall_base::error_with_causes;
+use petalfall_core::data_format::GuardMode;
 use petalfall_core::{
     game_line_level, AccountType, AutoBackupOutcome, DownloadProgress, Finished, GameExit, GameRun,
     GameSlot, LaunchAccount, LaunchEvent, LaunchFailed, LaunchPhase, LaunchRequest, LaunchStage,
@@ -553,6 +554,12 @@ fn spawn_watch(
 /// 它继承链上的基底版本也没有在做这几件事（`instance_busy`）。加载器实例的客户端 jar 与 natives 在
 /// 基底的目录里，基底跟着实例一直占到游戏退出。后一道失败时前一道的预留随返回值一起丢弃，不会把
 /// 占用槽留在加载中。
+///
+/// 两道占用都只看内存；占住实例自己之后、读它的继承链之前，先以「使用」方式核对游戏目录的数据格式记号
+/// （[`Petalfall::guard_game_dir`]），这是启动碰游戏目录的第一下。核对有时限，游戏目录在断开的网络共享上时
+/// 在时限内报暂时连不上；之后的读取（这里的继承链版本 JSON，`launch_game` 接着查共用存档时的实例设置）都没有
+/// 时限，排在它前面就会一直挂着，记号比这一版新或读不懂时也不该先去读这个目录。core 的启动在写游戏目录之前
+/// 还会再核对一次。
 async fn reserve_launch<'a>(
     running: &'a RunningGame,
     locks: &InstanceLocks,
@@ -562,6 +569,7 @@ async fn reserve_launch<'a>(
     let reservation = running.slot.reserve(version_id).map_err(busy)?;
     let instance = locks
         .acquire_with_chain(version_id, InstanceActivity::Launching, async {
+            petalfall.guard_game_dir(GuardMode::Use).await?;
             Ok(petalfall.inheritance_chain(version_id).await?)
         })
         .await?;
@@ -1254,6 +1262,64 @@ mod tests {
         assert!(reserve_launch(&running, &locks, &petalfall, "生存")
             .await
             .is_ok());
+    }
+
+    /// 游戏目录的数据格式关卡排在读继承链之前：关卡不放行时报它的错，版本 JSON 碰都不碰，占用槽与实例占用一并
+    /// 放开；关卡放行了才读。版本 JSON 的位置被一个目录占着，读了必出 IO 错误，报的是哪个错就说明读没读。
+    #[tokio::test]
+    async fn the_data_format_gate_runs_before_the_chain_is_read() {
+        use crate::commands::error::code;
+        use petalfall_core::data_format::{DATA_FORMAT, STAMP_FILE};
+
+        let dir = tempfile::tempdir().unwrap();
+        let game_dir = dir.path().join(".minecraft");
+        std::fs::create_dir_all(game_dir.join("versions").join("生存").join("生存.json")).unwrap();
+        let facade = facade_with(dir.path(), &[]);
+        let petalfall = facade.snapshot().await;
+        let running = RunningGame::default();
+        let locks = InstanceLocks::default();
+        let stamp = game_dir
+            .join(concat!(".", petalfall_base::app_slug!()))
+            .join(STAMP_FILE);
+        std::fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+
+        for (contents, expected) in [
+            (
+                json!({ "data_format": DATA_FORMAT + 1 }).to_string(),
+                code::GAME_DIR_DATA_TOO_NEW,
+            ),
+            (
+                json!({ "data_format": u32::MAX }).to_string(),
+                code::GAME_DIR_DATA_TOO_NEW,
+            ),
+            ("[2]".to_owned(), code::DATA_FORMAT_UNREADABLE),
+        ] {
+            std::fs::write(&stamp, &contents).unwrap();
+            let err = reserve_launch(&running, &locks, &petalfall, "生存")
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(err.code, expected, "{contents}：{err:?}");
+            assert_eq!(
+                err.detail.unwrap()["path"],
+                json!(game_dir.display().to_string()),
+                "{contents}"
+            );
+            assert_eq!(locks.activity("生存"), None, "{contents}：实例占用随之放开");
+            drop(
+                running
+                    .slot
+                    .reserve("创造")
+                    .unwrap_or_else(|_| panic!("{contents}：占用槽没被留下")),
+            );
+        }
+
+        std::fs::remove_file(&stamp).unwrap();
+        let err = reserve_launch(&running, &locks, &petalfall, "生存")
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code, code::IO, "关卡放行之后才读版本 JSON：{err:?}");
     }
 
     #[test]
