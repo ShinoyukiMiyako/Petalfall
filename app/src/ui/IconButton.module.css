@@ -1,6 +1,8 @@
 .button {
   --icon-button-size: 36px;
   position: relative;
+  /* 悬停叠层用 z-index: -1 垫在图标之下、底色之上，需要按钮自成层叠上下文 */
+  isolation: isolate;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -33,10 +35,43 @@
   border-radius: var(--sk-r);
 }
 
+/*
+ * 悬停与按下叠一层，叠层做透明度过渡，与 Button 同一写法。幽灵变体没有底，叠层就是它的悬停底；
+ * 每个变体都挂着这一层（只有幽灵会显出来），切到「开」态时叠层淡出，而不是随伪元素消失在一帧里跳掉。
+ */
+.button::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--sk-fill-hover);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
 /* ---- 幽灵（默认） ---- */
-.button[data-variant="ghost"]:hover:not(:disabled, [data-disabled]) {
-  background: var(--sk-bg-2);
+
+/*
+ * 悬停与按下的底是叠层：实色 bg-2 在夜樱的卡片、浮层与弹窗上只差 1.01-1.04:1，落在凹陷区与行悬停（本身就是 bg-2）上完全看不出。
+ * text-2 留在叠层上悬停最低 3.68:1、按下最低 3.02:1，图标提到 text；按下也要提，键盘按住空格时只有 :active、没有 :hover。
+ * 「开」与菜单展开中的底是 accent-soft，悬停不变，不铺叠层。
+ * 压在卡面图片或材质平铺上时，卡面下发 --icon-button-base（表面色）先垫一层底：半透明的叠层直接落在图片上，图标读不清
+ */
+.button[data-variant="ghost"]:hover:not(:disabled, [data-disabled], [aria-pressed="true"], [data-open]),
+.button[data-variant="ghost"]:active:not(:disabled, [data-disabled], [aria-pressed="true"], [data-open]) {
+  background-color: var(--icon-button-base, transparent);
   color: var(--sk-text);
+}
+
+.button[data-variant="ghost"]:hover:not(:disabled, [data-disabled], [aria-pressed="true"], [data-open])::before {
+  opacity: 1;
+}
+
+.button[data-variant="ghost"]:active:not(:disabled, [data-disabled], [aria-pressed="true"], [data-open])::before {
+  background: var(--sk-fill-press);
+  opacity: 1;
 }
 
 /* ---- 次 ---- */

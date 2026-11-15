@@ -10,6 +10,24 @@ export function readCss(url: URL): string {
   return readFileSync(url, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
+/** 按顶层逗号拆选择器列表：:not(a, b) 这类括号里的逗号不拆。 */
+function splitSelectorList(list: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i];
+    if (c === "(") depth++;
+    else if (c === ")") depth--;
+    else if (c === "," && depth === 0) {
+      parts.push(list.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(list.slice(start));
+  return parts;
+}
+
 /**
  * 一个选择器的生效声明：选择器列表里含它的各条顶层规则按出现顺序合并，后面的覆盖前面的。
  * 只认没有嵌套的「选择器 { 声明 }」，也不比特异性，适用于单类名与它的逗号分组这类特异性相同的规则。
@@ -18,7 +36,7 @@ export function declarationsOf(css: string, selector: string): Map<string, strin
   const out = new Map<string, string>();
   let found = false;
   for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    if (!m[1].split(",").some((s) => s.trim() === selector)) continue;
+    if (!splitSelectorList(m[1]).some((s) => s.trim() === selector)) continue;
     found = true;
     for (const part of m[2].split(";")) {
       const at = part.indexOf(":");
