@@ -1,7 +1,8 @@
 // 幽灵 Button 与幽灵 IconButton 的悬停与按下：铺 --sk-fill-hover / --sk-fill-press 叠层（常驻的 ::before，只过渡透明度），
 // 叠层半透明，先与按钮所在的底合成，再与字算。静止为 text-2 的字与图标留在叠层上不过线，悬停与按下一并提到 text。
 // 底按实际放幽灵按钮的地方逐个列：窗口底、卡片与可点卡片的悬停、凹陷区、列表行与表格行的悬停、浮层面板、弹窗与弹窗底栏、
-// 通知、四种色调的提示条与横幅，另有随强调色变的表格选中行；压在卡面图片或材质上的幽灵图标按钮先垫卡面下发的表面色。
+// 通知、四种色调的提示条与横幅，另有随强调色变的表格选中行；压在卡面图片或材质上的图标按钮静止时就垫着卡面下发的表面色，
+// 「开」与菜单展开中的 accent-soft 也叠在它上面。
 // 按钮文字至少 4.5:1、图标至少 3:1，两者同色，按 4.5 核。危险变体、禁用、「开」与菜单展开中不铺叠层，另核写法。
 import { describe, expect, it } from "vitest";
 import { APPEARANCES, contrast, declarationOf, declarationsOf, readCss, resolveColor, tokensOf, type AppearanceName, type Rgb } from "../test/contrast";
@@ -35,7 +36,12 @@ const KINDS: readonly Kind[] = [
 
 type State = "hover" | "active";
 
-const ghostRule = (kind: Kind, state: State, pseudo = "") => `.button[data-variant="ghost"]:${state}${kind.live}${pseudo}`;
+/** IconButton 静止时的底：卡面下发的垫底色，不在卡面上时透明。 */
+const ICON_BASE = "var(--icon-button-base, transparent)";
+/** IconButton「开」与菜单展开中的底：accent-soft 的比例与垫底色混。 */
+const ICON_ON = `color-mix(in srgb, var(--sk-accent) 11%, ${ICON_BASE})`;
+
+const ghostRule =(kind: Kind, state: State, pseudo = "") => `.button[data-variant="ghost"]:${state}${kind.live}${pseudo}`;
 
 /** 叠层的颜色：悬停用常驻层自己的底，按下换成按下那条规则的底。 */
 const overlayOf = (kind: Kind, state: State) => (state === "hover" ? declarationOf(kind.css, ".button::before", "background") : declarationOf(kind.css, ghostRule(kind, "active", "::before"), "background"));
@@ -216,29 +222,71 @@ describe("幽灵按钮叠层的写法", () => {
     expect(() => declarationsOf(buttonCss, `.button[data-variant="secondary"]:hover${live}::before`)).toThrow();
   });
 
-  it("IconButton：「开」与菜单展开中仍是 accent-soft 底、accent-strong 图标，悬停不变；危险变体悬停仍是 danger-soft，不铺叠层", () => {
+  it("IconButton：「开」与菜单展开中是叠在垫底色上的 accent-soft 底、accent-strong 图标，悬停不变；危险变体悬停仍是 danger-soft，不铺叠层", () => {
     for (const selector of ['.button[aria-pressed="true"]', ".button[data-open]", '.button[aria-pressed="true"]:hover:not(:disabled)', ".button[data-open]:hover:not(:disabled)"]) {
-      expect(Object.fromEntries(declarationsOf(iconCss, selector))).toEqual({ background: "var(--sk-accent-soft)", color: "var(--sk-accent-strong)" });
+      expect(Object.fromEntries(declarationsOf(iconCss, selector))).toEqual({ background: ICON_ON, color: "var(--sk-accent-strong)" });
     }
     expect(Object.fromEntries(declarationsOf(iconCss, '.button[data-variant="danger"]:hover:not(:disabled, [data-disabled])'))).toEqual({ background: "var(--sk-danger-soft)", color: "var(--sk-danger)" });
     expect(() => declarationsOf(iconCss, '.button[data-variant="danger"]:hover:not(:disabled, [data-disabled])::before')).toThrow();
   });
 });
 
-describe("卡面图片与材质上的幽灵图标按钮", () => {
+describe("卡面图片与材质上的图标按钮", () => {
   const MEDIA = ['.cover[data-source="remote"]', '.cover[data-source="texture"]'];
   const LIBRARY_MEDIA = '.coverArea:has(> .cover:is([data-source="texture"], [data-source="remote"]))';
+  const BLACK: Rgb = [0, 0, 0];
+  const WHITE: Rgb = [255, 255, 255];
+  /** 卡面下发的垫底色（两种媒体形态下相同，上一条用例核对）。 */
+  const mediaBase = () => declarationOf(coverCss, MEDIA[0], "--icon-button-base");
+  /** 卡面上「开」与菜单展开中的底：垫底色换成卡面下发的那一个。 */
+  const onMedia = () => ICON_ON.replace(ICON_BASE, mediaBase());
 
-  it("卡面与实例库卡片的卡面区下发表面色，图标按钮悬停与按下先垫它，不垫时是透明", () => {
+  it("卡面与实例库卡片的卡面区下发表面色；图标按钮静止时就垫它，幽灵变体悬停与按下不另换底；不在卡面上时是透明", () => {
     for (const selector of MEDIA) expect(declarationOf(coverCss, selector, "--icon-button-base")).toBe("var(--sk-surface)");
     expect(declarationOf(libraryCss, LIBRARY_MEDIA, "--icon-button-base")).toBe("var(--sk-surface)");
-    for (const state of ["hover", "active"] as const) expect(declarationOf(iconCss, ghostRule(KINDS[1], state), "background-color")).toBe("var(--icon-button-base, transparent)");
+    expect(declarationOf(iconCss, ".button", "background")).toBe(ICON_BASE);
+    for (const state of ["hover", "active"] as const) {
+      const own = declarationsOf(iconCss, ghostRule(KINDS[1], state));
+      expect([own.has("background"), own.has("background-color")]).toEqual([false, false]);
+    }
   });
 
-  it.each(APPEARANCE_NAMES)("%s：叠层铺在表面色上，与浮层面板上的比值相同", (appearance) => {
+  // [静止, 悬停, 按下]。原先静止时没有底，text-2 直接落在压暗层与材质上，比值随图而定
+  const PINNED_MEDIA: Record<"day" | "night", readonly [number, number, number]> = { day: [5.63, 13.1, 11.49], night: [5.73, 9.87, 8.04] };
+
+  it.each(APPEARANCE_NAMES)("%s：静止时 text-2 的图标落在表面色上；悬停与按下的叠层铺在它上面，与浮层面板上的比值相同", (appearance) => {
     const tokens = tokensOf(appearance);
-    const base = resolveColor(declarationOf(coverCss, MEDIA[0], "--icon-button-base"), tokens, [0, 0, 0]);
+    const base = resolveColor(mediaBase(), tokens, BLACK);
+    const rest = contrast(resolveColor(declarationOf(iconCss, ".button", "color"), tokens, base), base);
     const panel = GROUNDS.findIndex((ground) => ground.name === "浮层面板");
-    expect([round(ratioOn(base, tokens, KINDS[1], "hover")), round(ratioOn(base, tokens, KINDS[1], "active"))]).toEqual(PINNED[modeOf(appearance)][panel]);
+    const hoverActive = [round(ratioOn(base, tokens, KINDS[1], "hover")), round(ratioOn(base, tokens, KINDS[1], "active"))];
+    expect(hoverActive).toEqual(PINNED[modeOf(appearance)][panel]);
+    expect([round(rest), ...hoverActive]).toEqual(PINNED_MEDIA[modeOf(appearance)]);
+    expect(rest).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("「开」与菜单展开中的混色比例就是 accent-soft 令牌的比例：不垫底时与令牌一字不差", () => {
+    for (const appearance of APPEARANCE_NAMES) expect(ICON_ON.replace(ICON_BASE, "transparent")).toBe(tokensOf(appearance).get("--sk-accent-soft"));
+  });
+
+  /** 卡面上「开」与菜单展开中 accent-strong 图标的对比度，随强调色变。 */
+  const PINNED_ON: Record<AppearanceName, number> = {
+    "日樱 · 樱粉": 5.29,
+    "日樱 · 紫水晶": 5.25,
+    "日樱 · 青苔": 5.33,
+    "夜樱 · 樱粉": 6.25,
+    "夜樱 · 紫水晶": 6.62,
+    "夜樱 · 青苔": 7.57,
+  };
+
+  it.each(APPEARANCE_NAMES)("%s：卡面上「开」与菜单展开中的底不透明，不随底下的图深浅变；accent-strong 图标不低于 4.5:1", (appearance) => {
+    const tokens = tokensOf(appearance);
+    const onBlack = resolveColor(onMedia(), tokens, BLACK);
+    expect(onBlack).toEqual(resolveColor(onMedia(), tokens, WHITE));
+    // 原先直接铺 accent-soft：落在黑与白的图上是两种颜色
+    expect(resolveColor("var(--sk-accent-soft)", tokens, BLACK)).not.toEqual(resolveColor("var(--sk-accent-soft)", tokens, WHITE));
+    const icon = contrast(resolveColor("var(--sk-accent-strong)", tokens, onBlack), onBlack);
+    expect(round(icon)).toBe(PINNED_ON[appearance]);
+    expect(icon).toBeGreaterThanOrEqual(4.5);
   });
 });
