@@ -130,7 +130,10 @@ function useRegistry(): OverlayRegistry {
   return registry;
 }
 
-/** 提供 Esc 栈与浮层根。整个应用只挂一个，包住外壳与所有会弹出浮层的组件。 */
+/**
+ * 提供 Esc 栈与浮层根。外壳只挂一个，包住外壳与所有会弹出浮层的组件。
+ * 例外是外壳之前的使用须知页：它自带一套给隐私说明弹窗用，同意后与外壳的这一套同时在场的只有它的退场那几帧，那时它的弹窗已算关上、栈是空的。
+ */
 export function OverlayProvider({ children }: { children: ReactNode }) {
   const [registry] = useState(() => new OverlayRegistry());
   useEffect(() => {

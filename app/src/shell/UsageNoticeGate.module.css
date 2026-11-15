@@ -135,3 +135,8 @@
   padding-top: var(--sk-space-16);
   border-top: 1px solid var(--sk-line);
 }
+
+/* 底栏最左的辅助动作（打开隐私说明），与弹窗底栏左侧的幽灵按钮同一种放法：两个决定按钮仍靠右 */
+.footerStart {
+  margin-right: auto;
+}

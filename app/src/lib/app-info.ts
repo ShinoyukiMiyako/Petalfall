@@ -89,7 +89,7 @@ export function loadUsageNotice(): Promise<LegalNotice> {
   return loadNotice(USAGE_NOTICE_FILE, "使用须知");
 }
 
-/** 隐私说明：关于页用它，用到时才去读。 */
+/** 隐私说明：关于页与使用须知页用它，用到时才去读。 */
 export function loadPrivacyNotice(): Promise<LegalNotice> {
   return loadNotice(PRIVACY_NOTICE_FILE, "隐私说明");
 }

@@ -1,4 +1,4 @@
-// 关于页用到的构建产物：第三方许可清单、协议全文、附加条款、素材许可、使用须知与隐私说明。
+// 关于页用到的构建产物：第三方许可清单、协议全文、附加条款、素材许可、使用须知与隐私说明。隐私说明在使用须知页上也能打开，同一条缓存。
 
 import { loadAdditionalTerms, loadAssetLicense, loadLicenseText, loadPrivacyNotice, loadThirdPartyLicenses, loadUsageNotice, type ThirdPartyManifest } from "../../lib/app-info";
 import type { LegalNotice } from "../../lib/legal-notice";
