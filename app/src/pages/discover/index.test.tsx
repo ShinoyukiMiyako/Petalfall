@@ -451,6 +451,30 @@ describe("发现页：搜索", () => {
     expect(options).toEqual(["适配：不限", `适配：${long}`, "适配：生存"]);
   });
 
+  // 「适配：」加 32 个汉字的实例名约 490px：留在浮层默认的 360 里，触发器省略掉的全名在列表里也看不全
+  it("适配实例的弹出列表放开浮层的宽度上限、显示全名；排序下拉的列表照旧", async () => {
+    await mount({ page: "discover", kind: "mod", forInstance: "生存" });
+    /** 点开指定的下拉，返回当前（未在退场的）列表所在的浮层面板。 */
+    const openPanel = async (label: string) => {
+      const trigger = document.querySelector<HTMLButtonElement>(`button[role="combobox"][aria-label="${label}"]`);
+      if (trigger === null) throw new Error(`找不到下拉 ${label}`);
+      act(() => trigger.click());
+      await flush();
+      const list = document.querySelector<HTMLElement>('[data-side]:not([data-exiting]) [role="listbox"]');
+      const panel = list === null ? null : list.closest<HTMLElement>("[data-side]");
+      if (panel === null) throw new Error(`${label} 没有打开列表`);
+      return { trigger, panel };
+    };
+    const fit = await openPanel("适配实例");
+    expect(fit.panel.getAttribute("data-max-width")).toBe("window");
+    act(() => fit.trigger.click());
+    await flush();
+
+    const sort = await openPanel("排序");
+    expect(sort.panel.querySelector('[role="option"]')?.textContent).toBe("相关度");
+    expect(sort.panel.hasAttribute("data-max-width")).toBe(false);
+  });
+
   it("「已装入」一条 installed_sources 取齐全部实例的已装来源，不逐个读 Mod 列表", async () => {
     await mount();
     expect(callsOf(ipc, "installed_sources")).toEqual([{}]);

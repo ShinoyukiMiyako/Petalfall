@@ -1267,6 +1267,27 @@ describe("新建实例：占位与换态", () => {
       expect(item.isConnected).toBe(true);
     });
 
+    // 「取消」的让位传 morph，起步钉在提交后的微任务里；淡入要按同一个时钟排，等首帧画出再计时的话，提交越长落后越多
+    it("淡入从插进来那次提交起算：「取消」离终点只剩这一格的 1/20 时起步，不等首帧画出再晚一截", async () => {
+      await mount();
+      setInput(nameInput(), "周末生存");
+      click(button(CREATE_COPY.next));
+      const committedAt = performance.now();
+      const item = backItem();
+      if (item === null) throw new Error("换到第 2 步后底栏没有「上一步」");
+      let enterMs = 0;
+      while (springAt("morph", 1, 0, enterMs / 1000).x > 1 / 20) enterMs += 1;
+      let startedAfter: number | null = null;
+      while (startedAfter === null) {
+        if (performance.now() - committedAt > enterMs + 200) throw new Error("「上一步」一直没开始淡入");
+        await stepFrames(1);
+        if (Number(item.style.opacity) > 0) startedAfter = performance.now() - committedAt;
+      }
+      expect(startedAfter).toBeGreaterThan(enterMs);
+      // 到点之后的头一帧就在淡入；等首帧画出的话要再晚放行之前的一两帧
+      expect(startedAfter).toBeLessThanOrEqual(enterMs + 16);
+    });
+
     it("减少动画：「取消」一步换到新位置，「上一步」不用等，当场淡入", async () => {
       await mount(null, { ...DEFAULT_APPEARANCE, reduceMotion: true });
       setInput(nameInput(), "周末生存");

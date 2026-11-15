@@ -356,6 +356,24 @@ describe("尺寸稳定", () => {
     expect(reserved.slice(1).every((label) => label !== undefined && /^1\.\d{3}$/.test(label))).toBe(true);
   });
 
+  // 定宽的触发器把长选项省略掉，列表还留在浮层默认的 360 里的话，全名在列表里也看不全
+  it("列表默认沿用浮层的宽度上限；listMaxWidth 为 window 时列表的浮层放开上限，触发器不受影响", () => {
+    const livePanel = () => document.querySelector<HTMLElement>(LIVE) as HTMLElement;
+    mount(<Select value="j8" options={JAVA} ariaLabel="Java 运行时" onChange={() => undefined} />);
+    const closedTrigger = trigger().outerHTML;
+    act(() => trigger().click());
+    expect(listbox()).not.toBeNull();
+    expect(livePanel().hasAttribute("data-max-width")).toBe(false);
+    view?.unmount();
+
+    mount(<Select listMaxWidth="window" value="j8" options={JAVA} ariaLabel="Java 运行时" onChange={() => undefined} />);
+    // 放开的只是弹出列表：触发器与默认的一模一样，定宽与省略照旧
+    expect(trigger().outerHTML).toBe(closedTrigger);
+    act(() => trigger().click());
+    expect(listbox()).not.toBeNull();
+    expect(livePanel().getAttribute("data-max-width")).toBe("window");
+  });
+
   it("列表的滚动条槽位常驻，槽位吃进面板右侧的内边距；过滤框内缩到与选项的右缘对齐", () => {
     const list = ruleOf(".list");
     expect(list).toContain("scrollbar-gutter: stable;");

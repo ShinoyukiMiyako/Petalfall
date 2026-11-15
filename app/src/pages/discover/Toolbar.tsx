@@ -177,6 +177,7 @@ export function Toolbar({ tabsId, filters, onKind, onFit, onFilters, fitCandidat
           options={fitOptions}
           onChange={(v) => onFit(v === FIT_ANY ? null : v)}
           className={styles.fitSelect}
+          listMaxWidth="window"
         />
         <Button
           size="sm"

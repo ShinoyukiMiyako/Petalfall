@@ -49,6 +49,11 @@ export interface PopoverProps {
   offset?: number;
   /** 宽度不小于锚点（下拉选择）。 */
   matchWidth?: boolean;
+  /**
+   * 宽度上限。default：360；window：不设固定上限，随内容排开，只夹在窗口内（两侧各留 8）。
+   * window 只给内容长度本身有上限的面板（选项是有长度上限的用户名称）：内容不设限时面板会铺满窗口。
+   */
+  maxWidth?: "default" | "window";
   /** 打开即把焦点移进面板（面板容器本身）。 */
   autoFocus?: boolean;
   /** 面板的角色：默认 dialog；内容自带 menu / listbox 时传 presentation，由内容承担角色。 */
@@ -169,6 +174,7 @@ export function Popover({
   placement = "bottom-start",
   offset = 8,
   matchWidth = false,
+  maxWidth = "default",
   autoFocus = false,
   role = "dialog",
   id,
@@ -216,6 +222,7 @@ export function Popover({
                 placement={placement}
                 offset={offset}
                 matchWidth={matchWidth}
+                maxWidth={maxWidth}
                 autoFocus={autoFocus}
                 role={role}
                 id={id}
@@ -257,6 +264,7 @@ interface PanelProps {
   placement: Placement;
   offset: number;
   matchWidth: boolean;
+  maxWidth: "default" | "window";
   autoFocus: boolean;
   role: "dialog" | "presentation";
   id: string | undefined;
@@ -282,7 +290,7 @@ interface Position {
   enter: Side;
 }
 
-function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidth, autoFocus, role, id, aria, className, close, layoutKey, header, footer, children }: PanelProps) {
+function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidth, maxWidth, autoFocus, role, id, aria, className, close, layoutKey, header, footer, children }: PanelProps) {
   const present = useIsPresent();
   const panelRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -422,6 +430,7 @@ function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidt
       className={cx(styles.panel, className)}
       data-side={side}
       data-match-width={matchWidth || undefined}
+      data-max-width={maxWidth === "window" ? maxWidth : undefined}
       data-structured={structured || undefined}
       data-exiting={present ? undefined : ""}
       // 面板 portal 在浮层根里，DOM 上不在 React 祖先之内：作为独立的布局投影树的根来量，祖先的位移与滚动不该从它身上扣掉

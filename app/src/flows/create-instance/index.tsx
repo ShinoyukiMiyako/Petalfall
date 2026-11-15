@@ -19,7 +19,7 @@ import { InstanceAvatarBase } from "../../art/iso/InstanceAvatarBase";
 import { ACTION_ERROR, coverLabel, LOADER_NAME } from "../../copy/flows";
 import { instanceNameError } from "../../domain/rules";
 import type { LoaderKind } from "../../domain/types";
-import { insertItem, insertItemFade, springAt, stepPane, stepPaneFade } from "../../lib/motion";
+import { springAt, stepPane, stepPaneFade } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
 import { useMounted } from "../../lib/useMounted";
 import { cx, isImeComposing } from "../../lib/util";
@@ -30,6 +30,7 @@ import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } fr
 import { useLoaderVersions, useManifest, useVersionRequirements } from "../../state/queries/catalog";
 import { useStarterMods, useTemplateInfo } from "../../state/queries/starter";
 import { canPinMore } from "../../state/selectors";
+import { Appear } from "../../ui/Appear";
 import { Button, CONTROL_ICON_SIZE } from "../../ui/Button";
 import { KeyHint } from "../../ui/KeyHint";
 import { LabelSlot } from "../../ui/LabelSlot";
@@ -71,7 +72,7 @@ const CREATE_LABELS = [CREATE_COPY.create, CREATE_COPY.creating] as const;
  * 「上一步」插进来时等多久才淡入（秒）。「取消」从它那一格（「上一步」的宽加一个间距）沿 morph 滑走，要走完九成才让出一个间距；
  * 当场淡入的话两行字叠着画一百多毫秒。等「取消」离终点只剩这一格的 1/20（默认字号下约 5 px，不到一个间距）再淡入，
  * 这一刻按 morph 的解析解取。时钟是同一个：传 morph 的让位把起步时刻钉在提交后的微任务里，framer-motion 给这次入场钉的
- * 起步时刻是提交时建动画的那一刻，两者只差这次提交余下的几个回调，60 Hz、提交再长都对得上。
+ * 起步时刻是提交时建动画的那一刻（Appear 的 enterStart 为 commit，不等首帧画出），两者只差这次提交余下的几个回调，60 Hz、提交再长都对得上。
  */
 const BACK_ENTER_DELAY = (() => {
   let seconds = 0;
@@ -167,37 +168,6 @@ function StepPane({ ref, direction, enter, onKeyDown, children }: StepPaneProps)
   );
 }
 
-/**
- * 底栏「上一步」的那一格。不用 ui/Appear：「取消」的让位要穿过这一格，Appear 的进出两头都会与它叠着画。
- * - 进：Appear 当场淡入，「取消」还压在这一格上。这里先透明着占住位置，等「取消」滑出去再淡入（BACK_ENTER_DELAY）；
- *   减少动画时让位一步到位，不用等。
- * - 退：Appear 当场把它抽出布局（popLayout），「取消」立刻滑进来，从淡出中的它上面压过去。这里留在布局里淡完才拿掉，
- *   「取消」等拿掉那一刻（增删观察报上来）再滑回来。
- * - 退到一半被拉回（点了上一步又马上点下一步）：framer-motion 让同一格回到 animate，再带入场延迟就停在半透明上干等。
- *   这时「取消」一直没动（这一格还在布局里），不用等，从当前的不透明度直接淡回 1。插进来还没开始淡入就退场的，
- *   两个值都已在退场的终点上，退场当场播完、这一格随即拿掉，再点下一步是新插进来的一格，照旧等。
- * 退场中带 inert：点不到、聚焦不到；焦点正在它上面时由新的一步接管（StepPane）。
- */
-function BackSlot({ children }: { children: ReactNode }) {
-  const present = useIsPresent();
-  const reduced = useReducedMotionConfig() === true;
-  // 开始退场过就记下，只增不减：之后回到在场都是被拉回
-  const [exited, setExited] = useState(false);
-  if (!present && !exited) setExited(true);
-  const item = reduced ? insertItemFade : insertItem;
-  // 单列了过渡的值（opacity）不继承外层的 delay，两层都要写
-  const { transition } = insertItem.animate;
-  const animate =
-    reduced || exited
-      ? item.animate
-      : { ...insertItem.animate, transition: { ...transition, delay: BACK_ENTER_DELAY, opacity: { ...transition.opacity, delay: BACK_ENTER_DELAY } } };
-  return (
-    <motion.div className={styles.footItem} inert={!present} initial={item.initial} animate={animate} exit={item.exit}>
-      {children}
-    </motion.div>
-  );
-}
-
 export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"create-instance">) {
   const existing = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
   const settings = useLauncherSelector((s) => s.settings);
@@ -256,6 +226,7 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
   // 没有尺寸变化引起的让位，也就没有要在 onLayoutAnimationStart 里补跑的。传 morph 是要它的时钟：起步时刻钉在提交后的微任务里，
   // 「上一步」的入场延迟（BACK_ENTER_DELAY）按同一条弹簧、同一个时钟算；settle 要等新排布画出两帧才起步，提交越长落后越多
   const footReflow = useReflow<HTMLDivElement>("morph");
+  const reduced = useReducedMotionConfig() === true;
 
   const trimmed = name.trim();
   const filter: VersionFilter = {
@@ -506,15 +477,21 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
               {CREATE_COPY.cancel}
             </Button>
           </div>
-          <AnimatePresence>
+          {/*
+           * 「上一步」的那一格，「取消」的让位要穿过它：
+           * - 进：先透明着占住位置，等「取消」滑出去再淡入（BACK_ENTER_DELAY，从插进来那次提交起算）；减少动画时让位一步到位，不用等。
+           * - 退：留在布局里淡完才拿掉，「取消」等拿掉那一刻（增删观察报上来）再滑回来，不从淡出中的它上面压过去。
+           *   退到一半被拉回（点了上一步又马上点下一步）时「取消」一直没动，从当前的不透明度直接淡回 1。插进来还没开始淡入就退场的，
+           *   两个值都已在退场的终点上，退场当场播完、这一格随即拿掉，再点下一步是新插进来的一格，照旧等。
+           * 退场中带 inert：点不到、聚焦不到；焦点正在它上面时由新的一步接管（StepPane）。
+           */}
+          <Appear itemClassName={styles.footItem} enterDelay={reduced ? undefined : BACK_ENTER_DELAY} enterStart="commit" exitInLayout>
             {index > 0 && (
-              <BackSlot key="back">
-                <Button icon="arrow-left" disabled={creating} onClick={() => goTo(index - 1)}>
-                  {CREATE_COPY.back}
-                </Button>
-              </BackSlot>
+              <Button key="back" icon="arrow-left" disabled={creating} onClick={() => goTo(index - 1)}>
+                {CREATE_COPY.back}
+              </Button>
             )}
-          </AnimatePresence>
+          </Appear>
           {/*
            * 主按钮从头到尾是同一个按钮（聚焦着的按钮不丢焦点），每一步都一样宽，换文案、换成加载态时同一行的按钮都不被挤动：
            * - 前置图标位常驻（下载，创建中换成加载指示），「下一步」时样式表让它透明。宽度由它加「创建并开始安装」撑出；
