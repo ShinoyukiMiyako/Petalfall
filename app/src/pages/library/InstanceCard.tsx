@@ -21,7 +21,7 @@ import { popMark } from "../../lib/motion";
 import { useNav } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
-import { busyInstanceId, canPinMore, findInstance, importingModpack } from "../../state/selectors";
+import { busyInstanceId, canPinMore, findInstance } from "../../state/selectors";
 import { Appear } from "../../ui/Appear";
 import { Card, CardTitleButton } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
@@ -59,7 +59,6 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   const currentTag = useReducedMotionConfig() === true ? popMark.reduced : popMark.tag;
   const busy = useLauncherSelector((s) => busyInstanceId(s) === id);
   const canPin = useLauncherSelector(canPinMore);
-  const importing = useLauncherSelector((s) => importingModpack(s, inst));
   // 崩溃报告不会被之后的正常启动清空：菜单项按「崩溃过」出现，提示只在之后没再正常玩过时给出；
   // 刚崩溃、列表还没重扫到崩溃时刻时，以会话的崩溃态为准
   const viewKind = useLauncherSelector((s) => (findInstance(s, id) === undefined ? null : launchView(s, inst).kind));
@@ -73,7 +72,6 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   const deleteReason = lockReason(locks.delete, "delete");
   const moveBlocked = moveReason(inst, locks);
   const pinAllowed = inst.pinned || canPin;
-  const importReason = inst.pinned ? LOCK_REASON.unpinImporting : LOCK_REASON.pinImporting;
   const cover = useInstanceCover(inst);
   const backdrop = useCoverBackdrop(inst);
   const justCrashed = viewKind === "crashed";
@@ -109,8 +107,8 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
     {
       label: inst.pinned ? LIBRARY_COPY.menu.unpin : LIBRARY_COPY.menu.pin,
       icon: inst.pinned ? "pin-off" : "pin",
-      disabled: importing || !pinAllowed,
-      disabledReason: importing ? importReason : pinAllowed ? undefined : LIBRARY_COPY.menu.pinFull,
+      disabled: !pinAllowed,
+      disabledReason: pinAllowed ? undefined : LIBRARY_COPY.menu.pinFull,
       onSelect: () => void togglePin(),
     },
     {
@@ -148,16 +146,14 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   ];
 
   const pinLabel = inst.pinned ? LIBRARY_COPY.unpin(name) : LIBRARY_COPY.pin(name);
-  // 导入中：按带原因的禁用画，点击无效，悬停提示在名称下面写原因。侧栏满了不同：点了由状态层弹上限提示，
-  // 所以只标 aria-disabled、提示换成上限那一句
+  // 侧栏满了：点了由状态层弹上限提示，所以只标 aria-disabled、提示换成上限那一句
   const pinButton = (
     <IconButton
       icon="pin"
       label={pinLabel}
       size="sm"
       pressed={inst.pinned}
-      disabledReason={importing ? importReason : undefined}
-      tooltip={importing || pinAllowed}
+      tooltip={pinAllowed}
       aria-disabled={pinAllowed ? undefined : true}
       className={styles.pin}
       onClick={() => void togglePin()}
@@ -190,7 +186,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
               )}
             </AnimatePresence>
             <span className={styles.grow} />
-            <Tooltip content={TOAST_COPY.pinLimit} disabled={importing || pinAllowed}>
+            <Tooltip content={TOAST_COPY.pinLimit} disabled={pinAllowed}>
               {pinButton}
             </Tooltip>
           </div>

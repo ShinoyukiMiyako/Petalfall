@@ -2,7 +2,7 @@
 // 跨页面共用的文案（启动、崩溃类别、确认框、通知）取自 copy/flows，这里只放本页私有的部分。
 // 插值一律经 domain/format 格式化；产品名取自 app-info。
 
-import { cluePointer, CRASH_SOURCE_LABEL, LOADER_NAME, PIN_IMPORTING_COPY, RELEASE_CHANNEL_LABEL, SETTINGS_SECTION_LABEL } from "../../copy/flows";
+import { cluePointer, CRASH_SOURCE_LABEL, LOADER_NAME, RELEASE_CHANNEL_LABEL, SETTINGS_SECTION_LABEL } from "../../copy/flows";
 import { formatBytes, formatMemory, formatPlaytime, formatRelative } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
@@ -53,10 +53,6 @@ export const HERO_COPY = {
 export const LOCK_REASON = {
   /** 新建或导入还没落盘的占位项：盘上可能还没有实例目录，打开哪个文件夹都只会报未安装。 */
   placeholderFolder: "新建的实例还没装好，装完后才能打开文件夹",
-  /** 有进行中的整合包导入任务指向这个实例（占位项与被扫到的半成品都算，见 importingModpack）：目录建好之前后端不认这个名字，固定只会报找不到；建好之后导入失败或取消时目录会被删掉，留下指向不存在实例的固定。实例库卡片与头图的固定入口共用。 */
-  pinImporting: PIN_IMPORTING_COPY.pin,
-  /** 导入中的实例本来就已固定（配置里留着同名的旧固定）：取消固定与固定按同一个判断禁用，原因要说取消固定。入口同上。 */
-  unpinImporting: PIN_IMPORTING_COPY.unpin,
   /** 打开工作子目录与改实例设置：安装、补全、改名、删除、移到别的游戏目录进行中时。 */
   work: {
     folder: {

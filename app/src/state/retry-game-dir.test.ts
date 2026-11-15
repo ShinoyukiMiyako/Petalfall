@@ -398,6 +398,34 @@ describe("发起之后切了目录的新建、导入与补全落地", () => {
     expect([done.body, done.action]).toEqual([`它在游戏目录 ${A} 里，当前已换到别的目录，封面与侧栏固定没有写上；切回去再启动`, undefined]);
   });
 
+  it("导入途中取消了它的侧栏固定、又切到 B：通知只说封面没写上，不说没固定", async () => {
+    const imported = deferred<ModpackInstallOutcomeDto>();
+    ipc.overrides.set("install_modpack", () => imported.promise);
+    await store.actions.installModpack({
+      source: { kind: "file", path: "D:/包.mrpack" },
+      name: "整合包",
+      packName: "樱落",
+      packVersion: "1.0.0",
+      modCount: 3,
+      cover: "grass",
+      excludedOptional: [],
+      mcVersion: "1.21.1",
+      loader: "fabric",
+      loaderVersion: "0.16.5",
+    });
+    await settle();
+    expect(store.getState().sidebarPins).toEqual(["整合包"]);
+    await store.actions.togglePin("整合包");
+    expect(store.getState().sidebarPins).toEqual([]);
+    await switchTo(B, [instanceDto("整合包")]);
+    imported.resolve({ version_id: "整合包", version_dir: `${A}\versions\整合包`, modpack: null as never });
+    await settle();
+
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+    const done = toastOf("「整合包」已导入");
+    expect(done.body).toBe(`它在游戏目录 ${A} 里，当前已换到别的目录，封面没有写上；切回去再启动`);
+  });
+
   it("修好后接着启动、补全途中切到 B：不启动 B 里的同名实例，通知写明在哪、不带启动按钮", async () => {
     const repaired = deferred<RepairResultDto>();
     ipc.overrides.set("repair_instance", () => repaired.promise);

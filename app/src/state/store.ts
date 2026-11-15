@@ -17,7 +17,6 @@ import {
   isCrashCategory,
   MSA_CLIENT_ID_MISSING,
   NEXT_LAUNCH_SUFFIX,
-  PIN_IMPORTING_COPY,
   TASK_INTERRUPTED_CODE,
   TASK_TEXT,
   TASK_TOAST,
@@ -100,7 +99,7 @@ import { network as appNetwork, type NetworkMonitor } from "./online";
 import { MODPACK_SUMMARY_RESOURCE } from "./queries/discover";
 import { invalidate as invalidateResources, resources } from "./resource";
 import type { Route } from "./route";
-import { findInstance, gameDirectoryBusy, importingModpack } from "./selectors";
+import { gameDirectoryBusy } from "./selectors";
 import {
   appendSessionLogs,
   applyPhase,
@@ -282,6 +281,11 @@ type TaskMeta =
       mcVersion: string | null;
       loader: LoaderKind;
       loaderVersion: string | null;
+      /**
+       * 与新建的同名字段同一个规则。导入还多一层：半成品目录建好后后端认这个名字，可导入失败或取消时后端会把目录删掉，
+       * 这期间写进固定列表就留下一条指向不存在实例的固定，所以同样只在派生状态里固定，装好后再写。
+       */
+      autoPin: boolean;
     }
   /** starter：失败的新建改排补全时接过来的开局 Mod，补全好了照样接着装，重启后从参数读回；别的补全为空。 */
   | { type: "repair"; launchAfter: boolean; starter: StarterPick[] }
@@ -712,7 +716,8 @@ function metaFromSpec(task: Task): TaskMeta | null {
         starter: starterPicksArg(args, command),
       };
     case "install_modpack":
-      return { type: "modpack", name: strArg(args, "name", command), cover: null, modCount: null, mcVersion: null, loader: "vanilla", loaderVersion: null };
+      // 与新建同理，按「有空位就固定」处理
+      return { type: "modpack", name: strArg(args, "name", command), cover: null, modCount: null, mcVersion: null, loader: "vanilla", loaderVersion: null, autoPin: true };
     case "repair_instance":
       return { type: "repair", launchAfter: false, starter: starterPicksArg(args, command) };
     case "install_java": {
@@ -1230,7 +1235,7 @@ class StateDeriver {
       named.add(meta.name.toLowerCase());
       creations.push({ task, meta });
       // 自动固定跟着任务走、不跟着占位项走：装到一半的目录被别的重扫扫到时扫描项接替了占位项，新实例照样排在侧栏末尾
-      if (meta.type === "create" && meta.autoPin && sidebarPins.length < SIDEBAR_PIN_LIMIT && !sidebarPins.includes(meta.name)) {
+      if (meta.autoPin && sidebarPins.length < SIDEBAR_PIN_LIMIT && !sidebarPins.includes(meta.name)) {
         sidebarPins.push(meta.name);
         unsavedPins.push(meta.name);
       }
@@ -2488,18 +2493,22 @@ export class LauncherStore {
     return this.renames.slice(mark).reduce((cur, r) => (r.from === cur ? r.to : cur), id);
   }
 
-  /**
-   * 还在安装、还没写进固定列表的新建实例：它的任务与入队上下文；不是这种实例为 null。装到一半被重扫扫到的半成品目录也算，
-   * 与派生里的自动固定一致：取消固定、拖动排序只改装好后的打算，不把半成品写进固定列表。已在固定列表里的照常经后端改。
-   */
-  private pendingCreate(id: string): { taskId: string; meta: Extract<TaskMeta, { type: "create" }> } | null {
-    if (this.raw.pins.includes(id)) return null;
+  /** 还在新建或导入的实例：它的任务与入队上下文；没有为 null。装到一半被重扫扫到的半成品目录也算。 */
+  private creationOf(id: string): { taskId: string; meta: CreationMeta } | null {
     for (const task of this.raw.tasks) {
       if (!isActiveTask(task)) continue;
       const meta = this.raw.taskMeta[task.id];
-      if (meta !== undefined && meta.type === "create" && meta.name === id) return { taskId: task.id, meta };
+      if (meta !== undefined && (meta.type === "create" || meta.type === "modpack") && meta.name === id) return { taskId: task.id, meta };
     }
     return null;
+  }
+
+  /**
+   * 还在安装、还没写进固定列表的新建或导入实例：它的任务与入队上下文；不是这种实例为 null。装到一半被重扫扫到的半成品目录也算，
+   * 与派生里的自动固定一致：取消固定、拖动排序只改装好后的打算，不把半成品写进固定列表。已在固定列表里的照常经后端改。
+   */
+  private pendingCreate(id: string): { taskId: string; meta: CreationMeta } | null {
+    return this.raw.pins.includes(id) ? null : this.creationOf(id);
   }
 
   /** 任务完成后的落地与通知（任务完成一律弹，不论用户此时在哪一页）。 */
@@ -2547,11 +2556,11 @@ export class LauncherStore {
         const elsewhere = this.landedElsewhere(task);
         if (elsewhere !== null) {
           await this.fetchInstances((raw) => this.withoutLanding(raw, task.id));
-          const copy = TASK_TOAST.importedElsewhere(id, elsewhere, meta.cover !== null);
+          const copy = TASK_TOAST.importedElsewhere(id, elsewhere, meta.cover !== null, meta.autoPin);
           this.pushToast("success", copy.title, copy.body);
           return;
         }
-        await this.settleNewInstance(task.id, id, meta.cover, true);
+        await this.settleNewInstance(task.id, id, meta.cover, meta.autoPin);
         // 重启后恢复的导入任务不知道 Mod 数，正文省略
         const copy = TASK_TOAST.imported(id, meta.modCount);
         this.pushToast("success", copy.title, "body" in copy ? copy.body : undefined, this.launchAction(id));
@@ -3142,23 +3151,19 @@ export class LauncherStore {
       },
       togglePin(id) {
         return store.queueSidebarPins(async () => {
-          const state = store.getState();
           // 侧栏显示的固定项含安装中自动固定的新实例，上限按显示的算
-          const shown = state.sidebarPins;
-          // 导入中的整合包不改固定（原因见 importingModpack）。界面上的入口按同一个判断禁用，这里兜住没禁用的入口，报的是入口上同一句原因
-          const inst = findInstance(state, id);
-          if (inst !== undefined && importingModpack(state, inst)) {
-            throw new Error(shown.includes(id) ? PIN_IMPORTING_COPY.unpin : PIN_IMPORTING_COPY.pin);
-          }
+          const shown = store.getState().sidebarPins;
           if (!shown.includes(id) && shown.length >= SIDEBAR_PIN_LIMIT) {
             store.pushToast("warning", TOAST_COPY.pinLimit);
             return;
           }
-          const pending = store.pendingCreate(id);
-          if (pending !== null) {
+          const creation = store.creationOf(id);
+          if (creation !== null) {
             // 还在安装的新实例后端不认，只改它装好后要不要固定
-            store.set((raw) => ({ taskMeta: { ...raw.taskMeta, [pending.taskId]: { ...pending.meta, autoPin: !shown.includes(id) } } }));
-            return;
+            store.set((raw) => ({ taskMeta: { ...raw.taskMeta, [creation.taskId]: { ...creation.meta, autoPin: !shown.includes(id) } } }));
+            // 配置里留着同名的旧固定、半成品目录建好后又被读回固定列表：取消固定还得从列表里去掉，否则它照旧显示、装好后照旧固定。
+            // 先改打算再写：写入回来之前它靠固定列表留在原位，不会先跳到末尾
+            if (!store.raw.pins.includes(id)) return;
           }
           const pins = store.raw.pins;
           const next = pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id];
@@ -3206,6 +3211,7 @@ export class LauncherStore {
       async installModpack(spec) {
         const nameError = instanceNameError(spec.name, store.instanceIds());
         if (nameError !== null) throw new Error(nameError);
+        const autoPin = store.getState().sidebarPins.length < SIDEBAR_PIN_LIMIT;
         store.enqueue(
           {
             kind: "modpack",
@@ -3222,6 +3228,7 @@ export class LauncherStore {
             mcVersion: spec.mcVersion,
             loader: spec.loader,
             loaderVersion: spec.loaderVersion,
+            autoPin,
           },
           spec.packName,
         );

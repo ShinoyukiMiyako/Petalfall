@@ -23,7 +23,6 @@ import { CORE_EVENT } from "../../ipc/tasks";
 import { REFLOW_PAUSED_ATTR } from "../../lib/reflow";
 import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import bannerStyles from "../../ui/Banner.module.css";
-import { LOCK_REASON } from "../instance/copy";
 import { LIBRARY_COPY } from "./copy";
 import LibraryPage from "./index";
 import styles from "./library.module.css";
@@ -1346,7 +1345,7 @@ describe("实例库：动作", () => {
     expect(await reasonOf(item)).toBe(LIBRARY_COPY.menu.pinFull);
   });
 
-  it("导入中的整合包占位项：图钉与菜单项禁用、悬停说明要等导入完成，点了不写固定列表；新建的占位项照常能改固定", async () => {
+  it("导入中的整合包占位项：与新建的占位项一样入队就已固定，图钉与菜单项照常可点，只改装好后要不要固定、不写固定列表", async () => {
     ipc.overrides.set("install_modpack", () => new Promise(() => undefined));
     ipc.overrides.set("install_version", () => new Promise(() => undefined));
     await mount();
@@ -1369,26 +1368,27 @@ describe("实例库：动作", () => {
     expect(launcher.state.tasks.filter((t) => t.kind === "modpack").map((t) => t.status)).toEqual(["running"]);
     const before = callsOf(ipc, "set_sidebar_pins").length;
 
-    const pin = byLabel("把「周末联机」固定到侧栏");
-    expect(pin.getAttribute("aria-disabled")).toBe("true");
-    // 提示照常以名称开头，原因写在第二行
-    expect(await reasonOf(pin)).toBe(LIBRARY_COPY.pin("周末联机") + LOCK_REASON.pinImporting);
+    // 入队就排进侧栏：图钉显示已固定，提示照常只写名称
+    const pin = byLabel(LIBRARY_COPY.unpin("周末联机"));
+    expect(pin.getAttribute("aria-disabled")).toBeNull();
+    expect(pin.getAttribute("aria-pressed")).toBe("true");
+    expect(await reasonOf(pin)).toBe(LIBRARY_COPY.unpin("周末联机"));
     click(pin);
     await flush();
-    expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(before);
-    expect(toastTitles()).toEqual([]);
+    expect(launcher.state.sidebarPins).toEqual(["樱花生存", "周末生存"]);
 
     click(byLabel("「周末联机」的更多操作"));
     const item = menuItem(LIBRARY_COPY.menu.pin);
-    expect(item.getAttribute("aria-disabled")).toBe("true");
-    expect(await reasonOf(item)).toBe(LOCK_REASON.pinImporting);
+    expect(item.getAttribute("aria-disabled")).toBeNull();
     click(item);
     await flush();
+    expect(byLabel(LIBRARY_COPY.unpin("周末联机")).getAttribute("aria-pressed")).toBe("true");
+    expect(launcher.state.sidebarPins).toEqual(["樱花生存", "周末联机", "周末生存"]);
     expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(before);
-    expect(toastTitles()).toEqual([]);
+    expect(toastTitles()).toEqual([`success:${LIBRARY_COPY.unpinned("周末联机")}`, `success:${LIBRARY_COPY.pinned("周末联机")}`]);
 
-    // 新建的占位项由状态层记下装好后要不要固定，图钉不受影响
-    expect(byLabel("从侧栏取消固定「周末生存」").getAttribute("aria-disabled")).toBeNull();
+    // 新建的占位项同样
+    expect(byLabel(LIBRARY_COPY.unpin("周末生存")).getAttribute("aria-disabled")).toBeNull();
   });
 
   it("设为当前实例：写配置并通知；之后卡片标出「当前」、菜单项禁用", async () => {
