@@ -31,6 +31,7 @@ export function LoadedBody<T>({ resource, loading, failed, retry, children }: Lo
       <Callout
         tone="danger"
         announce
+        fullText
         action={
           <Button size="sm" onClick={() => resource.reload()}>
             {retry}
