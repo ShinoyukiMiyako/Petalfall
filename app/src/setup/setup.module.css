@@ -134,6 +134,11 @@
   font-size: var(--sk-fs-small);
   line-height: var(--sk-lh-small);
   color: var(--sk-text-2);
+  /*
+   * 中文说明逐字可断，最后一行常只剩一个字加句号；让浏览器挪动末尾几行的断点，不改措辞。
+   * 引导程序放行的最老 WebView2 还不认这个值，那里整条声明作废，照常折行。占位的那段同一条规则，叠放时高度才对得上。
+   */
+  text-wrap: pretty;
 }
 
 /* 传了 leadFloor：两段说明叠在同一格里，格子按较高的那段撑开；占位的那段看不见，也不进读屏 */

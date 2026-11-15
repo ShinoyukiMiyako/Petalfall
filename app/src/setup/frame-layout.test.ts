@@ -44,6 +44,12 @@ describe("说明区占位", () => {
     expect(decls(".leadSlot > .lead").get("grid-area")).toBe("1 / 1");
     expect(decls(".lead[data-floor]").get("visibility")).toBe("hidden");
   });
+
+  it("说明避开只剩一两个字的末行，占位的那段与它同一条规则：两段折法不同，叠放的高度就对不上", () => {
+    expect(decls(".lead").get("text-wrap")).toBe("pretty");
+    expect(decls(".leadSlot > .lead").has("text-wrap")).toBe(false);
+    expect(decls(".lead[data-floor]").has("text-wrap")).toBe(false);
+  });
 });
 
 describe("窗口按钮", () => {
