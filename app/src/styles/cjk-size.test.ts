@@ -17,6 +17,7 @@ const CJK_TEXT: readonly (readonly [string, readonly string[]])[] = [
   ["../pages/settings/settings.module.css", [".navHint", ".errorText", ".monoLine", ".calloutPath", ".dirPath", ".dataDirPath", ".licenseText"]],
   ["../shell/AccountCapsule.module.css", [".kind"]],
   ["../ui/LoadedBody.module.css", [".errorText"]],
+  ["../ui/RadioTile.module.css", [".note"]],
   ["../flows/onboarding/onboarding.module.css", [".errorText", ".extraPath"]],
   ["../flows/create-instance/create.module.css", [".stepValue", ".path"]],
   ["../pages/discover/pack.module.css", [".coverName"]],
