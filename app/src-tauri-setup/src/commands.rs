@@ -816,6 +816,7 @@ mod tests {
         UNINSTALL_KEY,
     };
     use crate::journal::Journal;
+    use crate::overlay::test_support::stub_image;
 
     const PAYLOAD: &str = "0.2.0";
     /// 假的 `%LOCALAPPDATA%`。用例里登记目录都是写得进的临时目录，探针一过就不会读到这里。
@@ -916,7 +917,7 @@ mod tests {
 
     fn app_dir() -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(APP_EXE), b"MZ").unwrap();
+        std::fs::write(dir.path().join(APP_EXE), stub_image()).unwrap();
         let text = dir.path().to_str().unwrap().to_owned();
         (dir, text)
     }
@@ -2486,7 +2487,7 @@ mod tests {
             fn installed(&self, version: &str) -> String {
                 let dir = self.root.path().join("Games").join("Petalfall");
                 fs::create_dir_all(&dir).unwrap();
-                fs::write(dir.join(APP_EXE), b"MZ").unwrap();
+                fs::write(dir.join(APP_EXE), stub_image()).unwrap();
                 let dir = dir.to_str().unwrap().to_owned();
                 self.hive
                     .set(UNINSTALL_KEY, Some(INSTALL_LOCATION), &format!("\"{dir}\""));

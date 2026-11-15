@@ -10,6 +10,7 @@ use std::path::Path;
 
 use petalfall_release::install_policy::{Installed, channel_of, compare_lenient};
 use petalfall_release::order;
+use petalfall_setup_payload::overlay_start;
 
 use crate::contract::{Channel, Existing, ExistingKind};
 
@@ -65,13 +66,31 @@ fn last_dir(registry: &dyn Registry) -> io::Result<Option<String>> {
     }
 }
 
-/// 程序文件是否还在。0 字节算不在：覆盖安装中途断电时旧 exe 已被截断，文件还在但打不开。
+/// 程序文件是否完好。PE 头读不懂、或文件短于节表声明的末端（各节 `PointerToRawData + SizeOfRawData` 的最大值）
+/// 都算不在：覆盖安装中途断电时旧 exe 可能已被截成 0 字节，也可能只写了一半，文件还在却打不开，探测不能为它给出
+/// 「打开」。节表末端之后多出的字节（签名补的证书表）不影响结论。只读头和节表，不读整个文件。
 fn app_exe_present(dir: &str) -> io::Result<bool> {
-    match fs::metadata(Path::new(dir).join(APP_EXE)) {
-        Ok(meta) => Ok(meta.is_file() && meta.len() > 0),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(err),
+    let path = Path::new(dir).join(APP_EXE);
+    // 同名的目录用 File::open 打不开，报的是拒绝访问而不是不在，先按元数据挡掉
+    match fs::metadata(&path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Ok(false),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
     }
+    let mut file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    let sections_end = match overlay_start(&mut file) {
+        Ok(end) => end,
+        Err(petalfall_setup_payload::Error::NotPe(_)) => return Ok(false),
+        Err(petalfall_setup_payload::Error::Io(err)) => return Err(err),
+        // overlay_start 只报上面两种；载荷库改了才会走到这里，照读取失败往上报，不猜成在或不在
+        Err(other) => return Err(io::Error::other(other)),
+    };
+    Ok(file.metadata()?.len() >= sections_end)
 }
 
 /// 程序文件完好时，已装版本相对载荷版本的三种情况，只看版本先后。先后与容错都按共用包的
@@ -91,7 +110,7 @@ pub struct Installation {
     pub dir: String,
     /// 卸载项里的 DisplayVersion，已去引号；没写或为空时是 `None`。
     pub version: Option<String>,
-    /// 程序文件在、是文件且不是 0 字节。
+    /// 程序文件在、是文件，PE 头读得懂，长度也不短于节表声明的末端。
     pub program_intact: bool,
 }
 
@@ -238,8 +257,10 @@ mod tests {
     use std::collections::HashMap;
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
+    use std::io::Cursor;
 
     use super::*;
+    use crate::overlay::test_support::{random_bytes, stub_image};
 
     const PAYLOAD: &str = "0.2.0";
 
@@ -280,12 +301,41 @@ mod tests {
         RandomState::new().build_hasher().finish() % bound
     }
 
-    /// 带一份非空 exe 的临时安装目录。
+    /// 带一份完好程序文件的临时安装目录：最小的 PE，正好结束在节末端。
     fn installed_dir() -> (tempfile::TempDir, String) {
+        exe_dir(&stub_image())
+    }
+
+    /// 程序文件写成 `exe` 的临时安装目录。
+    fn exe_dir(exe: &[u8]) -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join(APP_EXE), b"MZ").unwrap();
+        fs::write(dir.path().join(APP_EXE), exe).unwrap();
         let text = dir.path().to_str().unwrap().to_owned();
         (dir, text)
+    }
+
+    /// 卸载项登记着 `exe` 所在的目录时，探测认不认它是完好的程序文件。
+    fn intact_with(exe: &[u8]) -> bool {
+        let (_guard, dir) = exe_dir(exe);
+        let registry = FakeRegistry::uninstall(&quoted(&dir), PAYLOAD);
+        read_installation(&registry)
+            .unwrap()
+            .unwrap()
+            .program_intact
+    }
+
+    /// 夹具 PE 的节表末端，也是它的文件长度。
+    fn stub_sections_end() -> usize {
+        let image = stub_image();
+        let end = overlay_start(&mut Cursor::new(&image)).unwrap();
+        assert_eq!(end, image.len() as u64, "夹具应当正好结束在节末端");
+        image.len()
+    }
+
+    /// 夹具 PE 头里 `e_lfanew` 指向的 PE 签名位置。
+    fn stub_pe_at() -> usize {
+        let image = stub_image();
+        u32::from_le_bytes(image[0x3C..0x40].try_into().unwrap()) as usize
     }
 
     fn quoted(dir: &str) -> String {
@@ -356,6 +406,92 @@ mod tests {
         let registry = FakeRegistry::uninstall(dir.path().to_str().unwrap(), PAYLOAD);
         let found = read_installation(&registry).unwrap().unwrap();
         assert!(!found.program_intact);
+    }
+
+    #[test]
+    fn an_exe_ending_exactly_at_its_sections_is_intact() {
+        assert!(intact_with(&stub_image()));
+    }
+
+    /// 签名会在节末端之后补零和证书表：比节表长不算坏。
+    #[test]
+    fn bytes_past_the_section_end_keep_the_exe_intact() {
+        let mut image = stub_image();
+        image.extend_from_slice(&random_bytes(1 + random_below(4096) as usize));
+        assert!(intact_with(&image));
+    }
+
+    /// 覆盖安装写到一半：开头已经落下，节的内容只写进去一部分。
+    #[test]
+    fn a_half_written_exe_counts_as_missing() {
+        let image = stub_image();
+        let end = stub_sections_end();
+        let random_cut = 1 + random_below(end as u64 - 1) as usize;
+        for cut in [1, random_cut, end - 1] {
+            assert!(
+                !intact_with(&image[..cut]),
+                "截在第 {cut} 字节，节末端 {end}"
+            );
+        }
+        // 只差最后一个字节时 PE 头整个读得出：挡下它的是长度，不是头读不懂
+        assert_eq!(
+            overlay_start(&mut Cursor::new(&image[..end - 1])).unwrap(),
+            end as u64
+        );
+    }
+
+    fn patched(patch: impl FnOnce(&mut [u8])) -> Vec<u8> {
+        let mut image = stub_image();
+        patch(&mut image);
+        image
+    }
+
+    /// 每种都和完好的夹具一样长，挡下它们的只能是头读不懂。
+    #[test]
+    fn a_corrupt_pe_header_counts_as_missing() {
+        let pe_at = stub_pe_at();
+        let len = stub_image().len();
+        let mut noise = random_bytes(len);
+        noise[0] = b'X';
+        let cases = [
+            (
+                "没有 MZ",
+                patched(|image| image[..2].copy_from_slice(b"ZM")),
+            ),
+            ("PE 签名不对", patched(|image| image[pe_at + 1] = b'X')),
+            (
+                "e_lfanew 指到文件之外",
+                patched(|image| image[0x3C..0x40].copy_from_slice(&(len as u32).to_le_bytes())),
+            ),
+            (
+                "节表为空",
+                patched(|image| image[pe_at + 6..pe_at + 8].copy_from_slice(&0u16.to_le_bytes())),
+            ),
+            ("随机字节", noise),
+        ];
+        for (what, image) in cases {
+            assert_eq!(image.len(), len, "{what}");
+            assert!(!intact_with(&image), "{what}");
+        }
+        // 只有 MZ 两个字节的文件以前算完好
+        assert!(!intact_with(b"MZ"));
+    }
+
+    /// 读不了说明不了程序文件坏没坏，报给调用方，不当成不在。
+    #[test]
+    fn an_exe_that_cannot_be_read_reaches_the_caller() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        let (_guard, dir) = installed_dir();
+        let _lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(Path::new(&dir).join(APP_EXE))
+            .unwrap();
+        let registry = FakeRegistry::uninstall(&quoted(&dir), PAYLOAD);
+        let err = read_installation(&registry).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(ERROR_SHARING_VIOLATION));
     }
 
     #[test]
