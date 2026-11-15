@@ -1,7 +1,7 @@
 // 并行通道空出时虚线框里的「空闲」：交代这条通道眼下没有任务，是要被读到的状态，不是装饰也不是禁用态，不能用 text-3
 // （日樱落在卡片上约 2.17:1），按文字 4.5:1 验收。虚线框没有自己的底，字落在并行通道卡上。
 import { describe, expect, it } from "vitest";
-import { APPEARANCES, contrast, declarationOf, readCss, resolveColor, tokensOf, type AppearanceName, type Rgb } from "../../test/contrast";
+import { APPEARANCES, contrast, declarationOf, declarationsOf, readCss, resolveColor, tokensOf, type AppearanceName, type Rgb } from "../../test/contrast";
 
 const css = readCss(new URL("./tasks.module.css", import.meta.url));
 const cardCss = readCss(new URL("../../ui/Card.module.css", import.meta.url));
@@ -34,5 +34,44 @@ describe("并行通道里空闲通道的「空闲」", () => {
     expect(declarationOf(css, ".laneIdle", "color")).toBe("var(--sk-text-2)");
     expect(idleRatio("日樱 · 樱粉")).toBeCloseTo(5.586, 3);
     expect(idleRatio("夜樱 · 樱粉")).toBeCloseTo(5.854, 3);
+  });
+});
+
+// 结局角标：18 圆的实心填充上压 12 的图标。图标是认出完成、失败、已取消要看的图形，按非文字 3:1 验收，
+// 对的是它自己的填充；填充是不透明色，它与底座之间另有一圈 surface 外描隔开。
+const BADGE_TONES = ["ok", "danger", "muted"] as const;
+type BadgeTone = (typeof BADGE_TONES)[number];
+
+/** 色调规则特异性高于 .badge：自己写了就用自己的，没写就是 .badge 上的。 */
+function badgeDeclaration(tone: BadgeTone, property: string): string {
+  const selector = `.badge[data-tone="${tone}"]`;
+  return declarationsOf(css, selector).has(property) ? declarationOf(css, selector, property) : declarationOf(css, ".badge", property);
+}
+
+function badgeRatio(appearance: AppearanceName, tone: BadgeTone): number {
+  const tokens = tokensOf(appearance);
+  // 角标大半压在底座上，填充万一改成半透明，按底座的底合成
+  const tile = resolveColor(declarationOf(css, ".tile", "background"), tokens, cardGround(tokens));
+  const fill = resolveColor(badgeDeclaration(tone, "background"), tokens, tile);
+  return contrast(resolveColor(badgeDeclaration(tone, "color"), tokens, fill), fill);
+}
+
+const BADGE_CASES = (Object.keys(APPEARANCES) as AppearanceName[]).flatMap((appearance) => BADGE_TONES.map((tone) => [appearance, tone] as const));
+const isNight = (appearance: AppearanceName) => appearance.startsWith("夜樱");
+
+describe("任务行的结局角标", () => {
+  it("样式表里写了的角标色调正好是这里逐一验收的三种", () => {
+    const declared = [...css.matchAll(/\.badge\[data-tone="([a-z]+)"\]/g)].map((m) => m[1]);
+    expect([...new Set(declared)].sort()).toEqual([...BADGE_TONES].sort());
+  });
+
+  it.each(BADGE_CASES)("%s · %s：图标对填充不低于 3:1", (appearance, tone) => {
+    expect(badgeRatio(appearance, tone)).toBeGreaterThanOrEqual(3);
+  });
+
+  it.each(Object.keys(APPEARANCES) as AppearanceName[])("%s：已取消是次要文字 text-2 填充配 surface 图标，日樱 5.6325、夜樱 5.7334", (appearance) => {
+    expect(badgeDeclaration("muted", "background")).toBe("var(--sk-text-2)");
+    expect(badgeDeclaration("muted", "color")).toBe("var(--sk-surface)");
+    expect(badgeRatio(appearance, "muted")).toBeCloseTo(isNight(appearance) ? 5.7334 : 5.6325, 4);
   });
 });

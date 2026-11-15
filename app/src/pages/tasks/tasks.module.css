@@ -442,8 +442,9 @@
   background: var(--sk-danger);
 }
 
+/* 已取消是要认出来的结局，不是禁用态：text-3 填充上的图标不到非文字 3:1，填充取 text-2 */
 .badge[data-tone="muted"] {
-  background: var(--sk-text-3);
+  background: var(--sk-text-2);
 }
 
 .side {
