@@ -392,6 +392,15 @@ describe("移到其他游戏目录：弹窗", () => {
     expect(body).toContain("目标在另一个盘上：先把实例与存档备份复制过去，逐个文件校验无误后，再永久删除原来的文件，不进回收站。");
     expect(body).toContain("这个实例没开版本隔离，存档、Mod 和游戏设置放在原游戏目录根下、和别的实例共用，不会跟着移走。");
     expect(body).toContain("原游戏目录里也缺 12 个共用文件，移过去后第一次启动时会下载补上。");
+    // 不跟着走的那条排在摘要之前（矮窗口里主体不滚动也先看得到），说明块与其余提醒行仍在摘要之后
+    const order = [...previewBlock().querySelectorAll<HTMLElement>(":scope > :not([inert])")].map((el) => (el.querySelector("dl") === null ? textOf(el) : "摘要"));
+    expect(order).toEqual([
+      "这个实例没开版本隔离，存档、Mod 和游戏设置放在原游戏目录根下、和别的实例共用，不会跟着移走。",
+      "摘要",
+      "目标在另一个盘上：先把实例与存档备份复制过去，逐个文件校验无误后，再永久删除原来的文件，不进回收站。",
+      "原游戏目录里也缺 12 个共用文件，移过去后第一次启动时会下载补上。",
+      "移走后它会从侧栏固定里去掉。",
+    ]);
     expect(kv("一起带过去的版本")).toBe("1.21.1");
     expect(kv("目标里已有的版本")).toBe("1.20.1");
     expect(kv("要写入目标盘")).toBe(formatBytes(1100 * MB));
