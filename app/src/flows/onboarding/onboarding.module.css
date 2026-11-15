@@ -89,8 +89,13 @@
   cursor: default;
 }
 
+/*
+ * 叠层落在左栏 bg-2 上，text-2 只剩日樱 4.17:1、夜樱 4.39:1。可点回而步名是 text-2 的步（已跳过的、退回后还没再走到的）
+ * 悬停时步名连同「已跳过」提到 text
+ */
 .railItem:hover:not(:disabled) {
   background: var(--sk-fill-hover);
+  color: var(--sk-text);
 }
 
 .railItem:focus-visible {
@@ -161,6 +166,12 @@
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
   color: var(--sk-text-2);
+  /* 字色写在自己身上，不跟整行的字色过渡走：悬停变色时另配同一段过渡，与步名同拍 */
+  transition: color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.railItem:hover:not(:disabled) .railSkipped {
+  color: var(--sk-text);
 }
 
 /* ---------------------------------------------------------------- 右栏：标题、步骤内容、底栏 */

@@ -158,10 +158,17 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+  /* 悬停时提到 text，与导航项的底色同一段过渡 */
+  transition: color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .navHint[data-tone="accent"] {
   color: var(--sk-accent-strong);
+}
+
+/* 未选项悬停铺的叠层上 text-2 不到 4.5:1（夜樱 4.32），说明跟着提到 text；强调色的说明在叠层上仍有 5.1:1 以上，不提 */
+.navItem:hover:not([data-on]) .navHint:not([data-tone]) {
+  color: var(--sk-text);
 }
 
 .navDot {

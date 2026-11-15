@@ -138,8 +138,10 @@
   outline: none;
 }
 
+/* 叠层上 text-2 不到 4.5:1（夜樱 4.22），封面名跟着提到 text */
 .coverCell:hover {
   background: var(--sk-fill-hover);
+  color: var(--sk-text);
 }
 
 .coverCell:focus-visible {
