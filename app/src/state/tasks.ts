@@ -606,6 +606,11 @@ export function trimHistory(tasks: readonly Task[]): Task[] {
 /** 新建与导入整合包：按名字在当前目录里建一个新实例，不找已有的实例。 */
 const CREATES_INSTANCE: ReadonlySet<string> = new Set(["install_version", "install_modpack"]);
 
+/** 任务挂在 key（小写的实例名，与后端的锁键一致）这个实例上、开工时在当前目录里按名字找它。新建与导入不算，见 CREATES_INSTANCE。 */
+function actsOnInstance(task: Task, key: string): boolean {
+  return task.instanceId !== null && task.instanceId.toLowerCase() === key && !CREATES_INSTANCE.has(task.spec.command);
+}
+
 /**
  * 移动成功时排在队里、挂在被移走的实例上（不分大小写，与后端的锁键一致）的任务。它们只记着实例名与发起时的游戏目录，开工时
  * 后端在当前目录里按名字找实例：实例已经不在这里，一开工就报 version_not_installed；切到目标目录再重试，又因为发起时的目录
@@ -617,8 +622,26 @@ export function strandedByMove(tasks: readonly Task[], move: Task): Task[] {
   if (move.spec.command !== MOVE_TASK_COMMAND || move.instanceId === null) throw new Error(`任务 ${move.id} 不是移动实例`);
   const key = move.instanceId.toLowerCase();
   const source = originGameDir(move);
-  return tasks.filter(
-    (t) => t.status === "queued" && t.id !== move.id && t.instanceId !== null && t.instanceId.toLowerCase() === key && !CREATES_INSTANCE.has(t.spec.command) && inGameDir(t, source),
+  return tasks.filter((t) => t.status === "queued" && t.id !== move.id && actsOnInstance(t, key) && inGameDir(t, source));
+}
+
+/**
+ * 移动成功后，被移走的实例上已结束的失败与取消任务（含随这次移动取消的排队任务，见 strandedByMove）记的游戏目录换成目标目录，
+ * 与改名时迁移任务参数同一个思路：它们只认实例名，留着源目录的话，在源目录重试找不到实例（version_not_installed），切到目标目录
+ * 又因发起时的目录对不上被拦（见 retryGameDirReason），永远重试不了。迁过去之后切到目标目录照常重试，命令带的也是目标目录。
+ * 只迁已知发起于源目录的：别的目录里同名实例的任务不动；不知道发起于哪个目录的旧记录也不动，不拿目标目录去补。
+ * 新建与导入不迁（它们在源目录另建同名实例）；移动不迁：它的参数自带 source，后端按它核对，改了就是另一次移动。
+ * 已完成的不迁：它们是在源目录里做成的，也没有重试。
+ */
+export function followMove(tasks: readonly Task[], move: Task): Task[] {
+  if (move.spec.command !== MOVE_TASK_COMMAND || move.instanceId === null) throw new Error(`任务 ${move.id} 不是移动实例`);
+  const target = move.spec.args.target;
+  if (typeof target !== "string") throw new Error(`移动任务 ${move.id} 的参数 target 应为字符串`);
+  const key = move.instanceId.toLowerCase();
+  const source = originGameDir(move);
+  if (source === null) throw new Error(`移动任务 ${move.id} 没有源目录`);
+  return tasks.map((t) =>
+    (t.status === "failed" || t.status === "cancelled") && t.spec.command !== MOVE_TASK_COMMAND && actsOnInstance(t, key) && t.gameDir !== null && sameGameDir(t.gameDir, source) ? { ...t, gameDir: target } : t,
   );
 }
 

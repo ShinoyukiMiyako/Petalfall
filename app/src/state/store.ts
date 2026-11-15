@@ -130,6 +130,7 @@ import {
   dropSuperseded,
   exportDestination,
   findDuplicate,
+  followMove,
   GAME_DIR_FREE_COMMANDS,
   inGameDir,
   INSTANCE_TASK_COMMANDS,
@@ -2234,11 +2235,14 @@ export class LauncherStore {
     const repaired = before.spec.command === "repair_instance" ? before.instanceId : null;
     // 补全成功没有占位项，也一样记进 landing：落地重扫回来之前实例照旧按安装中派生
     const keep = this.keepsPlaceholder(before) || (repaired !== null && !this.discardLanding.has(id));
+    const moved = before.spec.command === MOVE_TASK_COMMAND;
     // 移走的实例上还排着的任务开始了也做不成（见 strandedByMove）：与完成记在同一次更新里取消，下面的调度才不会先把它们拉起来
-    const stranded = before.spec.command === MOVE_TASK_COMMAND ? strandedByMove(this.raw.tasks, before) : [];
+    const stranded = moved ? strandedByMove(this.raw.tasks, before) : [];
     this.set((raw) => {
       const now = Date.now();
-      const done = trimHistory(stranded.reduce((tasks, t) => markCancelled(tasks, t.id, now), markDone(raw.tasks, id, attempt, now)));
+      const settled = stranded.reduce((tasks, t) => markCancelled(tasks, t.id, now), markDone(raw.tasks, id, attempt, now));
+      // 随之取消的与之前失败、取消的一起跟着实例记到目标目录，切过去就能重试（见 followMove）
+      const done = trimHistory(moved ? followMove(settled, before) : settled);
       return { tasks: repaired === null ? done : dropSuperseded(done, repaired, before.gameDir), ...(keep ? { landing: [...raw.landing, id] } : {}) };
     });
     this.tasksChanged();
