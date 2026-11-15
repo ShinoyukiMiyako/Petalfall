@@ -1,6 +1,6 @@
 // 下载快览里要被读到的两处小字：头部右侧的进行中摘要（「2 个进行中 · 最多 3 个同时进行」，没有任务时「队列空闲」），
 // 与每个条目第三行的详情和状态（阶段或详情、「50% · 2.0 MB/s」、「排队中」）。它们都不是装饰也不是禁用态，不能用 text-3
-// （日樱落在浮层白底上约 2.19:1），按文字 4.5:1 验收。浮层面板是实心底；条目悬停时铺 bg-2，元信息行两种底都要过。
+// （日樱落在浮层白底上约 2.19:1），按文字 4.5:1 验收。浮层面板是实心底；条目悬停时铺 fill-hover 叠层，第三行随之提到 text，两种底都要过。
 import { describe, expect, it } from "vitest";
 import { APPEARANCES, contrast, declarationOf, readCss, resolveColor, tokensOf, type AppearanceName, type Rgb } from "../test/contrast";
 
@@ -21,10 +21,13 @@ function groundColor(ground: Ground, tokens: Map<string, string>): Rgb {
   return resolveColor(declarationOf(css, ".row:hover", "background"), tokens, panel);
 }
 
+/** 取字色的规则：悬停中的条目里取悬停时的那条。 */
+const inkOf = (selector: string, ground: Ground) => (ground === "rowHover" ? `.row:hover ${selector}` : selector);
+
 function ratio(appearance: AppearanceName, selector: string, ground: Ground): number {
   const tokens = tokensOf(appearance);
   const bg = groundColor(ground, tokens);
-  return contrast(resolveColor(declarationOf(css, selector, "color"), tokens, bg), bg);
+  return contrast(resolveColor(declarationOf(css, inkOf(selector, ground), "color"), tokens, bg), bg);
 }
 
 describe("下载快览里要被读到的小字", () => {
@@ -35,16 +38,16 @@ describe("下载快览里要被读到的小字", () => {
     expect(failing).toEqual([]);
   });
 
-  it("全部取次要文字 text-2", () => {
+  it("静止全部取次要文字 text-2", () => {
     expect(INFO_TEXT.map(({ selector }) => [selector, declarationOf(css, selector, "color")])).toEqual(INFO_TEXT.map(({ selector }) => [selector, "var(--sk-text-2)"]));
   });
 
-  it("两种底上的实际对比度：日樱面板 5.633、悬停 4.899，夜樱 5.733、5.939", () => {
+  it("两种底上的实际对比度：日樱面板 5.633、悬停 13.098，夜樱 5.733、9.869", () => {
     expect(ratio("日樱 · 樱粉", ".headMeta", "panel")).toBeCloseTo(5.633, 3);
     expect(ratio("日樱 · 樱粉", ".rowMeta", "panel")).toBeCloseTo(5.633, 3);
-    expect(ratio("日樱 · 樱粉", ".rowMeta", "rowHover")).toBeCloseTo(4.899, 3);
+    expect(ratio("日樱 · 樱粉", ".rowMeta", "rowHover")).toBeCloseTo(13.098, 3);
     expect(ratio("夜樱 · 樱粉", ".headMeta", "panel")).toBeCloseTo(5.733, 3);
     expect(ratio("夜樱 · 樱粉", ".rowMeta", "panel")).toBeCloseTo(5.733, 3);
-    expect(ratio("夜樱 · 樱粉", ".rowMeta", "rowHover")).toBeCloseTo(5.939, 3);
+    expect(ratio("夜樱 · 樱粉", ".rowMeta", "rowHover")).toBeCloseTo(9.869, 3);
   });
 });

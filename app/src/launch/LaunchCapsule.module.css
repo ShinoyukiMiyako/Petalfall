@@ -430,13 +430,22 @@
     color var(--sk-dur-hover) var(--sk-ease);
 }
 
+/*
+ * 悬停与按下铺半透明叠层：实色 bg-2 落在夜樱加载面的 surface 上只差 1.04:1、日樱失败面的 danger-tint 上只差 1.02:1，
+ * 看不出悬停
+ */
 .iconAction:hover:not([aria-disabled="true"]) {
-  background: var(--sk-bg-2);
+  background: var(--sk-fill-hover);
   color: var(--sk-text);
 }
 
-/* 方形图标按钮的按压：与同一面上胶囊内按钮的按压同一手感，小控件缩得更深一点 */
+/*
+ * 方形图标按钮的按压：与同一面上胶囊内按钮的按压同一手感，小控件缩得更深一点。
+ * 叠层换成 fill-press；图标同样提到 text，键盘按住空格时只有 :active、没有 :hover
+ */
 .iconAction:active:not([aria-disabled="true"]) {
+  background: var(--sk-fill-press);
+  color: var(--sk-text);
   transform: scale(0.94);
 }
 
