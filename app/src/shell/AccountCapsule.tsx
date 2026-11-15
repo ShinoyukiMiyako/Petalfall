@@ -17,7 +17,6 @@ import { ACTION_ERROR, NEXT_LAUNCH_SUFFIX, TOAST_COPY, accountKindLabel } from "
 import type { Account } from "../domain/adapt";
 import { useLoadingGate } from "../lib/loading-gate";
 import { fade, popMark, springs } from "../lib/motion";
-import { useMounted } from "../lib/useMounted";
 import { isImeComposing } from "../lib/util";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { skinSource, useSkinInfo } from "../state/queries/home";
@@ -106,8 +105,13 @@ export function AccountCapsule() {
   const switchTo = useSwitchAccount();
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
-  // 挂载时就在的内容跟着外壳一起出现；之后才换上的（读完账户、切换账户、加上首个账户）淡入
-  const mounted = useMounted();
+  // 上一次提交时胶囊已经看得见（挂载过，也不在等待期）。之后才换上的内容（读完账户、切换账户、加上首个账户）自己淡入；
+  // 胶囊还看不见时换上的不淡：挂载时就在的跟着外壳一起出现，等待期内读到的只随胶囊外框那一层淡入，与加载容器一样只淡一层。
+  // 账户面再自己从透明走一遍的话，两层不透明度相乘，第一张画面几乎看不见
+  const shownBefore = useRef(false);
+  useLayoutEffect(() => {
+    shownBefore.current = gate.view !== "pending";
+  }, [gate.view]);
 
   const account = gate.view === "content" ? current : null;
   const kind: CapsuleKind = gate.view !== "content" ? "loading" : account === null ? "add" : "account";
@@ -164,7 +168,7 @@ export function AccountCapsule() {
               className={styles.face}
               layout="position"
               layoutDependency={layoutKey}
-              initial={mounted.current ? { opacity: 0 } : false}
+              initial={shownBefore.current ? { opacity: 0 } : false}
               animate={{ opacity: 1, transition: fade.in }}
               exit={{ opacity: 0, transition: fade.out }}
             >

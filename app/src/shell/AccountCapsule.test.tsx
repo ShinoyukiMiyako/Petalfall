@@ -10,9 +10,10 @@ import { ACCOUNT_COPY, SHELL_ACTION_ERROR } from "../copy/shell";
 import { LOADING_DELAY_MS } from "../domain/limits";
 import type { AccountDto } from "../ipc/accounts";
 import { IpcError } from "../ipc/errors";
+import { fade } from "../lib/motion";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { resources } from "../state/resource";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { accountDto, bootOverrides, deferred, resetRecorder, settle, type Deferred } from "../test/launcher";
 import { AccountCapsule, useAccountSkin } from "./AccountCapsule";
@@ -72,7 +73,10 @@ function holdAccounts(): Deferred<AccountDto[]> {
   return pending;
 }
 
-beforeEach(() => {
+// 有用例要在假时钟上逐帧采样：每个用例开始前先在真实计时器上把帧循环排空再换假时钟，收尾先卸载、再排空、再换回真实计时器，
+// 否则上一个用例排在旧时钟上的那一帧永远不来，后面的用例推不动帧
+beforeEach(async () => {
+  await drainFrames();
   vi.useFakeTimers();
   // regular 档：胶囊里有名字，换账户时才看得出是哪一层
   vi.stubGlobal("innerWidth", TIER_REGULAR_MIN);
@@ -85,9 +89,10 @@ beforeEach(() => {
   ipc.overrides.set("skin_info", () => null);
   ipc.overrides.set("set_current_account", () => null);
 });
-afterEach(() => {
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  await drainFrames();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -112,7 +117,7 @@ describe("冷启动时账户还没读到", () => {
     expect(capsule().dataset.kind).toBe("account");
   });
 
-  it("等待期内就读到：同一个胶囊换成当前账户，看不见的骨架层直接拿掉、不播退场，账户层从透明淡入", async () => {
+  it("等待期内就读到：同一个胶囊换成当前账户，看不见的骨架层直接拿掉、不播退场；只有胶囊外框从透明淡入，账户层挂上就是不透明的", async () => {
     const accounts = holdAccounts();
     await mount();
     const loading = capsule();
@@ -127,7 +132,28 @@ describe("冷启动时账户还没读到", () => {
     // 帧在假时钟下没往前走，骨架层要是在播退场就还在：胶囊正从透明淡入，骨架照常淡出的话会在账户名底下透出来
     expect(faces()).toHaveLength(1);
     expect(faces()[0].textContent).toBe("Steve");
-    expect(faces()[0].style.opacity).toBe("0");
+    // 同一次提交里胶囊去掉 data-pending，外框按样式表的过渡从透明淡入；账户层不再自己从透明起步
+    expect(capsule().hasAttribute("data-pending")).toBe(false);
+    expect(faces()[0].style.opacity).toBe("1");
+  });
+
+  it("等待期内就读到之后的每一帧：账户层一直是 1，看得见的不透明度只有胶囊外框那一层，第一张画面不是两层相乘", async () => {
+    const accounts = holdAccounts();
+    await mount();
+    accounts.resolve([STEVE, ALEX]);
+    await flush();
+    const [face] = faces();
+    expect(face.textContent).toBe("Steve");
+    // 看得见的不透明度是外框乘账户层。外框是 CSS 过渡，jsdom 不跑；账户层要是自己也走一遍 fade.in，
+    // 第一张画面就是外框这一帧的取值再乘上同一条曲线的开头。采样到两倍于淡入的时长，晚起步的淡入也逃不过
+    const until = performance.now() + 2 * fade.in.duration * 1000;
+    const seen = new Set<string>();
+    while (performance.now() < until) {
+      await stepFrames(1);
+      seen.add(face.style.opacity);
+    }
+    expect(face.isConnected).toBe(true);
+    expect([...seen]).toEqual(["1"]);
   });
 
   it("骨架露出来之后才读到：骨架层叠在下面退场，账户层从透明淡入", async () => {
@@ -161,6 +187,8 @@ describe("冷启动时账户还没读到", () => {
     expect(capsule().getAttribute("aria-label")).toBe(ACCOUNT_COPY.addLabel);
     expect(faces()).toHaveLength(1);
     expect(faces()[0].textContent).toBe(ACCOUNT_COPY.add);
+    // 与读到账户时一样只淡胶囊外框一层
+    expect(faces()[0].style.opacity).toBe("1");
   });
 
   it("挂载时账户早已读到：直接是账户胶囊，内容不单独淡入", async () => {
