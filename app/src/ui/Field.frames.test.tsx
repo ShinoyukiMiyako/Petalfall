@@ -121,7 +121,7 @@ describe.each([
   it.each([
     ["提示", { hint: HINT }, HINT],
     ["错误", { error: ERROR }, ERROR],
-  ] as const)("预留一行、%s时有时无：后出现时画出第一帧之后才淡入；撤掉时原地淡出，播报区仍是同一个节点、仍占着那一行", async (_, shape, text) => {
+  ] as const)("预留一行、%s时有时无：后出现时画出第一帧之后才淡入；撤掉时原地淡出（减少动画时留在布局里淡完），播报区仍是同一个节点、仍占着那一行", async (_, shape, text) => {
     view = render(tree({ reserve: true, reduced }));
     const region = message();
     expect(region.childNodes.length).toBe(0);
@@ -139,7 +139,14 @@ describe.each([
     expect(message()).toBe(region);
     expect(region.dataset.reserve).toBe("true");
     expect(layer.hasAttribute("inert")).toBe(true);
-    expect(layer.dataset.motionPopId).toBeDefined();
+    // 只撤不进：减少动画时让位一步到位，抽出布局的话会压在当场顶上来的内容上，所以留在布局里淡完
+    if (reduced) {
+      expect(layer.dataset.motionPopId).toBeUndefined();
+      expect(getComputedStyle(layer).position).toBe("static");
+    } else {
+      expect(layer.dataset.motionPopId).toBeDefined();
+      expect(getComputedStyle(layer).position).toBe("absolute");
+    }
     await stepFrames(3);
     midway(layer.style.opacity);
     await stepFrames(60);
