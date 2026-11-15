@@ -11,6 +11,8 @@
 - [CONTRIBUTING.md](CONTRIBUTING.md)：分支、版本号与数据格式号、提交、质量门、素材与 CLA。
 - [README.md](README.md)：开发环境、常用命令、配置项与目录结构。
 - [docs/architecture.md](docs/architecture.md)：分层与依赖方向、错误处理、IPC 约定、磁盘布局、测试与守卫。
+- [docs/usage-notice.md](docs/usage-notice.md)、[docs/privacy.md](docs/privacy.md)：使用须知与隐私说明，写着落樱联网访问哪些地址、在本机存了什么、从哪里下载。
+- [SECURITY.md](SECURITY.md)：漏洞的报告渠道与安装包的核对方法。
 
 动手前先读任务涉及的那几节。落樱是 Minecraft: Java 版启动器：Rust 后端（`crates/` 下的各个 crate），React 19 + TypeScript 前端（`app/src/`），桌面外壳用 Tauri 2，目前只支持 Windows 10 / 11。仓库里有两个 Tauri 外壳：启动器在 `app/src-tauri/`，安装引导程序在 `app/src-tauri-setup/`（界面在 `app/src/setup/`）。下文说外壳、能力文件和 `tauri.conf.json` 而不加说明时，都指启动器。代码注释、文档和提交信息都用中文。
 
@@ -51,7 +53,7 @@ Rust：
 - 改了核心逻辑就同步改测试。断言具体结果，例如错误码、文件内容、状态变化和事件；不要写怎样都会过的断言。
 - 涉及网络的 Rust 测试用 wiremock 在本地模拟端点，不访问真实服务。前端测试走 `app/src/ipc/mock` 的模拟后端。
 - 测试写文件一律落在临时目录，不写仓库，也不写真实的数据目录与游戏目录；读仓库里的源码、配置和夹具不受此限。
-- 渲染整页、流程弹窗或外壳的前端测试文件，首行写 `// @vitest-environment jsdom`，下一行写 `// @module-tag heavy-page`。等 framer-motion 的动画用 `app/src/test/dom.ts` 的 `waitForFrames(断言)`，它反复等真实帧直到断言通过；不要睡固定时长，也不要在假定时器下调用它。假定时器下逐帧走用 `stepFrames`，用例收尾按「先卸载，再 `drainFrames()`，再换回真实计时器」的顺序。断言退场播完、节点移除的用例走真实计时器；取退场途中某一刻值的用例可以在同一个文件里走假定时器逐帧推进，照上面的顺序收尾，例如 `app/src/ui/ConfirmDialog.test.tsx`。细则见 architecture 的「测试与守卫」。
+- 渲染整页、流程弹窗或外壳的前端测试文件，首行写 `// @vitest-environment jsdom`，下一行写 `// @module-tag heavy-page`。等 framer-motion 的动画用 `app/src/test/dom.ts` 的 `waitForFrames(断言)`，它反复等真实帧直到断言通过；不要睡固定时长，也不要在假定时器下调用它。假定时器下逐帧走用 `stepFrames`。用例结束时由 `app/src/test/setup.ts` 统一按「先卸载，再 `drainFrames()`，再换回真实计时器」的顺序收尾；用例中途换计时器、`beforeEach` 里由真实计时器换成假时钟、在 `describe` 里的 `afterEach` 换回真实计时器的，仍要自己先卸载、再 `drainFrames()`。断言退场播完、节点移除的用例走真实计时器；取退场途中某一刻值的用例可以在同一个文件里走假定时器逐帧推进，照上面的顺序收尾，例如 `app/src/ui/ConfirmDialog.test.tsx`。细则见 architecture 的「测试与守卫」。
 
 ## 改完要跑的检查
 
@@ -79,7 +81,7 @@ PR 上只会自动跑 CLA 签署检查，不跑代码检查，下面这些要在
 
 - 素材文件是 [LICENSE-ASSETS.md](LICENSE-ASSETS.md) 第 2 节所列的文件，按类型划界：`app/src/art/` 及其子目录下的全部 `.json`（不论内容）、`app/src-tauri/icons/` 下的全部文件，以及仓库里新增的 `.png`、`.ico`、`.icns`、`.bmp`、`.svg`、`.jpg`、`.jpeg`、`.webp`、`.gif` 图片（该节排除的除外）。代码要用的数据不要放进 `app/src/art/` 下的 JSON，否则整个文件都会成为素材。
 - **素材不接受 AI 生成的像素内容。** 不要画、生成、重绘或改动任何素材里的图形（含调色板与像素网格），也不要凭空新建素材文件。贡献者本人画好的素材，你只能原样放进仓库，或者做下一条所列的机械改动。需要新图形，或者要往 `app/src/art/` 下放数据文件时，先告诉贡献者。
-- 徽记母版 `app/src/art/petal-mark.json` 和 `app/src-tauri/icons/` 下的文件只接受机械改动：调整格式、字段改名、迁移数据结构，以及在 `app/` 下用 `pnpm build:icons` 重新生成图标。贡献者想改它们的样子，请他开 issue 用文字描述，由维护者重画；不要画效果图或附成品像素图。细则见 CONTRIBUTING.md 的「素材」。
+- 徽记母版 `app/src/art/petal-mark.json`、`app/src-tauri/icons/` 下的文件和安装向导的页眉图 `app/src-tauri/installer-header.bmp` 只接受机械改动：调整格式、字段改名、迁移数据结构，以及在 `app/` 下用 `pnpm build:icons` 重新生成图标与页眉图。贡献者想改它们的样子，请他开 issue 用文字描述，由维护者重画；不要画效果图或附成品像素图。细则见 CONTRIBUTING.md 的「素材」。
 - 不要描摹、临摹或复制第三方作品，包括 Minecraft 的原版纹理与图案（CLA 第七条第五款）。原版材质在运行期从玩家本机的游戏文件或官方客户端读取，经 `petalfall-tex` 协议交给前端；仓库里不放 Minecraft 的纹理、声音或其他游戏资源。
 - 不要把别的项目（包括其他启动器）的代码搬进来。确实需要时告诉贡献者，由他按 CLA 第七条第三款与原创内容分开提交，在 PR 说明里写明来源、原作者、许可证和已知限制，并保留原有的版权和许可声明；接不接受由维护者决定。你的产出里能认出来的第三方内容，同样按这一款处理。素材不走这条路：第三方的图片、像素图和图形数据一律不接受。
 
@@ -89,4 +91,4 @@ PR 上只会自动跑 CLA 签署检查，不跑代码检查，下面这些要在
 
 ## 维护
 
-这份文件随项目约定更新：改了 CONTRIBUTING.md、CLA、LICENSE-ASSETS.md、README.md、docs/architecture.md、PR 模板、`.github/workflows/` 或质量门时，要一并核对。`app/scripts/agents-md.test.ts` 只检查这里的链接、仓库路径、pnpm 脚本名和章节标题，CLA 条款号和许可章节号要人工核对。发现它和代码、CLA、许可文件或上述文档对不上，以它们为准，并在 PR 里指出。
+这份文件随项目约定更新：改了 CONTRIBUTING.md、CLA、LICENSE-ASSETS.md、README.md、SECURITY.md、docs/architecture.md、docs/usage-notice.md、docs/privacy.md、PR 模板、`.github/workflows/` 或质量门时，要一并核对。`app/scripts/agents-md.test.ts` 只检查这里的链接、仓库路径、pnpm 脚本名和章节标题，CLA 条款号和许可章节号要人工核对。发现它和代码、CLA、许可文件或上述文档对不上，以它们为准，并在 PR 里指出。
