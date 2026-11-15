@@ -141,7 +141,7 @@
   margin-top: -2px;
   font-size: var(--sk-fs-micro);
   line-height: var(--sk-lh-micro);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .kind[data-expired],
@@ -212,7 +212,16 @@
 .itemLine {
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
+}
+
+/*
+ * 悬停与键盘高亮铺的叠层上 text-2 不到 4.5:1（夜樱 4.22），这一行跟着提到 text。
+ * 当前账户行的底是 accent-soft、不铺叠层；需要重新登录的那一行在叠层上仍是警示色（5.3:1 以上），都不提
+ */
+.item:hover:not([data-current]) .itemLine:not([data-expired]),
+.item:focus-visible:not([data-current]) .itemLine:not([data-expired]) {
+  color: var(--sk-text);
 }
 
 .check {

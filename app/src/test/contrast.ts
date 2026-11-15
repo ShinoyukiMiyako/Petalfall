@@ -65,8 +65,8 @@ function hex(value: string): Rgb {
 }
 
 /**
- * 把颜色值算成不透明色：纯色直接取；「某色 N% 与另一色」按 sRGB 线性插值；「某色 N% 与 transparent」按 N% 不透明度叠到
- * backdrop 上。认不出的写法直接抛错，不猜。
+ * 把颜色值算成不透明色：纯色直接取；「某色 N% 与另一色」按 sRGB 线性插值；「某色 N% 与 transparent」与带透明度的 rgba
+ * 写法按各自的不透明度叠到 backdrop 上。认不出的写法直接抛错，不猜。
  */
 export function resolveColor(value: string, tokens: Map<string, string>, backdrop: Rgb): Rgb {
   const ref = /^var\((--sk-[a-z0-9-]+)\)$/.exec(value);
@@ -74,6 +74,12 @@ export function resolveColor(value: string, tokens: Map<string, string>, backdro
     const next = tokens.get(ref[1]);
     if (next === undefined) throw new Error(`令牌 ${ref[1]} 没有定义`);
     return resolveColor(next, tokens, backdrop);
+  }
+  // 卡片底与悬停、按下叠层（--sk-card、--sk-fill-hover、--sk-fill-press）是 rgba 写法
+  const rgba = /^rgba\((\d+), (\d+), (\d+), (\d*\.?\d+)\)$/.exec(value);
+  if (rgba !== null) {
+    const alpha = Number(rgba[4]);
+    return [rgba[1], rgba[2], rgba[3]].map((c, i) => Number(c) * alpha + backdrop[i] * (1 - alpha)) as unknown as Rgb;
   }
   const fade = /^color-mix\(in srgb, (var\(--sk-[a-z0-9-]+\)) (\d+)%, transparent\)$/.exec(value);
   if (fade !== null) {
