@@ -26,7 +26,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::error::Result;
 use crate::facade::Petalfall;
-use crate::launch::LaunchWarning;
+use crate::launch::{LaunchWarning, RecordsLaunchWarnings, WithAddedWarnings};
 use crate::modfs::ledger_key;
 use crate::session::JavaUsed;
 
@@ -502,9 +502,15 @@ fn crash_report_path(version_dir: &Path) -> PathBuf {
 }
 
 #[derive(Serialize, Deserialize)]
-struct CrashReportFile<R = CrashReport> {
+struct CrashReportFile<R = WithAddedWarnings<CrashReport>> {
     format: u32,
     report: R,
+}
+
+impl RecordsLaunchWarnings for CrashReport {
+    fn launch_warnings(&mut self) -> &mut Vec<LaunchWarning> {
+        &mut self.warnings
+    }
 }
 
 /// 列表只要崩溃时刻：只反序列化这一项，不把线索与上下文行整份建出来。
@@ -564,7 +570,7 @@ pub(crate) async fn save_crash_report(version_dir: &Path, report: &CrashReport) 
     }
     let bytes = serde_json::to_vec_pretty(&CrashReportFile {
         format: CRASH_REPORT_FORMAT,
-        report: stored,
+        report: WithAddedWarnings::store(stored),
     })
     .map_err(|source| petalfall_instance::Error::Json {
         context: "崩溃报告",
@@ -595,9 +601,11 @@ impl Petalfall {
     /// 该实例最近一次的崩溃报告；从没崩溃过为 `None`。
     pub async fn last_crash(&self, version_id: &str) -> Result<Option<CrashReport>> {
         let version_dir = self.existing_instance_dir(version_id).await?;
-        let Some(mut report) = load_crash_file::<CrashReport>(&version_dir).await? else {
+        let Some(stored) = load_crash_file::<WithAddedWarnings<CrashReport>>(&version_dir).await?
+        else {
             return Ok(None);
         };
+        let mut report = stored.restore();
         for file in &mut report.scanned_files {
             if Path::new(&file.path).is_relative() {
                 file.path = version_dir.join(&file.path).display().to_string();
@@ -1065,6 +1073,45 @@ mod tests {
             loaded.log_path,
             Some(logs.join("1000.log").display().to_string())
         );
+    }
+
+    /// 数据格式号为 1 的版本不认得的提醒另存在 `added_warnings`，崩溃页读到的仍是按启动阶段排好的整份提醒。
+    #[tokio::test]
+    async fn warnings_added_after_format_1_are_saved_aside_and_read_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let version_dir = put_version(tmp.path(), "1.20.3");
+        let mut report = session_only(FABRIC_MISSING_DEPENDENCY, 1);
+        report.at = Some(3_000);
+        report.warnings = vec![
+            LaunchWarning::LongPlayerName,
+            LaunchWarning::PlayerNameChars,
+            LaunchWarning::OnedriveFolder,
+        ];
+        save_crash_report(&version_dir, &report).await.unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(crash_report_path(&version_dir)).unwrap())
+                .unwrap();
+        assert_eq!(
+            written["report"]["warnings"],
+            serde_json::json!(["long_player_name", "onedrive_folder"])
+        );
+        assert_eq!(
+            written["report"]["added_warnings"],
+            serde_json::json!(["player_name_chars"])
+        );
+
+        let loaded = petalfall.last_crash("1.20.3").await.unwrap().unwrap();
+        assert_eq!(loaded.warnings, report.warnings);
+        assert_eq!(last_crash_at(&version_dir).await.unwrap(), Some(3_000));
+        // 界面拿到的是并回之后的一份，不带另存的键。
+        let wire = serde_json::to_value(&loaded).unwrap();
+        assert_eq!(
+            wire["warnings"],
+            serde_json::json!(["long_player_name", "player_name_chars", "onedrive_folder"])
+        );
+        assert!(wire.get("added_warnings").is_none(), "{wire}");
     }
 
     #[tokio::test]

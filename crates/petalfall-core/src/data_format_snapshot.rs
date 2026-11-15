@@ -271,12 +271,13 @@ fn account_type_spelling(value: AccountType) -> &'static str {
     }
 }
 
-const LAUNCH_WARNINGS: [LaunchWarning; 8] = [
+const LAUNCH_WARNINGS: [LaunchWarning; 9] = [
     LaunchWarning::GamePath,
     LaunchWarning::InstanceName,
     LaunchWarning::OnedriveFolder,
     LaunchWarning::IcloudFolder,
     LaunchWarning::LongPlayerName,
+    LaunchWarning::PlayerNameChars,
     LaunchWarning::JvmMemoryUnit,
     LaunchWarning::JvmMinOverMax,
     LaunchWarning::JvmMaxTooLow,
@@ -289,6 +290,7 @@ fn launch_warning_spelling(value: LaunchWarning) -> &'static str {
         LaunchWarning::OnedriveFolder => "onedrive_folder",
         LaunchWarning::IcloudFolder => "icloud_folder",
         LaunchWarning::LongPlayerName => "long_player_name",
+        LaunchWarning::PlayerNameChars => "player_name_chars",
         LaunchWarning::JvmMemoryUnit => "jvm_memory_unit",
         LaunchWarning::JvmMinOverMax => "jvm_min_over_max",
         LaunchWarning::JvmMaxTooLow => "jvm_max_too_low",
@@ -825,6 +827,155 @@ async fn last_crash_json_matches_snapshot() {
         .expect("写崩溃报告");
     let written = read_written(&dir.path().join(PETALFALL_META_DIR).join(CRASH_REPORT_FILE));
     assert_matches_snapshot(CRASH_REPORT_FILE, CRASH_REPORT_FILE, &written);
+}
+
+// ---- 数据格式号为 1 的版本读现在写的记录 ----
+//
+// 崩溃记录与接回记录里新增的提醒取值另存在 `added_warnings`，不加数据格式号（见 `WithAddedWarnings`）。下面照已发出的、
+// 号为 1 的版本的结构反序列化现在写出的样本：提醒是封闭的八个取值，没有 `added_warnings`，其余字段与现在相同。
+// 这里读失败，那些版本就会把这两份记录当作读不懂。
+
+#[derive(Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Format1Warning {
+    GamePath,
+    InstanceName,
+    OnedriveFolder,
+    IcloudFolder,
+    LongPlayerName,
+    JvmMemoryUnit,
+    JvmMinOverMax,
+    JvmMaxTooLow,
+}
+
+const FORMAT_1_WARNINGS: [Format1Warning; 8] = [
+    Format1Warning::GamePath,
+    Format1Warning::InstanceName,
+    Format1Warning::OnedriveFolder,
+    Format1Warning::IcloudFolder,
+    Format1Warning::LongPlayerName,
+    Format1Warning::JvmMemoryUnit,
+    Format1Warning::JvmMinOverMax,
+    Format1Warning::JvmMaxTooLow,
+];
+
+#[derive(Debug, PartialEq, serde::Deserialize)]
+struct Format1CrashFile {
+    format: u32,
+    report: Format1CrashReport,
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize)]
+struct Format1CrashReport {
+    at: Option<u64>,
+    exit_code: Option<i32>,
+    session_started_at: Option<u64>,
+    log_path: Option<String>,
+    diagnoses: Vec<CrashClue>,
+    suspects: Vec<CrashSuspect>,
+    java: Option<JavaUsed>,
+    max_memory_mb: Option<u32>,
+    warnings: Vec<Format1Warning>,
+    #[serde(default)]
+    exit_code_note: Option<ExitCodeNote>,
+    #[serde(default)]
+    scanned_files: Vec<ScannedFile>,
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize)]
+struct Format1RunningRecord {
+    format: u32,
+    #[serde(flatten)]
+    process: ProcessIdentity,
+    instance_id: String,
+    game_dir: PathBuf,
+    version_dir: PathBuf,
+    working_dir: PathBuf,
+    session_started_at: u64,
+    running_since: u64,
+    backup_since: u64,
+    session_log: Option<PathBuf>,
+    java: JavaUsed,
+    max_memory_mb: u32,
+    warnings: Vec<Format1Warning>,
+    offline: bool,
+    account: RecordAccount,
+}
+
+#[tokio::test]
+async fn format_1_versions_read_the_crash_record_written_now() {
+    let dir = tempfile::tempdir().expect("建临时目录");
+    let sample = crash_report_sample();
+    assert!(sample.warnings.contains(&LaunchWarning::PlayerNameChars));
+    save_crash_report(dir.path(), &sample)
+        .await
+        .expect("写崩溃报告");
+    let written = read_written(&dir.path().join(PETALFALL_META_DIR).join(CRASH_REPORT_FILE));
+    let read: Format1CrashFile = serde_json::from_slice(&written)
+        .unwrap_or_else(|err| panic!("号为 1 的版本读不了现在写的崩溃记录：{err}"));
+    assert_eq!(
+        read,
+        Format1CrashFile {
+            format: CRASH_REPORT_FORMAT,
+            report: Format1CrashReport {
+                at: sample.at,
+                exit_code: sample.exit_code,
+                session_started_at: sample.session_started_at,
+                log_path: None,
+                diagnoses: sample.diagnoses,
+                suspects: sample.suspects,
+                java: sample.java,
+                max_memory_mb: sample.max_memory_mb,
+                warnings: FORMAT_1_WARNINGS.into(),
+                exit_code_note: None,
+                scanned_files: sample
+                    .scanned_files
+                    .into_iter()
+                    .filter(|file| file.kind != CrashSource::SessionLog)
+                    .collect(),
+            },
+        }
+    );
+}
+
+#[tokio::test]
+async fn format_1_versions_read_the_running_record_written_now() {
+    let dir = tempfile::tempdir().expect("建临时目录");
+    let petalfall = Petalfall::for_test(
+        PetalfallConfig::default(),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+    );
+    for sample in running_record_samples() {
+        assert!(sample.warnings.contains(&LaunchWarning::PlayerNameChars));
+        petalfall
+            .save_running_record(&sample)
+            .await
+            .expect("写运行记录");
+        let written = read_written(&petalfall.running_record_path());
+        let read: Format1RunningRecord = serde_json::from_slice(&written)
+            .unwrap_or_else(|err| panic!("号为 1 的版本读不了现在写的接回记录：{err}"));
+        assert_eq!(
+            read,
+            Format1RunningRecord {
+                format: sample.format,
+                process: sample.process,
+                instance_id: sample.instance_id,
+                game_dir: sample.game_dir,
+                version_dir: sample.version_dir,
+                working_dir: sample.working_dir,
+                session_started_at: sample.session_started_at,
+                running_since: sample.running_since,
+                backup_since: sample.backup_since,
+                session_log: sample.session_log,
+                java: sample.java,
+                max_memory_mb: sample.max_memory_mb,
+                warnings: FORMAT_1_WARNINGS.into(),
+                offline: sample.offline,
+                account: sample.account,
+            }
+        );
+    }
 }
 
 #[tokio::test]
