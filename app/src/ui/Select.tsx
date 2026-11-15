@@ -44,6 +44,11 @@ export interface SelectProps<T extends string> {
    * 宽度本来就不变，预留只会在触发器里白白多出最多 8 个隐藏节点。block 时不生效。
    */
   reserveWidth?: boolean;
+  /**
+   * 弹出列表的宽度上限。default：浮层默认的 360；window：随最长的选项排开、显示全名，只夹在窗口内。
+   * 给定宽、长选项在触发器上被省略的下拉用（发现页的适配实例），只在选项文字有长度上限时开，见 Popover 的 maxWidth。
+   */
+  listMaxWidth?: "default" | "window";
   disabled?: boolean;
   invalid?: boolean;
   /** 不在 Field 里时必填。 */
@@ -109,6 +114,7 @@ export function Select<T extends string>({
   size = "md",
   block = false,
   reserveWidth = false,
+  listMaxWidth = "default",
   disabled = false,
   invalid = false,
   ariaLabel,
@@ -252,7 +258,7 @@ export function Select<T extends string>({
         </span>
         <Icon name="chevron-down" size={16} className={styles.chevron} />
       </button>
-      <Popover open={open} anchor={trigger} onClose={() => setOpen(false)} placement="bottom-start" offset={6} matchWidth role="presentation">
+      <Popover open={open} anchor={trigger} onClose={() => setOpen(false)} placement="bottom-start" offset={6} matchWidth maxWidth={listMaxWidth} role="presentation">
         <SelectList
           listId={listId}
           optionId={optionId}

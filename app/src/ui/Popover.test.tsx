@@ -27,10 +27,11 @@ interface HostProps {
   header?: boolean;
   footer?: boolean;
   className?: string;
+  maxWidth?: "default" | "window";
 }
 
 /** 锚点按钮加一个开着的浮层；rerender 换 props 时面板不重新挂载。 */
-function Host({ layoutKey, header = false, footer = false, className }: HostProps) {
+function Host({ layoutKey, header = false, footer = false, className, maxWidth }: HostProps) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   return (
     <>
@@ -42,6 +43,7 @@ function Host({ layoutKey, header = false, footer = false, className }: HostProp
         placement="bottom-end"
         aria-label="下载快览"
         className={className}
+        maxWidth={maxWidth}
         layoutKey={layoutKey}
         header={header ? <p>标题行</p> : undefined}
         footer={footer ? <p>底栏</p> : undefined}
@@ -111,6 +113,15 @@ describe("面板结构", () => {
     expect(p.hasAttribute("data-structured")).toBe(true);
     expect(p.hasAttribute("data-framer-portal-id")).toBe(false);
     expect([...p.children].map((c) => c.className)).toEqual([styles.header, styles.body]);
+  });
+
+  it("宽度上限默认不带标记（样式表里的 360）；maxWidth 为 window 时带上标记，样式表据此只夹在窗口内", () => {
+    const { rerender } = mount({});
+    expect(panel().hasAttribute("data-max-width")).toBe(false);
+    rerender({ maxWidth: "default" });
+    expect(panel().hasAttribute("data-max-width")).toBe(false);
+    rerender({ maxWidth: "window" });
+    expect(panel().getAttribute("data-max-width")).toBe("window");
   });
 });
 
@@ -254,5 +265,17 @@ describe("样式约定", () => {
     expect(css).toMatch(/(^|\n)\.header,\s*\.footer\s*\{/);
     expect(rule(".footer").get("position")).toBe("relative");
     expect(rule(".content").get("position")).toBe("relative");
+  });
+
+  // 发现页适配实例的选项是「适配：」加最长 32 个汉字的实例名，约 490px，留在 360 里会被截断
+  it("默认最大宽 360；窗口档只换上限变量，下拉选择按它算的最大宽一起放开，夹在窗口内两侧各 8", () => {
+    const base = rule(".panel");
+    expect(base.get("--popover-max-width")).toBe("360px");
+    expect(base.get("max-width")).toBe("var(--popover-max-width)");
+    expect(rule(".panel[data-match-width]").get("max-width")).toBe("max(var(--popover-max-width), var(--popover-anchor-width))");
+    const wide = rule('.panel[data-max-width="window"]');
+    expect(wide.get("--popover-max-width")).toBe("calc(100% - var(--sk-space-8) * 2)");
+    // 只换变量：不另写 max-width，免得盖掉下拉选择「不小于触发器宽」的那条
+    expect(wide.has("max-width")).toBe(false);
   });
 });
