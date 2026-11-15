@@ -245,13 +245,23 @@ describe("加入服务器用的实例", () => {
     expect(joinPlan("旧版", based, null, ["旧版"])).toEqual({ kind: "backingUp", instanceId: "旧版" });
   });
 
-  it("实例选择里选中的那一个能不能拿来加入：正在启动或运行、在备份或恢复存档、被当作基底时各有原因，别的实例占着不算", () => {
-    const old = { id: "旧版", usedBy: null };
+  it("记住的实例正在移到别的游戏目录：带原因禁用，压过存档正忙与被当作基底；别的实例在移动不影响", () => {
+    const moving = instances.map((i) => (i.id === "旧版" ? { ...i, activity: "moving" as const, usedBy: "周末联机" } : i));
+    expect(joinPlan("旧版", moving, null, [])).toEqual({ kind: "moving", instanceId: "旧版" });
+    expect(joinPlan("旧版", moving, null, ["旧版"])).toEqual({ kind: "moving", instanceId: "旧版" });
+    expect(joinPlan("最近", moving, null, [])).toEqual({ kind: "direct", instanceId: "最近" });
+    // 移动不改实例的就绪状态，仍算能加入服务器的实例：照常列在实例选择里，选中时由 joinBlock 带原因禁用
+    expect(joinCandidates(moving).map((i) => i.id)).toEqual(["最近", "旧版", "没玩过", "也没玩过"]);
+  });
+
+  it("实例选择里选中的那一个能不能拿来加入：正在启动或运行、在移动、在备份或恢复存档、被当作基底时各有原因，别的实例占着不算", () => {
+    const old = { id: "旧版", usedBy: null, activity: null };
     expect(joinBlock(old, null, [])).toBeNull();
     expect(joinBlock(old, { instanceId: "最近", phase: "running" }, ["最近"])).toBeNull();
     expect(joinBlock(old, { instanceId: "旧版", phase: "loading" }, [])).toEqual({ kind: "busy", phase: "loading" });
+    expect(joinBlock({ ...old, activity: "moving" }, null, ["旧版"])).toEqual({ kind: "moving" });
     expect(joinBlock(old, null, ["旧版"])).toEqual({ kind: "backingUp" });
-    expect(joinBlock({ id: "旧版", usedBy: "周末联机" }, null, [])).toEqual({ kind: "inherited", usedBy: "周末联机" });
+    expect(joinBlock({ id: "旧版", usedBy: "周末联机", activity: null }, null, [])).toEqual({ kind: "inherited", usedBy: "周末联机" });
   });
 
   it("没记住、记住的已不在、损坏、在安装、版本不支持：都按没记住弹实例选择", () => {
