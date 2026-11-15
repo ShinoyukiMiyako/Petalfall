@@ -18,10 +18,15 @@
   pointer-events: none;
 }
 
+/*
+ * 槽位高度即窗口高度：侧栏按它收紧纵向间距（见 Sidebar.module.css 末尾的容器查询）。与宽度分档同理不用视口媒体查询。
+ * 尺寸包含不改变布局：槽位的宽高本来就由网格定，内容都是绝对定位的；提示与菜单挂在浮层根，没有固定定位的后代会换包含块。
+ */
 .sidebarSlot {
   position: relative;
   z-index: var(--sk-z-sidebar);
   min-height: 0;
+  container: sk-sidebar / size;
 }
 
 /*
