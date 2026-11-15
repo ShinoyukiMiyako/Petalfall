@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(window["width"], 1120);
         assert_eq!(window["height"], 720);
         assert_eq!(window["minWidth"], 960);
-        assert_eq!(window["minHeight"], 720);
+        assert_eq!(window["minHeight"], 640);
         assert_eq!(window["decorations"], false);
         assert_eq!(window["shadow"], true);
         assert_eq!(window["transparent"], false);

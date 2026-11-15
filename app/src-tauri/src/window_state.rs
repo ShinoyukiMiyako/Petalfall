@@ -729,7 +729,7 @@ mod native {
 mod tests {
     use super::*;
 
-    const MIN: (f64, f64) = (960.0, 720.0);
+    const MIN: (f64, f64) = (960.0, 640.0);
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
         Rect {
@@ -807,16 +807,28 @@ mod tests {
         assert_eq!(placement.client, rect(0, 0, 1366, 728));
     }
 
-    /// 1920x1080 + 150% 的笔记本：工作区只有 1280x688 逻辑像素，比最小高度 720 还矮。最小尺寸优先，
-    /// 窗口贴工作区左上，标题栏在屏上。
+    /// 1920x1080 + 150% 的笔记本：工作区 1280x688 逻辑像素，放得下最小高度 640。比工作区高的窗口压到工作区的
+    /// 高度，下沿不落到任务栏底下。
     #[test]
-    fn work_area_below_the_minimum_keeps_the_minimum_and_the_top_left() {
+    fn laptop_work_area_shrinks_a_taller_window_to_fit() {
         let laptop = screen(0, 0, 1920, 1032, 1.5);
         let placement = place(&saved(300, 200, 1440, 1080, 1.5), &[laptop], &laptop, MIN);
-        assert_eq!(placement.client, rect(300, 0, 1440, 1080));
+        assert_eq!(placement.client, rect(300, 0, 1440, 1032));
 
         let placement = place(&saved(300, 200, 1600, 1080, 1.0), &[laptop], &laptop, MIN);
-        assert_eq!(placement.client.height, 1080, "最小高度 720 x 1.5");
+        assert_eq!(placement.client, rect(0, 0, 1920, 1032));
+    }
+
+    /// 1366x768 + 125%、任务栏 60 物理像素：工作区只有约 1093x566 逻辑像素，比最小高度 640 还矮。最小尺寸优先，
+    /// 窗口贴工作区上沿，标题栏在屏上。
+    #[test]
+    fn work_area_below_the_minimum_keeps_the_minimum_and_the_top_left() {
+        let small = screen(0, 0, 1366, 708, 1.25);
+        let placement = place(&saved(100, 100, 1200, 800, 1.25), &[small], &small, MIN);
+        assert_eq!(placement.client, rect(100, 0, 1200, 800));
+
+        let placement = place(&saved(300, 200, 1600, 1080, 1.0), &[small], &small, MIN);
+        assert_eq!(placement.client.height, 800, "最小高度 640 x 1.25");
         assert_eq!(placement.client.y, 0);
     }
 
