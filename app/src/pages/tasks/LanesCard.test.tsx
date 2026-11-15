@@ -2,16 +2,16 @@
 // 并行通道卡里换下的那份任务：退场中按任务 id 读实时任务，淡出途中任务被「清除已结束」拿掉时沿用上一次读到的，不退回 props。
 // 整页里通道卡随每次进度重画，换下的那份冻结的是完成前最后一次上报，标识与完成后的相同：退回它也照样停在满格（同一标识
 // 只增不减），整页用例分不出两种写法。这里由用例直接给通道卡上一批的任务，冻结的那份与完成后的标识不同，退回它就跳回上一批的进度。
-// 帧跟着假时钟走，不推进就不播退场：清除之后换下的那份仍在原处。收尾先卸载、再排空帧循环，再换回真实计时器。
+// 帧跟着假时钟走，不推进就不播退场：清除之后换下的那份仍在原处。
 import { MotionConfig } from "framer-motion";
 import { act } from "react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import type { Task } from "../../domain/types";
 import { CORE_EVENT } from "../../ipc/tasks";
 import { LauncherProvider } from "../../state/launcher";
 import type { LauncherStore } from "../../state/store";
 import { progressTrack } from "../../state/tasks";
-import { drainFrames, render, type Rendered } from "../../test/dom";
+import { render, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, deferred, emit, resetRecorder, settle, startedStore, type Deferred } from "../../test/launcher";
 import { LanesCard } from "./LanesCard";
@@ -37,12 +37,6 @@ beforeEach(async () => {
     return run.promise;
   });
   store = await startedStore();
-});
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
 });
 
 const flush = () =>

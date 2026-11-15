@@ -15,26 +15,43 @@ export interface Rendered {
   unmount(): void;
 }
 
-/** 经 render 挂上、还没卸载的组件，用例结束时由 test/setup.ts 的全局收尾卸载（见 drainFrames 之后的 afterTest）。 */
+/** 经 render、renderWithoutAct 挂上、还没卸载的组件，用例结束时由 test/setup.ts 的全局收尾卸载（见 drainFrames 之后的 afterTest）。 */
 const mounted = new Set<Rendered>();
 
-export function render(ui: ReactNode): Rendered {
-  const container = document.createElement("div");
-  document.body.append(container);
+function mount(container: HTMLDivElement, ui: ReactNode, commit: (update: () => void) => void): Rendered {
   const root = createRoot(container);
   const rendered: Rendered = {
     container,
-    rerender: (next) => act(() => root.render(next)),
+    rerender: (next) => commit(() => root.render(next)),
     unmount: () => {
       mounted.delete(rendered);
-      act(() => root.unmount());
+      commit(() => root.unmount());
       container.remove();
     },
   };
   // 先登记再渲染：首次渲染就抛错的，根与容器同样要在用例结束时收走
   mounted.add(rendered);
-  act(() => root.render(ui));
+  commit(() => root.render(ui));
   return rendered;
+}
+
+function bodyContainer(): HTMLDivElement {
+  const container = document.createElement("div");
+  document.body.append(container);
+  return container;
+}
+
+export function render(ui: ReactNode): Rendered {
+  return mount(bodyContainer(), ui, (update) => act(update));
+}
+
+/**
+ * 不经 act 的 render：整个应用按真实时间自行调度的冒烟与流程测试关掉了 act 环境（IS_REACT_ACT_ENVIRONMENT 为 false），
+ * 这时再调 act，React 会报测试环境不支持 act。挂载、重渲染与卸载都不包 act，同样登记进用例结束时的统一收尾。
+ * 要在首次渲染之前就拿到容器的（例如只给应用根元素替换布局量值），自己建好挂进 body 再传进来，卸载时一并移除。
+ */
+export function renderWithoutAct(ui: ReactNode, container: HTMLDivElement = bodyContainer()): Rendered {
+  return mount(container, ui, (update) => update());
 }
 
 export interface MediaQueryStub {

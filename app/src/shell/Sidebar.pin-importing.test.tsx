@@ -10,7 +10,7 @@ import { SIDEBAR_COPY } from "../copy/shell";
 import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
-import { drainFrames, keydown, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { keydown, render, stepFrames, stubMatchMedia, stubResizeObserver } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, cancelledError, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../test/launcher";
 import { ChromeProvider, type ChromeApi } from "./chrome";
@@ -27,7 +27,6 @@ const NOW = Date.UTC(2026, 9, 31, 12);
 const SETTLE_FRAMES = 60;
 const chrome: ChromeApi = { scrollContentToTop: vi.fn(), focusContent: vi.fn() };
 
-let view: Rendered | undefined;
 let launcher: LauncherApi;
 let instances: InstanceDto[];
 /** 配置里存着的固定列表：读的时候像后端一样只给出盘上还在的。 */
@@ -45,7 +44,7 @@ const flush = () =>
   });
 
 async function mount(): Promise<void> {
-  view = render(
+  render(
     <LauncherProvider>
       <ShellProvider>
         <ChromeProvider value={chrome}>
@@ -161,11 +160,7 @@ beforeEach(() => {
   });
 });
 
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
+afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });

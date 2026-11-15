@@ -1,25 +1,17 @@
 // @vitest-environment jsdom
 // 列表行逐帧看入场从哪一帧开始走的用例。整个文件走假时钟、用 stepFrames 一帧一帧地推：
-// 每个用例开始前先在真实计时器上把帧循环排空再换假时钟，收尾先卸载、再排空、再换回真实计时器（见 test/dom 的 drainFrames）。
+// 每个用例开始前先在真实计时器上把帧循环排空再换假时钟（见 test/dom 的 drainFrames）。
 import { MotionConfig } from "framer-motion";
 import { act, useState } from "react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { drainFrames, render, stepFrames, type Rendered } from "../test/dom";
+import { beforeEach, expect, it, vi } from "vitest";
+import { drainFrames, render, stepFrames } from "../test/dom";
 import { List, ListRow, ROW_MOTION_LIMIT } from "./ListRow";
 
-let view: Rendered | undefined;
 let setItems: (next: string[]) => void = () => undefined;
 
 beforeEach(async () => {
   await drainFrames();
   vi.useFakeTimers();
-});
-
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
 });
 
 const BASE = ["甲", "乙", "丙"];
@@ -56,7 +48,7 @@ it.each([
   ["逐行入场的新行", "always", ""],
   ["整批换上的新行", "never", ""],
 ] as const)("%s（减少动画 %s）：第一帧画的仍是起点，画出来之后才开始入场，那次提交再长也不吃掉入场的开头", async (who, reducedMotion, from) => {
-  view = render(tree(reducedMotion));
+  render(tree(reducedMotion));
   const added = who === "逐行入场的新行" ? ["丁"] : batch(ROW_MOTION_LIMIT + 1);
   act(() => setItems([BASE[0], ...(who === "逐行入场的新行" ? BASE.slice(1) : []), ...added]));
   const arriving = row(added[0]);
@@ -86,7 +78,7 @@ it.each([
 });
 
 it("新行画出来之前列表又渲染了一次：下一次渲染里它已不算新来的，入场照样等到画出来之后才起步", async () => {
-  view = render(tree("never"));
+  render(tree("never"));
   act(() => setItems([...BASE, "丁"]));
   const arriving = row("丁");
   // 同一刻又来一次更新（进度上报、换了别的数据）：这一次的行集合里丁已在上一次，List 不再把它算作新来的

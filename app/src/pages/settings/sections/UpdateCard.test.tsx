@@ -3,7 +3,7 @@
 // 更新通道选项块：选了就写、连按方向键每次都写，下载中与已下好时先确认，写失败回到原值。
 import { MotionConfig } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { UPDATE_COPY } from "../../../copy/updater";
 import { percent } from "../../../domain/format";
 import { COMPLETION_HOLD_S, SPEED_REFRESH_MS } from "../../../lib/progress-display";
@@ -11,7 +11,7 @@ import { OverlayProvider, OverlayRoot } from "../../../shell/overlay";
 import { INITIAL_UPDATER_STATE, type DownloadSource, type UpdateInfo, type UpdaterChannels, type UpdaterPhase } from "../../../state/updater/machine";
 import { useDownloadHold } from "../../../state/updater/useDownloadHold";
 import { deferred, type Deferred } from "../../../test/launcher";
-import { drainFrames, keydown, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
+import { keydown, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
 import s from "../settings.module.css";
 import { ChannelPicker, StatusLine } from "./UpdateCard";
 import { updateCardView, type CardContext, type ChannelChangeCost, type ChannelId } from "./update-view";
@@ -39,14 +39,6 @@ beforeEach(() => {
   stubMatchMedia(false);
   reported.errors = [];
   vi.spyOn(console, "error").mockImplementation(() => undefined);
-});
-
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  // 确认框的进出场在假时钟上排着帧，换回真实计时器之前排空
-  await drainFrames();
-  vi.useRealTimers();
 });
 
 function line(bytes: number, totalBytes: number | null = TOTAL, source: DownloadSource | null = null): ReactNode {

@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../../art/illustrations/test-canvas";
 import { LOADING_DELAY_MS } from "../../../domain/limits";
 import type { GameDirectoryDto } from "../../../ipc/config";
@@ -18,7 +18,7 @@ import { ShellProvider, useNav, type NavApi } from "../../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../../state/appearance";
 import { LauncherProvider } from "../../../state/launcher";
 import { invalidate } from "../../../state/resource";
-import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
+import { render, stepFrames, stubMatchMedia, stubResizeObserver } from "../../../test/dom";
 import type { IpcRecorder } from "../../../test/fake-bridge";
 import { deferred, memoryAdviceDto, resetRecorder, settle } from "../../../test/launcher";
 import { SETTINGS_COMMANDS, SettingsCommandsProvider, type SettingsCommands } from "../commands";
@@ -28,7 +28,6 @@ import s from "../settings.module.css";
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../../ipc/bridge", async (orig) => (await import("../../../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
-let view: Rendered | undefined;
 let nav: NavApi;
 let removed: string[];
 
@@ -56,7 +55,7 @@ const wait = (ms: number) =>
 
 /** reduced 为真时按外观里打开了「减少动画」渲染（外观层据此设根部的 MotionConfig）。 */
 async function mountGame(reduced = false) {
-  view = render(
+  render(
     <AppearanceProvider initial={{ ...DEFAULT_APPEARANCE, reduceMotion: reduced }}>
       <LauncherProvider>
         <ShellProvider>
@@ -113,14 +112,6 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
   vi.spyOn(console, "info").mockImplementation(() => undefined);
-});
-
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  // 每个用例都重装一次假时钟：不先排空帧循环，后面的用例 framer-motion 一帧都推不动（见 test/dom 的 drainFrames）
-  await drainFrames();
-  vi.useRealTimers();
 });
 
 describe("游戏 · 卡片之间的让位", () => {

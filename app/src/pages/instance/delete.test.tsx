@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DELETE_INSTANCE_COPY } from "../../copy/flows";
 import { IpcError } from "../../ipc/errors";
 import type { DeletionPreviewDto, WorldDto } from "../../ipc/instances";
@@ -10,7 +10,7 @@ import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
-import { drainFrames, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { render, stubMatchMedia, stubResizeObserver } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { useDeleteInstance } from "./delete";
@@ -21,7 +21,6 @@ vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridg
 const NOW = Date.UTC(2026, 9, 31, 12);
 const ID = "生存";
 
-let view: Rendered | undefined;
 let launcher: LauncherApi;
 let remove: ReturnType<typeof useDeleteInstance>;
 
@@ -39,13 +38,6 @@ beforeEach(() => {
   bootOverrides(ipc, { instances: [instanceDto(ID)] });
 });
 
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
-});
-
 const flush = () =>
   act(async () => {
     await settle(20);
@@ -57,7 +49,7 @@ const advance = (ms: number) =>
   });
 
 async function openDelete() {
-  view = render(
+  render(
     <AppearanceProvider initial={DEFAULT_APPEARANCE}>
       <LauncherProvider>
         <ShellProvider>

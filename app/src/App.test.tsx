@@ -9,7 +9,6 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import App, { prepareApp } from "./App";
 import { stubCanvas } from "./art/illustrations/test-canvas";
@@ -30,7 +29,7 @@ import type { AppearanceMode } from "./domain/types";
 import { INSTANCE_TABS, PAGE_IDS, SETTINGS_SECTIONS, type PageId } from "./state/route";
 import { DEFAULT_UI_SHAPE, type UiShape } from "./state/ui-shape";
 import { loadUsageNoticeState, type UsageNoticeState } from "./state/usage-notice";
-import { stubMatchMedia, stubResizeObserver } from "./test/dom";
+import { renderWithoutAct, stubMatchMedia, stubResizeObserver } from "./test/dom";
 import type { IpcRecorder } from "./test/fake-bridge";
 import { resetRecorder } from "./test/launcher";
 
@@ -59,8 +58,6 @@ const LICENSES = {
   ],
 };
 
-let root: Root | null = null;
-let host: HTMLDivElement | null = null;
 let layout: HTMLStyleElement | null = null;
 let consoleError: MockInstance<typeof console.error>;
 /** 已经确认渲染过的页面。 */
@@ -81,19 +78,17 @@ function mount(): void {
   layout = document.createElement("style");
   layout.textContent = "[data-sk-focus-fallback] { overflow-y: auto; }";
   document.head.append(layout);
-  host = document.createElement("div");
+  const host = document.createElement("div");
   document.body.append(host);
   // jsdom 不排版，元素量出来都是 0 宽：尺寸分档量的是应用根元素（host 的直接子元素），只给它报这一轮的窗口宽度
   const measure = Element.prototype.getBoundingClientRect;
-  const frame = host;
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
-    if (this.parentElement !== frame) return measure.call(this);
+    if (this.parentElement !== host) return measure.call(this);
     return { x: 0, y: 0, left: 0, top: 0, width: windowWidth, height: 860, right: windowWidth, bottom: 860, toJSON: () => ({}) } as DOMRect;
   });
   vi.stubGlobal("innerWidth", windowWidth);
-  root = createRoot(host);
   // 花瓣画布依赖真实的 2D 上下文与帧循环，冒烟测试只关心页面能否渲染
-  root.render(<App appearance={{ ...DEFAULT_APPEARANCE, mode, petals: false }} uiShape={uiShape} usageNotice={usageNotice} />);
+  renderWithoutAct(<App appearance={{ ...DEFAULT_APPEARANCE, mode, petals: false }} uiShape={uiShape} usageNotice={usageNotice} />, host);
 }
 
 /** 分档与明暗确实按这一轮的设定生效了，否则整轮测的不是想测的那一档。 */
@@ -278,10 +273,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  root?.unmount();
-  root = null;
-  host?.remove();
-  host = null;
   layout?.remove();
   layout = null;
   vi.unstubAllGlobals();

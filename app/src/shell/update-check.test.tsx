@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { UPDATE_FOUND_TOAST } from "../copy/updater";
 import { CHANNEL_CHECK_DEBOUNCE_MS } from "../domain/limits";
@@ -11,7 +11,7 @@ import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { AUTO_CHECK_DELAY_MS, AUTO_CHECK_INTERVAL_MS } from "../state/updater/auto-check";
 import { useUpdater, type UpdaterApi } from "../state/updater/useUpdater";
-import { drainFrames, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, resetRecorder, settle } from "../test/launcher";
 import { OverlayRoot } from "./overlay";
@@ -94,13 +94,6 @@ beforeEach(() => {
     info = { ...info, available: UPDATE };
     return UPDATE;
   });
-});
-
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
 });
 
 describe("启动器更新：自动检查", () => {

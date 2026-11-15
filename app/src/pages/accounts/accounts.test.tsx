@@ -10,7 +10,7 @@ import { clearArtCache } from "../../mc/useArt";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
-import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import AccountsPage from "./index";
@@ -175,15 +175,10 @@ beforeEach(() => {
   ipc.overrides.set("skin_info", () => null);
 });
 
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  // 帧循环跟着假时钟走：换回真实计时器之前排空，同文件后面逐帧采样的用例才推得动
-  await drainFrames();
+afterEach(() => {
   setArtStatus(NO_ART);
   clearArtCache();
   vi.unstubAllGlobals();
-  vi.useRealTimers();
 });
 
 describe("账户页：当前账户与列表", () => {

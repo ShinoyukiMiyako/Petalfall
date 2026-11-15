@@ -41,15 +41,8 @@ const FACTS: PackFacts = { mcVersion: "1.21.1", loader: "fabric", modCount: 3, d
 const [FIRST, SECOND] = COVER_PRESETS;
 
 let view: Rendered | null = null;
-/** 这个用例的帧跟着假时钟走（startFrameClock）：收尾先卸载、再在假时钟上把帧循环排空，才换回真实计时器。 */
-let frameClock = false;
 
-afterEach(async () => {
-  view?.unmount();
-  view = null;
-  if (frameClock) await drainFrames();
-  frameClock = false;
-  vi.useRealTimers();
+afterEach(() => {
   reflowed.clear();
 });
 
@@ -62,7 +55,6 @@ afterEach(async () => {
 async function startFrameClock() {
   await drainFrames();
   vi.useFakeTimers();
-  frameClock = true;
 }
 
 interface FormOptions {

@@ -2,7 +2,7 @@
 // @module-tag heavy-page
 // 更新面板换阶段时不塌、不硬切：开始安装时正文与底栏都留着，只换状态块与按钮状态；版本不在了时弹窗播完退场再走。
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { ACTION_ERROR } from "../copy/flows";
 import { sourceSwitchedCopy, UPDATE_COPY } from "../copy/updater";
@@ -14,7 +14,7 @@ import { COMPLETION_HOLD_S, SPEED_REFRESH_MS } from "../lib/progress-display";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import type { DownloadSource, UpdaterPhase } from "../state/updater/machine";
-import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { render, stepFrames, stubMatchMedia, stubResizeObserver } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, deferred, emit, resetRecorder, settle, type Deferred } from "../test/launcher";
 import modalStyles from "../ui/Modal.module.css";
@@ -28,7 +28,6 @@ vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).f
 
 const UPDATE: UpdateDto = { version: "0.2.0", current_version: "0.1.0", notes: "修复若干问题", date: null, channel: "stable" };
 
-let view: Rendered | undefined;
 let shell: ShellApi;
 let launcher: LauncherApi;
 let info: UpdaterInfoDto;
@@ -50,7 +49,7 @@ const flush = () =>
 
 /** 已下好、等安装：打开面板。 */
 async function openReady(reduceMotion = false) {
-  view = render(
+  render(
     <AppearanceProvider initial={{ ...DEFAULT_APPEARANCE, petals: false, reduceMotion }}>
       <LauncherProvider>
         <ShellProvider>
@@ -95,13 +94,6 @@ beforeEach(() => {
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   ipc.overrides.set("updater_info", () => info);
   ipc.overrides.set("install_update", () => install.promise);
-});
-
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
 });
 
 describe("开始安装", () => {

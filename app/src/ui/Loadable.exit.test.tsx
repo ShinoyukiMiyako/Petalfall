@@ -2,22 +2,12 @@
 // Loadable 里要等退场播完的用例（内容退回加载、骨架的退场）。只看播没播完的用例走真实计时器，用 waitForFrames 等帧循环把动画播完；
 // 要在退场途中某一刻拉回、断言那一刻取值的用例走假时钟（startFrameClock），用 stepFrames 逐帧推进。
 import { act } from "react";
-import { afterEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { LoadingView } from "../lib/loading-gate";
 import { drainFrames, render, stepFrames, waitForFrames, type Rendered } from "../test/dom";
 import { Loadable } from "./Loadable";
 
 let view: Rendered | undefined;
-/** 这个用例的帧跟着假时钟走（startFrameClock）：收尾先卸载、再在假时钟上把帧循环排空，才换回真实计时器。 */
-let frameClock = false;
-
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  if (frameClock) await drainFrames();
-  frameClock = false;
-  vi.useRealTimers();
-});
 
 /**
  * 断言退场途中某一刻取值的用例让帧跟着假时钟走。按真实时间走的话，机器满载时两帧之间隔得比淡出（120 ms）还长，
@@ -27,7 +17,6 @@ afterEach(async () => {
 async function startFrameClock() {
   await drainFrames();
   vi.useFakeTimers();
-  frameClock = true;
 }
 
 /** 骨架的淡入（200 ms）与淡出（120 ms）在这么多帧（约 1 秒）之内都落定。 */

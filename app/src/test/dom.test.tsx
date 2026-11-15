@@ -5,11 +5,10 @@ import { drainFrames, render, stepFrames, stubSpanAnimations, waitForFrames, typ
 
 let view: Rendered | undefined;
 
+// 有的用例在真实计时器上等动画，后面的用例一开头就换上假时钟逐帧走：全局收尾只在假定时器上排空，真实计时器上还排着的那一帧
+// 会让换上假时钟之后的头几步推进扑空，所以这里不论在哪种计时器上都再排空一次
 afterEach(async () => {
-  view?.unmount();
-  view = undefined;
   await drainFrames();
-  vi.useRealTimers();
 });
 
 const fadeIn = (id: string, seconds: number) => (

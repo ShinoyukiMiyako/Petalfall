@@ -2,20 +2,11 @@
 // 百分数随平滑逐帧走。数中间值的用例走假时钟（startFrameClock），用 stepFrames 逐帧推进；其余用例走真实时间，用 waitForFrames 等。
 import { MotionConfig, motionValue } from "framer-motion";
 import { act, type ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { drainFrames, render, stepFrames, waitForFrames, type Rendered } from "../test/dom";
 import { PercentOf, SmoothPercent } from "./SmoothPercent";
 
 let view: Rendered | undefined;
-/** 这个用例的帧跟着假时钟走（startFrameClock）：收尾先卸载、再在假时钟上把帧循环排空，才换回真实计时器。 */
-let frameClock = false;
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  if (frameClock) await drainFrames();
-  frameClock = false;
-  vi.useRealTimers();
-});
 
 /**
  * 数中间值的用例让帧跟着假时钟走，用 stepFrames 逐帧推进。按真实时间走的话，机器满载时一帧晚到就可能把平滑整段走完，
@@ -24,7 +15,6 @@ afterEach(async () => {
 async function startFrameClock() {
   await drainFrames();
   vi.useFakeTimers();
-  frameClock = true;
 }
 
 /** 平滑（settle 弹簧）在这么多帧（约 1 秒）之内落定。 */
