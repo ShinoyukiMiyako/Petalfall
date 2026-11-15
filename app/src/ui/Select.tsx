@@ -14,7 +14,7 @@ import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKe
 import { Icon, type IconName } from "../art/Icon";
 import { cx, isImeComposing } from "../lib/util";
 import { mergeDescribedBy, useFieldControl } from "./Field";
-import { Popover } from "./Popover";
+import { Popover, usePopoverInitialFocus } from "./Popover";
 import styles from "./Select.module.css";
 import { TextInput } from "./TextInput";
 import { isTypeaheadKey, matchTypeahead, useTypeahead } from "./typeahead";
@@ -333,10 +333,14 @@ function SelectList<T extends string>({
     panel.style.minHeight = `${panel.offsetHeight}px`;
   }, []);
 
-  // 打开即聚焦过滤框。不用 autoFocus：开发构建的 StrictMode 会重放 effect，autoFocus 不会重放
-  useLayoutEffect(() => {
-    if (filterable) filterRef.current?.focus();
-  }, [filterable]);
+  // 打开即聚焦过滤框，等浮层面板可见之后：定位前的面板是隐藏的，挂载时聚焦会落空。
+  // 不用 autoFocus：时机同样太早，且开发构建的 StrictMode 会重放 effect，autoFocus 不会重放
+  usePopoverInitialFocus(() => {
+    if (!filterable) return;
+    const filter = filterRef.current;
+    if (filter === null) throw new Error("下拉列表的过滤框没有挂上");
+    filter.focus();
+  });
 
   // 键盘移动高亮时把它滚进列表可视区
   useLayoutEffect(() => {

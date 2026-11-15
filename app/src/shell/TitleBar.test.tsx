@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { ACTION_ERROR, INSTANCE_TAB_LABEL, NEXT_LAUNCH_SUFFIX, PAGE_LABEL, TOAST_COPY, accountKindLabel } from "../copy/flows";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { refuseHiddenFocus } from "../test/focus-fixup";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, deferred, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { ACCOUNT_COPY, PEEK_COPY, TITLEBAR_COPY } from "../copy/shell";
@@ -144,6 +145,21 @@ describe("账户胶囊", () => {
     expect(callsOf(ipc, "set_current_account")).toEqual([{ uuid: ALEX.uuid }]);
     const toast = launcher.state.toasts.find((t) => t.title === TOAST_COPY.accountSwitched("Alex"));
     expect(toast?.body).toBe(accountKindLabel("microsoft", null));
+  });
+
+  // 面板定位前是隐藏的，浏览器不给隐藏的元素焦点：挂载时就聚焦的话焦点留在胶囊上，↑↓ 到不了菜单
+  it("打开切换菜单：面板可见之后才把焦点放到当前账户上，↓ 移到下一个账户", async () => {
+    await mount();
+    const capsule = byLabel(ACCOUNT_COPY.current("Steve", accountKindLabel("offline", null)));
+    act(() => capsule.focus());
+    const calls = refuseHiddenFocus();
+    act(() => capsule.click());
+    await flush();
+    const rows = [...document.querySelectorAll<HTMLElement>("[role='menuitemradio']")];
+    expect(calls.map((c) => [c.target, c.hidden])).toEqual([[rows[0], false]]);
+    expect(document.activeElement).toBe(rows[0]);
+    keydown(rows[0], "ArrowDown");
+    expect(document.activeElement).toBe(rows[1]);
   });
 
   it("游戏占着进程时换账户：通知说明下次启动生效", async () => {
