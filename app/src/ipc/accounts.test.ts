@@ -112,7 +112,11 @@ describe("账户 mock：两库仲裁", () => {
     expect(await listAccounts()).toHaveLength(3);
 
     await createOfflineAccount("玩家");
-    expect(warnings).toEqual([{ kind: "warning", task_id: null, message: "用户名包含非标准字符，可能无法进入 1.18+ 世界" }]);
+    await createOfflineAccount("Petal-1.0");
+    expect(warnings).toEqual([
+      { kind: "warning", task_id: null, message: "用户名含空格或非 ASCII 字符，Minecraft 1.20.2 与 1.20.3 进不了存档与服务器" },
+      { kind: "warning", task_id: null, message: "用户名包含非标准字符，可能无法进入 1.18+ 世界" },
+    ]);
   });
 
   it("切到凭据账户会清掉离线选中项；未知 uuid 报 AccountNotFound 并带上 uuid", async () => {
