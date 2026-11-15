@@ -22,7 +22,7 @@ const CJK_TEXT: readonly (readonly [string, readonly string[]])[] = [
   ["../flows/create-instance/create.module.css", [".stepValue", ".path"]],
   ["../pages/discover/pack.module.css", [".coverName"]],
   ["../pages/instance/instance.module.css", [".modFile", ".fileChip"]],
-  ["../launch/LaunchCapsule.module.css", [".sub"]],
+  ["../launch/LaunchCapsule.module.css", [".sub", ".title", ".pill"]],
   ["../shell/StatusIsland.module.css", [".logLine"]],
   ["../shell/PageError.module.css", [".detail"]],
   ["../shell/UpdatePanel.module.css", [".failureRaw"]],
