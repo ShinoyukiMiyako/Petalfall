@@ -869,7 +869,7 @@ describe("微软设备码弹窗", () => {
       // 主按钮仍是底栏的「完成」
       expect(button(MICROSOFT_LOGIN_COPY.done).dataset.variant).toBe("primary");
       expect(modalLayoutKeys.at(-1)).toBe("microsoft:success:content:art");
-      expect(avatar()?.dataset.art).toBe("silhouette");
+      expect(avatar()?.dataset.art).toBe("mannequin");
     });
 
     it("本机有材质源：成功区没有这一行，头像直接画默认皮肤", async () => {
@@ -886,7 +886,7 @@ describe("微软设备码弹窗", () => {
       ipc.overrides.set("art_download", () => download.promise);
       await loginSucceeds();
       const face = avatar();
-      expect(face?.dataset.art).toBe("silhouette");
+      expect(face?.dataset.art).toBe("mannequin");
       const trigger = button("下载原版材质");
       act(() => {
         trigger.click();

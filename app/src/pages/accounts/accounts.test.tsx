@@ -477,7 +477,7 @@ describe("账户页：下载原版材质", () => {
     expect(getArtDownloadState()).toEqual({ phase: "idle" });
   });
 
-  it("本机没有材质源：聚光卡与「全部账户」之间一行说明加次按钮，立绘是剪影", async () => {
+  it("本机没有材质源：聚光卡与「全部账户」之间一行说明加次按钮，立绘是人偶", async () => {
     await mount();
     await flush();
     const card = entry();
@@ -493,7 +493,7 @@ describe("账户页：下载原版材质", () => {
       Node.DOCUMENT_POSITION_FOLLOWING,
       Node.DOCUMENT_POSITION_FOLLOWING,
     ]);
-    expect(spotFigure()?.dataset.art).toBe("silhouette");
+    expect(spotFigure()?.dataset.art).toBe("mannequin");
     expect(drawn).toEqual([]);
   });
 
@@ -520,7 +520,7 @@ describe("账户页：下载原版材质", () => {
     await mount();
     await flush();
     const figure = spotFigure();
-    expect(figure?.dataset.art).toBe("silhouette");
+    expect(figure?.dataset.art).toBe("mannequin");
 
     const button = buttonIn(entry() as HTMLElement, "下载原版材质");
     act(() => {

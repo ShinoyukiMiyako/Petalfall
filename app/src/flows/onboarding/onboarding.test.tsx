@@ -513,7 +513,7 @@ describe("首次启动向导：推进与收尾", () => {
         Node.DOCUMENT_POSITION_FOLLOWING,
         Node.DOCUMENT_POSITION_FOLLOWING,
       ]);
-      expect(avatars().map((a) => a.dataset.art)).toEqual(["silhouette", "silhouette"]);
+      expect(avatars().map((a) => a.dataset.art)).toEqual(["mannequin", "mannequin"]);
     });
 
     it("本机有材质源：没有这一行，头像直接画默认皮肤", async () => {
