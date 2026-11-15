@@ -14,7 +14,7 @@ import type { RouteOf } from "../../state/route";
 import { drainFrames, focusByKeyboard, render, stepFrames, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import type { InstanceDto } from "../../ipc/instances";
-import { bootOverrides, callsOf, cancelledError, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
+import { bootOverrides, callsOf, cancelledError, configDto, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { PickFolderProvider } from "../discover/platform";
 import TasksPage from "./index";
 import styles from "./tasks.module.css";
@@ -402,6 +402,48 @@ describe("下载任务页：历史", () => {
     move.reject(new IpcError("io", "目标盘拒绝访问"));
     await flush();
     expect(buttonIn(row("备份「旧世界」"), "重试").getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("移动成功后：挂在移走的实例上的失败任务记到目标目录，源目录里重试置灰写明去哪里；切到目标目录后可点，命令带目标目录", async () => {
+    const target = "E:\\HMCL\\.minecraft";
+    bootOverrides(ipc, {
+      journal: [
+        record("failed-mine", "failed", {
+          kind: "world_backup",
+          title: "备份「旧世界」",
+          detail: "「生存」",
+          instance_id: "生存",
+          error: { code: "io", message: "磁盘已满" },
+          spec: { command: "backup_world", args: { id: "生存", world: "旧世界" } },
+        }),
+      ],
+    });
+    let scanned = [instanceDto("生存"), instanceDto("创造")];
+    ipc.overrides.set("list_instances", () => scanned);
+    ipc.overrides.set("move_instance", () => {
+      scanned = [instanceDto("创造")];
+      return { id: "生存", source: "D:/Games/.minecraft", target, target_name: "HMCL", registered: false, follow_ups: [] };
+    });
+    await mount();
+    await act(() => launcher.actions.moveInstance("生存", "D:/Games/.minecraft", target, "HMCL"));
+    await flush();
+    expect(launcher.state.tasks.find((t) => t.id === "failed-mine")).toMatchObject({ status: "failed", gameDir: target });
+    const stale = buttonIn(row("备份「旧世界」"), "重试");
+    expect(stale.getAttribute("aria-disabled")).toBe("true");
+    act(() => focusByKeyboard(stale));
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toContain(`这个任务发起于游戏目录 ${target}，切回去再重试`);
+
+    ipc.overrides.set("set_game_directory", () => null);
+    ipc.overrides.set("get_config", () => configDto({ game_dir: target }));
+    scanned = [instanceDto("生存")];
+    await act(() => launcher.actions.setGameDirectory(target));
+    await flush();
+    ipc.overrides.set("backup_world", () => new Promise(() => undefined));
+    const retry = buttonIn(row("备份「旧世界」"), "重试");
+    expect(retry.getAttribute("aria-disabled")).toBeNull();
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toEqual([{ id: "生存", world: "旧世界", taskId: "failed-mine#2", gameDir: target }]);
   });
 
   it("上次关闭时中断的移动：行上写已在打开时收尾，不给重试；同样中断的下载照常给重试", async () => {

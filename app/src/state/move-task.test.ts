@@ -453,10 +453,17 @@ describe("移动与失败任务的重试", () => {
     await settle();
     await store.actions.backupWorld("生存", "w1", "樱花谷");
     await settle();
+    const frames: (string | null)[][] = [];
+    store.subscribe(() => {
+      const tasks = store.getState().tasks;
+      if (tasks[1].status === "done") frames.push(tasks.map((t) => t.gameDir));
+    });
     instances = instances.filter((i) => i.id !== "生存");
     pending.resolve(outcome());
     await settle();
-    // 移动本身发起于源目录，照旧；别的实例上的不动
+    // 移动落为完成的那一次更新里已经迁好：没有哪一帧让源目录里的重试按钮可点
+    expect(frames[0]).toEqual([TARGET, SOURCE, TARGET]);
+    // 移动本身发起于源目录，照旧
     expect(store.getState().tasks.map((t) => [t.spec.command, t.status, t.gameDir])).toEqual([
       ["install_resource", "failed", TARGET],
       ["move_instance", "done", SOURCE],
