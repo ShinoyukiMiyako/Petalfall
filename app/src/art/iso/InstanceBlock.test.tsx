@@ -58,7 +58,7 @@ describe("InstanceBlock", () => {
   });
 
   it("有材质源：取顶面与侧面，换成真材质；草方块顶面与侧面是两张图", async () => {
-    setArtStatus({ source: { versionId: "1.21.1", degraded: false }, panorama: false });
+    setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
     view = render(<InstanceBlock instanceId="周末生存" cover={{ block: "grass_block", hue: 118, image: null }} width={32} />);
     expect(block().dataset.art).toBe("emblem");
     await settle();
@@ -75,7 +75,7 @@ describe("InstanceBlock", () => {
   });
 
   it("动画材质（16 × 48）当作方块材质，只读首帧 16 × 16", async () => {
-    setArtStatus({ source: { versionId: "1.21.1", degraded: false }, panorama: false });
+    setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
     textureSize = { width: 16, height: 48 };
     view = render(<InstanceBlock instanceId="i0" cover={{ block: "prismarine_bricks", hue: 175, image: null }} width={20} />);
     await settle();
@@ -85,7 +85,7 @@ describe("InstanceBlock", () => {
   });
 
   it("宽不是 16 的材质回落徽记，并只记一次 warn", async () => {
-    setArtStatus({ source: { versionId: "1.21.1", degraded: false }, panorama: false });
+    setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
     textureSize = { width: 32, height: 32 };
     view = render(<InstanceBlock instanceId="i1" cover={{ block: "blue_ice", hue: 205, image: null }} width={32} />);
     await settle();
@@ -95,7 +95,7 @@ describe("InstanceBlock", () => {
   });
 
   it("不在预设也不在本机方块目录里的封面显示徽记，不请求任何材质", async () => {
-    setArtStatus({ source: { versionId: "1.21.1", degraded: false }, panorama: false });
+    setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
     setBlockCatalog(catalogFromDto({ version_id: "1.21.1", blocks: [] }));
     view = render(<InstanceBlock instanceId="i2" cover={{ block: "diamond_block", hue: 180, image: null }} width={24} />);
     await settle();
@@ -105,7 +105,7 @@ describe("InstanceBlock", () => {
   });
 
   it("目录里的有朝向方块：取顶面、侧面、正面三张图画成真材质", async () => {
-    setArtStatus({ source: { versionId: "1.21.1", degraded: false }, panorama: false });
+    setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
     setBlockCatalog(
       catalogFromDto({
         version_id: "1.21.1",

@@ -96,7 +96,7 @@ describe("账户 mock：两库仲裁", () => {
     for (const uuid of uuids) expect(new Set([0, 8, 16, 24].map((at) => uuid.slice(at, at + 8))).size).toBe(4);
     expect(new Set(uuids).size).toBe(names.length);
     // 四段相同时 Java 的 UUID.hashCode 恒为 0，每个离线账户都会落到同一套默认皮肤上
-    expect(new Set(uuids.map((uuid) => defaultSkin(uuid).path)).size).toBeGreaterThan(1);
+    expect(new Set(uuids.map((uuid) => defaultSkin(uuid, false).path)).size).toBeGreaterThan(1);
   });
 
   it("离线用户名：16 个字符可以、17 个不行，空名与双引号直接拒绝，非标准字符只告警", async () => {

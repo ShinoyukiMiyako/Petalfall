@@ -11,6 +11,8 @@ export interface ArtSourceDto {
   version_id: string;
   /** 本机的降级集（1.13 到 1.19）：推荐里较新的方块缺材质；下载来的最新正式版会盖过它。 */
   degraded: boolean;
+  /** 材质源早于 1.19.3，默认皮肤只有 steve 与 alex：离线账户按旧版规则选，skin_info 给的也是这两张之一。 */
+  legacy_skins: boolean;
 }
 
 export interface ArtStatusDto {

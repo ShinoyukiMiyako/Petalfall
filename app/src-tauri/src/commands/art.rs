@@ -7,7 +7,7 @@ use std::path::Path;
 use petalfall_core::art::BlockCatalog;
 use petalfall_core::{
     default_skin, Account, AccountType, ArtDownloadProgress, ArtDownloadStage, ArtStatus,
-    DownloadedClient, SkinInfo, SkinModel, TextureService, ThumbError,
+    DefaultSkinSet, DownloadedClient, SkinInfo, SkinModel, TextureService, ThumbError,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -41,6 +41,8 @@ pub struct ArtSourceDto {
     pub version_id: String,
     /// 本机的降级集（1.13 到 1.19）：预设里较新的方块缺材质，前端照样给「下载原版材质」入口，下载来的最新正式版盖过它。
     pub degraded: bool,
+    /// 材质源早于 1.19.3，默认皮肤只有 steve 与 alex：离线账户弹窗按旧版规则预览，与 `skin_info` 给的一致。
+    pub legacy_skins: bool,
 }
 
 /// 材质服务状态 DTO，也是 `petalfall://art-changed` 的负载。
@@ -58,6 +60,7 @@ impl From<ArtStatus> for ArtStatusDto {
             source: status.source.map(|version_id| ArtSourceDto {
                 version_id,
                 degraded: status.degraded,
+                legacy_skins: status.default_skins == DefaultSkinSet::Legacy,
             }),
             panorama: status.panorama,
         }
@@ -249,18 +252,22 @@ pub async fn skin_info(
             CommandError::from(petalfall_core::AuthError::AccountNotFound(account_uuid))
         })?;
     let Some(skin) = account.skin.as_ref() else {
-        return skin_without_profile(&account);
+        return skin_without_profile(&account, textures.status().default_skins);
     };
     Ok(textures.skin_info(skin).await.as_ref().map(skin_info_dto))
 }
 
-/// 账户记录里没有远程皮肤时画什么。离线账户永远没有自定义皮肤，进游戏看到的必是按 UUID 选出的默认皮肤；
-/// 正版与外置账户没有皮肤也可能只是档案还没取到，按默认皮肤画会冒充它的真实外观，所以留给界面画剪影。
-fn skin_without_profile(account: &Account) -> Result<Option<SkinInfoDto>, CommandError> {
+/// 账户记录里没有远程皮肤时画什么。离线账户永远没有自定义皮肤，进游戏看到的必是按 UUID 选出的默认皮肤，
+/// 按材质源里的那一套（`set`）选，选出的图才读得到；正版与外置账户没有皮肤也可能只是档案还没取到，
+/// 按默认皮肤画会冒充它的真实外观，所以留给界面画剪影。
+fn skin_without_profile(
+    account: &Account,
+    set: DefaultSkinSet,
+) -> Result<Option<SkinInfoDto>, CommandError> {
     if account.account_type != AccountType::Offline {
         return Ok(None);
     }
-    let skin = default_skin(&account.uuid).ok_or_else(|| {
+    let skin = default_skin(&account.uuid, set).ok_or_else(|| {
         CommandError::new(
             code::INTERNAL,
             format!("离线账户的 UUID 不是 32 位十六进制：{}", account.uuid),
@@ -297,19 +304,31 @@ mod tests {
             serde_json::to_value(ArtStatusDto::from(ArtStatus {
                 source: Some("1.21.1".into()),
                 degraded: false,
+                default_skins: DefaultSkinSet::Modern,
                 panorama: true,
             }))
             .unwrap(),
-            json!({ "source": { "version_id": "1.21.1", "degraded": false }, "panorama": true })
+            json!({ "source": { "version_id": "1.21.1", "degraded": false, "legacy_skins": false }, "panorama": true })
         );
         assert_eq!(
             serde_json::to_value(ArtStatusDto::from(ArtStatus {
                 source: Some("1.16.5".into()),
                 degraded: true,
+                default_skins: DefaultSkinSet::Legacy,
                 panorama: false,
             }))
             .unwrap(),
-            json!({ "source": { "version_id": "1.16.5", "degraded": true }, "panorama": false })
+            json!({ "source": { "version_id": "1.16.5", "degraded": true, "legacy_skins": true }, "panorama": false })
+        );
+        assert_eq!(
+            serde_json::to_value(ArtStatusDto::from(ArtStatus {
+                source: Some("1.19.4".into()),
+                degraded: true,
+                default_skins: DefaultSkinSet::Modern,
+                panorama: false,
+            }))
+            .unwrap(),
+            json!({ "source": { "version_id": "1.19.4", "degraded": true, "legacy_skins": false }, "panorama": false })
         );
     }
 
@@ -405,7 +424,9 @@ mod tests {
             "Steve",
             petalfall_core::AccountCredentials::Offline,
         );
-        let dto = skin_without_profile(&steve).unwrap().unwrap();
+        let dto = skin_without_profile(&steve, DefaultSkinSet::Modern)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             serde_json::to_value(dto).unwrap(),
             json!({ "kind": "default", "path": "entity/player/wide/efe", "model": "wide" })
@@ -417,11 +438,38 @@ mod tests {
             petalfall_core::AccountCredentials::Offline,
         );
         assert_eq!(
-            skin_without_profile(&alex).unwrap(),
+            skin_without_profile(&alex, DefaultSkinSet::Modern).unwrap(),
             Some(SkinInfoDto::Default {
                 path: "entity/player/slim/makena",
                 model: SkinModel::Slim,
             })
+        );
+    }
+
+    /// 材质源早于 1.19.3 时只有 steve 与 alex 两张：Steve 的离线 UUID 哈希是奇数，原版里是细臂 alex。
+    #[test]
+    fn offline_account_on_a_legacy_source_gets_steve_or_alex() {
+        let steve = petalfall_core::Account::new(
+            "5627dd98e6be3c21b8a8e92344183641",
+            "Steve",
+            petalfall_core::AccountCredentials::Offline,
+        );
+        assert_eq!(
+            skin_without_profile(&steve, DefaultSkinSet::Legacy).unwrap(),
+            Some(SkinInfoDto::Default {
+                path: "entity/alex",
+                model: SkinModel::Slim,
+            })
+        );
+        let alex = petalfall_core::Account::new(
+            "36532b5ec4423dbba24cc7e55d0f979a",
+            "Alex",
+            petalfall_core::AccountCredentials::Offline,
+        );
+        assert_eq!(
+            serde_json::to_value(skin_without_profile(&alex, DefaultSkinSet::Legacy).unwrap())
+                .unwrap(),
+            json!({ "kind": "default", "path": "entity/steve", "model": "wide" })
         );
     }
 
@@ -436,7 +484,14 @@ mod tests {
                 minecraft_expires_at: None,
             }),
         );
-        assert_eq!(skin_without_profile(&account).unwrap(), None);
+        assert_eq!(
+            skin_without_profile(&account, DefaultSkinSet::Modern).unwrap(),
+            None
+        );
+        assert_eq!(
+            skin_without_profile(&account, DefaultSkinSet::Legacy).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -447,7 +502,9 @@ mod tests {
             petalfall_core::AccountCredentials::Offline,
         );
         assert_eq!(
-            skin_without_profile(&account).unwrap_err().code,
+            skin_without_profile(&account, DefaultSkinSet::Modern)
+                .unwrap_err()
+                .code,
             code::INTERNAL
         );
     }
@@ -584,6 +641,7 @@ mod tests {
         ArtStatus {
             source: Some("1.21.1".into()),
             degraded: false,
+            default_skins: DefaultSkinSet::Modern,
             panorama: false,
         }
     }
@@ -620,6 +678,7 @@ mod tests {
         let degraded = ArtStatus {
             source: Some("1.16.5".into()),
             degraded: true,
+            default_skins: DefaultSkinSet::Legacy,
             panorama: false,
         };
         discard_staging(&slot, &degraded, &dest).await.unwrap();

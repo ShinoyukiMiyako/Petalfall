@@ -78,7 +78,7 @@ function putCatalog(versionId: string, blocks: CatalogBlockDto[]) {
 
 const cover = (block: string, image: string | null = null): InstanceCover => ({ block, hue: 30, image });
 
-const withSource = (versionId = "1.21.1") => setArtStatus({ source: { versionId, degraded: false }, panorama: false });
+const withSource = (versionId = "1.21.1") => setArtStatus({ source: { versionId, degraded: false, legacySkins: false }, panorama: false });
 
 describe("useBlockSource：本机材质", () => {
   it("预设按预设表取面：草方块顶面与侧面两张图，顶面染色", async () => {

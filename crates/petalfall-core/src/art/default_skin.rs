@@ -1,7 +1,11 @@
-//! 没有自定义皮肤的玩家在原版客户端（1.19.3 起）里显示的默认皮肤：由 UUID 的哈希在 9 套默认皮肤
-//! × 细臂、宽臂两种体型里选一套。离线账户永远没有自定义皮肤，进游戏看到的就是这一套，所以界面按它画。
+//! 没有自定义皮肤的玩家在原版客户端里显示的默认皮肤：由 UUID 的哈希选出。1.19.3 起在 9 套默认皮肤
+//! × 细臂、宽臂两种体型里选一套；更早的客户端只有宽臂的 steve 与细臂的 alex 两套，按哈希的奇偶选。
+//! 离线账户永远没有自定义皮肤，进游戏看到的就是这一套，所以界面按它画；皮肤图从材质源读，选取规则也跟着
+//! 材质源的版本走，否则旧版材质源里读不到 18 款的图，只能画剪影。
 //!
 //! 前端添加离线账户的弹窗按同一规则预览（`flows/login/default-skin.ts`），两边用同一组测试向量钉住。
+
+use std::collections::BTreeSet;
 
 use petalfall_auth::SkinModel;
 
@@ -34,6 +38,32 @@ const DEFAULT_SKINS: [DefaultSkin; 18] = [
     wide("entity/player/wide/zuri"),
 ];
 
+/// 1.19.3 以前原版客户端的两套默认皮肤，下标是哈希的最低位：客户端在 `(uuid.hashCode() & 1) == 1` 时给细臂
+/// alex，否则给宽臂 steve，体型与皮肤由同一个判断给出。
+const LEGACY_SKINS: [DefaultSkin; 2] = [wide("entity/steve"), slim("entity/alex")];
+
+/// 材质源里是哪一套默认皮肤。原版在 1.19.3 把两套换成 18 款，选取规则也一起换了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DefaultSkinSet {
+    /// 1.19.3 起的 18 款。没有材质源时也按它：界面不取图，下载来的最新正式版也是这一套。
+    #[default]
+    Modern,
+    /// 1.13 到 1.19.2：只有 `entity/steve` 与 `entity/alex` 两张。
+    Legacy,
+}
+
+impl DefaultSkinSet {
+    /// 按材质源抽进缓存的文件认：有旧版两张中的任一张就是 1.19.3 以前的源。1.19.3 起的客户端 jar 里没有这两张，
+    /// 更早的只有这两张；不看版本号，因为本机的版本目录可以随意命名（整合包常用中文名）。
+    pub fn of_source(files: &BTreeSet<String>) -> Self {
+        if LEGACY_SKINS.iter().any(|skin| files.contains(skin.path)) {
+            DefaultSkinSet::Legacy
+        } else {
+            DefaultSkinSet::Modern
+        }
+    }
+}
+
 const fn slim(path: &'static str) -> DefaultSkin {
     DefaultSkin {
         path,
@@ -61,11 +91,16 @@ pub fn java_uuid_hash(uuid: &str) -> Option<i32> {
     Some((((folded >> 32) as u32) ^ (folded as u32)) as i32)
 }
 
-/// 这个 UUID 在原版客户端里的默认皮肤：下标为哈希对 18 取非负余数（Java 的 `Math.floorMod`）。
-pub fn default_skin(uuid: &str) -> Option<DefaultSkin> {
+/// 这个 UUID 在原版客户端里的默认皮肤。1.19.3 起下标为哈希对 18 取非负余数（Java 的 `Math.floorMod`）；
+/// 更早看哈希的最低位，负哈希按补码取位，与 Java 的 `&` 一致。
+pub fn default_skin(uuid: &str, set: DefaultSkinSet) -> Option<DefaultSkin> {
     let hash = java_uuid_hash(uuid)?;
-    let index = hash.rem_euclid(DEFAULT_SKINS.len() as i32) as usize;
-    Some(DEFAULT_SKINS[index])
+    Some(match set {
+        DefaultSkinSet::Modern => {
+            DEFAULT_SKINS[hash.rem_euclid(DEFAULT_SKINS.len() as i32) as usize]
+        }
+        DefaultSkinSet::Legacy => LEGACY_SKINS[(hash & 1) as usize],
+    })
 }
 
 #[cfg(test)]
@@ -106,14 +141,19 @@ mod tests {
             "5627dd98e6be3c21b8a8e923441836410",
         ] {
             assert_eq!(java_uuid_hash(bad), None, "{bad}");
-            assert_eq!(default_skin(bad), None, "{bad}");
+            assert_eq!(default_skin(bad, DefaultSkinSet::Modern), None, "{bad}");
+            assert_eq!(default_skin(bad, DefaultSkinSet::Legacy), None, "{bad}");
         }
     }
 
     #[test]
     fn hashes_zero_to_seventeen_walk_slim_then_wide() {
         let picks: Vec<&str> = (0..18)
-            .map(|k| default_skin(&format!("{k:032x}")).unwrap().path)
+            .map(|k| {
+                default_skin(&format!("{k:032x}"), DefaultSkinSet::Modern)
+                    .unwrap()
+                    .path
+            })
             .collect();
         assert_eq!(
             picks,
@@ -160,7 +200,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                default_skin(uuid),
+                default_skin(uuid, DefaultSkinSet::Modern),
                 Some(DefaultSkin { path, model }),
                 "{uuid}"
             );
@@ -252,7 +292,7 @@ mod tests {
                 SkinModel::Wide
             };
             assert_eq!(
-                default_skin(uuid),
+                default_skin(uuid, DefaultSkinSet::Modern),
                 Some(DefaultSkin { path, model }),
                 "{uuid}"
             );
@@ -269,8 +309,85 @@ mod tests {
             ("樱花", "entity/player/wide/steve"),
         ] {
             let uuid = petalfall_auth::offline_uuid(name).simple().to_string();
-            assert_eq!(default_skin(&uuid).unwrap().path, path, "{name}");
+            assert_eq!(
+                default_skin(&uuid, DefaultSkinSet::Modern).unwrap().path,
+                path,
+                "{name}"
+            );
         }
+    }
+
+    // 1.13 到 1.19.2 的客户端（反汇编 1.13、1.16.5、1.19.2 核对过）：哈希最低位为 1 给细臂 alex，否则宽臂 steve。
+    // 期望值由 JDK 的 java.util.UUID.hashCode 独立算出，与前端测试同一组；负哈希与 i32::MIN 钉住按补码取位。
+    #[test]
+    fn legacy_set_picks_alex_on_odd_hash_and_steve_on_even() {
+        let steve = DefaultSkin {
+            path: "entity/steve",
+            model: SkinModel::Wide,
+        };
+        let alex = DefaultSkin {
+            path: "entity/alex",
+            model: SkinModel::Slim,
+        };
+        for (uuid, expected) in [
+            ("00000000-0000-0000-0000-000000000000", steve),
+            ("00000000-0000-0000-0000-000000000001", alex),
+            ("00000000-0000-0000-0000-000000000011", alex),
+            ("00000000-0000-0000-0000-00000000ffff", alex),
+            ("00000000-0000-0000-0000-0000ffffffff", alex),
+            ("00000000-0000-0000-0000-0000fffffffe", steve),
+            ("80000000-0000-0000-0000-000000000000", steve),
+            ("069a79f4-44e9-4726-a5be-fca90e38aaf5", steve),
+            ("853c80ef-3c37-49fd-aa49-938b674adae6", alex),
+        ] {
+            assert_eq!(
+                default_skin(uuid, DefaultSkinSet::Legacy),
+                Some(expected),
+                "{uuid}"
+            );
+        }
+    }
+
+    #[test]
+    fn offline_players_on_a_legacy_source_get_steve_or_alex() {
+        for (name, path) in [
+            ("Steve", "entity/alex"),
+            ("Alex", "entity/steve"),
+            ("Notch", "entity/steve"),
+            ("jeb_", "entity/alex"),
+            ("Hanami", "entity/steve"),
+            ("樱花", "entity/alex"),
+        ] {
+            let uuid = petalfall_auth::offline_uuid(name).simple().to_string();
+            assert_eq!(
+                default_skin(&uuid, DefaultSkinSet::Legacy).unwrap().path,
+                path,
+                "{name}"
+            );
+        }
+    }
+
+    fn files(paths: &[&str]) -> BTreeSet<String> {
+        paths.iter().map(|p| (*p).to_owned()).collect()
+    }
+
+    #[test]
+    fn source_with_the_two_old_skins_is_legacy() {
+        let legacy = files(&["block/stone", "entity/alex", "entity/steve"]);
+        assert_eq!(DefaultSkinSet::of_source(&legacy), DefaultSkinSet::Legacy);
+        // 只抽到一张（另一张没通过校验）也还是旧版源
+        let one = files(&["block/stone", "entity/alex"]);
+        assert_eq!(DefaultSkinSet::of_source(&one), DefaultSkinSet::Legacy);
+        // 1.19.3、1.19.4 没有 1.20 的方块，是降级源，但皮肤已经是 18 款
+        let modern: BTreeSet<String> = std::iter::once("block/stone")
+            .chain(DEFAULT_SKINS.iter().map(|skin| skin.path))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(DefaultSkinSet::of_source(&modern), DefaultSkinSet::Modern);
+        assert_eq!(
+            DefaultSkinSet::of_source(&files(&["block/stone"])),
+            DefaultSkinSet::Modern
+        );
     }
 
     #[test]
@@ -282,6 +399,9 @@ mod tests {
                 SkinModel::Wide => "entity/player/wide/",
             };
             assert!(skin.path.starts_with(folder), "{}", skin.path);
+        }
+        for skin in LEGACY_SKINS {
+            assert!(SKIN_TEXTURES.contains(&skin.path), "{}", skin.path);
         }
     }
 }

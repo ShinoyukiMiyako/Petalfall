@@ -156,8 +156,8 @@ pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
 pub use art::{ArtDownloadProgress, ArtDownloadStage};
 pub use art::{
-    ArtStatus, DefaultSkin, DownloadedClient, SkinInfo, TexResponse, TextureService, ThumbError,
-    default_skin,
+    ArtStatus, DefaultSkin, DefaultSkinSet, DownloadedClient, SkinInfo, TexResponse,
+    TextureService, ThumbError, default_skin,
 };
 pub use auth::{
     AheadOutcome, AuthServerInfo, AuthlibLogin, AuthlibPending, RENEW_AHEAD_CHECK_EVERY,

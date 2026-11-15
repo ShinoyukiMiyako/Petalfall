@@ -12,6 +12,7 @@ import { endBreathWindow, startBreathWindow } from "../launch/breath";
 import { LaunchHostProvider, type ConfirmHandle, type ConfirmOptions, type LaunchHost } from "../launch/host";
 import { bindArtStatus } from "../mc/binding";
 import { registerCatalogReload, settleArtDownload } from "../state/art-download";
+import { invalidate as invalidateResources } from "../state/resource";
 import type { CreateInstancePreset } from "../state/flows";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { LIBRARY_ROUTE, routeInstanceId, routeKey, sameRoute, type Route } from "../state/route";
@@ -782,6 +783,7 @@ function ShellCore({ children }: { children: ReactNode }) {
       listenChanged: (handler) => onArtChanged(() => handler()),
       onError: report,
       onCatalog: settleArtDownload,
+      onDefaultSkinsChanged: () => invalidateResources("skin"),
       reloadRequests: registerCatalogReload,
     }).then(
       (release) => {
