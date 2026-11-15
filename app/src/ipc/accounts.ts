@@ -88,7 +88,7 @@ export interface AuthServerDto {
 export interface AuthlibProfileDto {
   uuid: string;
   name: string;
-  /** 拿不到远程皮肤时是按角色 UUID 选的默认皮肤；UUID 不是 32 位十六进制时为 null，画剪影。 */
+  /** 拿不到远程皮肤时是按角色 UUID 选的默认皮肤；UUID 不是 32 位十六进制时为 null，画人偶。 */
   skin: SkinInfoDto | null;
 }
 

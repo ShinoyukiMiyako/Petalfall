@@ -1803,14 +1803,14 @@ describe("主页：账户皮肤", () => {
     expect(figure?.closest("button")?.getAttribute("aria-label")).toBe("管理账户");
   });
 
-  it("皮肤查询失败：照常画剪影立绘，不弹通知，原因写进控制台", async () => {
+  it("皮肤查询失败：照常画人偶立绘，不弹通知，原因写进控制台", async () => {
     const failure = new IpcError("io", "账户文件读不出来");
     ipc.overrides.set("skin_info", () => {
       throw failure;
     });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     await mount();
-    expect(document.querySelector('[data-sk-art="skin"]')?.getAttribute("data-art")).toBe("silhouette");
+    expect(document.querySelector('[data-sk-art="skin"]')?.getAttribute("data-art")).toBe("mannequin");
     expect(launcher.state.toasts).toEqual([]);
     const skinWarnings = warn.mock.calls.filter(([message]) => String(message).includes("皮肤"));
     expect(skinWarnings).toHaveLength(1);
@@ -1818,7 +1818,7 @@ describe("主页：账户皮肤", () => {
     expect((skinWarnings[0][1] as IpcError).message).toBe("账户文件读不出来");
   });
 
-  it("刷新账户后皮肤信息重取失败：立绘沿用上次读到的皮肤，不退回剪影，原因写进控制台", async () => {
+  it("刷新账户后皮肤信息重取失败：立绘沿用上次读到的皮肤，不退回人偶，原因写进控制台", async () => {
     const account = accountDto();
     ipc.overrides.set("skin_info", () => ({ kind: "remote", sha1: "cd".repeat(20), model: "wide", hat: true }));
     ipc.overrides.set("refresh_account", () => account);
@@ -1845,7 +1845,7 @@ describe("主页：账户皮肤", () => {
     expect(skinWarnings).toEqual(["[home] 当前账户的皮肤信息读不出来，立绘沿用上次读到的皮肤"]);
   });
 
-  it("切换到皮肤信息还没读到的账户：立绘留着上一位的皮肤，读到「没有皮肤」才换成剪影", async () => {
+  it("切换到皮肤信息还没读到的账户：立绘留着上一位的皮肤，读到「没有皮肤」才换成人偶", async () => {
     const first = accountDto();
     const second = accountDto({ uuid: "00000000-0000-0000-0000-00000000a002", name: "Alex" });
     let current = first;
@@ -1873,6 +1873,6 @@ describe("主页：账户皮肤", () => {
     expect(art()).toBe("skin");
     secondSkin.resolve(null);
     await flush();
-    expect(art()).toBe("silhouette");
+    expect(art()).toBe("mannequin");
   });
 });

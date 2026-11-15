@@ -1,5 +1,5 @@
 // 添加离线账户。左侧是这个用户名进游戏后的样子：按它的离线 UUID 选出的原版默认皮肤（输入停顿后才换，
-// 免得每敲一个字闪一次；本机游戏文件里读不到这套皮肤时是按 UUID 着色的剪影）；还没输入时并排站着史蒂夫与
+// 免得每敲一个字闪一次；本机游戏文件里读不到这套皮肤时是按 UUID 着色的人偶）；还没输入时并排站着史蒂夫与
 // 艾利克斯。默认皮肤按材质源里的那一套选：材质源早于 1.19.3 时只有史蒂夫与艾利克斯两款，与后端给账户的一致。
 // 右侧是用户名、UUID 预览与说明。
 // 校验与后端同一套规则：错误不能提交，提醒照常可以提交。
@@ -73,7 +73,7 @@ export const OfflineDialog = memo(function OfflineDialog({ report }: { report: R
   const display = nameDisplay(name, check, touched);
   const figureName = useDebounced(name, FIGURE_DEBOUNCE_MS);
   const figureUuid = offlineUuid(figureName);
-  // 没有材质源时不取图，按哪一套都一样画剪影
+  // 没有材质源时不取图，按哪一套都一样画人偶
   const skinSet: DefaultSkinSet = useArtStatus().source?.legacySkins === true ? "legacy" : "modern";
   const figureSkin = defaultSkin(figureUuid, skinSet);
 
@@ -173,7 +173,7 @@ export const OfflineDialog = memo(function OfflineDialog({ report }: { report: R
 
 /**
  * 预取一套默认皮肤：只为把位图取进缓存，不画任何东西。默认皮肤至多 18 套（旧版材质源只有 2 套）、都在本机游戏文件里，
- * 打开弹窗时全取一遍，输入停顿后换上的立绘第一帧就是真皮肤，不先闪一下剪影再交叉。
+ * 打开弹窗时全取一遍，输入停顿后换上的立绘第一帧就是真皮肤，不先闪一下人偶再交叉。
  */
 function SkinPreload({ skin }: { skin: SkinRef }) {
   useSkin(skin);

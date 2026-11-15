@@ -53,7 +53,7 @@ const SKELETON_BAR = { name: 48, kind: 40, nameHeight: 10, kindHeight: 8 } as co
 
 /**
  * 账户的皮肤，说法同 skinSource：还在读时是「读取中」，头像留着正在显示的脸。读取失败经外层统一错误处理报告，
- * 重取失败时沿用上一次读到的皮肤，从没读到过的头像退回剪影（与「没有皮肤」同样的画法）。
+ * 重取失败时沿用上一次读到的皮肤，从没读到过的头像退回人偶（与「没有皮肤」同样的画法）。
  */
 export function useAccountSkin(uuid: string): SkinSource {
   const skin = useSkinInfo(uuid);

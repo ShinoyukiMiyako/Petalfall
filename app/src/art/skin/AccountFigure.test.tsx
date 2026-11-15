@@ -9,6 +9,7 @@ import { stubCanvas, type CanvasStub } from "../illustrations/test-canvas";
 import { AccountFigure } from "./AccountFigure";
 import { REST_POSE } from "./figure3d";
 import { skinFigureCanvas, type LoadedSkin } from "./render";
+import { mannequinFigure } from "./test-mannequin";
 
 /** 转动中现画的每一帧的 yaw（默认姿态贴缓存位图，不经过这里）。 */
 const painted = vi.hoisted((): number[] => []);
@@ -123,10 +124,23 @@ describe("AccountFigure：可拖动的立绘", () => {
     expect(spinCanvas()).toBeNull();
   });
 
-  it("剪影不响应拖动：皮肤取不到时 interactive 也没有可拖动的画布", async () => {
+  it("人偶也能拖动转身：皮肤取不到时 interactive 的画布先贴人偶的默认姿态，拖动后按新姿态现画", async () => {
     view = render(<AccountFigure uuid="u2" skin={null} scale={6} interactive />);
     await settle();
-    expect(spinCanvas()).toBeNull();
+    expect(view.container.querySelector("[data-art]")?.getAttribute("data-art")).toBe("mannequin");
+    expect(onDisplay().at(-1)?.source).toBe(mannequinFigure("u2", "wide", 6));
+    painted.length = 0;
+    dragBy(60);
+    expect(painted).toEqual([REST_POSE.yaw + Math.PI / 3]);
+  });
+
+  it("皮肤到了以后垫在下面的人偶不再接拖动：可拖动的画布只剩皮肤那一张", async () => {
+    view = render(figure());
+    expect(view.container.querySelectorAll('canvas[data-tauri-drag-region="false"]')).toHaveLength(1);
+    expect(onDisplay().at(-1)?.source).toBe(mannequinFigure("u1", "wide", 6));
+    await settle();
+    expect(view.container.querySelectorAll('canvas[data-tauri-drag-region="false"]')).toHaveLength(1);
+    expect(cachedDrawn()).toHaveLength(1);
   });
 
   it("不进键盘焦点序列，也不是窗口拖动区；label 时根元素仍是 role=img", async () => {

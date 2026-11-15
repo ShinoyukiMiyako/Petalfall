@@ -101,7 +101,7 @@ impl From<AuthServerInfo> for AuthServerDto {
     }
 }
 
-/// 待选角色 DTO：角色 uuid、名字与皮肤（拿不到远程皮肤时是按角色 uuid 选的默认皮肤，uuid 不合规时为 null，界面画剪影）。
+/// 待选角色 DTO：角色 uuid、名字与皮肤（拿不到远程皮肤时是按角色 uuid 选的默认皮肤，uuid 不合规时为 null，界面画人偶）。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AuthlibProfileDto {
     pub uuid: String,

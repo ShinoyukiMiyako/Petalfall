@@ -2,7 +2,8 @@
 // @module-tag heavy-page
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { stubCanvas, type CanvasStub } from "../../art/illustrations/test-canvas";
+import { fallbackDrawn, mannequinFace } from "../../art/skin/test-mannequin";
 import type { ConfigDto, GameDirectoryDto } from "../../ipc/config";
 import { IpcError } from "../../ipc/errors";
 import { APP_NAME } from "../../lib/app-info";
@@ -28,6 +29,7 @@ const OFFICIAL_DIR = "C:\\Users\\player\\AppData\\Roaming\\.minecraft";
 
 let launcher: LauncherApi;
 let picked: string | null;
+let canvas: CanvasStub;
 
 function Harness() {
   launcher = useLauncher();
@@ -116,7 +118,7 @@ beforeEach(() => {
   resetRecorder(ipc);
   stubResizeObserver();
   stubMatchMedia(false);
-  stubCanvas();
+  canvas = stubCanvas();
   picked = null;
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -405,7 +407,23 @@ describe("首次启动向导：推进与收尾", () => {
     expect(all("button[data-kind]").some((b) => b.closest("[inert]") === null)).toBe(true);
   });
 
-  it("第三步已添加的账户刷新后皮肤信息重取失败：头像沿用上次读到的皮肤，不退回剪影", async () => {
+  it("第三步已添加的账户在本机没有原版材质：头像画这个账户的人偶，不是空白", async () => {
+    const account = accountDto();
+    ipc.overrides.set("list_accounts", () => [account]);
+    ipc.overrides.set("current_account", () => account);
+    ipc.overrides.set("skin_info", () => ({ kind: "default", path: "entity/player/wide/steve", model: "wide" }));
+    await mount();
+    await click(button("下一步"));
+    await click(button("下一步"));
+    await flush();
+    const added = all("section").find((section) => section.textContent?.startsWith("已添加"));
+    const avatar = added?.querySelector<HTMLElement>('[data-sk-art="skin"]');
+    if (avatar === null || avatar === undefined) throw new Error("「已添加」区里没有头像");
+    expect(avatar.dataset.art).toBe("mannequin");
+    expect(fallbackDrawn(canvas, avatar)).toBe(mannequinFace(account.uuid, 24));
+  });
+
+  it("第三步已添加的账户刷新后皮肤信息重取失败：头像沿用上次读到的皮肤，不退回人偶", async () => {
     const account = accountDto();
     ipc.overrides.set("list_accounts", () => [account]);
     ipc.overrides.set("current_account", () => account);
