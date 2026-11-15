@@ -20,7 +20,7 @@ import { LauncherProvider } from "../../../state/launcher";
 import { invalidate } from "../../../state/resource";
 import { render, stepFrames, stubMatchMedia, stubResizeObserver } from "../../../test/dom";
 import type { IpcRecorder } from "../../../test/fake-bridge";
-import { deferred, memoryAdviceDto, resetRecorder, settle } from "../../../test/launcher";
+import { callsOf, deferred, memoryAdviceDto, resetRecorder, settle } from "../../../test/launcher";
 import { SETTINGS_COMMANDS, SettingsCommandsProvider, type SettingsCommands } from "../commands";
 import SettingsPage from "../index";
 import s from "../settings.module.css";
@@ -169,6 +169,14 @@ describe("游戏 · 内存卡的加载", () => {
     expect(memory.querySelector('[data-tone="danger"]')?.textContent).toContain("读不到本机内存信息查询内存失败");
     expect(toggle("自动分配").disabled).toBe(true);
     expect(memory.querySelector('[aria-busy="true"]')).toBeNull();
+    // 说明块里的操作是文字之后的幽灵小按钮，不是自成一块的次按钮
+    const retry = buttonIn(memory, "重试");
+    expect([retry.dataset.variant, retry.dataset.size]).toEqual(["ghost", "sm"]);
+    ipc.overrides.delete("memory_advice");
+    await click(retry);
+    expect(callsOf(ipc, "memory_advice")).toHaveLength(2);
+    expect(memory.querySelector('[data-tone="danger"]')).toBeNull();
+    expect(memory.querySelector('input[type="range"]')).not.toBeNull();
   });
 });
 
@@ -223,6 +231,26 @@ describe("游戏 · 其他文件夹", () => {
     // 列表是读到之后才出现的一块：自己淡入，不是同帧插进来
     const list = games.querySelector("ul");
     expect(list?.parentElement?.style.opacity).toBe("0");
+    expect(live(games, "li").map((li) => li.textContent)).toEqual([expect.stringContaining("HMCL")]);
+  });
+
+  it("目录列表读不出来：说明块写出原因，重试是文字之后的幽灵小按钮，点了重读一次，读到后列出目录", async () => {
+    ipc.overrides.set("list_game_directories", () => {
+      throw new Error("拒绝访问 game_dirs.json");
+    });
+    ipc.overrides.set("discover_game_directories", () => []);
+    await mountGame();
+    const games = card("游戏目录");
+    const alert = live<HTMLElement>(games, '[data-tone="danger"]');
+    expect(alert.map((el) => el.textContent)).toEqual(["游戏目录列表读不出来拒绝访问 game_dirs.json重试"]);
+    const retry = buttonIn(alert[0], "重试");
+    expect([retry.dataset.variant, retry.dataset.size]).toEqual(["ghost", "sm"]);
+
+    ipc.overrides.set("list_game_directories", () => [dir("默认目录", CURRENT, true), dir("HMCL", "D:\\HMCL\\.minecraft")]);
+    const before = callsOf(ipc, "list_game_directories").length;
+    await click(retry);
+    expect(callsOf(ipc, "list_game_directories")).toHaveLength(before + 1);
+    expect(live(games, '[data-tone="danger"]')).toEqual([]);
     expect(live(games, "li").map((li) => li.textContent)).toEqual([expect.stringContaining("HMCL")]);
   });
 

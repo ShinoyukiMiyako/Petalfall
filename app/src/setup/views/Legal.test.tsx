@@ -7,6 +7,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LOADING_DELAY_MS } from "../../domain/limits";
 import { APP_LICENSE, ASSET_LICENSE, REPO_URL, type ThirdPartyManifest } from "../../lib/app-info";
+import { BundledFileError } from "../../lib/bundled-file";
 import { render, stubResizeObserver, type Rendered } from "../../test/dom";
 import { COPY, type Lang } from "../copy";
 import { FrameChromeProvider, type FrameChrome } from "../Frame";
@@ -255,10 +256,11 @@ describe("协议全文", () => {
     expect(licenseRegion()?.textContent).toBe(LICENSE);
   });
 
-  it("读失败时说明并带上原文，清单、源代码和商标声明都还在", async () => {
+  it("读失败时说明并带上原因（标题已点名是哪份，原因里不再说一遍），清单、源代码和商标声明都还在", async () => {
     const onOpenExternal = vi.fn();
-    await show({ loadLicenseText: () => Promise.reject(new Error("协议全文读不出来：/LICENSE.txt 返回 404")), onOpenExternal });
-    expect(document.querySelector('[role="alert"]')?.textContent).toBe(`${COPY.zh.legal.licenseFailed}协议全文读不出来：/LICENSE.txt 返回 404`);
+    await show({ loadLicenseText: () => Promise.reject(new BundledFileError("协议全文", "/LICENSE.txt 返回 404")), onOpenExternal });
+    const alert = document.querySelector('[role="alert"]');
+    expect([...(alert?.children ?? [])].map((p) => p.textContent)).toEqual([COPY.zh.legal.licenseFailed, "/LICENSE.txt 返回 404"]);
     expect(licenseRegion()).toBeNull();
     expect(rows()).toHaveLength(3);
     expect(main()).toContain(COPY.zh.legal.trademark);
@@ -271,10 +273,11 @@ describe("协议全文", () => {
     expect(document.querySelector('[role="alert"]')?.textContent).toBe(`${COPY.zh.legal.licenseFailed}IPC 断了`);
   });
 
-  it("读失败记日志，不只是画在界面上", async () => {
-    const failure = new Error("读不出来");
+  it("读失败记日志，不只是画在界面上：记的是整个错误，message 里看得出是哪份没读到", async () => {
+    const failure = new BundledFileError("协议全文", "/LICENSE.txt 返回 503");
     await show({ loadLicenseText: () => Promise.reject(failure) });
     expect(console.error).toHaveBeenCalledWith("协议页读取失败", failure);
+    expect(failure.message).toBe("协议全文读不出来：/LICENSE.txt 返回 503");
   });
 });
 
@@ -309,12 +312,13 @@ describe.each([
 
   it("读失败时只在它自己的标签下说明并带上原文，协议全文、清单和声明都还在", async () => {
     const path = prop === "loadAdditionalTerms" ? "/LICENSE-ADDITIONAL-TERMS.md" : "/LICENSE-ASSETS.md";
-    await show({ [prop]: () => Promise.reject(new Error(`${name}读不出来：${path} 返回 404`)) });
+    await show({ [prop]: () => Promise.reject(new BundledFileError(name, `${path} 返回 404`)) });
     expect(document.querySelector('[role="alert"]')).toBeNull();
     expect(licenseRegion()?.textContent).toBe(LICENSE);
 
     await showTab(name);
-    expect(document.querySelector('[role="alert"]')?.textContent).toBe(`${failed}${name}读不出来：${path} 返回 404`);
+    const alert = document.querySelector('[role="alert"]');
+    expect([...(alert?.children ?? [])].map((p) => p.textContent)).toEqual([failed, `${path} 返回 404`]);
     expect(licenseRegion()).toBeNull();
     expect(rows()).toHaveLength(3);
     expect(main()).toContain(legal.assets);

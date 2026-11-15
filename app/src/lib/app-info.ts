@@ -5,6 +5,7 @@
 import type { BuildInfo } from "../../scripts/build-info.mjs";
 import { ADDITIONAL_TERMS_FILE, ASSET_LICENSE_FILE, LICENSE_TEXT_FILE, PRIVACY_NOTICE_FILE, THIRD_PARTY_LICENSES_FILE, USAGE_NOTICE_FILE } from "../../scripts/licenses-file.mjs";
 import type { ThirdPartyManifest } from "../../scripts/third-party-licenses.mjs";
+import { BundledFileError } from "./bundled-file";
 import { parseLegalNotice, type LegalNotice } from "./legal-notice";
 
 export type { BuildInfo, ReleaseChannel } from "../../scripts/build-info.mjs";
@@ -52,7 +53,7 @@ export { PRIVACY_NOTICE_FILE, USAGE_NOTICE_FILE };
 export async function loadThirdPartyLicenses(): Promise<ThirdPartyManifest> {
   const url = `${import.meta.env.BASE_URL}${THIRD_PARTY_LICENSES_FILE}`;
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`第三方许可清单读不出来：${url} 返回 ${response.status}`);
+  if (!response.ok) throw new BundledFileError("第三方许可清单", `${url} 返回 ${response.status}`);
   return (await response.json()) as ThirdPartyManifest;
 }
 
@@ -60,7 +61,7 @@ export async function loadThirdPartyLicenses(): Promise<ThirdPartyManifest> {
 async function loadLegalText(file: string, what: string): Promise<string> {
   const url = `${import.meta.env.BASE_URL}${file}`;
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`${what}读不出来：${url} 返回 ${response.status}`);
+  if (!response.ok) throw new BundledFileError(what, `${url} 返回 ${response.status}`);
   return response.text();
 }
 

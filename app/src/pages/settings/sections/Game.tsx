@@ -131,7 +131,7 @@ function MemoryCard() {
           tone="danger"
           announce
           action={
-            <Button size="sm" onClick={() => void run(() => advice.reload(), MEMORY_COPY.readFailed)}>
+            <Button size="sm" variant="ghost" onClick={() => void run(() => advice.reload(), MEMORY_COPY.readFailed)}>
               {LOAD_COPY.retry}
             </Button>
           }
@@ -437,7 +437,7 @@ function GameDirectoryCard() {
                 tone="danger"
                 announce
                 action={
-                  <Button size="sm" onClick={() => dirs.reload()}>
+                  <Button size="sm" variant="ghost" onClick={() => dirs.reload()}>
                     {LOAD_COPY.retry}
                   </Button>
                 }

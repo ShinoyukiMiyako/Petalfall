@@ -185,7 +185,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
         <Callout
           tone="danger"
           action={
-            <Button variant="secondary" size="sm" onClick={() => void run(() => actions.reload("tasks"), BOOT_SLICE_ERROR.tasks)}>
+            <Button variant="ghost" size="sm" onClick={() => void run(() => actions.reload("tasks"), BOOT_SLICE_ERROR.tasks)}>
               {TASKS_COPY.loadError.retry}
             </Button>
           }

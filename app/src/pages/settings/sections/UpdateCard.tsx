@@ -238,7 +238,7 @@ export function UpdateCard() {
         tone="danger"
         announce
         action={
-          <Button size="sm" onClick={() => updater.info.reload()}>
+          <Button size="sm" variant="ghost" onClick={() => updater.info.reload()}>
             {LOAD_COPY.retry}
           </Button>
         }

@@ -360,7 +360,8 @@ describe("同意之前看隐私说明", () => {
     const dialog = onlyDialog();
     const alert = dialog.querySelector('[role="alert"]');
     expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe(NOTICE_DIALOG_COPY.privacy.failed);
-    expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe(`隐私说明读不出来：${PRIVACY_URL} 返回 404`);
+    // 标题已点名是哪份，原文只给原因
+    expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe(`${PRIVACY_URL} 返回 404`);
     expect(dialog.querySelector("h2 + p")).toBeNull();
     expect(dialog.querySelector('[role="region"]')).toBeNull();
 
@@ -449,6 +450,7 @@ describe("须知改版", () => {
 });
 
 describe("启动时读须知", () => {
+  // 启动时读不到就进错误页，那里的标题不点名是哪份文件：报错整句要带上称呼
   it("须知文件不在：照实报错，不当成这次不用展示", async () => {
     vi.stubGlobal("fetch", async () => new Response("Not Found", { status: 404 }));
     await expect(loadUsageNoticeState()).rejects.toThrow(`使用须知读不出来：${NOTICE_URL} 返回 404`);
