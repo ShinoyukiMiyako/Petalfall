@@ -86,3 +86,22 @@ describe("吸顶工具条只动底色与透明度", () => {
     }
   });
 });
+
+// 文字色按对比度分档：普通 accent 落到 accent-soft 一类底上不到 4.5:1，强调色文字只用 accent-strong；
+// text-3 在日樱底上约 2.1:1，只能画装饰，要读到的说明用 text-2。
+describe("文字颜色", () => {
+  it("眉题是强调色文字，用 accent-strong", () => {
+    expect(value(".eyebrow", "color")).toBe("var(--sk-accent-strong)");
+  });
+
+  it("热门分类说明、作者行、卡片底栏与列表尾说明都是要读到的信息，用 text-2", () => {
+    for (const selector of [".chipsLabel", ".cardAuthor", ".cardFoot", ".listNote"]) {
+      expect([selector, value(selector, "color")]).toEqual([selector, "var(--sk-text-2)"]);
+    }
+  });
+
+  it("text-3 只留给说明行里装饰性的「·」分隔", () => {
+    const users = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter((rule) => rule[2].includes("var(--sk-text-3)")).map((rule) => rule[1].trim());
+    expect(users).toEqual([".infoPart:not(:first-child)::before"]);
+  });
+});
