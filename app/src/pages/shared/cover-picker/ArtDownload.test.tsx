@@ -53,7 +53,7 @@ vi.mock("../../../shell/useRunner", async (orig) => {
   };
 });
 
-const READY: ArtStatusDto = { source: { version_id: "1.21.4", degraded: false }, panorama: false };
+const READY: ArtStatusDto = { source: { version_id: "1.21.4", degraded: false, legacy_skins: false }, panorama: false };
 
 let view: Rendered | undefined;
 
@@ -235,7 +235,7 @@ describe("下载原版材质部件", () => {
 
   it("材质源是 1.20 之前的降级集：已有目录也给下载入口，说明写不全；下完、材质源换成完整的并载入新目录后部件消失", async () => {
     act(() => {
-      setArtStatus({ source: { versionId: "1.16.5", degraded: true }, panorama: false });
+      setArtStatus({ source: { versionId: "1.16.5", degraded: true, legacySkins: true }, panorama: false });
       setBlockCatalog(catalogFromDto({ version_id: "1.16.5", blocks: [] }));
     });
     mount();
@@ -252,7 +252,7 @@ describe("下载原版材质部件", () => {
 
     // 与材质绑定的顺序一致：先换状态，再放进新目录并报告载入成功
     act(() => {
-      setArtStatus({ source: { versionId: "1.21.4", degraded: false }, panorama: false });
+      setArtStatus({ source: { versionId: "1.21.4", degraded: false, legacySkins: false }, panorama: false });
       setBlockCatalog(catalog());
       settleArtDownload(true);
     });
@@ -261,7 +261,7 @@ describe("下载原版材质部件", () => {
 
   it("降级集下完后新目录没能载入：材质状态已是完整的、旧目录还在，部件照样留着给重试", async () => {
     act(() => {
-      setArtStatus({ source: { versionId: "1.16.5", degraded: true }, panorama: false });
+      setArtStatus({ source: { versionId: "1.16.5", degraded: true, legacySkins: true }, panorama: false });
       setBlockCatalog(catalogFromDto({ version_id: "1.16.5", blocks: [] }));
     });
     mount();
@@ -269,7 +269,7 @@ describe("下载原版材质部件", () => {
     await act(async () => art.pending[0].resolve(READY));
     await flush();
     act(() => {
-      setArtStatus({ source: { versionId: "1.21.4", degraded: false }, panorama: false });
+      setArtStatus({ source: { versionId: "1.21.4", degraded: false, legacySkins: false }, panorama: false });
       settleArtDownload(false);
     });
     expect(text()).toContain("下好了，但没能载入");
@@ -278,7 +278,7 @@ describe("下载原版材质部件", () => {
 
   it("完整的材质源、没在下载：什么都不渲染", () => {
     act(() => {
-      setArtStatus({ source: { versionId: "1.21.4", degraded: false }, panorama: false });
+      setArtStatus({ source: { versionId: "1.21.4", degraded: false, legacySkins: false }, panorama: false });
       setBlockCatalog(catalog());
     });
     mount();

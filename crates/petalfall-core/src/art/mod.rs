@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use petalfall_auth::{SkinModel, SkinRef};
 
 pub use catalog::{BlockCatalog, CatalogBlock};
-pub use default_skin::{DefaultSkin, default_skin};
+pub use default_skin::{DefaultSkin, DefaultSkinSet, default_skin};
 pub use download::{ArtDownloadProgress, ArtDownloadStage};
 pub use remote::{THUMB_HOSTS, ThumbError};
 pub use source::{JarOpener, default_opener};
@@ -84,6 +84,9 @@ pub struct ArtStatus {
     /// 材质源是本机的降级集（1.13 到 1.19，没有 1.20 的材质标志）：预设里较新的方块缺材质，前端画徽记并给下载入口，
     /// 下载来的最新正式版会盖过它（见 [`TextureService::refresh`] 的选源顺序）。没有材质源时为 false。
     pub degraded: bool,
+    /// 材质源里是哪一套默认皮肤，离线账户按它的规则选（见 [`default_skin`]）。降级集里 1.19.3、1.19.4 已是 18 款，
+    /// 所以不能由 `degraded` 推出。没有材质源时为 [`DefaultSkinSet::Modern`]。
+    pub default_skins: DefaultSkinSet,
     /// 标题全景对象是否在某个候选目录里且哈希正确。
     pub panorama: bool,
 }
@@ -142,6 +145,7 @@ struct Active {
     catalog: BlockCatalog,
     /// 本机降级集（见 [`ArtStatus::degraded`]）；下载来的总是某个时点最新的正式版，不算。
     degraded: bool,
+    skins: DefaultSkinSet,
 }
 
 struct State {
@@ -757,6 +761,7 @@ impl TextureService {
 
 fn active(prepared: disk_cache::Prepared, degraded: bool) -> Active {
     Active {
+        skins: DefaultSkinSet::of_source(&prepared.files),
         dir: prepared.dir,
         files: prepared.files,
         catalog: prepared.catalog,
@@ -768,6 +773,7 @@ fn status_of(state: &State) -> ArtStatus {
     ArtStatus {
         source: state.active.as_ref().map(|a| a.catalog.version_id.clone()),
         degraded: state.active.as_ref().is_some_and(|a| a.degraded),
+        default_skins: state.active.as_ref().map(|a| a.skins).unwrap_or_default(),
         panorama: state.panorama.is_some(),
     }
 }

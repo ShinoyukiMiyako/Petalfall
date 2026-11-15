@@ -67,7 +67,7 @@ describe("AccountAvatar", () => {
   });
 
   it("默认皮肤取到后换成皮肤正脸 + 帽子层，脸 32 px 按 dpr 1 画满 32 × 32", async () => {
-    setArtStatus({ source: { versionId: "1.21.1", degraded: false }, panorama: false });
+    setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
     view = render(<AccountAvatar uuid="u1" skin={{ kind: "default", path: "entity/player/slim/alex", model: "slim" }} size={40} current label="Alex 的头像" />);
     expect(root().dataset.art).toBe("silhouette");
     await settle();
@@ -233,7 +233,7 @@ describe("preloadSkins", () => {
   const REMOTE_SKIN = { kind: "remote", sha1: "e5".repeat(20), model: "wide", hat: true } as const;
 
   it("按与头像相同的地址先取进缓存，之后挂上的头像第一帧就是皮肤", async () => {
-    setArtStatus({ source: { versionId: "1.21.1", degraded: false }, panorama: false });
+    setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
     preloadSkins([STEVE, REMOTE_SKIN]);
     await settle();
     expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([

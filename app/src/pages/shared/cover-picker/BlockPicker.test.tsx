@@ -440,7 +440,7 @@ describe("材质源是 1.20 之前的降级集", () => {
   const downloadPart = () => [...dialog().querySelectorAll<HTMLElement>("p")].find((p) => p.textContent === "本机的原版材质不全") ?? null;
 
   beforeEach(() => {
-    setArtStatus({ source: { versionId: "1.16.5", degraded: true }, panorama: false });
+    setArtStatus({ source: { versionId: "1.16.5", degraded: true, legacySkins: true }, panorama: false });
     setBlockCatalog(oldCatalog());
   });
   afterEach(() => setArtStatus(NO_ART));
@@ -464,7 +464,7 @@ describe("材质源是 1.20 之前的降级集", () => {
     mount({ block: "cherry_planks", image: false });
     expect(downloadPart()).not.toBeNull();
     act(() => {
-      setArtStatus({ source: { versionId: "1.21.4", degraded: false }, panorama: false });
+      setArtStatus({ source: { versionId: "1.21.4", degraded: false, legacySkins: false }, panorama: false });
       setBlockCatalog(catalog());
     });
     const leaving = [...dialog().querySelectorAll<HTMLElement>("[inert]")];
@@ -505,7 +505,7 @@ describe("材质源是 1.20 之前的降级集", () => {
   });
 
   it("完整的材质源不给下载部件", () => {
-    act(() => setArtStatus({ source: { versionId: "1.21.4", degraded: false }, panorama: false }));
+    act(() => setArtStatus({ source: { versionId: "1.21.4", degraded: false, legacySkins: false }, panorama: false }));
     mount({ block: "cherry_planks", image: false });
     expect(downloadPart()).toBeNull();
     expect(dialog().textContent).not.toContain("下载原版材质");

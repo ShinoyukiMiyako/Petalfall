@@ -275,6 +275,58 @@ async fn falls_back_to_a_degraded_source_then_to_none() {
 }
 
 #[tokio::test]
+async fn default_skin_set_follows_the_source() {
+    let fx = fixture();
+    let full = fx.refresh().await;
+    assert_eq!(full.default_skins, DefaultSkinSet::Modern);
+
+    std::fs::remove_dir_all(fx.settings.join("versions/1.21.1")).unwrap();
+    let stone = tex("block/stone");
+    let steve = tex("entity/steve");
+    let alex = tex("entity/alex");
+    let grey = || png(16, 16, |_, _| [120, 120, 120, 255]);
+    rewrite_jar(
+        &fx.settings,
+        "1.16.5",
+        &[
+            (stone.as_str(), grey()),
+            (steve.as_str(), png(64, 64, |_, _| PINK)),
+            (alex.as_str(), png(64, 64, |_, _| PINK)),
+        ],
+    );
+    let legacy = fx.refresh().await;
+    assert_eq!(legacy.source.as_deref(), Some("1.16.5"));
+    assert!(legacy.degraded);
+    assert_eq!(legacy.default_skins, DefaultSkinSet::Legacy);
+    assert_eq!(fx.service.status(), legacy);
+    let served = body(
+        fx.service
+            .respond("/art/entity/alex.png", Some("1.16.5"))
+            .await,
+    );
+    assert_eq!(dims(&served), (64, 64));
+
+    // 1.19.3、1.19.4 这样的降级集已经换成 18 款：降级不等于旧版皮肤
+    let slim_alex = tex("entity/player/slim/alex");
+    rewrite_jar(
+        &fx.settings,
+        "1.16.5",
+        &[
+            (stone.as_str(), grey()),
+            (slim_alex.as_str(), png(64, 64, |_, _| PINK)),
+        ],
+    );
+    let degraded = fx.refresh().await;
+    assert!(degraded.degraded);
+    assert_eq!(degraded.default_skins, DefaultSkinSet::Modern);
+
+    std::fs::remove_dir_all(fx.settings.join("versions/1.16.5")).unwrap();
+    let none = fx.refresh().await;
+    assert_eq!(none.source, None);
+    assert_eq!(none.default_skins, DefaultSkinSet::Modern);
+}
+
+#[tokio::test]
 async fn only_whitelisted_paths_are_served() {
     let fx = fixture();
     fx.refresh().await;

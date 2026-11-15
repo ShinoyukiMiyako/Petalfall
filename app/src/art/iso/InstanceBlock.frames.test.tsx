@@ -36,7 +36,7 @@ const settle = () => act(() => new Promise<void>((resolve) => setTimeout(resolve
 const block = () => view?.container.querySelector<HTMLElement>("[data-sk-art='iso']") as HTMLElement;
 
 it("换了来源（两张材质都已缓存、不经徽记直接换）：旧图淡出、新图淡入，两层叠放交叉", async () => {
-  setArtStatus({ source: { versionId: "1.21.1", degraded: false }, panorama: false });
+  setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
   const at = (block: string) => <InstanceBlock instanceId="i6" cover={{ block, hue: 0, image: null }} width={32} />;
   // 先各取一次，两种方块的材质都进缓存；等换图留下的退场层走完
   view = render(at("cherry_planks"));
@@ -53,7 +53,7 @@ it("换了来源（两张材质都已缓存、不经徽记直接换）：旧图�
 });
 
 it("换封面方块、新材质还在取：留着旧材质，不先落回徽记；新材质到了直接与旧材质交叉", async () => {
-  setArtStatus({ source: { versionId: "1.21.1", degraded: false }, panorama: false });
+  setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
   const at = (block: string) => <InstanceBlock instanceId="i7" cover={{ block, hue: 0, image: null }} width={32} />;
   view = render(at("cherry_planks"));
   await settle();

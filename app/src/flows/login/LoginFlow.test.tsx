@@ -394,11 +394,11 @@ describe("离线账户弹窗", () => {
       return el;
     };
     const paths = (urls: string[]) => urls.map((url) => new URL(url).pathname).sort();
-    const ALL_DEFAULT_SKINS = DEFAULT_SKINS.map((skin) => `/art/${skin.path}.png`).sort();
+    const ALL_DEFAULT_SKINS = DEFAULT_SKINS.modern.map((skin) => `/art/${skin.path}.png`).sort();
 
     beforeEach(() => {
       // 本机有可用的客户端：默认皮肤从它的游戏文件里读
-      ipc.overrides.set("art_status", () => ({ source: { version_id: "1.21.1", degraded: false }, panorama: false }));
+      ipc.overrides.set("art_status", () => ({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false }));
       missing = new Set();
       fetched = [];
       prefetched = [];
@@ -478,7 +478,7 @@ describe("离线账户弹窗", () => {
       expect(fetched).toEqual([]);
     });
 
-    it("本机游戏文件里没有这套默认皮肤（1.19.3 以前的客户端）：退回剪影", async () => {
+    it("本机游戏文件里读不到选中的那套默认皮肤：退回剪影", async () => {
       missing.add("/art/entity/player/slim/makena.png");
       const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
       await openWithName("Alex");
@@ -487,6 +487,41 @@ describe("离线账户弹窗", () => {
       expect(fetched).toEqual([]);
       expect(figure().dataset.art).toBe("silhouette");
       expect(warn.mock.calls.some(([message]) => String(message).includes("/art/entity/player/slim/makena.png"))).toBe(true);
+      warn.mockRestore();
+    });
+
+    const legacySource = () => ipc.overrides.set("art_status", () => ({ source: { version_id: "1.19.2", degraded: true, legacy_skins: true }, panorama: false }));
+
+    it("材质源早于 1.19.3：只预取史蒂夫与艾利克斯两张，开局并排的两位就是它们，输入后换上的也不另取", async () => {
+      legacySource();
+      await openEmpty();
+      expect(paths(fetched)).toEqual(["/art/entity/alex.png", "/art/entity/steve.png"]);
+      expect(fetched.every((url) => new URL(url).search === "?v=1.19.2")).toBe(true);
+      expect(figures().map((f) => f.dataset.art)).toEqual(["skin", "skin"]);
+      fetched.splice(0);
+      typeInto(inputs()[0], "Notch");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(FIGURE_DEBOUNCE_MS);
+        await settle();
+      });
+      expect(fetched).toEqual([]);
+      expect(figure().dataset.art).toBe("skin");
+    });
+
+    it("材质源早于 1.19.3：名字按哈希的奇偶落在两款之一（Steve 是艾利克斯，Alex 是史蒂夫）", async () => {
+      legacySource();
+      missing.add("/art/entity/steve.png");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      await openWithName("Steve");
+      expect(figure().dataset.art).toBe("skin");
+      typeInto(inputs()[0], "Alex");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(FIGURE_DEBOUNCE_MS);
+        await settle();
+      });
+      expect(stageLabel()).toBe("Alex 的角色预览");
+      expect(figure().dataset.art).toBe("silhouette");
+      expect(fetched).toEqual([]);
       warn.mockRestore();
     });
   });

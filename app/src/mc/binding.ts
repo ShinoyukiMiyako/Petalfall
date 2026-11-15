@@ -2,7 +2,7 @@
 // 载入方块目录，并把目录载没载入报出去（下载原版材质的部件靠它结束「正在载入」）。
 // 命令与事件的类型化封装属于 IPC 层，这里只接收函数，由外壳在应用根注入。
 
-import { artStatusFromDto, artUrl, setArtStatus, type ArtStatusDto } from "./art";
+import { artStatusFromDto, artUrl, getArtStatus, setArtStatus, type ArtStatus, type ArtStatusDto } from "./art";
 import { catalogFromDto, setBlockCatalog, type BlockCatalogDto } from "./catalog";
 import { PRESET_FACE_PATHS } from "./whitelist";
 import { preloadArt } from "./useArt";
@@ -22,11 +22,18 @@ export interface ArtStatusBinding {
    */
   onCatalog: (loaded: boolean) => void;
   /**
+   * 材质源里的默认皮肤换了一套（跨过 1.19.3）：后端给离线账户的皮肤信息按材质源的那一套选，之前取到的路径在新材质源里
+   * 读不到，要重取。没有材质源时后端按 18 款回答，与 1.19.3 起的材质源算同一套。
+   */
+  onDefaultSkinsChanged: () => void;
+  /**
    * 登记一个「立刻重查」的入口，返回注销。下载原版材质完成后用它重查：后端在下载命令返回之前就推了变化事件，
    * 那次查询可能早于下载部件开始等待就已结束。
    */
   reloadRequests: (reload: () => void) => () => void;
 }
+
+const legacySkins = (status: ArtStatus) => status.source?.legacySkins === true;
 
 /** 封面预设全部方块的材质地址：新建实例与整合包导入默认取预设，侧栏固定实例也多半是它们。 */
 function coverArtUrls(): string[] {
@@ -43,7 +50,7 @@ function coverArtUrls(): string[] {
  * 材质源就绪后预加载全部封面方块，打开新建实例、侧栏时不再等图；再载入方块目录，材质源变为 null 时清空目录。
  * 目录载入失败不影响材质状态，交给 onError，旧目录保留到下次变化事件。返回解除绑定的函数。
  */
-export async function bindArtStatus({ load, loadCatalog, listenChanged, onError, onCatalog, reloadRequests }: ArtStatusBinding): Promise<() => void> {
+export async function bindArtStatus({ load, loadCatalog, listenChanged, onError, onCatalog, onDefaultSkinsChanged, reloadRequests }: ArtStatusBinding): Promise<() => void> {
   let disposed = false;
   let latest = 0;
   // 连续两次变化时只认最后一次查询的结果；目录查询跟着它所属的那次状态查询作废
@@ -70,7 +77,9 @@ export async function bindArtStatus({ load, loadCatalog, listenChanged, onError,
       const dto = await load();
       if (stale(ticket)) return;
       const next = artStatusFromDto(dto);
+      const skinsChanged = legacySkins(next) !== legacySkins(getArtStatus());
       setArtStatus(next);
+      if (skinsChanged) onDefaultSkinsChanged();
       if (next.source === null) {
         setBlockCatalog(null);
         onCatalog(false);
