@@ -3,6 +3,7 @@
 
 import type { ReactNode } from "react";
 import { Spinner } from "../art/Spinner";
+import { readFailureReason } from "../lib/bundled-file";
 import { useLoadingGate } from "../lib/loading-gate";
 import { Button } from "./Button";
 import { Callout } from "./Callout";
@@ -16,7 +17,7 @@ export interface LoadedBodyProps<T> {
   resource: LoadedResource<T>;
   /** 转圈旁的那句，也是读屏播报的读取中说明。 */
   loading: string;
-  /** 读失败时 Callout 的标题；正文是错误原文。 */
+  /** 读失败时 Callout 的标题，点名是哪份读不出来；正文是失败原因（readFailureReason）。 */
   failed: string;
   /** 读失败时重读按钮的文案。 */
   retry: string;
@@ -39,7 +40,7 @@ export function LoadedBody<T>({ resource, loading, failed, retry, children }: Lo
         }
       >
         <span className={s.calloutTitle}>{failed}</span>
-        <span className={s.errorText}>{resource.error.message}</span>
+        <span className={s.errorText}>{readFailureReason(resource.error)}</span>
       </Callout>
     );
   }

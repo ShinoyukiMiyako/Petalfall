@@ -16,6 +16,7 @@ import {
   loadUsageNotice,
   type ThirdPartyManifest,
 } from "./app-info";
+import { BundledFileError } from "./bundled-file";
 
 const MANIFEST: ThirdPartyManifest = {
   packages: [
@@ -25,6 +26,18 @@ const MANIFEST: ThirdPartyManifest = {
 };
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+
+/** 读失败的错误：message 是日志与启动错误页用的整句（带称呼），reason 是提示框标题下只放的原因。 */
+async function rejection(load: () => Promise<unknown>): Promise<{ message: string; reason: string }> {
+  const error: unknown = await load().then(
+    () => {
+      throw new Error("文件不在却读成功了");
+    },
+    (e: unknown) => e,
+  );
+  if (!(error instanceof BundledFileError)) throw new Error(`读失败的不是 BundledFileError：${String(error)}`);
+  return { message: error.message, reason: error.reason };
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -77,9 +90,12 @@ describe("第三方许可清单", () => {
     expect(fetch.mock.calls).toEqual([["/third-party-licenses.json"]]);
   });
 
-  it("文件不在（产物不是经 vite 构建出来的）时报错，带上地址与状态码", async () => {
+  it("文件不在（产物不是经 vite 构建出来的）时报错：整句带称呼、地址与状态码，原因单独一份不带称呼", async () => {
     vi.stubGlobal("fetch", async () => new Response("Not Found", { status: 404 }));
-    await expect(loadThirdPartyLicenses()).rejects.toThrow("第三方许可清单读不出来：/third-party-licenses.json 返回 404");
+    expect(await rejection(loadThirdPartyLicenses)).toEqual({
+      message: "第三方许可清单读不出来：/third-party-licenses.json 返回 404",
+      reason: "/third-party-licenses.json 返回 404",
+    });
   });
 });
 
@@ -97,9 +113,10 @@ describe.each([
     expect(fetch.mock.calls).toEqual([[url]]);
   });
 
-  it("文件不在时报错，带上称呼、地址与状态码", async () => {
-    vi.stubGlobal("fetch", async () => new Response("Not Found", { status: 404 }));
-    await expect(load()).rejects.toThrow(`${name}读不出来：${url} 返回 404`);
+  it("文件不在时报错：整句带称呼、地址与状态码，原因单独一份不带称呼", async () => {
+    const status = 400 + Math.floor(Math.random() * 200);
+    vi.stubGlobal("fetch", async () => new Response("Not Found", { status }));
+    expect(await rejection(load)).toEqual({ message: `${name}读不出来：${url} 返回 ${status}`, reason: `${url} 返回 ${status}` });
   });
 });
 
@@ -116,9 +133,10 @@ describe.each([
     expect(fetch.mock.calls).toEqual([[url]]);
   });
 
-  it("文件不在时报错，带上称呼、地址与状态码", async () => {
-    vi.stubGlobal("fetch", async () => new Response("Not Found", { status: 404 }));
-    await expect(load()).rejects.toThrow(`${name}读不出来：${url} 返回 404`);
+  it("文件不在时报错：整句带称呼、地址与状态码，原因单独一份不带称呼", async () => {
+    const status = 400 + Math.floor(Math.random() * 200);
+    vi.stubGlobal("fetch", async () => new Response("Not Found", { status }));
+    expect(await rejection(load)).toEqual({ message: `${name}读不出来：${url} 返回 ${status}`, reason: `${url} 返回 ${status}` });
   });
 
   it("文首没有版本号时报错，不当成第 1 版", async () => {

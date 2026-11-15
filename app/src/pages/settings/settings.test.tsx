@@ -2275,7 +2275,8 @@ describe("设置页：关于与启动器更新", () => {
       const [dialog] = openDialogs();
       const alert = dialog.querySelector('[role="alert"]');
       expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe(`${title}读不出来`);
-      expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe(`${title}读不出来：${url} 返回 404`);
+      // 标题已点名是哪份，原文只给原因
+      expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe(`${url} 返回 404`);
       expect(dialog.querySelector("h2 + p")).toBeNull();
       expect(dialog.querySelector('[role="region"]')).toBeNull();
 
@@ -2337,7 +2338,8 @@ describe("设置页：关于与启动器更新", () => {
       const [dialog] = openDialogs();
       const alert = dialog.querySelector('[role="alert"]');
       expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe(`${title}读不出来`);
-      expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe(`${title}读不出来：${url} 返回 404`);
+      // 标题已点名是哪份，原文只给原因
+      expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe(`${url} 返回 404`);
       expect(dialog.querySelector("pre")).toBeNull();
 
       await click(all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === "重试") as HTMLButtonElement);
@@ -2453,7 +2455,8 @@ describe("设置页：关于与启动器更新", () => {
     const [dialog] = openDialogs();
     const alert = dialog.querySelector('[role="alert"]');
     expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe("协议全文读不出来");
-    expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe("协议全文读不出来：/LICENSE.txt 返回 404");
+    // 标题已点名是哪份，原文只给原因
+    expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe("/LICENSE.txt 返回 404");
     expect(dialog.querySelector("pre")).toBeNull();
     expect(dialog.textContent).not.toContain("Not Found");
 
@@ -2555,8 +2558,9 @@ describe("设置页：关于与启动器更新", () => {
     await mount("about");
     await click(rowButton("第三方许可", "查看"));
     const [dialog] = openDialogs();
-    expect(dialog.textContent).toContain("第三方许可清单读不出来");
-    expect(dialog.textContent).toContain("返回 404");
+    const alert = dialog.querySelector('[role="alert"]');
+    expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe("第三方许可清单读不出来");
+    expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe("/third-party-licenses.json 返回 404");
     await click(all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === "重试") as HTMLButtonElement);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(openDialogs()[0]?.textContent).toContain("serde");

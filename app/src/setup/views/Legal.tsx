@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import { useEffect, useId, useState } from "react";
 import { REPO_URL, type ThirdPartyManifest } from "../../lib/app-info";
+import { readFailureReason } from "../../lib/bundled-file";
 import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
 import { fade } from "../../lib/motion";
 import { Button } from "../../ui/Button";
@@ -38,8 +39,9 @@ function useLoaded<T>(load: () => Promise<T>): Loaded<T> {
     load().then(
       (value) => setLoaded({ status: "ready", value }),
       (error: unknown) => {
+        // 日志记整个错误（message 带称呼）；提示的标题已点名是哪份，界面上只放原因
         console.error("协议页读取失败", error);
-        setLoaded({ status: "failed", message: error instanceof Error ? error.message : String(error) });
+        setLoaded({ status: "failed", message: error instanceof Error ? readFailureReason(error) : String(error) });
       },
     );
   }, []);
