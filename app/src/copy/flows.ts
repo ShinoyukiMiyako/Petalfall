@@ -1703,6 +1703,12 @@ const INSTANCE_LOCK_REASON = {
   },
 } as const;
 
+/**
+ * 失败任务挂在移动中的实例上时重试的悬停原因，与移动菜单项同一句。不说「完成后才能重试」：移动成功后这些任务跟着实例
+ * 记到了目标目录，要切过去才能重试。
+ */
+export const RETRY_MOVING_REASON = INSTANCE_LOCK_REASON.moving.move;
+
 /** 锁定原因的悬停文字；没有锁为 undefined，可以直接交给 disabledReason。 */
 export function lockReason(lock: InstanceLock | BaseBusyLock | null, kind: "mods" | "rename" | "repair" | "reinstallLoader" | "delete" | "move"): string | undefined {
   if (lock === null) return undefined;
