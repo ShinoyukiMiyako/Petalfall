@@ -116,7 +116,6 @@
   --sk-shade-left: linear-gradient(90deg, rgba(30, 16, 26, 0.72) 0%, rgba(30, 16, 26, 0.62) 55%, rgba(30, 16, 26, 0) 100%);
   --sk-shade-soft: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(30, 16, 26, 0.22));
   --sk-win-close: #E5484D;
-  --sk-win-close-active: #C9373C;
   --sk-win-close-ink: #FFFFFF;
   --sk-disabled: 0.5;
   --sk-scrollbar-size: 10px;
