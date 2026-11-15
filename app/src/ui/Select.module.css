@@ -173,8 +173,9 @@
   height: 48px;
 }
 
+/* 与账户菜单、侧栏导航的悬停同用半透明叠层；实色 bg-2 在夜樱与浮层底只差 1.04:1，几乎看不出高亮 */
 .option[data-highlight] {
-  background: var(--sk-bg-2);
+  background: var(--sk-fill-hover);
 }
 
 .option[aria-selected="true"] {
@@ -215,6 +216,15 @@
   line-height: var(--sk-lh-caption);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/*
+ * 叠层上 text-2 不到 4.5:1（夜樱 4.22），第二行说明跟着提到 text，图标一并提上去与标签同色。
+ * 已选项的标签与勾是强调色，在叠层上仍够对比度，保留本色
+ */
+.option[data-highlight] .optionIcon,
+.option[data-highlight] .optionHint {
+  color: var(--sk-text);
 }
 
 .check {
