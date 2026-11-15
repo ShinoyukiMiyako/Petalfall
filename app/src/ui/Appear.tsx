@@ -1,19 +1,19 @@
 // 条件出现的块：提示条、警告、校验错误、开关联动出现的选项这类「有时在、有时不在」的内容。
 //
-// 出现时淡入并从略小处落到位，消失时淡出并立即脱离布局（exitInLayout 时留在布局里淡完再拿掉）。它只管自己的入场与退场；
+// 出现时淡入并从略小处落到位，消失时淡出并立即脱离布局（exitInLayout 时留在布局里淡完再拿掉，减少动画时只撤不进的那一次也这样）。它只管自己的入场与退场；
 // 被它挤开的兄弟怎么动，交给所在容器的让位（lib/reflow 的 useReflow，页面一级区块与卡片网格已经自带）。
 //
 // 用法：把条件渲染原样写在里面，假值会被丢掉。多个子项各自进出，要给稳定的 key。
 //   <Appear>{warning !== null && <Callout tone="warn">{warning}</Callout>}</Appear>
 //
 // 每个子项外面包了一层元素，它才是所在 flex / grid 里的那一项；需要撑满或对齐时用 itemClassName。
-// 退场中的那一层带 inert：它已经让出位置、叠在顶上来的兄弟上面淡出（exitInLayout 时占着位置淡出），点不到、聚焦不到，读屏也不再读它。
+// 退场中的那一层带 inert：它已经让出位置、叠在顶上来的兄弟上面淡出（留在布局里退场时占着位置淡出），点不到、聚焦不到，读屏也不再读它。
 // 按选择器找子项的代码与测试用 :not([inert]) 排除它（列表行的退场也是这个约定）。
 // 放在页面一级区块的位置上时：挂载时就在的子项跟着页面入场；之后出现的子项由这里淡入，里面的区块不再叠一层页面淡入。
 // 空的时候不占入场序号，有子项时占一个。
 
-import { AnimatePresence, motion, useIsPresent, usePresenceData, type TargetAndTransition, type Transition } from "framer-motion";
-import { Children, isValidElement, useState, type ReactNode, type Ref } from "react";
+import { AnimatePresence, motion, useIsPresent, usePresenceData, useReducedMotionConfig, type TargetAndTransition, type Transition } from "framer-motion";
+import { Children, isValidElement, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { useInsertItem, type InsertMotion } from "../lib/useInsertItem";
 import { useMounted } from "../lib/useMounted";
 import { usePaintedOnce } from "../lib/usePaintedOnce";
@@ -41,6 +41,10 @@ export interface AppearProps {
    * 撤掉的子项留在布局里淡完再拿掉，不按 popLayout 抽出布局：要穿过这一格的兄弟让位等它拿掉那一刻才起步，
    * 不从淡出中的它上面压过去。退场途中被拉回时这一格一直没让出去，没有要等让开的兄弟，入场不再带 enterDelay，从当前的值直接回到位。
    * 中途改它只管之后撤掉的子项：抽不抽出布局是开始退场那一刻量定的，已经在退场的按原来的方式退完。
+   *
+   * 减少动画时不开它也按这样退场，只要撤掉的那次渲染里没有新子项进来：那里的让位一步到位，抽出布局的话下方内容同一帧顶上来，
+   * 退场项从接近不透明开始压在它上面淡完；留在布局里时下方内容等它拿掉那一刻一步到位。同一次有子项进来（换一块内容、提示换成错误）
+   * 照常抽出布局，旧的在原处与新的交叉淡化：留在布局里的话新旧两块会上下叠着占两份高度，下方内容先被挤下去再弹回来。
    */
   exitInLayout?: boolean;
   /**
@@ -57,9 +61,15 @@ interface AppearItemProps {
   own: boolean;
   enterDelay?: number;
   enterStart: "painted" | "commit";
-  exitInLayout: boolean;
   className?: string;
   children: ReactNode;
+}
+
+/** 撤掉那一次渲染定下的退场方式，经 AnimatePresence 的 custom 递给撤掉的子项。 */
+interface ExitData {
+  transition: Transition | undefined;
+  /** 留在布局里淡完再拿掉（AnimatePresence 按 sync），不按 popLayout 抽出布局。 */
+  inLayout: boolean;
 }
 
 /** 入场目标的过渡整体晚 delay 秒：按值写的透明度过渡也带上同一个延迟，不靠 motion-dom 从根上继承。 */
@@ -68,11 +78,11 @@ function delayed(animate: InsertMotion["animate"], delay: number): TargetAndTran
   return { ...animate, transition: "opacity" in transition ? { ...transition, delay, opacity: { ...transition.opacity, delay } } : { ...transition, delay } };
 }
 
-function AppearItem({ ref, own, enterDelay, enterStart, exitInLayout, className, children }: AppearItemProps) {
+function AppearItem({ ref, own, enterDelay, enterStart, className, children }: AppearItemProps) {
   const present = useIsPresent();
-  // 撤掉的子项还按撤掉之前那次渲染的属性画，收不到 Appear 这一次给的 exitTransition：它经 AnimatePresence 的 custom 递进来，
+  // 撤掉的子项还按撤掉之前那次渲染的属性画，收不到 Appear 这一次定下的退场方式：它经 AnimatePresence 的 custom 递进来，
   // 在场与否变了的那次渲染里取到的就是撤掉那一次给的值
-  const exitTransition = usePresenceData() as Transition | undefined;
+  const exit = usePresenceData() as ExitData;
   // 减少动画时只留透明度：缩放在那里是一步到位的，退场会先缩一下再淡出
   const item = useInsertItem();
   // 冻结挂载那一刻的值：Appear 挂载之后每次渲染给的 own 都为真，挂载时就在的子项不能因此退回起点
@@ -83,9 +93,14 @@ function AppearItem({ ref, own, enterDelay, enterStart, exitInLayout, className,
   // 起算时刻冻结在挂载那一刻：同一个 key 下等不等首帧由否变是，已经显示着的子项会退回起点再等一帧
   const [waitsForPaint] = useState(entering && enterStart === "painted");
   const painted = usePaintedOnce("item", waitsForPaint);
-  // 开始退场过就记下，只增不减：之后回到在场都是被拉回
+  // 留在布局里退场过就记下，只增不减：之后回到在场都是被拉回。只认开始退场的那次渲染：退场途中 Appear 再渲染时，
+  // 递进来的换成了那一次的决定，抽出布局退场的不能因为之后某次只撤不进就记成留在布局里
+  const [wasPresent, setWasPresent] = useState(present);
   const [exited, setExited] = useState(false);
-  if (exitInLayout && !present && !exited) setExited(true);
+  if (present !== wasPresent) {
+    setWasPresent(present);
+    if (!present && exit.inLayout) setExited(true);
+  }
   // 延迟取放行那一刻的值：调用方要等挂载之后量过布局才知道等多久，量完的那次重渲染排在放行之前。
   // 留在布局里退场又被拉回的不带延迟：framer-motion 让它回到 animate，带着延迟就停在半透明上干等
   const target = entering && enterDelay !== undefined && !exited ? delayed(item.animate, enterDelay) : item.animate;
@@ -96,7 +111,7 @@ function AppearItem({ ref, own, enterDelay, enterStart, exitInLayout, className,
       inert={!present}
       initial={entering ? item.initial : false}
       animate={painted ? target : item.initial}
-      exit={exitTransition === undefined ? item.exit : { ...item.exit, transition: exitTransition }}
+      exit={exit.transition === undefined ? item.exit : { ...item.exit, transition: exit.transition }}
     >
       <EntranceGate own={own}>{children}</EntranceGate>
     </motion.div>
@@ -108,10 +123,22 @@ export function Appear({ children, itemClassName, initial = false, enterDelay, e
   // 之后才挂载的元素也永远跳过入场。这里只在包裹层自己身上关掉。
   const mounted = useMounted();
   const own = mounted.current || initial;
+  const reduced = useReducedMotionConfig() === true;
+  const items = Children.toArray(children).map((child, index) => ({ child, key: isValidElement(child) && child.key !== null ? child.key : index }));
+  // 上一次提交时在场的子项，用来认出这一次有没有子项进来
+  const committed = useRef<readonly (string | number)[]>([]);
+  useLayoutEffect(() => {
+    committed.current = items.map((item) => item.key);
+  });
+  // 有子项进来的渲染一律按 popLayout：AnimatePresence 只在 popLayout 下把量尺寸的 ref 递给子项，motion.div 的 ref 回调又只在挂上时调一次，
+  // 在 sync 下挂上的子项之后再也抽不出布局。只撤不进的渲染里没有子项挂上，减少动画时只有它改按 sync。
+  // committed 初值为空，挂载时就在的子项也算进来的
+  const brings = items.some((item) => !committed.current.includes(item.key));
+  const exit: ExitData = { transition: exitTransition, inLayout: exitInLayout || (reduced && !brings) };
   return (
-    <AnimatePresence mode={exitInLayout ? "sync" : "popLayout"} custom={exitTransition}>
-      {Children.toArray(children).map((child, index) => (
-        <AppearItem key={isValidElement(child) && child.key !== null ? child.key : index} own={own} enterDelay={enterDelay} enterStart={enterStart} exitInLayout={exitInLayout} className={itemClassName}>
+    <AnimatePresence mode={exit.inLayout ? "sync" : "popLayout"} custom={exit}>
+      {items.map(({ child, key }) => (
+        <AppearItem key={key} own={own} enterDelay={enterDelay} enterStart={enterStart} className={itemClassName}>
           {child}
         </AppearItem>
       ))}

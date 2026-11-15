@@ -166,6 +166,8 @@ const configured = (show: boolean, options: Options = {}) => (
 interface ExitFrame {
   /** popLayout 把它抽出布局时打的标记。 */
   popped: boolean;
+  /** 算好的定位方式：抽出布局时 popLayout 插进来的规则把它改成 absolute，下方的兄弟顶上来占它的位置。 */
+  position: string;
   inert: boolean;
   opacity: number;
   transform: string;
@@ -182,16 +184,33 @@ async function recordExit(options: Options): Promise<{ frames: ExitFrame[]; el: 
   const frames: ExitFrame[] = [];
   while (el.isConnected) {
     if (frames.length > 60) throw new Error("退场一直没播完");
-    frames.push({ popped: el.hasAttribute("data-motion-pop-id"), inert: el.hasAttribute("inert"), opacity: Number(el.style.opacity), transform: el.style.transform });
+    frames.push({ popped: el.hasAttribute("data-motion-pop-id"), position: getComputedStyle(el).position, inert: el.hasAttribute("inert"), opacity: Number(el.style.opacity), transform: el.style.transform });
     await stepFrames(1);
   }
   return { frames, el };
 }
 
-it("对照：默认退场当场抽出布局，在原处淡出", async () => {
+it("对照：不减少动画时默认退场当场抽出布局、转成绝对定位，在原处淡出", async () => {
   const { frames } = await recordExit({});
   expect(frames.length).toBeGreaterThan(3);
   expect(frames.every((f) => f.popped)).toBe(true);
+  expect(frames.every((f) => f.position === "absolute")).toBe(true);
+});
+
+it("减少动画、不开 exitInLayout：只撤不进时留在布局里淡完才移除，途中一直占着原位、兄弟不被顶上来，只淡出不缩放", async () => {
+  const { frames } = await recordExit({ reducedMotion: "always" });
+  expect(frames.length).toBeGreaterThan(3);
+  expect(frames.length).toBeLessThanOrEqual(Math.ceil((fade.out.duration * 1000) / 16) + 2);
+  expect(frames.filter((f) => f.popped)).toEqual([]);
+  // 一直按原来的流内定位排着：下方的兄弟没有位置可顶
+  expect(frames.map((f) => f.position)).toEqual(frames.map(() => "static"));
+  expect(frames.every((f) => f.inert)).toBe(true);
+  expect(frames.map((f) => f.transform)).toEqual(frames.map(() => ""));
+  const opacities = frames.map((f) => f.opacity);
+  expect(opacities[0]).toBe(1);
+  expect(opacities).toEqual([...opacities].sort((a, b) => b - a));
+  expect(opacities.at(-1)).toBeLessThan(0.2);
+  expect(view?.container.querySelector("[data-note]")).toBeNull();
 });
 
 it("exitInLayout：撤掉的子项留在布局里淡完才移除，途中一直占着原位、带 inert，淡完那一刻移除", async () => {
@@ -284,4 +303,101 @@ it("enterStart 为 commit：不等首帧画出，enterDelay 从插进来的那�
   expect(commit).toBeGreaterThanOrEqual(Math.floor(100 / 16));
   expect(commit).toBeLessThanOrEqual(Math.ceil(100 / 16) + 1);
   expect(painted).toBeGreaterThan(commit);
+});
+
+const keyed = (keys: readonly string[], options: Options = {}) => (
+  <MotionConfig reducedMotion={options.reducedMotion ?? "never"}>
+    <Appear enterDelay={options.enterDelay} enterStart={options.enterStart} exitInLayout={options.exitInLayout}>
+      {keys.map((key) => (
+        <p key={key} data-key={key}>
+          {key}
+        </p>
+      ))}
+    </Appear>
+  </MotionConfig>
+);
+
+/** 某个 key 的包裹层；给一个尺寸，jsdom 里 popLayout 才抽得出来（见 recordExit）。 */
+const sizedWrap = (key: string): HTMLElement => {
+  const el = view?.container.querySelector<HTMLElement>(`[data-key="${key}"]`)?.parentElement;
+  if (el === null || el === undefined) throw new Error(`子项 ${key} 没有挂上`);
+  el.style.width = "120px";
+  el.style.height = "36px";
+  return el;
+};
+
+it.each([
+  ["挂载时就在的子项", true],
+  ["之后才加进来的子项", false],
+] as const)("减少动画下同一次有子项进来（换一块内容）：%s照常抽出布局，在原处与新的交叉淡化，不上下叠着占两份高度", async (_who, atMount) => {
+  const options: Options = { reducedMotion: "always" };
+  if (atMount) {
+    view = render(keyed(["a"], options));
+  } else {
+    view = render(keyed([], options));
+    view.rerender(keyed(["a"], options));
+    await stepFrames(60);
+  }
+  const old = sizedWrap("a");
+  view.rerender(keyed(["b"], options));
+  expect(old.hasAttribute("data-motion-pop-id")).toBe(true);
+  expect(getComputedStyle(old).position).toBe("absolute");
+  expect(old.hasAttribute("inert")).toBe(true);
+  expect(sizedWrap("b").hasAttribute("inert")).toBe(false);
+  await stepFrames(60);
+  expect(old.isConnected).toBe(false);
+});
+
+it("减少动画下只撤不进、退场途中被拉回：这一格一直没让出去，不再等 enterDelay，从半路的不透明度直接回到 1", async () => {
+  const options: Options = { reducedMotion: "always", enterDelay: 0.2, enterStart: "commit" };
+  view = render(keyed([], options));
+  view.rerender(keyed(["a"], options));
+  await stepFrames(60);
+  const el = sizedWrap("a");
+  expect(el.style.opacity).toBe("1");
+
+  view.rerender(keyed([], options));
+  await stepFrames(3);
+  expect(el.hasAttribute("data-motion-pop-id")).toBe(false);
+  const left = Number(el.style.opacity);
+  expect(left).toBeGreaterThan(0);
+  expect(left).toBeLessThan(1);
+
+  view.rerender(keyed(["a"], options));
+  expect(sizedWrap("a")).toBe(el);
+  const opacities = [left];
+  while (opacities.at(-1) !== 1) {
+    if (opacities.length > 60) throw new Error("拉回后一直没回到不透明");
+    await stepFrames(1);
+    opacities.push(Number(el.style.opacity));
+  }
+  expect(longestStall(opacities)).toBeLessThanOrEqual(1);
+});
+
+it("减少动画下按互换抽出布局退场的，退场途中又有一次只撤不进：被拉回时那一格已经让出去过，照常等 enterDelay", async () => {
+  const options: Options = { reducedMotion: "always", enterDelay: 0.2, enterStart: "commit" };
+  view = render(keyed([], options));
+  view.rerender(keyed(["a"], options));
+  await stepFrames(60);
+  const el = sizedWrap("a");
+  view.rerender(keyed(["b"], options));
+  expect(el.hasAttribute("data-motion-pop-id")).toBe(true);
+  await stepFrames(2);
+  // 这一次只撤不进：a 还在退场，递给它的决定换成了留在布局里，但它的退场早已按抽出布局开始
+  view.rerender(keyed([], options));
+  await stepFrames(1);
+  const left = Number(el.style.opacity);
+  expect(left).toBeGreaterThan(0);
+  expect(left).toBeLessThan(1);
+
+  view.rerender(keyed(["a"], options));
+  expect(sizedWrap("a")).toBe(el);
+  const opacities = [left];
+  while (opacities.at(-1) !== 1) {
+    if (opacities.length > 60) throw new Error("拉回后一直没回到不透明");
+    await stepFrames(1);
+    opacities.push(Number(el.style.opacity));
+  }
+  // 200 ms 的延迟约 12 帧：先停在半路上，之后才回到 1
+  expect(longestStall(opacities)).toBeGreaterThanOrEqual(Math.floor(200 / 16) - 2);
 });
