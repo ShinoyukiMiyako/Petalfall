@@ -361,8 +361,8 @@
   display: block;
   color: var(--sk-text-2);
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   overflow-wrap: anywhere;
   user-select: text;
 }
@@ -442,8 +442,8 @@
 .extraPath {
   overflow: hidden;
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   color: var(--sk-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
