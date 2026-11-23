@@ -1,6 +1,8 @@
 // 首次启动向导的文案。产品名一律经 APP_NAME 拼入。
 
 import type { IconName } from "../../art/Icon";
+import { dataWriterName, newerVersionToInstall, type DataWriter } from "../../copy/data-format";
+import { joinMixed } from "../../copy/flows";
 import { APP_NAME } from "../../lib/app-info";
 import type { StepId } from "./model";
 
@@ -55,6 +57,10 @@ export const DIR_COPY = {
   none: "没有找到其他启动器的文件夹。之后可以在设置里手动添加。",
   empty: "游戏目录不能为空",
   bang: "路径里不能有「!」，Java 会读不出里面的游戏文件",
+  // 默认目录被挡最常见：卸载时删了数据，游戏目录里的格式记录却还在。路径就在输入框里，句子不重复它，先说可以直接换一个
+  dataTooNew: (writer: DataWriter) =>
+    joinMixed("这个文件夹已经被", dataWriterName(writer), "用过，这个版本读不了里面的实例。换一个文件夹，或者装上", newerVersionToInstall(writer), "再来。"),
+  dataFormatUnreadable: (reason: string) => `这个文件夹里的格式记录读不懂（${reason}），换一个文件夹。`,
   pickFailed: "没能打开文件夹选择框",
   settingsFailed: "读不到默认的游戏目录",
   discoverFailed: "没能探测其他启动器的文件夹",
@@ -88,7 +94,7 @@ export const ACCOUNT_STEP_COPY = {
 export const LOGIN_OPTIONS: readonly { kind: "microsoft" | "offline" | "authlib"; name: string; desc: string; icon: IconName; online: boolean }[] = [
   { kind: "microsoft", name: "微软账户", desc: "正版验证，能进所有在线服务器", icon: "shield", online: true },
   { kind: "offline", name: "离线账户", desc: "无需联网，单人与离线服使用", icon: "user", online: false },
-  { kind: "authlib", name: "外置登录", desc: "LittleSkin 等第三方验证服务器", icon: "server", online: true },
+  { kind: "authlib", name: "外置登录", desc: "LittleSkin 等第三方认证服务器", icon: "server", online: true },
 ];
 
 export const APPEARANCE_STEP_COPY = {

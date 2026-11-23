@@ -25,6 +25,8 @@
 //! 错误统一归口到 [`Error`]，下游 `#[from]` 冒泡。
 
 pub mod content;
+#[cfg(test)]
+mod data_format_snapshot;
 pub mod discovery;
 pub mod error;
 pub mod folder;
@@ -75,8 +77,8 @@ pub use isolation::{
 
 pub use content::{
     InstanceContent, LevelInfo, PackEntry, ResourcePackEntry, ShaderPackEntry, WorldEntry,
-    count_mod_files, count_worlds, dir_footprint, list_worlds, read_instance_content,
-    read_render_distance,
+    count_mod_files, count_resource_packs, count_worlds, dir_footprint, list_worlds,
+    read_instance_content, read_render_distance,
 };
 
 pub use level::{GameMode, LevelSummary};

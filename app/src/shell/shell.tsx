@@ -2,21 +2,23 @@
 // 启动器更新面板的开合与自动检查、全局快捷键、尺寸分档、运行呼吸窗口、材质状态绑定，以及启动层要的宿主能力。
 // 标题栏、侧栏、命令面板、通知容器等视觉件只读这里导出的 useShell / useNav，不各自持有这些状态。
 //
-// 装配：AppearanceProvider -> LauncherProvider -> ShellProvider -> 外壳布局。外壳布局把应用根元素交给 bindRoot、
+// 装配：AppearanceProvider -> UiShapeProvider -> LauncherProvider -> ShellProvider -> 外壳布局。外壳布局把应用根元素交给 bindRoot、
 // 内容区滚动容器交给 bindPageScroll，并把 OverlayRoot 放在应用根元素的最后一个子位置。
 
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ACTION_ERROR, TOAST_COPY } from "../copy/flows";
 import { artBlocks, artStatus, onArtChanged } from "../ipc/art";
 import { endBreathWindow, startBreathWindow } from "../launch/breath";
-import { LaunchHostProvider, type ConfirmOptions, type LaunchHost } from "../launch/host";
+import { LaunchHostProvider, type ConfirmHandle, type ConfirmOptions, type LaunchHost } from "../launch/host";
 import { bindArtStatus } from "../mc/binding";
 import { registerCatalogReload, settleArtDownload } from "../state/art-download";
+import { invalidate as invalidateResources } from "../state/resource";
 import type { CreateInstancePreset } from "../state/flows";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { LIBRARY_ROUTE, routeInstanceId, routeKey, sameRoute, type Route } from "../state/route";
 import { activeDownloads, activeTasks, pinnedInstances } from "../state/selectors";
-import { launchPromptCopy } from "../state/store";
+import { gameDirDataRejectionOf } from "../state/errors";
+import { launchPromptCopy, type SliceStatus } from "../state/store";
 import type { Toast } from "../state/toasts";
 import { phaseUpdate } from "../state/updater/machine";
 import { UpdaterProvider, useUpdater, type UpdaterApi } from "../state/updater/useUpdater";
@@ -44,7 +46,7 @@ import {
   renameInHistory,
   type NavHistory,
 } from "./nav";
-import { OverlayProvider, useOverlayControls, useOverlayState } from "./overlay";
+import { OverlayProvider, useOverlayControls, useScrimOpen } from "./overlay";
 import { pickFile as pickNativeFile, pickSaveFile as saveNativeFile, SAVE_FILE_KINDS, withExtension, type SaveFileDialog, type SaveFileKind } from "./platform";
 import { useTier, type Tier } from "./tier";
 import { useUpdaterAutoCheck } from "./update-check";
@@ -90,6 +92,11 @@ export interface ShellApi {
   tier: Tier;
   /** 命令式确认：确认为 true；取消、Esc、被新的确认顶掉为 false。 */
   confirm(options: ConfirmOptions): Promise<boolean>;
+  /**
+   * 先开框、内容晚到的命令式确认：点了马上开框，要等的数据到了再经句柄原地换内容（见 ConfirmHandle）。
+   * 与 confirm 共用同一个确认框，同样顶掉尚未回答的旧请求。
+   */
+  openConfirm(options: ConfirmOptions): ConfirmHandle;
   palette: PaletteState;
   openPalette(query?: string): void;
   closePalette(): void;
@@ -141,8 +148,6 @@ export interface ShellApi {
    * 永不 reject（失败已经报告过，再抛回去会报两次）。
    */
   copyText(text: string): Promise<boolean>;
-  /** 主页花瓣暂停：窗口不可见、失焦或有带遮罩的浮层。 */
-  petalsPaused: boolean;
   /** 应用根元素（尺寸分档按它的宽度）。 */
   bindRoot(el: HTMLElement | null): void;
   /** 内容区唯一的纵向滚动容器（历史项的滚动位置记录与恢复）。 */
@@ -153,6 +158,8 @@ export interface ShellApi {
 
 const NavContext = createContext<NavApi | null>(null);
 const ShellContext = createContext<ShellApi | null>(null);
+/** 窗口可见且有焦点。只给花瓣暂停用，不进 ShellApi，理由见 usePetalsPaused。 */
+const WindowActiveContext = createContext<boolean | null>(null);
 
 export function useNav(): NavApi {
   const api = useContext(NavContext);
@@ -164,6 +171,19 @@ export function useShell(): ShellApi {
   const api = useContext(ShellContext);
   if (api === null) throw new Error("useShell 必须在 ShellProvider 之内使用");
   return api;
+}
+
+/**
+ * 主页花瓣暂停：窗口不可见、失焦或有带遮罩的浮层。
+ * 不放在 ShellApi 上：每次开关弹窗、窗口失焦聚焦都会换外壳上下文的值，读 useShell 的整页跟着重渲染一遍；
+ * 弹窗的入场与退场动画在这之前已经创建，被这遍渲染堵住的时长记进动画，第一张可见帧就跳过一截。
+ * 外壳核心也不订阅浮层状态，开关弹窗只让调用这里的那一小块重渲染。
+ */
+export function usePetalsPaused(): boolean {
+  const active = useContext(WindowActiveContext);
+  if (active === null) throw new Error("usePetalsPaused 必须在 ShellProvider 之内使用");
+  const scrimOpen = useScrimOpen();
+  return !active || scrimOpen;
 }
 
 export function ShellProvider({ children }: { children: ReactNode }) {
@@ -215,6 +235,19 @@ function assertAnchorInFlow(anchor: HTMLElement, scroller: HTMLElement): void {
   }
 }
 
+/**
+ * 实例列表是不是已知：读到了，或游戏目录因数据格式打不开（换目录之前列表就是空的，指向实例的页面都已失效）。
+ * 加载中与别的读取失败（网络盘暂时连不上等）不算：列表只是没读到，不能据此把人从实例页送走。
+ */
+function instanceListKnown(status: SliceStatus): boolean {
+  return status.kind === "ready" || gameDirRefused(status);
+}
+
+/** 列实例因游戏目录的数据格式被拒：目录被更新的版本用过，或记号读不懂。 */
+function gameDirRefused(status: SliceStatus): boolean {
+  return status.kind === "error" && gameDirDataRejectionOf(status.error) !== null;
+}
+
 function scrollMarginTop(el: HTMLElement): number {
   const raw = getComputedStyle(el).scrollMarginTop;
   // 浏览器总给出像素值；jsdom 对没声明的属性给空串，而这个属性的初始值就是 0
@@ -228,6 +261,8 @@ interface ConfirmRequest {
   id: number;
   /** 确认框的 key：框开着时被顶替的请求沿用前一个的，框关上之后再来的请求才换新的。 */
   frame: number;
+  /** 经句柄原地换过几次内容：确认框的布局只在请求或它变了的那次重渲染量。 */
+  revision: number;
   options: ConfirmOptions;
   resolve: (ok: boolean) => void;
 }
@@ -246,7 +281,8 @@ function ShellCore({ children }: { children: ReactNode }) {
   // 外壳根只订阅自己用到的几片：每 100 ms 的下载进度与每批游戏日志都不让它重渲染
   const lastRename = useLauncherSelector((s) => s.lastRename);
   const lastMove = useLauncherSelector((s) => s.lastMove);
-  const instancesReady = useLauncherSelector((s) => s.status.instances.kind === "ready");
+  const instancesKnown = useLauncherSelector((s) => instanceListKnown(s.status.instances));
+  const dirRefused = useLauncherSelector((s) => gameDirRefused(s.status.instances));
   const ids = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
   const crashedId = useLauncherSelector((s) => (s.session !== null && s.session.phase === "crashed" ? s.session.instanceId : null));
   const runningSince = useLauncherSelector((s) => (s.session !== null && s.session.phase === "running" ? s.session.runningSince : null));
@@ -258,7 +294,6 @@ function ShellCore({ children }: { children: ReactNode }) {
   const actions = useLauncherActions();
   const run = useRunner();
   const overlay = useOverlayControls();
-  const { scrimOpen } = useOverlayState();
 
   // ---------------------------------------------------------------- 历史
 
@@ -331,22 +366,26 @@ function ShellCore({ children }: { children: ReactNode }) {
 
   const instanceIds = useMemo(() => new Set(ids), [ids]);
   useEffect(() => {
+    const alive = (r: Route) => {
+      const id = routeInstanceId(r);
+      return id === null || instanceIds.has(id);
+    };
     let next = historyRef.current;
     if (rename !== null) next = renameInHistory(next, rename.from, rename.to);
     const leaveMoved = move !== null && routeInstanceId(currentEntry(next).route) === move.id;
-    if (leaveMoved) next = navGo(next, LIBRARY_ROUTE);
+    // 游戏目录因数据格式被拒，停着的实例页随列表一起失效：一律去实例库，那里有「换一个游戏目录」。按剪除落回之前最近的
+    // 存活项的话，从主页、或在别的页面点侧栏固定进来的会落回那一页，主页上只有报错与重试
+    const leaveRefused = dirRefused && !alive(currentEntry(next).route);
+    if (leaveMoved || leaveRefused) next = navGo(next, LIBRARY_ROUTE);
     // 实例列表还没读到时不剪：此时列表为空，会把所有实例页都当成失效
-    if (instancesReady) next = pruneHistory(next, (r) => {
-      const id = routeInstanceId(r);
-      return id === null || instanceIds.has(id);
-    });
-    commit(next, leaveMoved ? "go" : null);
+    if (instancesKnown) next = pruneHistory(next, alive);
+    commit(next, leaveMoved || leaveRefused ? "go" : null);
     if (rename !== null) setAppliedRename(rename.seq);
     if (move !== null) setAppliedMove(move.seq);
-  }, [commit, instanceIds, instancesReady, rename, move]);
+  }, [commit, dirRefused, instanceIds, instancesKnown, rename, move]);
 
   const current = currentEntry(viewHistory);
-  const route = effectiveRoute(current.route, (id) => !instancesReady || instanceIds.has(id));
+  const route = effectiveRoute(current.route, (id) => !instancesKnown || instanceIds.has(id));
 
   // 托底跟着页面走：换了页面（页面按路由键重挂，托着的页面根已经卸掉）就摘掉它的滚动监听
   const pageKey = routeKey(route);
@@ -399,19 +438,6 @@ function ShellCore({ children }: { children: ReactNode }) {
   const pendingRef = useRef<ConfirmRequest | null>(null);
   const confirmSeq = useRef(0);
 
-  const confirm = useCallback((options: ConfirmOptions) => {
-    return new Promise<boolean>((resolve) => {
-      // 新的确认顶掉尚未回答的旧请求：旧请求按取消结算
-      if (pendingRef.current !== null) pendingRef.current.resolve(false);
-      confirmSeq.current += 1;
-      const frame = pendingRef.current === null ? confirmSeq.current : pendingRef.current.frame;
-      const request: ConfirmRequest = { id: confirmSeq.current, frame, options, resolve };
-      pendingRef.current = request;
-      setConfirmRequest(request);
-      setConfirmOpen(true);
-    });
-  }, []);
-
   const settleConfirm = useCallback((ok: boolean) => {
     const request = pendingRef.current;
     if (request === null) return;
@@ -419,6 +445,42 @@ function ShellCore({ children }: { children: ReactNode }) {
     request.resolve(ok);
     setConfirmOpen(false);
   }, []);
+
+  const openConfirm = useCallback(
+    (options: ConfirmOptions): ConfirmHandle => {
+      // 新的确认顶掉尚未回答的旧请求：旧请求按取消结算
+      if (pendingRef.current !== null) pendingRef.current.resolve(false);
+      confirmSeq.current += 1;
+      const id = confirmSeq.current;
+      const frame = pendingRef.current === null ? id : pendingRef.current.frame;
+      let request!: ConfirmRequest;
+      const result = new Promise<boolean>((resolve) => {
+        request = { id, frame, revision: 0, options, resolve };
+      });
+      pendingRef.current = request;
+      setConfirmRequest(request);
+      setConfirmOpen(true);
+      // 已经结算（含被新的确认顶掉）的句柄碰不到确认框：那时框里是别的请求，或者正在退场
+      const live = () => pendingRef.current?.id === id;
+      return {
+        result,
+        update: (patch) => {
+          if (!live()) return;
+          // 同一个请求原地换内容：id 与 frame 不变，确认框不重挂、不当成顶替（不重做聚焦、标题与正文不淡入）
+          setConfirmRequest((prev) => {
+            if (prev?.id !== id) throw new Error(`确认请求 ${id} 还没结算，外壳里的确认框却不是它`);
+            return { ...prev, revision: prev.revision + 1, options: { ...prev.options, ...patch } };
+          });
+        },
+        dismiss: () => {
+          if (live()) settleConfirm(false);
+        },
+      };
+    },
+    [settleConfirm],
+  );
+
+  const confirm = useCallback((options: ConfirmOptions) => openConfirm(options).result, [openConfirm]);
 
   // 另一实例占着游戏进程时再点启动：状态容器挂出 launchPrompt，这里弹替换确认并把回答交回
   const promptRef = useRef<typeof launchPrompt>(null);
@@ -474,10 +536,9 @@ function ShellCore({ children }: { children: ReactNode }) {
       const ok = await confirm({ ...UPDATE_COPY.restartConfirm(tasks, downloads), tone: "danger" });
       if (!ok) return;
     }
-    await run(async () => {
-      await actions.flushTaskJournal();
-      await updater().install();
-    }, UPDATE_COPY.installFailed);
+    // 任务记录写不进去（数据目录只读、盘满、文件被占用）不该拦住更新：与关窗、启动后自动退出一致，单独报错后照常安装
+    await run(() => actions.flushTaskJournal(), ACTION_ERROR.saveJournal);
+    await run(() => updater().install(), UPDATE_COPY.installFailed);
   }, [actions, confirm, run, updater]);
   useUpdaterAutoCheck(openUpdatePanel, updater);
 
@@ -707,8 +768,6 @@ function ShellCore({ children }: { children: ReactNode }) {
     return () => endBreathWindow();
   }, [runningSince, active]);
 
-  const petalsPaused = !shown || !focused || scrimOpen;
-
   // ---------------------------------------------------------------- 材质状态
 
   // 绑定只建一次；失败经统一错误处理报告（写控制台 + error 通知）
@@ -724,6 +783,7 @@ function ShellCore({ children }: { children: ReactNode }) {
       listenChanged: (handler) => onArtChanged(() => handler()),
       onError: report,
       onCatalog: settleArtDownload,
+      onDefaultSkinsChanged: () => invalidateResources("skin"),
       reloadRequests: registerCatalogReload,
     }).then(
       (release) => {
@@ -764,6 +824,7 @@ function ShellCore({ children }: { children: ReactNode }) {
     () => ({
       tier,
       confirm,
+      openConfirm,
       palette,
       openPalette,
       closePalette,
@@ -783,7 +844,6 @@ function ShellCore({ children }: { children: ReactNode }) {
       saveFile,
       runToastAction,
       copyText,
-      petalsPaused,
       bindRoot: setRootEl,
       bindPageScroll,
       bindChrome,
@@ -801,11 +861,11 @@ function ShellCore({ children }: { children: ReactNode }) {
       fileDrop.registerFileDrop,
       fileDrop.registerJarDrop,
       installUpdate,
+      openConfirm,
       openCreateInstance,
       openPalette,
       openUpdatePanel,
       palette,
-      petalsPaused,
       pickFile,
       registerFind,
       registerShortcut,
@@ -821,15 +881,16 @@ function ShellCore({ children }: { children: ReactNode }) {
       <ShellContext.Provider value={shell}>
         <LaunchHostProvider host={launchHost}>
           <UpdaterBridge bind={bindUpdater} />
-          {children}
+          <WindowActiveContext.Provider value={active}>{children}</WindowActiveContext.Provider>
           {/* 框开着时被顶替不换 key：换 key 会把开着的框连遮罩一起卸掉重挂，遮罩断一帧。原地换内容，
-              按 requestKey 重做初始聚焦；框关上之后再来的请求才换 key */}
+              按 requestKey 重做初始聚焦；框关上之后再来的请求才换 key。布局只在换了请求或句柄换了内容的那次量 */}
           {confirmRequest !== null && (
             <ConfirmDialog
               key={confirmRequest.frame}
               open={confirmOpen}
               {...confirmRequest.options}
               requestKey={confirmRequest.id}
+              layoutKey={`${confirmRequest.id}:${confirmRequest.revision}`}
               onConfirm={() => settleConfirm(true)}
               onClose={() => settleConfirm(false)}
             />

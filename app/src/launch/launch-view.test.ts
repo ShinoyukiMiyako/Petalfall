@@ -27,6 +27,7 @@ function inst(id: string, overrides: Partial<InstanceSummary> = {}): InstanceSum
     description: null,
     cover: null,
     coverImage: null,
+    coverImageHue: null,
     background: "follow",
     backgroundImage: null,
     pinned: false,
@@ -39,6 +40,7 @@ function inst(id: string, overrides: Partial<InstanceSummary> = {}): InstanceSum
     dirError: null,
     modCount: 0,
     worldCount: 0,
+    resourcePackCount: 0,
     isolated: false,
     memoryMb: null,
     modpack: null,
@@ -64,9 +66,11 @@ function state(overrides: Partial<LauncherState>): LauncherState {
     instances: [],
     selectedInstanceId: null,
     sidebarPins: [],
+    unsavedPins: [],
     firstRun: false,
     session: null,
     tasks: [],
+    landingTaskIds: [],
     unseenFailures: 0,
     toasts: [],
     login: null,
@@ -84,7 +88,7 @@ const loading = (instanceId: string, stage = 0): SessionState => {
 const running = (instanceId: string) => sessionLaunched(loading(instanceId), "launch-1", T0 + 1000);
 
 function installTask(instanceId: string, id: string, status: Task["status"], progress = 0): Task {
-  return { ...newTask({ id, kind: "game", title: `安装 ${instanceId}`, detail: "", instanceId, spec: { command: "install_version", args: { targetName: instanceId } } }, T0), status, progress };
+  return { ...newTask({ gameDir: "D:/Games/.minecraft", id, kind: "game", title: `安装 ${instanceId}`, detail: "", instanceId, spec: { command: "install_version", args: { targetName: instanceId } } }, T0), status, progress };
 }
 
 describe("启动视图判定", () => {
@@ -132,6 +136,39 @@ describe("启动视图判定", () => {
     expect(launchView(state({ tasks }), a)).toMatchObject({ kind: "installing", queuePosition: 2, task: { id: "t1" } });
     expect(launchView(state({ tasks: [installTask("A", "t1", "running", 0.4)] }), a)).toMatchObject({ kind: "installing", queuePosition: null });
     expect(launchView(state({}), a)).toEqual({ kind: "installing", task: null, queuePosition: null });
+  });
+
+  it("安装中、本实例没有未完成的任务：最近一次写整个目录的任务已完成时给出它（落地重扫还没回来），名次为 null", () => {
+    const a = inst("A", { status: "installing" });
+    const created: Task = { ...installTask("A", "t1", "done", 1), finishedAt: T0 + 1000 };
+    expect(launchView(state({ tasks: [created] }), a)).toEqual({ kind: "installing", task: created, queuePosition: null });
+
+    const repaired: Task = {
+      ...newTask({ gameDir: "D:/Games/.minecraft", id: "t2", kind: "repair", title: "补全 A", detail: "", instanceId: "A", spec: { command: "repair_instance", args: { id: "A" } } }, T0),
+      status: "done",
+      progress: 1,
+      finishedAt: T0 + 2000,
+    };
+    expect(launchView(state({ tasks: [created, repaired] }), a)).toEqual({ kind: "installing", task: repaired, queuePosition: null });
+    // 未完成的优先
+    const again = installTask("A", "t3", "running", 0.4);
+    expect(launchView(state({ tasks: [created, again] }), a)).toEqual({ kind: "installing", task: again, queuePosition: null });
+  });
+
+  it("安装中、最近一次写整个目录的任务失败了，或只有别的实例、别的种类的已完成任务：task 为 null", () => {
+    const a = inst("A", { status: "installing" });
+    const created: Task = { ...installTask("A", "t1", "done", 1), finishedAt: T0 + 1000 };
+    const failed: Task = { ...installTask("A", "t2", "failed", 0.3), error: { code: "network_failed", message: "连接超时" }, finishedAt: T0 + 2000 };
+    expect(launchView(state({ tasks: [created, failed] }), a)).toEqual({ kind: "installing", task: null, queuePosition: null });
+
+    const other: Task = { ...installTask("B", "t3", "done", 1), finishedAt: T0 + 3000 };
+    const mod: Task = {
+      ...newTask({ gameDir: "D:/Games/.minecraft", id: "t4", kind: "mod", title: "装 Sodium", detail: "", instanceId: "A", spec: { command: "install_mod", args: { versionId: "A", platform: "modrinth", projectId: "sodium" } } }, T0),
+      status: "done",
+      progress: 1,
+      finishedAt: T0 + 4000,
+    };
+    expect(launchView(state({ tasks: [other, mod] }), a)).toEqual({ kind: "installing", task: null, queuePosition: null });
   });
 });
 

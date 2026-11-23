@@ -16,7 +16,6 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
 
-/// 日志目录名，位于数据目录下。
 /// 启动器日志所在的子目录（相对数据目录）。
 pub(crate) const LOGS_DIR: &str = "logs";
 

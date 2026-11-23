@@ -3,11 +3,13 @@
 import { AnimatePresence, MotionConfig } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { AUTHLIB_COPY, LITTLESKIN_API, MICROSOFT_LOGIN_COPY, NO_ACCOUNT_COPY, OFFLINE_NAME_COPY, TOAST_COPY } from "../../copy/flows";
+import { stubCanvas, type CanvasStub } from "../../art/illustrations/test-canvas";
+import { fallbackDrawn, mannequinFigure } from "../../art/skin/test-mannequin";
+import { ACTION_ERROR, AUTHLIB_COPY, LITTLESKIN_API, MICROSOFT_LOGIN_COPY, NO_ACCOUNT_COPY, OFFLINE_NAME_COPY, TOAST_COPY } from "../../copy/flows";
 import { validateOfflineName } from "../../domain/rules";
 import { COPY_FEEDBACK_MS, LOADING_DELAY_MS } from "../../domain/limits";
-import { DEVICE_CODE_EVENT } from "../../ipc/accounts";
+import { DEVICE_CODE_EVENT, type AccountDto } from "../../ipc/accounts";
+import { ART_DOWNLOAD_EVENT, type ArtStatusDto } from "../../ipc/art";
 import { IpcError } from "../../ipc/errors";
 import { mockInvoke } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
@@ -15,14 +17,17 @@ import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { MANUAL_LOGIN } from "../../state/login";
 import type { ModalProps } from "../../ui/Modal";
-import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
+import { render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { AUTHLIB_DIALOG_COPY, DEVICE_DIALOG_COPY, OFFLINE_DIALOG_COPY } from "../../copy/login";
 import { NO_ART, setArtStatus } from "../../mc/art";
+import { setBlockCatalog } from "../../mc/catalog";
 import { clearArtCache } from "../../mc/useArt";
+import { getArtDownloadState } from "../../state/art-download";
 import { DEFAULT_SKINS } from "./default-skin";
 import LoginFlow from "./index";
+import { offlineUuid } from "./offline-uuid";
 import { FIGURE_DEBOUNCE_MS, nameDisplay } from "./OfflineDialog";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -56,16 +61,17 @@ describe("离线用户名下方的提示", () => {
   });
 
   it("提醒与通过", () => {
-    expect(nameDisplay("樱花", check("樱花"), false)).toEqual({ kind: "warn", message: OFFLINE_NAME_COPY.nonStandard });
+    expect(nameDisplay("樱花", check("樱花"), false)).toEqual({ kind: "warn", message: OFFLINE_NAME_COPY.spaceOrNonAscii });
+    expect(nameDisplay("Sakura-1", check("Sakura-1"), false)).toEqual({ kind: "warn", message: OFFLINE_NAME_COPY.nonStandard });
     expect(nameDisplay("Sakura", check("Sakura"), false)).toEqual({ kind: "ok", message: OFFLINE_NAME_COPY.ok });
   });
 });
 
-let view: Rendered | undefined;
 let launcher: LauncherApi;
 let nav: NavApi;
 let writeText: ReturnType<typeof vi.fn>;
 let opened: string[];
+let canvas: CanvasStub;
 
 function Host({ presence }: { presence: boolean }) {
   launcher = useLauncher();
@@ -95,7 +101,7 @@ function Motion({ initial, children }: { initial: boolean; children: ReactNode }
  * reduced：一开始就打开减少动画。
  */
 async function mount({ presence = false, reduced = false }: { presence?: boolean; reduced?: boolean } = {}) {
-  view = render(
+  render(
     <Motion initial={reduced}>
       <LauncherProvider>
         <ShellProvider>
@@ -110,8 +116,14 @@ async function mount({ presence = false, reduced = false }: { presence?: boolean
 
 const dialog = () => document.querySelector<HTMLElement>("[role='dialog']");
 const title = () => dialog()?.querySelector("h2")?.textContent;
-/** 换内容后旧内容带着 inert 淡出，jsdom 里退场播不完会一直留着：找按钮、输入框、文字都只认没在退场的。 */
-const live = (el: Element) => el.closest("[inert]") === null;
+/**
+ * 换内容后旧内容带着 inert 淡出，jsdom 里退场播不完会一直留着：找按钮、输入框、文字都只认没在退场的。
+ * 整个弹窗关上后退场时整层也带 inert（弹窗层自己）：断言退场中的面板画成什么样的用例要找的是它里面当前的内容，这一层不算。
+ */
+const live = (el: Element) => {
+  const leaving = el.closest("[inert]");
+  return leaving === null || leaving.hasAttribute("data-sk-modal-layer");
+};
 /** 按钮上显示的文案：会换文案的按钮把几条候选叠在同一格里，只认当前这条。 */
 const labelOf = (b: HTMLButtonElement) => (b.querySelector("[data-align] > [data-current]") ?? b).textContent;
 const buttons = () => [...document.querySelectorAll<HTMLButtonElement>("[role='dialog'] button")].filter(live);
@@ -137,6 +149,8 @@ function typeInto(el: HTMLInputElement, value: string) {
   });
 }
 
+const pressEnter = (el: HTMLInputElement) => act(() => void el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+
 const inputs = () => [...(dialog()?.querySelectorAll<HTMLInputElement>("input") ?? [])].filter(live);
 /** 最里层换内容那一格里当前的内容（外置登录的当前这一步）。 */
 const stepPane = () => {
@@ -152,7 +166,7 @@ beforeEach(() => {
   modalLayoutKeys.length = 0;
   stubResizeObserver();
   stubMatchMedia(false);
-  stubCanvas();
+  canvas = stubCanvas();
   bootOverrides(ipc, { accounts: [accountDto({ name: "Alex" })] });
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   writeText = vi.fn(async () => {});
@@ -163,12 +177,7 @@ beforeEach(() => {
     return null;
   });
 });
-// 换回真实计时器之前把帧循环排空：还有一帧排在这个用例的假时钟上时，后面的用例一帧都推不动（抖动这类逐帧采样的断言会落空）
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
-  vi.useRealTimers();
+afterEach(() => {
   vi.unstubAllGlobals();
 });
 
@@ -258,6 +267,120 @@ describe("离线账户弹窗", () => {
     expect(button(OFFLINE_NAME_COPY.submit).disabled).toBe(true);
   });
 
+  describe("提交之后", () => {
+    /** 后端的账户库：添加真的写进去，之后读列表能读到新账户；当前账户是库里的第一个。 */
+    let stored: AccountDto[];
+    beforeEach(() => {
+      stored = [accountDto({ name: "Alex" })];
+      ipc.overrides.set("list_accounts", () => stored);
+      ipc.overrides.set("current_account", () => (stored.length === 0 ? null : stored[0]));
+      ipc.overrides.set("create_offline_account", (args) => {
+        const created = accountDto({ uuid: "5627dd98e6be3c21b8a8e92344183641", name: String(args.name) });
+        stored = [...stored, created];
+        return created;
+      });
+    });
+
+    /** 用户名下方那一行：默认说明、「可以使用」与错误都写在这里。 */
+    const nameMessage = () => {
+      const el = inputs()[0].closest("[class*='_nameField_']")?.querySelector("[aria-live='polite']");
+      if (!(el instanceof HTMLElement)) throw new Error("找不到用户名下方的提示行");
+      return el;
+    };
+    /** 提示行此刻显示的那一条：提示与错误互换时换下去的一块带 inert 留在原处淡出，jsdom 里播不完会一直留着，只认在场的那一块。 */
+    const nameLine = () => nameMessage().querySelector(":scope > :not([inert])")?.textContent;
+
+    it("回车添加成功：退场途中用户名下方仍是「可以使用」，主按钮仍在转圈、没变禁用，再按回车不会再提交", async () => {
+      await mount({ presence: true });
+      await act(async () => {
+        await launcher.actions.openLogin("offline");
+      });
+      await flush();
+      typeInto(inputs()[0], "Steve");
+      pressEnter(inputs()[0]);
+      await flush();
+      // 新账户已读回、弹窗已关：它正在退场，jsdom 里退场播不完，一直挂在 DOM 上
+      expect(launcher.state.accounts.map((a) => a.name)).toEqual(["Alex", "Steve"]);
+      expect(launcher.state.login).toBeNull();
+      expect(nameLine()).toBe(OFFLINE_NAME_COPY.ok);
+      expect(nameMessage().hasAttribute("data-error")).toBe(false);
+      const submit = button(OFFLINE_NAME_COPY.submit);
+      expect(submit.getAttribute("aria-busy")).toBe("true");
+      expect(submit.disabled).toBe(false);
+
+      pressEnter(inputs()[0]);
+      await flush();
+      expect(callsOf(ipc, "create_offline_account")).toEqual([{ name: "Steve" }]);
+      expect(nameLine()).toBe(OFFLINE_NAME_COPY.ok);
+    });
+
+    it("由启动触发：加上账户后接着启动，启动还没回来与随后失败时，退场途中都不报同名、主按钮一直转圈", async () => {
+      stored = [];
+      const launching = deferred<never>();
+      ipc.overrides.set("launch_game", () => launching.promise);
+      await mount({ presence: true });
+      await act(async () => {
+        await launcher.actions.launch("生存");
+      });
+      await flush();
+      act(() => button(NO_ACCOUNT_COPY.addOffline).click());
+      await flush();
+      typeInto(inputs()[0], "Steve");
+      pressEnter(inputs()[0]);
+      await flush();
+      // 添加动作在账户加上时就已成功落定，接着的启动转到后台、还没回来：弹窗已关、账户已在列表里，
+      // 退场途中保持提交时的样子
+      expect(launcher.state.login).toBeNull();
+      expect(launcher.state.accounts.map((a) => a.name)).toEqual(["Steve"]);
+      expect(callsOf(ipc, "launch_game")).toHaveLength(1);
+      expect(nameLine()).toBe(OFFLINE_NAME_COPY.ok);
+      expect(button(OFFLINE_NAME_COPY.submit).getAttribute("aria-busy")).toBe("true");
+
+      // 账户加上之后的启动失败：只按启动的标题报，碰不到早已落定的添加；退场中的弹窗不回到可以再填的样子
+      await act(async () => {
+        launching.reject(new Error("启动器进程意外退出"));
+        await settle();
+      });
+      expect(launcher.state.toasts.filter((t) => t.tone === "error").map((t) => t.title)).toEqual([ACTION_ERROR.launch("生存")]);
+      expect(nameLine()).toBe(OFFLINE_NAME_COPY.ok);
+      expect(nameMessage().hasAttribute("data-error")).toBe(false);
+      const submit = button(OFFLINE_NAME_COPY.submit);
+      expect(submit.getAttribute("aria-busy")).toBe("true");
+      expect(submit.disabled).toBe(false);
+    });
+
+    it("添加失败而弹窗还开着：回到可以再提交的样子，改好后再试一次", async () => {
+      ipc.overrides.set("create_offline_account", () => {
+        throw new IpcError("io", "账户库写不进去");
+      });
+      await mount({ presence: true });
+      await act(async () => {
+        await launcher.actions.openLogin("offline");
+      });
+      await flush();
+      typeInto(inputs()[0], "Steve");
+      pressEnter(inputs()[0]);
+      await flush();
+      expect(launcher.state.login).toEqual({ kind: "offline", intent: MANUAL_LOGIN });
+      const submit = button(OFFLINE_NAME_COPY.submit);
+      expect(submit.hasAttribute("aria-busy")).toBe(false);
+      expect(submit.disabled).toBe(false);
+      expect(nameLine()).toBe(OFFLINE_NAME_COPY.ok);
+
+      // 改名之后照实时的账户列表查重：撞上已有的仍然报同名
+      typeInto(inputs()[0], "alex");
+      expect(nameLine()).toBe(OFFLINE_NAME_COPY.duplicate);
+      expect(button(OFFLINE_NAME_COPY.submit).disabled).toBe(true);
+
+      ipc.overrides.set("create_offline_account", (args) => accountDto({ uuid: "5627dd98e6be3c21b8a8e92344183641", name: String(args.name) }));
+      typeInto(inputs()[0], "Steve");
+      pressEnter(inputs()[0]);
+      await flush();
+      expect(callsOf(ipc, "create_offline_account")).toEqual([{ name: "Steve" }, { name: "Steve" }]);
+      expect(launcher.state.login).toBeNull();
+    });
+  });
+
   describe("预览立绘", () => {
     let missing: Set<string>;
     let fetched: string[];
@@ -271,11 +394,11 @@ describe("离线账户弹窗", () => {
       return el;
     };
     const paths = (urls: string[]) => urls.map((url) => new URL(url).pathname).sort();
-    const ALL_DEFAULT_SKINS = DEFAULT_SKINS.map((skin) => `/art/${skin.path}.png`).sort();
+    const ALL_DEFAULT_SKINS = DEFAULT_SKINS.modern.map((skin) => `/art/${skin.path}.png`).sort();
 
     beforeEach(() => {
       // 本机有可用的客户端：默认皮肤从它的游戏文件里读
-      ipc.overrides.set("art_status", () => ({ source: { version_id: "1.21.1" }, panorama: false }));
+      ipc.overrides.set("art_status", () => ({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false }));
       missing = new Set();
       fetched = [];
       prefetched = [];
@@ -348,22 +471,59 @@ describe("离线账户弹窗", () => {
       expect(dialog()?.querySelector("[inert]")?.querySelectorAll('[data-sk-art="skin"]')).toHaveLength(2);
     });
 
-    it("本机没有可用的游戏文件：两个位置都退回剪影，不读任何皮肤", async () => {
+    it("本机没有可用的游戏文件：两个位置都退回人偶，不读任何皮肤", async () => {
       ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
       await openEmpty();
-      expect(figures().map((f) => f.dataset.art)).toEqual(["silhouette", "silhouette"]);
+      expect(figures().map((f) => f.dataset.art)).toEqual(["mannequin", "mannequin"]);
+      // 两位各是自己名字的离线 UUID 色相的人偶，体型照那一套默认皮肤
+      expect(figures().map((f) => fallbackDrawn(canvas, f))).toEqual([mannequinFigure(offlineUuid("Steve"), "wide", 4), mannequinFigure(offlineUuid("Alex"), "slim", 4)]);
       expect(fetched).toEqual([]);
     });
 
-    it("本机游戏文件里没有这套默认皮肤（1.19.3 以前的客户端）：退回剪影", async () => {
+    it("本机游戏文件里读不到选中的那套默认皮肤：退回人偶", async () => {
       missing.add("/art/entity/player/slim/makena.png");
       const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
       await openWithName("Alex");
       expect(prefetched.map((url) => new URL(url).pathname)).toContain("/art/entity/player/slim/makena.png");
       // 读不到的结果同样缓存，换上来时不再请求一次
       expect(fetched).toEqual([]);
-      expect(figure().dataset.art).toBe("silhouette");
+      expect(figure().dataset.art).toBe("mannequin");
       expect(warn.mock.calls.some(([message]) => String(message).includes("/art/entity/player/slim/makena.png"))).toBe(true);
+      warn.mockRestore();
+    });
+
+    const legacySource = () => ipc.overrides.set("art_status", () => ({ source: { version_id: "1.19.2", degraded: true, legacy_skins: true }, panorama: false }));
+
+    it("材质源早于 1.19.3：只预取史蒂夫与艾利克斯两张，开局并排的两位就是它们，输入后换上的也不另取", async () => {
+      legacySource();
+      await openEmpty();
+      expect(paths(fetched)).toEqual(["/art/entity/alex.png", "/art/entity/steve.png"]);
+      expect(fetched.every((url) => new URL(url).search === "?v=1.19.2")).toBe(true);
+      expect(figures().map((f) => f.dataset.art)).toEqual(["skin", "skin"]);
+      fetched.splice(0);
+      typeInto(inputs()[0], "Notch");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(FIGURE_DEBOUNCE_MS);
+        await settle();
+      });
+      expect(fetched).toEqual([]);
+      expect(figure().dataset.art).toBe("skin");
+    });
+
+    it("材质源早于 1.19.3：名字按哈希的奇偶落在两款之一（Steve 是艾利克斯，Alex 是史蒂夫）", async () => {
+      legacySource();
+      missing.add("/art/entity/steve.png");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      await openWithName("Steve");
+      expect(figure().dataset.art).toBe("skin");
+      typeInto(inputs()[0], "Alex");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(FIGURE_DEBOUNCE_MS);
+        await settle();
+      });
+      expect(stageLabel()).toBe("Alex 的角色预览");
+      expect(figure().dataset.art).toBe("mannequin");
+      expect(fetched).toEqual([]);
       warn.mockRestore();
     });
   });
@@ -391,6 +551,50 @@ describe("微软设备码弹窗", () => {
     await flush();
     expect(writeText).toHaveBeenCalledWith("PF7Q-X2LM");
     expect(opened).toEqual(["https://www.microsoft.com/link"]);
+  });
+
+  /**
+   * 按浏览器的样子在焦点所在处按一次回车或空格（同 ui/Modal.test.tsx 的 press）。jsdom 只派发事件，这两样都不做：
+   * 焦点所在的子树带上 inert 后，浏览器在下一个输入事件到来之前把焦点挪回 body；聚焦着的按钮收到没被取消的回车或空格时触发 click。
+   */
+  const press = (key: "Enter" | " ") => {
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement && focused.closest("[inert]") !== null) act(() => focused.blur());
+    const target = document.activeElement ?? document.body;
+    const down = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    act(() => void target.dispatchEvent(down));
+    if (key === " ") act(() => void target.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true, cancelable: true })));
+    if (target instanceof HTMLButtonElement && !target.disabled && !down.defaultPrevented) act(() => target.click());
+  };
+
+  // 退场中的面板处理函数停在关上那一刻：「复制并打开网页」没有自带判断，退场途中还按得到的话会再复制一次、再开一次网页
+  it("关掉登录后的退场途中：整层带 inert，回车与空格不再复制代码、不再打开网页", async () => {
+    pendingLogin();
+    await mount({ presence: true });
+    act(() => void launcher.actions.startMicrosoftLogin());
+    await flush();
+    act(() => emit(DEVICE_CODE_EVENT, code));
+    await flush();
+    const copyAndOpen = button(MICROSOFT_LOGIN_COPY.copyAndOpen);
+    act(() => copyAndOpen.focus());
+    press("Enter");
+    await flush();
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(opened).toEqual(["https://www.microsoft.com/link"]);
+
+    await act(async () => {
+      await launcher.actions.closeLogin();
+    });
+    await flush();
+    expect(launcher.state.login).toBeNull();
+    const layer = copyAndOpen.closest("[data-sk-modal-layer]");
+    expect(layer?.hasAttribute("data-exiting")).toBe(true);
+    press("Enter");
+    press(" ");
+    await flush();
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(opened).toEqual(["https://www.microsoft.com/link"]);
+    expect(layer?.hasAttribute("inert")).toBe(true);
   });
 
   it("获取代码时按拿到代码后的样子占位：两步说明常驻，骨架过了加载门才出现、至少停留同样久，代码到了原位换上", async () => {
@@ -604,6 +808,113 @@ describe("微软设备码弹窗", () => {
     expect(launcher.state.login).toBeNull();
     expect(nav.route).toEqual({ page: "settings", section: "general" });
   });
+
+  describe("成功区的下载原版材质", () => {
+    const MODERN: ArtStatusDto = { source: { version_id: "1.21.4", degraded: false, legacy_skins: false }, panorama: false };
+    const NOTE = "本机还没有原版材质，默认皮肤画不出来。";
+    const sakura = accountDto({ uuid: "0f3c5a7e9b1d4f6a8c2e4a6b8d0f2a4c", name: "Sakura", account_type: "microsoft" });
+    // 档案里没有皮肤：后端按 UUID 给的默认皮肤是细臂 sunny
+    const FALLBACK = { kind: "default", path: "entity/player/slim/sunny", model: "slim" } as const;
+    let drawn: string[];
+    const note = () => [...(dialog()?.querySelectorAll("p") ?? [])].find((p) => p.textContent === NOTE && live(p));
+    const avatar = () => dialog()?.querySelector<HTMLElement>('[data-sk-art="skin"]');
+
+    beforeEach(() => {
+      drawn = [];
+      ipc.overrides.set("skin_info", (args) => (args.accountUuid === sakura.uuid ? FALLBACK : null));
+      // 下完后材质绑定接着载入方块目录，载入了下载状态才回到空闲
+      ipc.overrides.set("art_blocks", () => ({ version_id: "1.21.4", blocks: [] }));
+      vi.stubGlobal("fetch", vi.fn(async (url: string) => ({ ok: true, status: 200, blob: async () => new Blob([url]) })));
+      vi.stubGlobal(
+        "createImageBitmap",
+        vi.fn(async (blob: Blob) => {
+          drawn.push(await blob.text());
+          return { width: 64, height: 64 };
+        }),
+      );
+    });
+
+    afterEach(() => {
+      setBlockCatalog(null);
+      setArtStatus(NO_ART);
+      clearArtCache();
+      // 下载状态全应用只有一份：每条用例都要走完，留在下载中会带进下一条
+      expect(getArtDownloadState()).toEqual({ phase: "idle" });
+    });
+
+    /** 走到设备码登录成功：拿到代码，再由后端交回新账户。 */
+    async function loginSucceeds() {
+      const login = deferred<AccountDto>();
+      ipc.overrides.set("microsoft_login", () => login.promise);
+      await mount();
+      act(() => void launcher.actions.startMicrosoftLogin());
+      await flush();
+      act(() => emit(DEVICE_CODE_EVENT, code));
+      await flush();
+      bootOverrides(ipc, { accounts: [accountDto({ name: "Alex" }), sakura], current: sakura });
+      await act(async () => {
+        login.resolve(sakura);
+        await settle();
+      });
+      await flush();
+      expect(title()).toBe(DEVICE_DIALOG_COPY.doneTitle);
+    }
+
+    it("本机没有材质源：新账户胶囊下面一行说明加幽灵按钮，弹窗按带这一行的版式量布局", async () => {
+      await loginSucceeds();
+      const line = note();
+      if (line === undefined) throw new Error("成功区没有下载原版材质的那一行");
+      const download = button("下载原版材质");
+      expect([download.dataset.variant, download.dataset.size]).toEqual(["ghost", "sm"]);
+      // 主按钮仍是底栏的「完成」
+      expect(button(MICROSOFT_LOGIN_COPY.done).dataset.variant).toBe("primary");
+      expect(modalLayoutKeys.at(-1)).toBe("microsoft:success:content:art");
+      expect(avatar()?.dataset.art).toBe("mannequin");
+    });
+
+    it("本机有材质源：成功区没有这一行，头像直接画默认皮肤", async () => {
+      ipc.overrides.set("art_status", () => MODERN);
+      await loginSucceeds();
+      expect(note()).toBeUndefined();
+      expect(buttons().some((b) => labelOf(b) === "下载原版材质")).toBe(false);
+      expect(modalLayoutKeys.at(-1)).toBe("microsoft:success:content");
+      expect(avatar()?.dataset.art).toBe("skin");
+    });
+
+    it("点下载：连点两下也只发一次 art_download；下完后头像在原节点上换上默认皮肤，这一行退场，弹窗换回不带它的版式", async () => {
+      const download = deferred<ArtStatusDto>();
+      ipc.overrides.set("art_download", () => download.promise);
+      await loginSucceeds();
+      const face = avatar();
+      expect(face?.dataset.art).toBe("mannequin");
+      const trigger = button("下载原版材质");
+      act(() => {
+        trigger.click();
+        trigger.click();
+      });
+      await flush();
+      expect(callsOf(ipc, "art_download")).toEqual([{}]);
+      act(() => emit(ART_DOWNLOAD_EVENT, { stage: "client", downloaded: 1024 * 1024, total: 4 * 1024 * 1024 }));
+      await flush();
+      expect(liveText()).toContain("正在下载客户端");
+      // 按钮与进度同为一行高：下载中不另量布局
+      expect(modalLayoutKeys.at(-1)).toBe("microsoft:success:content:art");
+
+      ipc.overrides.set("art_status", () => MODERN);
+      await act(async () => {
+        download.resolve(MODERN);
+        await settle(20);
+      });
+      await flush();
+      expect(avatar()).toBe(face);
+      expect(face?.dataset.art).toBe("skin");
+      expect(drawn.filter((url) => url.includes("/art/entity/"))).toEqual([expect.stringMatching(/\/art\/entity\/player\/slim\/sunny\.png\?v=1\.21\.4$/)]);
+      expect(note()).toBeUndefined();
+      expect(liveText()).not.toContain("正在下载客户端");
+      expect(modalLayoutKeys.at(-1)).toBe("microsoft:success:content");
+      expect(callsOf(ipc, "art_download")).toHaveLength(1);
+    });
+  });
 });
 
 describe("外置登录弹窗", () => {
@@ -616,7 +927,7 @@ describe("外置登录弹窗", () => {
     await bridge.invoke("is_first_run");
   });
 
-  async function openAuthlib(options: { reduced?: boolean } = {}) {
+  async function openAuthlib(options: { reduced?: boolean; presence?: boolean } = {}) {
     await mount(options);
     await act(async () => {
       await launcher.actions.openLogin("authlib");
@@ -652,6 +963,9 @@ describe("外置登录弹窗", () => {
     expect(dialog()?.textContent).toContain("服务器出了故障，不是账户或密码的问题。稍后重试。");
     expect(inputs()[1].value).toBe("secret");
     expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
+    // 说明块里的操作是文字之后的幽灵小按钮，不是自成一块的次按钮
+    const retry = button(AUTHLIB_COPY.retry);
+    expect([retry.dataset.variant, retry.dataset.size]).toEqual(["ghost", "sm"]);
 
     // 重试在途时说明块留着、重试键转圈，结果回来才收起：不先缩回再撑开
     const retried = deferred<void>();
@@ -706,6 +1020,56 @@ describe("外置登录弹窗", () => {
     const leaving = dialog()?.querySelector("[inert]");
     expect(leaving?.textContent).toContain(AUTHLIB_COPY.notYggdrasil.title);
     expect(liveText()).not.toContain(AUTHLIB_COPY.notYggdrasil.title);
+  });
+
+  it("地址提示在一行与两行之间换折行时弹窗形变；折行不变的逐字输入不重新量布局，也不多出一份提示文字", async () => {
+    await openAuthlib();
+    // jsdom 不排版：只含文字的元素按每行 40 个字、行高 18 排
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const text = this.textContent ?? "";
+      if (this.children.length > 0 || text === "") return original.call(this);
+      const rect = { left: 0, top: 0, width: 480, height: Math.ceil(text.length / 40) * 18 };
+      return { ...rect, x: 0, y: 0, right: rect.width, bottom: rect.height, toJSON: () => rect } as DOMRect;
+    });
+    // 提示是「将使用 https://<主机>」：主机 28 个字时整句恰好 40 个字排一行，多一个字就折成两行
+    const host = (length: number) => {
+      const letters = Array.from({ length: length - 4 }, () => String.fromCharCode(97 + Math.floor(Math.random() * 26))).join("");
+      return `${letters}.com`;
+    };
+    const lines = (input: string) => Math.ceil(AUTHLIB_DIALOG_COPY.willUse(`https://${input}`).length / 40);
+    const url = inputs()[0];
+    const key = () => modalLayoutKeys.at(-1);
+    const atOpen = key();
+
+    // 没有提示时播报区预留一行：换成一行的提示，弹窗不变高
+    const oneLine = host(28);
+    expect(lines(oneLine)).toBe(1);
+    typeInto(url, oneLine);
+    expect(liveText()).toContain(AUTHLIB_DIALOG_COPY.willUse(`https://${oneLine}`));
+    expect(key()).toBe(atOpen);
+
+    const twoLines = host(29);
+    expect(lines(twoLines)).toBe(2);
+    typeInto(url, twoLines);
+    const wrapped = key();
+    expect(wrapped).not.toBe(atOpen);
+    expect(dialog()?.textContent?.split(AUTHLIB_DIALOG_COPY.willUse(`https://${twoLines}`)).length).toBe(2);
+
+    // 仍是两行：逐字输入照常重渲染，布局签名不变
+    const stillTwo = host(29 + Math.floor(Math.random() * 40));
+    expect(lines(stillTwo)).toBe(2);
+    typeInto(url, stillTwo);
+    expect(key()).toBe(wrapped);
+
+    // 写全协议，提示撤掉，回到预留的一行
+    typeInto(url, `https://${stillTwo}`);
+    const cleared = key();
+    expect(cleared).not.toBe(wrapped);
+    typeInto(url, oneLine);
+    expect(key()).toBe(cleared);
+    typeInto(url, twoLines);
+    expect(key()).not.toBe(cleared);
   });
 
   it("不是认证服务器时原位说明；换个地址进入登录这一步", async () => {
@@ -788,7 +1152,8 @@ describe("外置登录弹窗", () => {
     act(() => button(AUTHLIB_COPY.preset).click());
     expect(inputs()[0].value).toBe(LITTLESKIN_API);
     expect(liveText()).not.toContain(AUTHLIB_COPY.notYggdrasil.title);
-    expect(dialog()?.querySelector("[inert]")?.textContent).toContain(AUTHLIB_COPY.notYggdrasil.title);
+    // 地址框下「将使用 …」的提示也随之原地淡出、同样带 inert：只看退场中的说明块
+    expect(dialog()?.querySelector("[inert] [role='alert']")?.textContent).toContain(AUTHLIB_COPY.notYggdrasil.title);
 
     ipc.overrides.set("probe_auth_server", serviceDown("读取验证服务器信息"));
     act(() => button(AUTHLIB_COPY.next).click());
@@ -823,6 +1188,47 @@ describe("外置登录弹窗", () => {
     expect(document.activeElement).toBe(retry);
     expect(said?.isConnected).toBe(false);
     expect(block.querySelector("strong")?.textContent).toBe(AUTHLIB_COPY.loginServiceDown.title);
+  });
+
+  it("登录这一步连不上：danger 说明块写「网络连接失败」，重试是文字之后带刷新图标的幽灵小按钮，在途时就地转圈", async () => {
+    await openAuthlib();
+    typeInto(inputs()[0], "skin.example.com");
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    const [username, password] = inputs();
+    typeInto(username, "multi@example.com");
+    typeInto(password, "secret");
+    const unreachable = () => {
+      throw new IpcError("Http", "HTTP 请求失败（账号密码认证）");
+    };
+    ipc.overrides.set("authlib_login", unreachable);
+    act(() => button(AUTHLIB_COPY.login).click());
+    await flush();
+    const block = alertBlock();
+    expect([block.dataset.tone, block.textContent]).toEqual(["danger", `${AUTHLIB_COPY.network}${AUTHLIB_COPY.retry}`]);
+    const retry = button(AUTHLIB_COPY.retry);
+    expect(block.contains(retry)).toBe(true);
+    expect([retry.dataset.variant, retry.dataset.size, retry.dataset.hasIcon, retry.dataset.loading]).toEqual(["ghost", "sm", "true", undefined]);
+
+    const retried = deferred<void>();
+    ipc.overrides.set("authlib_login", async () => {
+      await retried.promise;
+      unreachable();
+    });
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "authlib_login")).toHaveLength(2);
+    expect(alertBlock()).toBe(block);
+    expect([retry.dataset.variant, retry.dataset.loading, retry.getAttribute("aria-busy")]).toEqual(["ghost", "true", "true"]);
+    // 刷新图标的位置换成加载指示，按钮不换成别的变体
+    expect(retry.querySelectorAll("svg")).toHaveLength(1);
+    expect(retry.querySelector("[data-tone]")?.getAttribute("aria-hidden")).toBe("true");
+
+    retried.resolve();
+    await flush();
+    expect(callsOf(ipc, "authlib_login")).toHaveLength(2);
+    expect(alertBlock().textContent).toBe(`${AUTHLIB_COPY.network}${AUTHLIB_COPY.retry}`);
+    expect([button(AUTHLIB_COPY.retry).dataset.loading, button(AUTHLIB_COPY.retry).getAttribute("aria-busy")]).toEqual([undefined, null]);
   });
 
   it("从皮肤站拖进服务器链接：弹窗打开即填好地址并执行一次「下一步」，停在登录这一步", async () => {
@@ -992,6 +1398,93 @@ describe("外置登录弹窗", () => {
     picking.resolve();
     await flush();
     expect(launcher.state.login).toBeNull();
+  });
+
+  // 弹窗关上后退场的面板画的是关上那一刻交上去的外框与主体（AnimatePresence 留着移除时的元素）：按钮的转圈、
+  // 回车与点击的处理函数都停在提交在途的那一刻，结果回来后弹窗自己再改状态也到不了退场中的面板上
+  describe("提交之后", () => {
+    /** 照外壳那样挂、停在登录这一步并填好账号与密码。 */
+    async function atLogin(username: string, password: string) {
+      await openAuthlib({ presence: true });
+      typeInto(inputs()[0], "skin.example.com");
+      act(() => button(AUTHLIB_COPY.next).click());
+      await flush();
+      typeInto(inputs()[0], username);
+      typeInto(inputs()[1], password);
+    }
+    const toastTitles = (tone: "success" | "error") => launcher.state.toasts.filter((t) => t.tone === tone).map((t) => t.title);
+
+    it("回车登录成功：退场途中主按钮仍在转圈、没变禁用，再按回车或点它都不会再登录一次", async () => {
+      await atLogin("steve@example.com", "secret");
+      pressEnter(inputs()[1]);
+      await flush();
+      // 状态容器已关掉弹窗：它正在退场，jsdom 里退场播不完，一直挂在 DOM 上
+      expect(launcher.state.login).toBeNull();
+      expect(toastTitles("success")).toEqual([TOAST_COPY.authlibAdded("steve", "skin.example.com").title]);
+      const submit = button(AUTHLIB_COPY.login);
+      expect(submit.getAttribute("aria-busy")).toBe("true");
+      expect(submit.disabled).toBe(false);
+      expect(button(AUTHLIB_DIALOG_COPY.back).disabled).toBe(true);
+
+      pressEnter(inputs()[1]);
+      act(() => submit.click());
+      await flush();
+      expect(callsOf(ipc, "authlib_login")).toHaveLength(1);
+      expect(toastTitles("success")).toHaveLength(1);
+      expect(submit.getAttribute("aria-busy")).toBe("true");
+    });
+
+    it("选定角色成功：退场途中「使用这个角色」仍在转圈，再按它不会拿用掉的那次登录再选一次", async () => {
+      await atLogin("multi@example.com", "secret");
+      pressEnter(inputs()[1]);
+      await flush();
+      act(() => button(AUTHLIB_COPY.pickProfile).click());
+      await flush();
+      expect(launcher.state.login).toBeNull();
+      expect(toastTitles("success")).toEqual([TOAST_COPY.authlibAdded("multi_main", "skin.example.com").title]);
+      const pick = button(AUTHLIB_COPY.pickProfile);
+      expect(pick.getAttribute("aria-busy")).toBe("true");
+      expect(button(AUTHLIB_DIALOG_COPY.back).disabled).toBe(true);
+
+      // 退场层带 inert，键盘与指针都到不了它；直接派发的 click 仍进处理函数，它停在提交在途的那一刻，照样不再选
+      act(() => pick.click());
+      await flush();
+      expect(callsOf(ipc, "select_authlib_profile")).toHaveLength(1);
+      expect(toastTitles("error")).toEqual([]);
+      expect(pick.getAttribute("aria-busy")).toBe("true");
+    });
+
+    it("登录被拒、选定失败而弹窗还开着：回到可以再提交的样子，改好后再试一次", async () => {
+      await atLogin("multi@example.com", "wrong");
+      pressEnter(inputs()[1]);
+      await flush();
+      expect(launcher.state.login).not.toBeNull();
+      expect(liveText()).toContain(AUTHLIB_COPY.badCredentials);
+      expect(button(AUTHLIB_COPY.login).hasAttribute("aria-busy")).toBe(false);
+      expect(button(AUTHLIB_DIALOG_COPY.back).disabled).toBe(false);
+
+      typeInto(inputs()[1], "secret");
+      pressEnter(inputs()[1]);
+      await flush();
+      expect(callsOf(ipc, "authlib_login")).toHaveLength(2);
+
+      ipc.overrides.set("select_authlib_profile", () => {
+        throw new IpcError("io", "账户库写不进去");
+      });
+      act(() => button(AUTHLIB_COPY.pickProfile).click());
+      await flush();
+      expect(launcher.state.login).not.toBeNull();
+      expect(toastTitles("error")).toEqual([ACTION_ERROR.authlib]);
+      const pick = button(AUTHLIB_COPY.pickProfile);
+      expect(pick.hasAttribute("aria-busy")).toBe(false);
+      expect(button(AUTHLIB_DIALOG_COPY.back).disabled).toBe(false);
+
+      ipc.overrides.delete("select_authlib_profile");
+      act(() => pick.click());
+      await flush();
+      expect(callsOf(ipc, "select_authlib_profile")).toHaveLength(2);
+      expect(launcher.state.login).toBeNull();
+    });
   });
 });
 

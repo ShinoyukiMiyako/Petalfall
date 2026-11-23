@@ -121,8 +121,17 @@
     color var(--sk-dur-hover) var(--sk-ease);
 }
 
+/*
+ * 悬停与按下铺半透明叠层：实色 bg-2 落在夜樱输入框的 surface 底上只差 1.04:1，看不出悬停。
+ * 叠层上的中性字一律提到 text，触屏按住时只有 :active、没有 :hover，按下也写上
+ */
 .clear:hover {
-  background: var(--sk-bg-2);
+  background: var(--sk-fill-hover);
+  color: var(--sk-text);
+}
+
+.clear:active {
+  background: var(--sk-fill-press);
   color: var(--sk-text);
 }
 

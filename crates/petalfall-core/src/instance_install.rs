@@ -30,6 +30,7 @@ use petalfall_instance::{
 use petalfall_version::{LoaderInfo, LoaderKind, VersionJson, identify_mc_version, resolve};
 
 use crate::InstanceError;
+use crate::data_format::{GameDirCheck, GuardMode};
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, InstallPhase, emit};
 use crate::facade::{Petalfall, make_context};
@@ -166,12 +167,16 @@ pub enum MarkerSettlement {
 impl Petalfall {
     /// 校验名称，原子地建出实例目录并写下未完成标记，返回写下的标记（结局时原样交回
     /// [`Petalfall::settle_instance_marker`]）。目录已经存在（含并发新建的同名实例）报重名。
+    ///
+    /// 建任何东西之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，
+    /// 什么都不建。
     pub async fn create_instance_dir(
         &self,
         name: &str,
         request: &InstanceRequest,
     ) -> Result<IncompleteMarker> {
         request.validate()?;
+        let checked = self.guard_game_dir(GuardMode::Use).await?;
         self.check_new_instance_name(name).await?;
         let dir = self.instance_dir(name)?;
         let versions = self.layout().versions_dir();
@@ -181,6 +186,11 @@ impl Petalfall {
                 path: versions,
                 source,
             })?;
+        // 游戏目录是上一步才建出来的：开头核对时它还不在，记号没处写，现在补上。放在建实例目录之前，记号写不进去
+        // 时还没有任何实例数据落下。
+        if checked == GameDirCheck::Absent {
+            self.guard_game_dir(GuardMode::Use).await?;
+        }
         match tokio::fs::create_dir(&dir).await {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -210,6 +220,9 @@ impl Petalfall {
     }
 
     /// 在已建好的实例目录 `versions/<id>/` 里安装 `request` 描述的版本。
+    ///
+    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，不下载、
+    /// 不写任何文件。
     pub async fn install_instance(
         &self,
         id: &str,
@@ -217,6 +230,9 @@ impl Petalfall {
         events: Option<&EventSink>,
     ) -> Result<InstanceInstallOutcome> {
         request.validate()?;
+        // 不看是不是「目录不在」：实例目录在，游戏目录就在；不在时下一步就报实例不存在。新建出来的游戏目录由
+        // create_instance_dir 补记号。
+        self.guard_game_dir(GuardMode::Use).await?;
         let dir = self.existing_instance_dir(id).await?;
         let announcer = PhaseAnnouncer::new(events, install_plan(request));
         let report_phase = |phase| announcer.enter(phase);
@@ -375,7 +391,10 @@ impl Petalfall {
     }
 
     /// 丢掉一个新建到一半的实例目录（新建被取消时）。目录已经不在不算错。
+    ///
+    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，什么都不删。
     pub async fn abandon_instance(&self, id: &str) -> Result<()> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dir = self.instance_dir(id)?;
         match tokio::fs::remove_dir_all(&dir).await {
             Ok(()) => {
@@ -388,12 +407,15 @@ impl Petalfall {
     }
 
     /// 把长任务的结局写进未完成标记。`marker` 是开始时写下的那份。
+    ///
+    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，标记不动。
     pub async fn settle_instance_marker(
         &self,
         id: &str,
         marker: IncompleteMarker,
         settlement: MarkerSettlement,
     ) -> Result<()> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let store = MarkerStore::for_version_dir(&self.instance_dir(id)?);
         let settled = match settlement {
             MarkerSettlement::Succeeded => return Ok(store.clear().await?),
@@ -415,7 +437,11 @@ impl Petalfall {
     /// 定补全方案并写下新的未完成标记，返回方案与标记。
     ///
     /// 标记文件损坏时当作没有标记：版本 JSON 可用就照它补全，不可用时照安装记录重装，连记录也没有才报不可补全。
+    ///
+    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，标记不动。
+    /// 任务中心重试补全不经列实例，不能指望调用方已经核对过。
     pub async fn begin_repair(&self, id: &str) -> Result<(RepairPlan, IncompleteMarker)> {
+        self.guard_game_dir(GuardMode::Use).await?;
         self.plan_repair(id, false).await
     }
 
@@ -424,8 +450,9 @@ impl Petalfall {
     /// 内容接着重装。
     ///
     /// 标记里记着安装内容的照它重装，整合包没导入完的报不可补全，版本 JSON 丢失或写坏时照安装记录重装，都与
-    /// [`Petalfall::begin_repair`] 一样；定不出能原样装回的内容时报不可补全，标记不动。
+    /// [`Petalfall::begin_repair`] 一样；定不出能原样装回的内容时报不可补全，标记不动。核对数据格式记号也同它。
     pub async fn begin_loader_reinstall(&self, id: &str) -> Result<(RepairPlan, IncompleteMarker)> {
+        self.guard_game_dir(GuardMode::Use).await?;
         self.plan_repair(id, true).await
     }
 
@@ -545,12 +572,16 @@ impl Petalfall {
     }
 
     /// 按方案补全实例。
+    ///
+    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，不下载、
+    /// 不写任何文件。重装方案经 [`Petalfall::install_instance`]，那里照样再核对一次。
     pub async fn repair_instance(
         &self,
         id: &str,
         plan: &RepairPlan,
         events: Option<&EventSink>,
     ) -> Result<RepairOutcome> {
+        self.guard_game_dir(GuardMode::Use).await?;
         match plan {
             RepairPlan::Reinstall(request) => {
                 let outcome = self.install_instance(id, request, events).await?;
@@ -1187,7 +1218,7 @@ mod tests {
         );
         assert_eq!(
             template_stage(&TemplateOutcome::Skipped(TemplateSkip::Disabled)),
-            "没有沿用默认设置：新建实例时沿用默认设置已在配置里关闭"
+            "没有沿用默认设置：新建实例时沿用默认设置已在设置的「游戏」分区关闭"
         );
     }
 
@@ -1952,6 +1983,406 @@ mod tests {
             }
             .validate()
             .unwrap();
+        }
+    }
+
+    // ---- 游戏目录的数据格式记号 ----
+
+    use crate::data_format::STAMP_FILE;
+    use crate::data_format::testing::{GuardFixture, with_fixture};
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    /// 测试里当作这一版的数据格式号：号为 1 时一个记号都不写，看不出写没写。
+    const OWN: u32 = 2;
+    /// 比 [`OWN`] 新的记号。
+    const NEWER_STAMP: &str = r#"{"data_format":3,"written_by":"1.1.0-dev.57"}"#;
+
+    fn own() -> GuardFixture {
+        GuardFixture {
+            own: OWN,
+            look: None,
+        }
+    }
+
+    fn stamp_file(game_dir: &Path) -> PathBuf {
+        game_dir.join(PETALFALL_META_DIR).join(STAMP_FILE)
+    }
+
+    fn put(path: &Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    /// `root` 下的全部内容：目录记成 `None`，文件记成字节。
+    fn tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+        fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let rel = path.strip_prefix(root).unwrap().to_owned();
+                if path.is_dir() {
+                    out.insert(rel, None);
+                    walk(root, &path, out);
+                } else {
+                    out.insert(rel, Some(std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    /// 当前游戏目录被更新的落樱用过、或记号读不懂：新建在建任何东西之前就报错，数据目录与游戏目录一个文件都不多。
+    #[tokio::test]
+    async fn creating_in_a_refused_game_dir_writes_nothing() {
+        let unreadable = r#"{"data_format":"3"}"#;
+        for stamp in [NEWER_STAMP, unreadable] {
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall_at(tmp.path());
+            write_version(petalfall.game_dir(), "旧实例", &vanilla_json("1.21.1"));
+            put(&stamp_file(petalfall.game_dir()), stamp);
+            let before = tree(tmp.path());
+
+            let err = with_fixture(
+                own(),
+                petalfall.create_instance_dir("新实例", &request("1.21.1", None, None)),
+            )
+            .await
+            .unwrap_err();
+
+            match err {
+                CoreError::GameDirDataTooNew {
+                    path,
+                    found,
+                    supported,
+                    written_by,
+                } if stamp == NEWER_STAMP => {
+                    assert_eq!(path, petalfall.game_dir());
+                    assert_eq!((found, supported), (3, OWN));
+                    assert_eq!(written_by.as_deref(), Some("1.1.0-dev.57"));
+                }
+                CoreError::DataFormatUnreadable { path, .. } if stamp == unreadable => {
+                    assert_eq!(path, petalfall.game_dir());
+                }
+                other => panic!("记号 {stamp} 应拒绝新建，实际是 {other:?}"),
+            }
+            assert_eq!(tree(tmp.path()), before, "记号 {stamp}");
+        }
+    }
+
+    /// 实例目录建好之后、安装开工之前，游戏目录被更新的落樱用过：安装报错，一个请求都不发，一个文件都不写。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn installing_into_a_newer_game_dir_downloads_and_writes_nothing() {
+        let server = MockServer::start().await;
+        mock_meta(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path())
+            .with_manifest_url(format!("{}/manifest.json", server.uri()))
+            .with_fabric_base(server.uri());
+        let req = request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"));
+        petalfall
+            .create_instance_dir("周末生存", &req)
+            .await
+            .unwrap();
+        put(&stamp_file(petalfall.game_dir()), NEWER_STAMP);
+        let before = tree(tmp.path());
+
+        let err = with_fixture(own(), petalfall.install_instance("周末生存", &req, None))
+            .await
+            .unwrap_err();
+
+        match err {
+            CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                ..
+            } => {
+                assert_eq!(path, petalfall.game_dir());
+                assert_eq!((found, supported), (3, OWN));
+            }
+            other => panic!("应拒绝安装，实际是 {other:?}"),
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
+        assert_eq!(tree(tmp.path()), before);
+    }
+
+    /// 游戏目录原本不存在：新建把它建出来，在安装开工之前就补上记号，成功后记号是这一版的号。记号已经等于这一版
+    /// 时再新建，记号原样不动。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_game_dir_created_by_a_new_instance_gets_the_stamp() {
+        let server = MockServer::start().await;
+        mock_meta(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path())
+            .with_manifest_url(format!("{}/manifest.json", server.uri()))
+            .with_fabric_base(server.uri());
+        let game_dir = petalfall.game_dir().to_owned();
+        assert!(!game_dir.exists());
+        let req = request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"));
+
+        with_fixture(own(), async {
+            petalfall
+                .create_instance_dir("周末生存", &req)
+                .await
+                .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(stamp_file(&game_dir)).unwrap(),
+                r#"{"data_format":2}"#,
+                "建出游戏目录时就该补上记号"
+            );
+            petalfall
+                .install_instance("周末生存", &req, None)
+                .await
+                .unwrap();
+        })
+        .await;
+
+        assert_eq!(
+            std::fs::read_to_string(stamp_file(&game_dir)).unwrap(),
+            r#"{"data_format":2}"#
+        );
+        assert!(
+            game_dir
+                .join("versions")
+                .join("周末生存")
+                .join("周末生存.json")
+                .is_file()
+        );
+
+        let equal = r#"{"data_format":2,"written_by":"1.0.0"}"#;
+        put(&stamp_file(&game_dir), equal);
+        with_fixture(
+            own(),
+            petalfall.create_instance_dir("第二个", &request("1.21.1", None, None)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(stamp_file(&game_dir)).unwrap(),
+            equal
+        );
+    }
+
+    use crate::data_format::DirLook;
+    use crate::data_format::testing::LookFn;
+    use crate::error::GameDirProblem;
+    use petalfall_release::data_format::{StampFile, parse_stamp};
+    use std::sync::{Arc, Mutex};
+
+    /// 游戏目录原本不存在：开头的核对看到目录不存在，建好 `versions/` 之后的第二次核对被拒，一种是别处刚写下了更高的
+    /// 号，一种是这一刻够不着这个位置（网络盘断开）。新建报第二次核对的错误，实例目录没建、没有未完成标记、没写记号：
+    /// 盘上只多出空的 `versions/`。
+    #[tokio::test]
+    async fn a_refused_check_after_creating_the_game_dir_creates_no_instance() {
+        for case in ["更高的号", "够不着"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall_at(tmp.path());
+            let game_dir = petalfall.game_dir().to_owned();
+            let instance = game_dir.join("versions").join("新实例");
+            // 游戏目录建出来之后的每次核对都记下那时实例目录在不在。
+            let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+            let look: LookFn = {
+                let (seen, instance) = (seen.clone(), instance.clone());
+                Arc::new(move |dir: &Path| {
+                    let look = if !dir.exists() {
+                        DirLook::Absent
+                    } else {
+                        seen.lock().unwrap().push(instance.exists());
+                        match case {
+                            "更高的号" => DirLook::Stamp(parse_stamp(StampFile::Contents(
+                                NEWER_STAMP.as_bytes(),
+                            ))),
+                            _ => DirLook::Unreachable(std::io::Error::from_raw_os_error(53)),
+                        }
+                    };
+                    Box::pin(async move { look })
+                })
+            };
+
+            let err = with_fixture(
+                GuardFixture {
+                    own: OWN,
+                    look: Some(look),
+                },
+                petalfall.create_instance_dir("新实例", &request("1.21.1", None, None)),
+            )
+            .await
+            .unwrap_err();
+
+            match (case, err) {
+                (
+                    "更高的号",
+                    CoreError::GameDirDataTooNew {
+                        path,
+                        found,
+                        supported,
+                        written_by,
+                    },
+                ) => {
+                    assert_eq!(path, game_dir);
+                    assert_eq!((found, supported), (3, OWN));
+                    assert_eq!(written_by.as_deref(), Some("1.1.0-dev.57"));
+                }
+                ("够不着", CoreError::InvalidGameDirectory { path, problem }) => {
+                    assert_eq!(path, game_dir);
+                    assert_eq!(problem, GameDirProblem::Unavailable);
+                }
+                (case, other) => panic!("{case}：应拒绝新建，实际是 {other:?}"),
+            }
+            assert_eq!(
+                *seen.lock().unwrap(),
+                [false],
+                "{case}：建好目录之后只核对一次，那时实例目录还不在"
+            );
+            assert_eq!(
+                tree(tmp.path()),
+                BTreeMap::from([
+                    (PathBuf::from(".minecraft"), None),
+                    (PathBuf::from(".minecraft").join("versions"), None),
+                ]),
+                "{case}"
+            );
+        }
+    }
+
+    use crate::instances::tests::disk_state;
+
+    /// 补全、定方案、记结局、丢弃这几个入口在表里的名字；补全按两种方案各调一次。
+    const WRITERS: [&str; 6] = [
+        "abandon_instance",
+        "settle_instance_marker",
+        "begin_repair",
+        "begin_loader_reinstall",
+        "repair_instance 补齐",
+        "repair_instance 重装",
+    ];
+
+    /// 等着补全的实例「待补全」：版本 JSON 只有一个从模拟端点下载的库，未完成标记记着当初的安装内容。各入口真走
+    /// 下去都会改盘或发请求：删目录、清标记、写新标记、下载库与版本清单。返回写下的标记。
+    async fn repairable_instance(petalfall: &Petalfall, base: &str) -> IncompleteMarker {
+        let dir = write_version(
+            petalfall.game_dir(),
+            "待补全",
+            &format!(
+                r#"{{"id":"待补全","type":"release","mainClass":"m",
+                    "libraries":[{{"name":"net.example:loader:0.16.10","url":"{base}/"}}]}}"#
+            ),
+        );
+        let marker = IncompleteMarker::pending(
+            IncompleteKind::Install {
+                spec: request("1.21.1", None, None).spec(),
+            },
+            1_700_000_000_000,
+        );
+        MarkerStore::for_version_dir(&dir)
+            .save(&marker)
+            .await
+            .unwrap();
+        marker
+    }
+
+    async fn call_writer(
+        petalfall: &Petalfall,
+        entry: &str,
+        marker: &IncompleteMarker,
+    ) -> Result<()> {
+        let id = "待补全";
+        match entry {
+            "abandon_instance" => petalfall.abandon_instance(id).await,
+            "settle_instance_marker" => {
+                petalfall
+                    .settle_instance_marker(id, marker.clone(), MarkerSettlement::Succeeded)
+                    .await
+            }
+            "begin_repair" => petalfall.begin_repair(id).await.map(drop),
+            "begin_loader_reinstall" => petalfall.begin_loader_reinstall(id).await.map(drop),
+            "repair_instance 补齐" => petalfall
+                .repair_instance(id, &RepairPlan::Complete, None)
+                .await
+                .map(drop),
+            "repair_instance 重装" => petalfall
+                .repair_instance(
+                    id,
+                    &RepairPlan::Reinstall(request("1.21.1", None, None)),
+                    None,
+                )
+                .await
+                .map(drop),
+            other => panic!("表里没有这个入口：{other}"),
+        }
+    }
+
+    fn repair_petalfall(root: &Path, server: &MockServer) -> Petalfall {
+        petalfall_at(root)
+            .with_manifest_url(format!("{}/manifest.json", server.uri()))
+            .with_fabric_base(server.uri())
+    }
+
+    /// 任务中心重试补全、旧列表上点补全时，游戏目录已被更新的落樱用过：每个入口都报游戏目录太新，一个请求都不发，
+    /// 数据目录与游戏目录里的文件内容、修改时间都不变，没有多出文件。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repair_entries_refuse_a_newer_game_dir_and_touch_nothing() {
+        for entry in WRITERS {
+            let server = MockServer::start().await;
+            mock_meta(&server).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = repair_petalfall(tmp.path(), &server);
+            let marker = repairable_instance(&petalfall, &server.uri()).await;
+            put(&stamp_file(petalfall.game_dir()), NEWER_STAMP);
+            let before = disk_state(tmp.path());
+
+            let err = with_fixture(own(), call_writer(&petalfall, entry, &marker))
+                .await
+                .unwrap_err();
+
+            match err {
+                CoreError::GameDirDataTooNew {
+                    path,
+                    found,
+                    supported,
+                    written_by,
+                } => {
+                    assert_eq!(path, petalfall.game_dir(), "{entry}");
+                    assert_eq!((found, supported), (3, OWN), "{entry}");
+                    assert_eq!(written_by.as_deref(), Some("1.1.0-dev.57"), "{entry}");
+                }
+                other => panic!("{entry} 应报游戏目录太新，实际是 {other:?}"),
+            }
+            assert_eq!(disk_state(tmp.path()), before, "{entry}");
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                0,
+                "{entry}"
+            );
+        }
+    }
+
+    /// 不换本版号：记号读不懂与号是多少无关，生产的这条路同样在碰任何文件、发任何请求之前拦下。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repair_entries_refuse_an_unreadable_stamp_and_touch_nothing() {
+        for entry in ["begin_repair", "repair_instance 补齐"] {
+            let server = MockServer::start().await;
+            mock_meta(&server).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = repair_petalfall(tmp.path(), &server);
+            let marker = repairable_instance(&petalfall, &server.uri()).await;
+            put(&stamp_file(petalfall.game_dir()), r#"{"data_format":"3"}"#);
+            let before = disk_state(tmp.path());
+
+            let err = call_writer(&petalfall, entry, &marker).await.unwrap_err();
+
+            assert!(
+                matches!(&err, CoreError::DataFormatUnreadable { path, .. } if path == petalfall.game_dir()),
+                "{entry}：{err:?}"
+            );
+            assert_eq!(disk_state(tmp.path()), before, "{entry}");
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                0,
+                "{entry}"
+            );
         }
     }
 }

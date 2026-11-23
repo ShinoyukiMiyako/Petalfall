@@ -8,6 +8,9 @@
 //! 像素换到目标屏现在的缩放，再整个夹进那块屏的工作区；哪块屏都不重叠（显示器拔了、排列换了）就居中到主
 //! 显示器。文件读不出、内容不对按首次启动处理，不拦启动。
 //!
+//! 首次启动（没有记录）时窗口由配置按默认尺寸居中到主显示器。主显示器的工作区装不下它（1080p 加 150% 缩放的
+//! 笔记本就装不下默认高度）时按同一套规则压进工作区，装得下不动，见 [`fit_first_window`]。
+//!
 //! 最大化不能在隐藏时交给 Tauri：tao 对隐藏的窗口最大化是先 `SW_MAXIMIZE`（显示并激活）再 `SW_HIDE`，前端
 //! 还没画第一帧，窗口就先闪一下底色，激活权也落到了别的窗口上。所以隐藏期间先把窗口撑到工作区大小，让前端
 //! 按最大化的尺寸排版；显示时（[`reveal`]）一次 `SetWindowPlacement(SW_SHOWMAXIMIZED)` 直接最大化地显示，
@@ -255,6 +258,18 @@ fn clamp_into(pos: i64, size: u32, start: i32, extent: u32) -> i32 {
     }) as i32
 }
 
+/// 首次启动时配置已按默认尺寸把窗口居中到主显示器，客户区是 `client`、缩放是 `scale`。客户区整个落在主显示器
+/// 的工作区里就返回 `None`，保持配置给的样子；否则按 [`place`] 的规则压进工作区，返回要摆成的客户区。
+fn fit_first_run(client: Rect, scale: f64, primary: &Screen, min: (f64, f64)) -> Option<Rect> {
+    let placement = place(
+        &Saved::from_client(client, scale, false),
+        std::slice::from_ref(primary),
+        primary,
+        min,
+    );
+    (placement.client != client).then_some(placement.client)
+}
+
 /// 窗口事件到来时窗口此刻的样子。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Frame {
@@ -447,7 +462,13 @@ pub fn install(
             tracing::error!(error = %err, ?saved, "按上次的状态摆主窗口失败，按默认尺寸居中启动");
             (None, None)
         }),
-        None => (None, None),
+        None => {
+            if let Err(err) = fit_first_window(&window) {
+                // 同上，只在窗口已销毁或事件循环已退出时发生
+                tracing::error!(error = %err, "把首次启动的主窗口压进工作区失败，按默认尺寸居中启动");
+            }
+            (None, None)
+        }
     };
     let memory = WindowMemory::new(path, record, pending_maximize);
     let target = window.clone();
@@ -501,6 +522,35 @@ fn restore(window: &WebviewWindow, saved: &Saved) -> tauri::Result<(Option<Saved
         "按上次的状态摆好了主窗口"
     );
     Ok((Some(placement.saved()), pending_maximize))
+}
+
+/// 首次启动时把超出主显示器工作区的隐藏窗口压进去（见 [`fit_first_run`]），装得下就不动。
+///
+/// 不用窗口配置的 `preventOverflow`：tauri-runtime-wry 拿客户区尺寸比工作区，再把外框按客户区尺寸居中，没算 tao
+/// 给无边框带阴影窗口加的那圈缩放边（左右下各一个边框宽，Windows 11 上顶边还有一两个像素）。客户区因此比算好的
+/// 位置偏右下：压过高度后下沿仍压在任务栏上一两个像素，压过宽度后右边出界一个边框宽，关闭键就在那一边。这里和
+/// 摆回一样按实测的外框与客户区差值摆，客户区正好落在工作区里。
+fn fit_first_window(window: &WebviewWindow) -> tauri::Result<()> {
+    let Some(primary) = window.primary_monitor()? else {
+        tracing::warn!("找不到主显示器，首次启动的主窗口按默认尺寸居中");
+        return Ok(());
+    };
+    let primary = Screen::from(&primary);
+    let client = client_rect(window)?;
+    let Some(target) = fit_first_run(client, window.scale_factor()?, &primary, min_size(window))
+    else {
+        return Ok(());
+    };
+    move_client(window, target, primary.scale)?;
+    tracing::info!(
+        ?client,
+        ?target,
+        ?primary,
+        client_position = ?window.inner_position()?,
+        client_size = ?window.inner_size()?,
+        "首次启动的主窗口超出了主显示器的工作区，已压进工作区"
+    );
+    Ok(())
 }
 
 /// 窗口配置里主窗口客户区的最小逻辑尺寸。配置里没写最小尺寸就是不限，按 0 算；最小尺寸只认配置这一处，
@@ -564,16 +614,21 @@ fn capture(window: &WebviewWindow) -> tauri::Result<Frame> {
 }
 
 fn normal_frame(window: &WebviewWindow) -> tauri::Result<Frame> {
+    Ok(Frame::Normal {
+        client: client_rect(window)?,
+        scale: window.scale_factor()?,
+    })
+}
+
+/// 客户区此刻在屏幕上的物理矩形。
+fn client_rect(window: &WebviewWindow) -> tauri::Result<Rect> {
     let position = window.inner_position()?;
     let size = window.inner_size()?;
-    Ok(Frame::Normal {
-        client: Rect {
-            x: position.x,
-            y: position.y,
-            width: size.width,
-            height: size.height,
-        },
-        scale: window.scale_factor()?,
+    Ok(Rect {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
     })
 }
 
@@ -729,7 +784,7 @@ mod native {
 mod tests {
     use super::*;
 
-    const MIN: (f64, f64) = (960.0, 720.0);
+    const MIN: (f64, f64) = (960.0, 640.0);
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
         Rect {
@@ -807,16 +862,28 @@ mod tests {
         assert_eq!(placement.client, rect(0, 0, 1366, 728));
     }
 
-    /// 1920x1080 + 150% 的笔记本：工作区只有 1280x688 逻辑像素，比最小高度 720 还矮。最小尺寸优先，
-    /// 窗口贴工作区左上，标题栏在屏上。
+    /// 1920x1080 + 150% 的笔记本：工作区 1280x688 逻辑像素，放得下最小高度 640。比工作区高的窗口压到工作区的
+    /// 高度，下沿不落到任务栏底下。
     #[test]
-    fn work_area_below_the_minimum_keeps_the_minimum_and_the_top_left() {
+    fn laptop_work_area_shrinks_a_taller_window_to_fit() {
         let laptop = screen(0, 0, 1920, 1032, 1.5);
         let placement = place(&saved(300, 200, 1440, 1080, 1.5), &[laptop], &laptop, MIN);
-        assert_eq!(placement.client, rect(300, 0, 1440, 1080));
+        assert_eq!(placement.client, rect(300, 0, 1440, 1032));
 
         let placement = place(&saved(300, 200, 1600, 1080, 1.0), &[laptop], &laptop, MIN);
-        assert_eq!(placement.client.height, 1080, "最小高度 720 x 1.5");
+        assert_eq!(placement.client, rect(0, 0, 1920, 1032));
+    }
+
+    /// 1366x768 + 125%、任务栏 60 物理像素：工作区只有约 1093x566 逻辑像素，比最小高度 640 还矮。最小尺寸优先，
+    /// 窗口贴工作区上沿，标题栏在屏上。
+    #[test]
+    fn work_area_below_the_minimum_keeps_the_minimum_and_the_top_left() {
+        let small = screen(0, 0, 1366, 708, 1.25);
+        let placement = place(&saved(100, 100, 1200, 800, 1.25), &[small], &small, MIN);
+        assert_eq!(placement.client, rect(100, 0, 1200, 800));
+
+        let placement = place(&saved(300, 200, 1600, 1080, 1.0), &[small], &small, MIN);
+        assert_eq!(placement.client.height, 800, "最小高度 640 x 1.25");
         assert_eq!(placement.client.y, 0);
     }
 
@@ -928,6 +995,154 @@ mod tests {
                     client.y + client.height as i32 <= work.y + work.height as i32,
                     "{state:?} -> {placement:?}"
                 );
+            }
+        }
+    }
+
+    /// 配置按默认尺寸居中到 `primary` 时客户区的样子：1120x720 逻辑像素换成物理像素，按工作区居中。不计无边框
+    /// 窗口那圈看不见的缩放边带来的几像素偏移，那一项单独测。
+    fn centred_default(primary: &Screen) -> Rect {
+        let width = (1120.0 * primary.scale).round() as u32;
+        let height = (720.0 * primary.scale).round() as u32;
+        let work = primary.work;
+        rect(
+            work.x + (work.width as i32 - width as i32) / 2,
+            work.y + (work.height as i32 - height as i32) / 2,
+            width,
+            height,
+        )
+    }
+
+    /// 1920x1080 + 150% 的笔记本：默认 1120x720 是 1680x1080 物理像素，居中到 1032 高的工作区时上沿出屏 24、
+    /// 下沿压进任务栏 24。压到工作区的高度、贴上沿，宽度与左右位置不动。任务栏在上边时贴的是工作区上沿。
+    #[test]
+    fn first_run_taller_than_the_work_area_is_squeezed_into_it() {
+        let laptop = screen(0, 0, 1920, 1032, 1.5);
+        assert_eq!(centred_default(&laptop), rect(120, -24, 1680, 1080));
+        assert_eq!(
+            fit_first_run(centred_default(&laptop), 1.5, &laptop, MIN),
+            Some(rect(120, 0, 1680, 1032))
+        );
+
+        let taskbar_on_top = screen(0, 48, 1920, 1032, 1.5);
+        assert_eq!(
+            fit_first_run(centred_default(&taskbar_on_top), 1.5, &taskbar_on_top, MIN),
+            Some(rect(120, 48, 1680, 1032))
+        );
+    }
+
+    /// 装得下的屏保持配置给的样子：仍是默认尺寸，位置不动。工作区正好等于默认高度也算装得下，矮一个物理像素就压。
+    #[test]
+    fn first_run_that_fits_is_left_as_configured() {
+        assert_eq!(
+            fit_first_run(centred_default(&PRIMARY), 1.0, &PRIMARY, MIN),
+            None
+        );
+        let uhd = screen(0, 0, 3840, 2088, 1.5);
+        assert_eq!(fit_first_run(centred_default(&uhd), 1.5, &uhd, MIN), None);
+
+        let exact = screen(0, 0, 1920, 1080, 1.5);
+        assert_eq!(
+            fit_first_run(centred_default(&exact), 1.5, &exact, MIN),
+            None
+        );
+        let short = screen(0, 0, 1920, 1079, 1.5);
+        assert_eq!(
+            fit_first_run(centred_default(&short), 1.5, &short, MIN),
+            Some(rect(120, 0, 1680, 1079))
+        );
+    }
+
+    /// 配置居中的是外框，无边框带阴影的窗口外框比客户区多一圈看不见的缩放边：客户区比算好的位置偏右一个边框宽，
+    /// Windows 11 上还偏下一两个像素。尺寸装得下、只是这点偏移让客户区出界时只挪位置；压过高度时偏移一并收掉。
+    #[test]
+    fn first_run_pushed_out_by_the_invisible_borders_is_moved_back() {
+        let snug = screen(0, 0, 1680, 1392, 1.5);
+        assert_eq!(
+            fit_first_run(rect(12, 158, 1680, 1080), 1.5, &snug, MIN),
+            Some(rect(0, 158, 1680, 1080))
+        );
+
+        let laptop = screen(0, 0, 1920, 1032, 1.5);
+        assert_eq!(
+            fit_first_run(rect(132, -22, 1680, 1080), 1.5, &laptop, MIN),
+            Some(rect(132, 0, 1680, 1032))
+        );
+    }
+
+    /// 只有宽度装不下：压到工作区宽、贴左沿，高度与上下位置不动。
+    #[test]
+    fn first_run_wider_than_the_work_area_only_narrows() {
+        let narrow = screen(0, 0, 1600, 1400, 1.5);
+        assert_eq!(
+            fit_first_run(centred_default(&narrow), 1.5, &narrow, MIN),
+            Some(rect(0, 160, 1600, 1080))
+        );
+    }
+
+    /// 1366x768 + 125%、任务栏 60 物理像素：工作区比最小尺寸还矮。宽压到工作区宽，高取最小高度 640 x 1.25，
+    /// 贴工作区左上，与摆回的规则一致。
+    #[test]
+    fn first_run_on_a_work_area_below_the_minimum_keeps_the_minimum() {
+        let small = screen(0, 0, 1366, 708, 1.25);
+        assert_eq!(centred_default(&small), rect(-17, -96, 1400, 900));
+        assert_eq!(
+            fit_first_run(centred_default(&small), 1.25, &small, MIN),
+            Some(rect(0, 0, 1366, 800))
+        );
+    }
+
+    /// 随机的主屏与缩放：装得下就不动；装不下时只动装不下的那一边，压完那一边落在工作区里（工作区不比最小尺寸
+    /// 小时）、尺寸只缩不放，工作区比最小尺寸还小时取最小尺寸、贴工作区起点。
+    #[test]
+    fn first_run_only_touches_the_side_that_does_not_fit() {
+        let mut rng = fastrand::Rng::with_seed(0x0f17_5ee0);
+        for _ in 0..2000 {
+            let scale = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5][rng.usize(..6)];
+            let primary = screen(
+                rng.i32(-4000..4000),
+                rng.i32(-1000..1000),
+                rng.u32(800..4000),
+                rng.u32(500..2400),
+                scale,
+            );
+            let client = centred_default(&primary);
+            let work = primary.work;
+            let fits_x = client.width <= work.width;
+            let fits_y = client.height <= work.height;
+            let fitted = fit_first_run(client, scale, &primary, MIN);
+            let Some(target) = fitted else {
+                assert!(fits_x && fits_y, "{primary:?}: 装不下却没动");
+                continue;
+            };
+            assert!(
+                !(fits_x && fits_y),
+                "{primary:?}: 装得下却动了 -> {target:?}"
+            );
+            let axes = [
+                (
+                    fits_x,
+                    (client.x, client.width),
+                    (target.x, target.width),
+                    (work.x, work.width),
+                    (MIN.0 * scale).round() as u32,
+                ),
+                (
+                    fits_y,
+                    (client.y, client.height),
+                    (target.y, target.height),
+                    (work.y, work.height),
+                    (MIN.1 * scale).round() as u32,
+                ),
+            ];
+            for (fits, before, after, (start, extent), min) in axes {
+                if fits {
+                    assert_eq!(after, before, "{primary:?}: 装得下的一边不该动");
+                } else if extent >= min {
+                    assert_eq!(after, (start, extent), "{primary:?}: 压到工作区");
+                } else {
+                    assert_eq!(after, (start, min), "{primary:?}: 最小尺寸优先");
+                }
             }
         }
     }

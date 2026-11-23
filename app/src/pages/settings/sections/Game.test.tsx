@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../../art/illustrations/test-canvas";
 import { LOADING_DELAY_MS } from "../../../domain/limits";
 import type { GameDirectoryDto } from "../../../ipc/config";
@@ -18,9 +18,9 @@ import { ShellProvider, useNav, type NavApi } from "../../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../../state/appearance";
 import { LauncherProvider } from "../../../state/launcher";
 import { invalidate } from "../../../state/resource";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
+import { render, stepFrames, stubMatchMedia, stubResizeObserver } from "../../../test/dom";
 import type { IpcRecorder } from "../../../test/fake-bridge";
-import { deferred, memoryAdviceDto, resetRecorder, settle } from "../../../test/launcher";
+import { callsOf, deferred, memoryAdviceDto, resetRecorder, settle } from "../../../test/launcher";
 import { SETTINGS_COMMANDS, SettingsCommandsProvider, type SettingsCommands } from "../commands";
 import SettingsPage from "../index";
 import s from "../settings.module.css";
@@ -28,7 +28,6 @@ import s from "../settings.module.css";
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../../ipc/bridge", async (orig) => (await import("../../../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
-let view: Rendered | undefined;
 let nav: NavApi;
 let removed: string[];
 
@@ -56,7 +55,7 @@ const wait = (ms: number) =>
 
 /** reduced 为真时按外观里打开了「减少动画」渲染（外观层据此设根部的 MotionConfig）。 */
 async function mountGame(reduced = false) {
-  view = render(
+  render(
     <AppearanceProvider initial={{ ...DEFAULT_APPEARANCE, reduceMotion: reduced }}>
       <LauncherProvider>
         <ShellProvider>
@@ -115,16 +114,10 @@ beforeEach(() => {
   vi.spyOn(console, "info").mockImplementation(() => undefined);
 });
 
-afterEach(() => {
-  view?.unmount();
-  view = undefined;
-  vi.useRealTimers();
-});
-
 describe("游戏 · 卡片之间的让位", () => {
-  it("四张卡片直接排在载入门的分区卡片栈里：一张变高时由那一层的让位把下面的卡片滑过去，分区不再自己包一层", async () => {
+  it("五张卡片直接排在载入门的分区卡片栈里：一张变高时由那一层的让位把下面的卡片滑过去，分区不再自己包一层", async () => {
     await mountGame();
-    const cards = ["内存", "版本隔离", "游戏目录", "存档备份"].map(card);
+    const cards = ["内存", "版本隔离", "新实例", "游戏目录", "存档备份"].map(card);
     const stack = cards[0].parentElement;
     if (stack === null) throw new Error("内存卡片没有父元素");
     expect(stack.classList.contains(s.sectionFlow)).toBe(true);
@@ -176,6 +169,14 @@ describe("游戏 · 内存卡的加载", () => {
     expect(memory.querySelector('[data-tone="danger"]')?.textContent).toContain("读不到本机内存信息查询内存失败");
     expect(toggle("自动分配").disabled).toBe(true);
     expect(memory.querySelector('[aria-busy="true"]')).toBeNull();
+    // 说明块里的操作是文字之后的幽灵小按钮，不是自成一块的次按钮
+    const retry = buttonIn(memory, "重试");
+    expect([retry.dataset.variant, retry.dataset.size]).toEqual(["ghost", "sm"]);
+    ipc.overrides.delete("memory_advice");
+    await click(retry);
+    expect(callsOf(ipc, "memory_advice")).toHaveLength(2);
+    expect(memory.querySelector('[data-tone="danger"]')).toBeNull();
+    expect(memory.querySelector('input[type="range"]')).not.toBeNull();
   });
 });
 
@@ -189,6 +190,12 @@ describe("游戏 · 内存提醒的进出", () => {
     const memory = card("内存");
     const notices = () => live<HTMLElement>(memory, '[data-tone="warn"]').map((el) => el.textContent);
     expect(notices()).toEqual(["需要 13 GB，本机最多给 8 GB（物理内存的一半），内存可能不够用。"]);
+    // 封顶提示随估算晚到才出现，入场停在起点、等画出第一帧才起步；起步之前就撤掉的还看不见，不播退场、随即移除。
+    // 要看它关掉自动分配后原地淡出，先推几帧让它起步
+    await stepFrames(3);
+    const capped = live<HTMLElement>(memory, '[data-tone="warn"]')[0].parentElement;
+    if (capped === null) throw new Error("封顶提示没有包裹层");
+    expect(Number(capped.style.opacity)).toBeGreaterThan(0);
 
     await click(toggle("自动分配"));
     const leaving = [...memory.querySelectorAll<HTMLElement>("[inert]")];
@@ -224,6 +231,26 @@ describe("游戏 · 其他文件夹", () => {
     // 列表是读到之后才出现的一块：自己淡入，不是同帧插进来
     const list = games.querySelector("ul");
     expect(list?.parentElement?.style.opacity).toBe("0");
+    expect(live(games, "li").map((li) => li.textContent)).toEqual([expect.stringContaining("HMCL")]);
+  });
+
+  it("目录列表读不出来：说明块写出原因，重试是文字之后的幽灵小按钮，点了重读一次，读到后列出目录", async () => {
+    ipc.overrides.set("list_game_directories", () => {
+      throw new Error("拒绝访问 game_dirs.json");
+    });
+    ipc.overrides.set("discover_game_directories", () => []);
+    await mountGame();
+    const games = card("游戏目录");
+    const alert = live<HTMLElement>(games, '[data-tone="danger"]');
+    expect(alert.map((el) => el.textContent)).toEqual(["游戏目录列表读不出来拒绝访问 game_dirs.json重试"]);
+    const retry = buttonIn(alert[0], "重试");
+    expect([retry.dataset.variant, retry.dataset.size]).toEqual(["ghost", "sm"]);
+
+    ipc.overrides.set("list_game_directories", () => [dir("默认目录", CURRENT, true), dir("HMCL", "D:\\HMCL\\.minecraft")]);
+    const before = callsOf(ipc, "list_game_directories").length;
+    await click(retry);
+    expect(callsOf(ipc, "list_game_directories")).toHaveLength(before + 1);
+    expect(live(games, '[data-tone="danger"]')).toEqual([]);
     expect(live(games, "li").map((li) => li.textContent)).toEqual([expect.stringContaining("HMCL")]);
   });
 

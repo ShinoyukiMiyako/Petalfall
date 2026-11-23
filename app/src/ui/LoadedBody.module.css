@@ -1,0 +1,26 @@
+/* 弹窗里按需读取的内容：读取中是居中的转圈加一句说明，读失败是 danger Callout 里的标题加错误原文。 */
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sk-space-10);
+  padding: var(--sk-space-32) 0;
+  font-size: var(--sk-fs-small);
+  color: var(--sk-text-2);
+}
+
+.calloutTitle {
+  display: block;
+  font-weight: var(--sk-w-medium);
+}
+
+.errorText {
+  display: block;
+  color: var(--sk-text-2);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
+  overflow-wrap: anywhere;
+  user-select: text;
+}

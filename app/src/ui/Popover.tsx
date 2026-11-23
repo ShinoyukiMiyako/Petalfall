@@ -9,6 +9,9 @@
 //   Tab 移出面板。按在锚点上不算外部，由锚点自己切换开合；按在面板之后才打开的浮层里（面板里弹出的下拉）也不算。
 // - 非模态，不圈定焦点。关闭时焦点仍在面板内（或已丢到 body）才还给打开前的元素；
 //   用户已经把焦点带去别处（点了外部、Tab 走了）就留在那里。
+// - 面板定位之前是 visibility: hidden（还不知道放在哪一侧），浏览器不让隐藏的元素获得焦点，而内容的 layout effect
+//   先于面板自己的定位执行：内容挂载时直接聚焦会落空，焦点留在触发器上，键盘打开的菜单按键全落在触发器上。
+//   打开时的初始聚焦一律等面板可见的那次提交再执行：autoFocus 由面板自己做，内容（菜单容器、下拉的过滤框）经 usePopoverInitialFocus。
 // - 开着的时候内容变高变矮（行增删、提示条出没、列表与空态互换），传 layoutKey 后外框沿 morph 弹簧形变到新尺寸，
 //   不再一帧跳过去：外框走 framer-motion 的布局动画（transform 缩放），头部、主体、底部只随位置移动、抵消外框的缩放，
 //   内容本身不被拉伸。它只在 layoutKey 变的那次重渲染取快照，内容结构的变化要体现在 layoutKey 上。
@@ -20,7 +23,9 @@
 
 import { AnimatePresence, LayoutGroup, motion, useIsPresent, useMotionValue, useReducedMotionConfig, type Transition } from "framer-motion";
 import {
+  createContext,
   useCallback,
+  useContext,
   useLayoutEffect,
   useRef,
   useState,
@@ -49,7 +54,12 @@ export interface PopoverProps {
   offset?: number;
   /** 宽度不小于锚点（下拉选择）。 */
   matchWidth?: boolean;
-  /** 打开即把焦点移进面板（面板容器本身）。 */
+  /**
+   * 宽度上限。default：360；window：不设固定上限，随内容排开，只夹在窗口内（两侧各留 8）。
+   * window 只给内容长度本身有上限的面板（选项是有长度上限的用户名称）：内容不设限时面板会铺满窗口。
+   */
+  maxWidth?: "default" | "window";
+  /** 打开即把焦点移进面板（面板容器本身），在面板定位完、可见之后。 */
   autoFocus?: boolean;
   /** 面板的角色：默认 dialog；内容自带 menu / listbox 时传 presentation，由内容承担角色。 */
   role?: "dialog" | "presentation";
@@ -162,6 +172,28 @@ export function moveFocusPastAnchor(anchor: Element, root: HTMLElement, backward
   (after ?? candidates[0])?.focus();
 }
 
+/** 面板是否已定位、可见；null 表示不在 Popover 的内容里。 */
+const PanelShownContext = createContext<boolean | null>(null);
+
+/** shown 变为 true 的那次提交里执行一次 focus；挂载时已经可见就在挂载时执行。 */
+function useFocusWhenShown(shown: boolean, focus: () => void): void {
+  // 只跟 shown：focus 每次渲染都是新函数，列进依赖会在每次重渲染时把焦点拽回去。
+  // 执行的是 shown 变化那次渲染里的 focus，读到的就是那一刻的状态
+  useLayoutEffect(() => {
+    if (shown) focus();
+  }, [shown]);
+}
+
+/**
+ * Popover 内容打开时的初始聚焦：在面板定位完、变为可见的那次提交里执行。那次提交的 DOM 已经写成可见，
+ * 焦点在绘制之前就进了面板。
+ */
+export function usePopoverInitialFocus(focus: () => void): void {
+  const shown = useContext(PanelShownContext);
+  if (shown === null) throw new Error("usePopoverInitialFocus 只能用在 Popover 的内容里");
+  useFocusWhenShown(shown, focus);
+}
+
 export function Popover({
   open,
   anchor,
@@ -169,6 +201,7 @@ export function Popover({
   placement = "bottom-start",
   offset = 8,
   matchWidth = false,
+  maxWidth = "default",
   autoFocus = false,
   role = "dialog",
   id,
@@ -216,6 +249,7 @@ export function Popover({
                 placement={placement}
                 offset={offset}
                 matchWidth={matchWidth}
+                maxWidth={maxWidth}
                 autoFocus={autoFocus}
                 role={role}
                 id={id}
@@ -257,6 +291,7 @@ interface PanelProps {
   placement: Placement;
   offset: number;
   matchWidth: boolean;
+  maxWidth: "default" | "window";
   autoFocus: boolean;
   role: "dialog" | "presentation";
   id: string | undefined;
@@ -282,11 +317,12 @@ interface Position {
   enter: Side;
 }
 
-function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidth, autoFocus, role, id, aria, className, close, layoutKey, header, footer, children }: PanelProps) {
+function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidth, maxWidth, autoFocus, role, id, aria, className, close, layoutKey, header, footer, children }: PanelProps) {
   const present = useIsPresent();
   const panelRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<Position | null>(null);
+  const shown = pos !== null;
   // 已采用的方位：之后的重新定位以它为首选
   const adopted = useRef<Side | null>(null);
   const morph = layoutKey !== undefined;
@@ -369,9 +405,12 @@ function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidt
     return () => document.removeEventListener("pointerdown", onPointerDown, true);
   }, [present, anchor, root, close]);
 
-  useLayoutEffect(() => {
-    if (autoFocus) panelRef.current?.focus();
-  }, [autoFocus]);
+  useFocusWhenShown(shown, () => {
+    if (!autoFocus) return;
+    const el = panelRef.current;
+    if (el === null) throw new Error("浮层面板没有挂上");
+    el.focus();
+  });
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "Tab" || event.defaultPrevented) return;
@@ -422,6 +461,7 @@ function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidt
       className={cx(styles.panel, className)}
       data-side={side}
       data-match-width={matchWidth || undefined}
+      data-max-width={maxWidth === "window" ? maxWidth : undefined}
       data-structured={structured || undefined}
       data-exiting={present ? undefined : ""}
       // 面板 portal 在浮层根里，DOM 上不在 React 祖先之内：作为独立的布局投影树的根来量，祖先的位移与滚动不该从它身上扣掉
@@ -433,7 +473,7 @@ function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidt
         ...cssVars({ "--popover-anchor-width": `${pos ? pos.anchorWidth : 0}px` }),
         left: pos ? pos.left : 0,
         top: pos ? pos.top : 0,
-        visibility: pos ? "visible" : "hidden",
+        visibility: shown ? "visible" : "hidden",
         ...shape,
       }}
       initial={reduced ? insertItemFade.initial : { opacity: 0, scale: 0.97 }}
@@ -488,5 +528,5 @@ function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidt
   );
   // 自成一个布局组：标题栏这类外层 LayoutGroup 会经 portal 传进来，组员互相通知取快照，而面板的投影树与它们不是同一棵，
   // 被通知的面板取了快照却等不到自己这棵树的提交，留着过期的快照。组内（外框、头尾、调用方跟着走的块）一起取快照
-  return morph ? <LayoutGroup inherit={false}>{panel}</LayoutGroup> : panel;
+  return <PanelShownContext.Provider value={shown}>{morph ? <LayoutGroup inherit={false}>{panel}</LayoutGroup> : panel}</PanelShownContext.Provider>;
 }

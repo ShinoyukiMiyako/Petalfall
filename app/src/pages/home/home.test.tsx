@@ -13,10 +13,12 @@ import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
+import { DEFAULT_UI_SHAPE, UI_SHAPE_WRITE_DELAY_MS, UiShapeProvider, type UiShape } from "../../state/ui-shape";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { accountDto, bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
+import s from "./home.module.css";
 import HomePage from "./index";
 import { world } from "./test-data";
 
@@ -36,6 +38,8 @@ let launcher: LauncherApi;
 let instances: InstanceDto[];
 let pinned: PinnedServerDto[];
 let writeText: ReturnType<typeof vi.fn>;
+/** 启动时读到的界面形状：默认没记过。 */
+let shape: UiShape;
 
 function Probe() {
   nav = useNav();
@@ -52,15 +56,17 @@ const flush = () =>
 async function mount() {
   view = render(
     <AppearanceProvider initial={DEFAULT_APPEARANCE}>
-      <LauncherProvider>
-        <ShellProvider>
-          <RemoteImageProvider resolve={async (url) => url}>
-            <Probe />
-            <HomePage route={{ page: "home" }} />
-          </RemoteImageProvider>
-          <OverlayRoot />
-        </ShellProvider>
-      </LauncherProvider>
+      <UiShapeProvider initial={shape}>
+        <LauncherProvider>
+          <ShellProvider>
+            <RemoteImageProvider resolve={async (url) => url}>
+              <Probe />
+              <HomePage route={{ page: "home" }} />
+            </RemoteImageProvider>
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </UiShapeProvider>
     </AppearanceProvider>,
   );
   await flush();
@@ -100,6 +106,7 @@ function ping(address: string): ServerStatusDto {
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW });
   resetRecorder(ipc);
+  shape = DEFAULT_UI_SHAPE;
   stubResizeObserver();
   stubMatchMedia(false);
   stubCanvas();
@@ -386,8 +393,20 @@ describe("主页：最近游玩", () => {
       });
   };
 
+  /** 在场段落里骨架层（整层 aria-hidden）中的骨架卡数。 */
+  const skeletonCards = () => {
+    const grid = recentSection()?.querySelector(`[aria-hidden="true"] > .${s.recentGrid}`);
+    if (grid === null || grid === undefined) throw new Error("最近游玩没有骨架网格");
+    return grid.children.length;
+  };
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+
   // 段落夹在两排卡片之间：加载期间不占位的话，列表一到整段插进来，下面一排被一帧顶下去
   it("实例列表晚到：加载期间整段原位占着（前 300 ms 隐身、不可交互），读出来后在同一个段落里换成卡片", async () => {
+    shape = { recentCards: 2, repairBanner: false };
     const release = holdInstances();
     await mount();
     const held = recentSection();
@@ -426,13 +445,87 @@ describe("主页：最近游玩", () => {
     expect(cardOf("红石")).toBe(kept);
   });
 
-  it("实例列表晚到且除大卡外一个都没玩过：占位的段落退场让出位置，不留空白", async () => {
+  it("实例列表晚到且除大卡外一个都没玩过：照记下的形状占位的段落退场让出位置，不留空白，记下 0 张", async () => {
+    shape = { recentCards: 2, repairBanner: false };
     instances = instances.map((i) => (i.id === "生存" ? i : { ...i, last_played_at: null }));
     const release = holdInstances();
     await mount();
     expect(recentSection()).not.toBeNull();
     await release();
     expect(recentSection()).toBeNull();
+    await advance(UI_SHAPE_WRITE_DELAY_MS);
+    expect(callsOf(ipc, "set_ui_shape")).toEqual([{ patch: { recent_cards: 0 } }]);
+  });
+
+  it("记下 3 张、实例列表还在读：首帧就按 3 张骨架占位，不按这一档的上限 5 张", async () => {
+    vi.stubGlobal("innerWidth", 1280);
+    shape = { recentCards: 3, repairBanner: false };
+    holdInstances();
+    await mount();
+    expect(shell.tier).toBe("regular");
+    expect(skeletonCards()).toBe(3);
+  });
+
+  it("记下的张数比这一档放得下的多：按这一档的上限占位", async () => {
+    // jsdom 默认 1024 宽，落在 compact 档，上限 4 张
+    shape = { recentCards: 6, repairBanner: false };
+    holdInstances();
+    await mount();
+    expect(skeletonCards()).toBe(4);
+  });
+
+  it("记下 0 张：实例列表还在读时首帧不画这一段，过了隐身期也不补；读到有卡再出现", async () => {
+    const release = holdInstances();
+    await mount();
+    expect(document.querySelector('section[aria-labelledby="home-recent-title"]')).toBeNull();
+    await advance(300);
+    expect(document.querySelector('section[aria-labelledby="home-recent-title"]')).toBeNull();
+    await release();
+    // 加载门已过了隐身期，按骨架的最短停留再等一拍才算读完
+    await advance(300);
+    const titles = [...(recentSection() as HTMLElement).querySelectorAll<HTMLButtonElement>('button[aria-label^="打开「"]')].map((b) => b.textContent);
+    expect(titles).toEqual(["创造", "红石"]);
+  });
+
+  it("列表落定后记下这次的张数：攒 1 秒写一次，与记下的不同才写", async () => {
+    shape = { recentCards: 3, repairBanner: false };
+    const release = holdInstances();
+    await mount();
+    await release();
+    await advance(UI_SHAPE_WRITE_DELAY_MS - 1);
+    expect(callsOf(ipc, "set_ui_shape")).toEqual([]);
+    await advance(1);
+    expect(callsOf(ipc, "set_ui_shape")).toEqual([{ patch: { recent_cards: 2 } }]);
+  });
+
+  it("记下的就是这次的张数：不写", async () => {
+    shape = { recentCards: 2, repairBanner: false };
+    await mount();
+    await advance(5 * UI_SHAPE_WRITE_DELAY_MS);
+    expect(callsOf(ipc, "set_ui_shape")).toEqual([]);
+  });
+
+  it("记下的是最宽一档的张数：compact 档只列 4 张，玩过的有 6 个就记 6", async () => {
+    instances = [
+      instanceDto("生存", { last_played_at: NOW - MINUTE }),
+      ...["一", "二", "三", "四", "五", "六", "七"].map((name, i) => instanceDto(name, { last_played_at: NOW - (i + 2) * HOUR })),
+    ];
+    await mount();
+    const titles = [...(recentSection() as HTMLElement).querySelectorAll<HTMLButtonElement>('button[aria-label^="打开「"]')].map((b) => b.textContent);
+    expect(titles).toEqual(["一", "二", "三", "四"]);
+    await advance(UI_SHAPE_WRITE_DELAY_MS);
+    expect(callsOf(ipc, "set_ui_shape")).toEqual([{ patch: { recent_cards: 6 } }]);
+  });
+
+  it("实例列表读取失败：不把失败记成 0 张", async () => {
+    shape = { recentCards: 2, repairBanner: false };
+    ipc.overrides.set("list_instances", () => {
+      throw new IpcError("io_failed", "versions 目录读不出来");
+    });
+    await mount();
+    expect(launcher.state.status.instances.kind).toBe("error");
+    await advance(5 * UI_SHAPE_WRITE_DELAY_MS);
+    expect(callsOf(ipc, "set_ui_shape")).toEqual([]);
   });
 
   it("实例列表读取失败后重试：不在的段落不为重读先插进隐身占位，读到有卡再出现", async () => {
@@ -449,8 +542,10 @@ describe("主页：最近游玩", () => {
     expect(recentSection()).toBeNull();
 
     failing = false;
-    const heroError = [...document.querySelectorAll<HTMLElement>("[data-pad]")].find((card) => card.textContent?.includes("实例列表读不出来"));
-    if (heroError === undefined) throw new Error("大卡没有原位报错");
+    // 洞察的累计时长与当日详情也写「实例列表读不出来」：按大卡自己的加载区找到大卡，不按文字找
+    const heroError = document.querySelector(`.${s.heroLoadable}`)?.closest<HTMLElement>("[data-span]");
+    if (heroError === null || heroError === undefined) throw new Error("找不到继续游玩大卡");
+    expect(heroError.textContent).toContain("实例列表读不出来");
     click(buttonByText("重试", heroError));
     await flush();
     expect(launcher.state.status.instances.kind).toBe("loading");
@@ -477,9 +572,11 @@ describe("主页：最近游玩", () => {
       throw new Error("设置的读取还没发出");
     };
     ipc.overrides.set("get_config", () => new Promise((resolve) => (releaseConfig = () => resolve(configDto({ selected_version: "创造" })))));
+    shape = { recentCards: 2, repairBanner: false };
     await mount();
     const held = recentSection();
-    expect(held?.querySelector('button[aria-label^="打开「"]')).toBeNull();
+    if (held === null) throw new Error("设置还在读，记下 2 张的最近游玩却没有占位");
+    expect(held.querySelector('button[aria-label^="打开「"]')).toBeNull();
     await act(async () => {
       releaseConfig();
       await settle();
@@ -582,6 +679,41 @@ describe("主页：游玩日历与洞察", () => {
     click(bar("10月27日"));
     expect(text()).toContain("这天没有游玩");
     expect(text()).toContain("休息也是游戏的一部分。");
+  });
+
+  it("停在主页时重扫因数据格式被拒：常玩加载器、累计时长与当日实例换成读不到，淡出中的旧层留着最后一次的值，不按清空的列表重算", async () => {
+    await mount();
+    const tiles = (prefix: string, leaving: boolean) =>
+      [...document.querySelectorAll<HTMLElement>('[role="group"][aria-label]')]
+        .filter((g) => g.getAttribute("aria-label")?.startsWith(prefix) && (g.closest("[inert]") !== null) === leaving)
+        .map((g) => g.getAttribute("aria-label"));
+    const dayDetail = document.querySelector<HTMLElement>(`.${s.dayDetail}`);
+    if (dayDetail === null) throw new Error("找不到当日详情");
+    expect(tiles("常玩加载器", false)).toEqual(["常玩加载器 Fabric，近 30 天占 80%"]);
+    expect(tiles("累计时长", false)).toEqual(["累计时长 43 小时，4 个实例"]);
+
+    // 同一次提交里实例列表清空、切片置为出错（store 的 adoptScanRefusal）
+    ipc.overrides.set("list_instances", () => {
+      throw new IpcError("game_dir_data_too_new", "游戏目录的数据格式 3 比这一版认得的 2 新", { path: "D:\\Games\\.minecraft", found: 3, supported: 2, written_by: "1.1.0-dev.57", written_by_channel: "dev" });
+    });
+    await act(async () => {
+      await expect(launcher.actions.refreshInstances()).rejects.toThrow("数据格式 3");
+    });
+    await flush();
+    expect(launcher.state.status.instances.kind).toBe("error");
+    expect(launcher.state.instances).toEqual([]);
+
+    // 在场的换成读不到；淡出中的旧层还在文档里（带 inert），写的仍是出错前的值，不是「暂无」「0 个实例」「已被删除」
+    expect(tiles("常玩加载器", false)).toEqual(["常玩加载器 读不到"]);
+    expect(tiles("常玩加载器", true)).toEqual(["常玩加载器 Fabric，近 30 天占 80%"]);
+    expect(tiles("累计时长", false)).toEqual(["累计时长 读不到，实例列表读不出来"]);
+    expect(tiles("累计时长", true)).toEqual(["累计时长 43 小时，4 个实例"]);
+    const leavingRows = [...dayDetail.querySelectorAll<HTMLElement>("[inert] [aria-label]")].map((el) => el.getAttribute("aria-label"));
+    expect(leavingRows).toEqual(["打开「生存」"]);
+    expect(dayDetail.textContent).toContain("实例列表读不出来");
+    expect(dayDetail.textContent).not.toContain("当天玩的实例已被删除");
+    expect(text()).not.toContain("暂无");
+    expect(text()).not.toContain("0 个实例");
   });
 
   it("游戏退出：游玩记录与大卡的存档重取，这一局新建的存档进信息行；单纯重扫实例列表不重取", async () => {
@@ -1495,6 +1627,27 @@ describe("主页：固定服务器的「加入」", () => {
     expect(picker()).toBeNull();
   });
 
+  it("记住的实例正在移到其他游戏目录：「加入」aria-disabled，原因与启动入口同一句，点了不启动", async () => {
+    pinned = [{ name: "晨星", address: "play.example", instance: "创造" }];
+    instances = instances.map((i) => (i.id === "创造" ? { ...i, activity: "moving" } : i));
+    await mount();
+    const join = joinButton();
+    expect(join.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      join.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = join.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("「加入」悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe("实例正在移到其他游戏目录，完成后才能启动");
+    click(join);
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+    expect(picker()).toBeNull();
+  });
+
   it("实例选择里选中的正是运行中的实例：「加入服务器」aria-disabled 并写明原因，点了既不保存也不启动；换一个实例就能加入", async () => {
     await mount();
     await act(async () => {
@@ -1534,6 +1687,42 @@ describe("主页：固定服务器的「加入」", () => {
     await flush();
     expect(callsOf(ipc, "set_pinned_server_instance")).toEqual([{ address: "play.example", instance: "创造" }]);
     expect(launcher.state.launchPrompt).toEqual({ instanceId: "创造", occupantId: "生存", occupantPhase: "running", quickPlay: SERVER });
+  });
+
+  it("实例选择里选中的实例正在移到其他游戏目录：照常列出，「加入服务器」带同一句原因禁用，点了既不保存也不启动；换一个实例就能加入", async () => {
+    instances = instances.map((i) => (i.id === "生存" ? { ...i, activity: "moving" } : i));
+    await mount();
+    click(joinButton());
+    await flush();
+    const panel = picker();
+    if (panel === null) throw new Error("没有弹出实例选择");
+    expect(radios(panel).map((o) => o.getAttribute("aria-checked"))).toEqual(["true", "false", "false"]);
+    const remember = panel.querySelector<HTMLElement>('[role="checkbox"]');
+    if (remember === null) throw new Error("没有「记住这个选择」");
+    click(remember);
+    const submit = buttonByText("加入服务器", panel);
+    expect(submit.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      submit.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = submit.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("「加入服务器」悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe("实例正在移到其他游戏目录，完成后才能启动");
+    click(submit);
+    await flush();
+    expect(callsOf(ipc, "set_pinned_server_instance")).toHaveLength(0);
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+
+    click(radios(panel)[1]);
+    const enabled = buttonByText("加入服务器", panel);
+    expect(enabled.getAttribute("aria-disabled")).toBeNull();
+    click(enabled);
+    await flush();
+    expect(callsOf(ipc, "set_pinned_server_instance")).toEqual([{ address: "play.example", instance: "创造" }]);
+    expect(callsOf(ipc, "launch_game").map((a) => [a.versionId, a.quickPlay])).toEqual([["创造", SERVER]]);
   });
 
   it("「不再记住实例」清掉绑定；「更换加入用的实例」打开实例选择且默认勾选记住", async () => {
@@ -1614,18 +1803,76 @@ describe("主页：账户皮肤", () => {
     expect(figure?.closest("button")?.getAttribute("aria-label")).toBe("管理账户");
   });
 
-  it("皮肤查询失败：照常画剪影立绘，不弹通知，原因写进控制台", async () => {
+  it("皮肤查询失败：照常画人偶立绘，不弹通知，原因写进控制台", async () => {
     const failure = new IpcError("io", "账户文件读不出来");
     ipc.overrides.set("skin_info", () => {
       throw failure;
     });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     await mount();
-    expect(document.querySelector('[data-sk-art="skin"]')?.getAttribute("data-art")).toBe("silhouette");
+    expect(document.querySelector('[data-sk-art="skin"]')?.getAttribute("data-art")).toBe("mannequin");
     expect(launcher.state.toasts).toEqual([]);
     const skinWarnings = warn.mock.calls.filter(([message]) => String(message).includes("皮肤"));
     expect(skinWarnings).toHaveLength(1);
     expect(skinWarnings[0][1]).toBeInstanceOf(IpcError);
     expect((skinWarnings[0][1] as IpcError).message).toBe("账户文件读不出来");
+  });
+
+  it("刷新账户后皮肤信息重取失败：立绘沿用上次读到的皮肤，不退回人偶，原因写进控制台", async () => {
+    const account = accountDto();
+    ipc.overrides.set("skin_info", () => ({ kind: "remote", sha1: "cd".repeat(20), model: "wide", hat: true }));
+    ipc.overrides.set("refresh_account", () => account);
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["skin"]) })));
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 64, height: 64 })));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await mount();
+    await flush();
+    const art = () => document.querySelector<HTMLElement>('[data-sk-art="skin"]')?.dataset.art;
+    expect(art()).toBe("skin");
+    const skinCalls = callsOf(ipc, "skin_info").length;
+
+    ipc.overrides.set("skin_info", () => {
+      throw new IpcError("io", "账户文件读不出来");
+    });
+    await act(async () => {
+      await launcher.actions.refreshAccount(account.uuid);
+    });
+    await flush();
+    expect(callsOf(ipc, "skin_info").slice(skinCalls)).toEqual([{ accountUuid: account.uuid }]);
+    expect(art()).toBe("skin");
+    // 这一次以失败落定（不是还停在重取中），提示写的是实际画出来的样子
+    const skinWarnings = warn.mock.calls.filter(([message]) => String(message).includes("皮肤")).map(([message]) => message);
+    expect(skinWarnings).toEqual(["[home] 当前账户的皮肤信息读不出来，立绘沿用上次读到的皮肤"]);
+  });
+
+  it("切换到皮肤信息还没读到的账户：立绘留着上一位的皮肤，读到「没有皮肤」才换成人偶", async () => {
+    const first = accountDto();
+    const second = accountDto({ uuid: "00000000-0000-0000-0000-00000000a002", name: "Alex" });
+    let current = first;
+    bootOverrides(ipc, { accounts: [first, second], instances, config: configDto({ selected_version: "生存" }) });
+    ipc.overrides.set("list_instances", () => instances);
+    ipc.overrides.set("current_account", () => current);
+    ipc.overrides.set("set_current_account", (args: IpcArgs) => {
+      current = args.uuid === second.uuid ? second : first;
+      return null;
+    });
+    const secondSkin = deferred<null>();
+    ipc.overrides.set("skin_info", (args: IpcArgs) => (args.accountUuid === second.uuid ? secondSkin.promise : { kind: "remote", sha1: "ef".repeat(20), model: "wide", hat: true }));
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["skin"]) })));
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 64, height: 64 })));
+    await mount();
+    await flush();
+    const art = () => document.querySelector<HTMLElement>('[data-sk-art="skin"]')?.dataset.art;
+    expect(art()).toBe("skin");
+
+    await act(async () => {
+      await launcher.actions.selectAccount(second.uuid);
+    });
+    await flush();
+    expect(document.querySelector("h1")?.textContent).toContain("Alex");
+    expect(art()).toBe("skin");
+    secondSkin.resolve(null);
+    await flush();
+    expect(art()).toBe("mannequin");
   });
 });

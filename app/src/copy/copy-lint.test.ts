@@ -320,11 +320,6 @@ const EXCEPTIONS: readonly { file: string; text: string; why: string }[] = [
   { file: "../ui/ConfirmDialog.tsx", text: "确定", why: "列的就是确认键不许用的泛称" },
   { file: "../pages/settings/commands.ts", text: "打开启动器日志目录", why: "设置页没接上真实命令时抛给开发者的动作名" },
   { file: "../state/errors.ts", text: "文件 IO 失败: ", why: "比对后端 Io 错误正文的前缀，不是界面文案，半角冒号是后端的原样" },
-  {
-    file: "../setup/copy.ts",
-    text: `从测试版换回预览版时，先关掉这个窗口，在 Windows 设置的「应用」里卸载 ${HOLE}，卸载时不要勾选「删除应用程序数据」；再重新运行这个安装包并沿用默认的安装位置，设置、账户和游戏文件都会保留。`,
-    why: "教用户在 Windows 设置「应用」页里操作，系统自己的叫法就是卸载",
-  },
 ];
 
 function isExempt(entry: string): boolean {
@@ -480,7 +475,10 @@ describe("任务失败原因与后端码表对齐", () => {
       world_in_use: "这个存档正被游戏打开",
       install_unsafe_path: "版本文件里有指向游戏目录之外的路径，已拒绝写入",
       instance_move_verify_failed: "复制出的文件和原件对不上，这次移动已放弃，原件没动",
+      game_dir_changed: "当前游戏目录已经换了，切回发起任务时的游戏目录再重试",
       loader_library_missing: "加载器自带的文件缺失或已损坏，只能由加载器安装器生成，需要重新安装加载器",
+      game_dir_data_too_new: `当前游戏目录被更新的${APP_NAME}用过，这个版本读不了里面的实例`,
+      data_format_unreadable: "当前游戏目录里的格式记录读不懂，为了不弄坏里面的实例，这次没有动它",
     });
   });
 

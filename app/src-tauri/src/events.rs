@@ -4,6 +4,8 @@
 //! [`CoreEventForwarder`]，把它的发送端交给门面方法，转发任务把收到的每条 [`CoreEvent`] 译成
 //! [`CoreEventPayload`] 再 `emit` 出去。负载带 `task_id`：前端下载队列据此把进度归到对应任务，
 //! 不带 `task_id`（为 `null`）的事件只属于启动会话。
+//!
+//! 账户变更不属于哪一条命令，后台续期与启动时都会发，另走门面上的广播通道，由 [`forward_account_changes`] 常驻转发。
 
 use petalfall_core::{CoreEvent, EventSink};
 use serde::Serialize;
@@ -17,6 +19,11 @@ pub const DEVICE_CODE_EVENT: &str = "petalfall://device-code";
 
 /// 游戏进程的每一行 stdout / stderr。
 pub const GAME_LOG_EVENT: &str = "petalfall://game-log";
+
+/// 后台改写了账户记录（后台提前续期、启动前的验证与续期、启动时顺带同步的外置档案）时推送，负载
+/// [`AccountChangedPayload`]。前端重读账户列表，并让这个账户的皮肤查询失效。账户页的刷新、登录、切换与删除由界面
+/// 自己发起，做完就重读，不推这个事件。
+pub const ACCOUNT_CHANGED_EVENT: &str = "petalfall://account-changed";
 
 /// 推送一个事件；失败（窗口已关、无监听者）只记日志，不影响命令本身的结果。
 pub fn emit<S: Serialize + Clone>(app: &AppHandle, event: &str, payload: S) {
@@ -100,6 +107,44 @@ impl From<CoreEvent> for CoreEventKind {
             }
         }
     }
+}
+
+/// [`ACCOUNT_CHANGED_EVENT`] 的负载：改了的账户。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccountChangedPayload {
+    pub uuid: String,
+}
+
+/// 把门面的账户变更通知（[`petalfall_core::Petalfall::subscribe_account_changes`]）逐条交给 `deliver`，直到门面全部
+/// 放下、通道关闭。积压挤掉了几条时记 warn 接着转：丢的那几个账户要等下一次重读才换上新名字与皮肤。
+pub fn forward_account_changes(
+    mut changes: tokio::sync::broadcast::Receiver<String>,
+    deliver: impl Fn(AccountChangedPayload) + Send + 'static,
+) -> tauri::async_runtime::JoinHandle<()> {
+    use tokio::sync::broadcast::error::RecvError;
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match changes.recv().await {
+                Ok(uuid) => deliver(AccountChangedPayload { uuid }),
+                Err(RecvError::Lagged(missed)) => tracing::warn!(
+                    missed,
+                    "账户变更通知积压，挤掉了几条：那几个账户的界面要等下一次重读才更新"
+                ),
+                Err(RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+/// 转发到前端的 [`ACCOUNT_CHANGED_EVENT`]。订阅要在门面开始后台续期之前拿好，见 [`forward_account_changes`]。
+pub fn forward_account_changes_to_app(
+    app: &AppHandle,
+    changes: tokio::sync::broadcast::Receiver<String>,
+) {
+    let app = app.clone();
+    forward_account_changes(changes, move |payload| {
+        emit(&app, ACCOUNT_CHANGED_EVENT, payload)
+    });
 }
 
 /// 一次命令的门面事件转发：持有交给门面的发送端与后台转发任务。
@@ -373,6 +418,79 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&stage).unwrap(),
             json!({ "task_id": "all#1", "step": u32::MAX, "kind": "stage", "message": "准备更新" })
+        );
+    }
+
+    fn account_change_log() -> (
+        Arc<Mutex<Vec<AccountChangedPayload>>>,
+        impl Fn(AccountChangedPayload) + Send + 'static,
+    ) {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let sink = log.clone();
+        (log, move |payload| sink.lock().unwrap().push(payload))
+    }
+
+    /// 门面在后台改了哪个账户，转发出去的负载就是 `{ uuid }`，按发生的先后；门面全部放下、通道关闭后转发任务自己结束。
+    #[tokio::test]
+    async fn account_changes_are_forwarded_in_order_until_the_channel_closes() {
+        let (changes, receiver) = tokio::sync::broadcast::channel(8);
+        let (log, deliver) = account_change_log();
+        let forwarder = forward_account_changes(receiver, deliver);
+        for uuid in ["1111aaaa", "2222bbbb", "1111aaaa"] {
+            changes.send(uuid.to_owned()).unwrap();
+        }
+        drop(changes);
+        tokio::time::timeout(std::time::Duration::from_secs(5), forwarder)
+            .await
+            .expect("通道关闭后转发任务应结束")
+            .unwrap();
+
+        let log = log.lock().unwrap();
+        assert_eq!(
+            log.iter().map(|p| p.uuid.as_str()).collect::<Vec<_>>(),
+            ["1111aaaa", "2222bbbb", "1111aaaa"]
+        );
+        assert_eq!(
+            serde_json::to_value(&log[1]).unwrap(),
+            json!({ "uuid": "2222bbbb" })
+        );
+    }
+
+    /// 积压挤掉了几条：记下之后接着转后面的，不停下。改成遇到任何接收错误就退出，后面两条就转不出去。
+    #[tokio::test]
+    async fn lagged_account_changes_keep_forwarding_the_rest() {
+        let (changes, receiver) = tokio::sync::broadcast::channel(2);
+        for uuid in ["a1", "b2", "c3", "d4"] {
+            changes.send(uuid.to_owned()).unwrap();
+        }
+        drop(changes);
+        let (log, deliver) = account_change_log();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            forward_account_changes(receiver, deliver),
+        )
+        .await
+        .expect("通道关闭后转发任务应结束")
+        .unwrap();
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                AccountChangedPayload { uuid: "c3".into() },
+                AccountChangedPayload { uuid: "d4".into() }
+            ]
+        );
+    }
+
+    /// 前端按同一个事件名订阅；两边各写一份，改了一边这里就失败。
+    #[test]
+    fn front_end_subscribes_to_the_same_account_changed_event() {
+        let ts = include_str!("../../src/ipc/accounts.ts");
+        assert!(
+            ts.contains(&format!(
+                "export const ACCOUNT_CHANGED_EVENT = \"{ACCOUNT_CHANGED_EVENT}\";"
+            )),
+            "app/src/ipc/accounts.ts 里的事件名与后端不一致"
         );
     }
 

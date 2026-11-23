@@ -209,6 +209,13 @@ export const ISOLATION_OPTIONS = [
 
 export const RECOMMENDED_ISOLATION = "mod_loaders_and_non_release";
 
+/** 新实例的默认设置在实例设置里保存，这里只管新建与导入整合包时沿不沿用。 */
+export const NEW_INSTANCE_COPY = {
+  title: "新实例",
+  template: "沿用默认设置",
+  templateDesc: "新建实例与导入整合包时，把在实例设置里保存的默认设置（键位、视距、服务器列表）补进新实例，实例里已有的文件不动。关掉后一律不沿用，已保存的默认设置仍然留着。",
+} as const;
+
 export const GAME_DIR_COPY = {
   title: "游戏目录",
   subtitle: "版本、库文件与共用资源放在这里，实例的存档按隔离策略分开",
@@ -261,12 +268,12 @@ export const APPEARANCE_COPY = {
   motionTitle: "背景与动效",
   petals: "飘落花瓣",
   petalsDesc: "主页背景少量像素花瓣缓慢飘落，鼠标经过时轻轻避让",
-  petalsReduced: "「减少动画」已开启，花瓣会停在原处不动",
+  petalsReduced: "「减少动画」已开启，花瓣换成一幅静止的散落画面，不再飘动",
   panorama: "樱花林全景背景",
   panoramaDesc: "主页背景换成原版的樱花林全景，花瓣照常飘在它前面。全景图读取自你本机的游戏文件。",
   panoramaMissing: "本机还没有带樱花林全景的游戏版本，装好 1.20 系列任一版本后可以开启",
   reduceMotion: "减少动画",
-  reduceMotionDesc: "停掉花瓣飘落、卡面视差与页面过渡。系统开了「减少动态效果」时无论这里怎么设都会生效。",
+  reduceMotionDesc: "花瓣不再飘落，卡面视差、按下时的收缩等各处的位移缩放都停掉，页面切换只留淡入。系统开了「减少动态效果」时无论这里怎么设都会生效。",
   systemReduced: "系统已开启",
   coverBackground: "实例卡面默认背景",
   coverBackgroundDesc: "实例的卡面背景设为跟随时用它。方块平铺取封面方块的材质，读取自你本机的游戏文件。",
@@ -288,6 +295,8 @@ export const ABOUT_COPY = {
   copied: "已复制",
   versionRow: "版本",
   channelRow: "发布通道",
+  /** 没走发布流程的本机与 fork 构建（构建信息的通道为 local）：品牌卡的通道标、「发布通道」一行与复制文本都写它。 */
+  localBuild: "本机构建",
   builtRow: "构建日期",
   licenseRow: "开源协议",
   assetLicenseRow: "素材许可",
@@ -311,6 +320,10 @@ export const ABOUT_COPY = {
   licensesHeadName: "名称",
   licensesHeadVersion: "版本",
   licensesHeadLicense: "许可证",
+  usageNotice: "使用须知",
+  usageNoticeDesc: `${APP_NAME}做什么、不做什么，下载来源、账户与免责的说明`,
+  privacyNotice: "隐私说明",
+  privacyNoticeDesc: `${APP_NAME}联网访问哪些地址、在这台电脑上存了什么`,
   licenseText: "协议全文",
   licenseTextDesc: `${APP_LICENSE} 的英文原文，随应用分发`,
   licenseTextSubtitle: `${APP_LICENSE}，协议全文只有英文版`,

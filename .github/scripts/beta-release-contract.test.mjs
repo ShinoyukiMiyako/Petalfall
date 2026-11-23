@@ -3,14 +3,29 @@
 // 放在 node 测试里，是因为 dev-build.yml 每次推送、beta-release.yml 的 build 作业在编译之前都跑 node --test，契约在 CI 上生效。
 //
 // 只看真正执行的行：文件头和步骤上方的注释里也写着这些键和命令，拿全文找子串的话，删掉真正的那一行照样能过。
-// .github/scripts 下的脚本只用 node 自带的模块，没有自己的依赖，用不了 YAML 解析器，于是反过来收紧写法：先把每一行分成
-// 结构行和块纯量正文（run: | 下面的脚本），结构行只许用这份文件现在用到的几种写法。锚点、别名、合并键能把一个作业的
-// 凭据原样搬进另一个作业，带引号的键、多行纯量、flow 集合逐行看不出 YAML 最后把它折成了什么，按行比对的检查都会被
-// 绕过去，所以这些写法一律判失败；真要用，先把这里的解析补上。
+// 逐行解析与按作业、步骤取行的规则在 workflow-lines.mjs，为什么收紧 YAML 写法也写在那里。
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
+
+import {
+  blockOf,
+  codeOf,
+  exposedOf,
+  job,
+  jobBlock,
+  jobKeys,
+  jobLines,
+  jobNames,
+  parseWorkflow,
+  secretsIn,
+  stepKeys,
+  stepText,
+  steps,
+  structure,
+  tokenRefs,
+} from './workflow-lines.mjs';
 
 const WORKFLOW = readFileSync(new URL('../workflows/beta-release.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const UPDATER_RS = readFileSync(new URL('../../app/src-tauri/src/commands/updater.rs', import.meta.url), 'utf8');
@@ -64,229 +79,53 @@ const BUNDLE_SCRIPT = [
   'echo "installer-name=$(basename "$installer")" >> "$GITHUB_OUTPUT"',
 ];
 
+// 下面三步是挡违规构建的闸，脚本同样逐行钉死（不含 shell 注释），理由与打包那一步相同：前面插一句 exit 0、
+// 命令后面接 || true、包进一个从不调用的函数，检查就不再执行，构建却照样成功。
+// 读出各通道已发布的版本：三条命令一条不少，模式只由分支定，beta 上是 release，别处的演练是 rehearsal。
+const HEADS_SCRIPT = [
+  'mode=release',
+  'if [ "$GITHUB_REF" != refs/heads/beta ]; then',
+  'mode=rehearsal',
+  'fi',
+  'node .github/scripts/release-heads.mjs read "$GITHUB_REPOSITORY" "$HEADS"',
+  'node .github/scripts/release-heads.mjs gate beta "$mode" "$VERSION" "$HEADS"',
+  'node .github/scripts/release-heads.mjs data-format beta "$mode" "$HEADS" "$GITHUB_REPOSITORY"',
+];
+
+// 核对载荷头：读回的四项交给 release-heads.mjs payload 按源码核对，通过之后才写出给构建信息用的三项。
+const PAYLOAD_SCRIPT = [
+  'fields="$(cargo run --release --locked -p petalfall-setup-payload --bin inspect-setup -- "$BOOTSTRAP")"',
+  "IFS=$'\\t' read -r magic header_version data_format caps <<< \"$fields\"",
+  'node .github/scripts/release-heads.mjs payload "$VERSION" "$magic" "$header_version" "$data_format" "$caps"',
+  'echo "magic=$magic" >> "$GITHUB_OUTPUT"',
+  'echo "data-format=$data_format" >> "$GITHUB_OUTPUT"',
+  'echo "caps=$caps" >> "$GITHUB_OUTPUT"',
+];
+
+// 核对内嵌的更新公钥：两个 .pub 文件都找，去掉首尾空白的写法与注入那一行相同；空串对 grep -F 处处命中、多行只要一行
+// 命中就算，所以先要求是一行 base64。
+const PUBKEYS_SCRIPT = [
+  'for pub in .github/dev-updater.pub .github/release-updater.pub; do',
+  `key="$(node -p "require('fs').readFileSync(process.argv[1], 'utf8').trim()" "$pub")"`,
+  'if ! [[ "$key" =~ ^[A-Za-z0-9+/]+=*$ ]]; then',
+  'echo "::error::$pub 去掉首尾空白后不是一行 base64"',
+  'exit 1',
+  'fi',
+  `if ! grep -qF -e "$key" -- ${PETALFALL_EXE}; then`,
+  'echo "::error::Petalfall.exe 里没有内嵌 $pub 里的更新公钥"',
+  'exit 1',
+  'fi',
+  'done',
+];
+
+const LOCKED_CLI_CALL = 'node .github/scripts/locked-cli.mjs app/pnpm-lock.yaml "$CLI_VERSION" > "$RUNNER_TEMP/tauri-cli.tsv"';
+
 /** 允许的 flow 集合，整行比对。flow 集合能跨行、能嵌套，逐行看不出折成了什么，只放行现有的这几处。 */
 const FLOW_ALLOWED = ['branches: [beta]', 'permissions: {}', 'needs: [build, sign]', 'needs: [build, stage]'];
 
-const PLAIN_KEY = /^([A-Za-z_][A-Za-z0-9_-]*):(?=\s|$)(.*)$/s;
-const QUOTED = /^(?:"(?:[^"\\]|\\.)*"|'(?:[^']|'')*')/;
-const BLOCK_HEADER = /^[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:\s+#.*)?$/;
-
-/**
- * 把工作流逐行分成 blank、comment、structure（YAML 结构行）和 content（块纯量正文）。块纯量的正文是比它的键更深的行
- * 和其间的空行，正文里的 &&、2>&1、*.mjs 都是 shell，不当 YAML 看。结构行只认 `键: 值`、`- 键: 值`、`- 值` 三种，
- * 键只认不带引号的普通键；认不出、或用了 problems 里那些写法的，逐条记下行号。
- *
- * 单行纯量下面跟着更深的结构行就是续行：YAML 把它折进上一行的值，`if:` 下面多一行 `|| true` 就放宽了条件，
- * 而按行看那一行 if 还是原样。注释行之后再出现更深的行，YAML 会直接报错，所以找下一行时跳过注释与空行，
- * 比它深一律判失败，不必分辨是哪一种。
- */
-function parseWorkflow(text) {
-  const lines = [];
-  const problems = [];
-  let blockParent = null;
-  let scalarColumn = null;
-  for (const [index, raw] of text.split('\n').entries()) {
-    // libyaml 一系的解析器把单独的 CR、NEL、U+2028、U+2029 也当换行，按 \n 切行会把它们后面藏着的结构当成同一行
-    if (/[\r\u0085\u{2028}\u{2029}]/u.test(raw)) problems.push(`第 ${index + 1} 行含有 YAML 会当成换行的字符`);
-    const indent = raw.length - raw.replace(/^ +/, '').length;
-    const body = raw.slice(indent);
-    if (blockParent !== null && (body.trim() === '' || indent > blockParent)) {
-      lines.push({ no: index + 1, raw, kind: 'content', indent });
-      continue;
-    }
-    blockParent = null;
-    if (body.trim() === '' || body.startsWith('#')) {
-      lines.push({ no: index + 1, raw, kind: body.trim() === '' ? 'blank' : 'comment', indent });
-      continue;
-    }
-
-    const line = { no: index + 1, raw, kind: 'structure', indent, column: indent, item: false, key: null, valueKind: null };
-    lines.push(line);
-    const fail = (why) => problems.push(`第 ${line.no} 行${why}：${raw.trim()}`);
-    if (scalarColumn !== null && indent > scalarColumn) fail('比上一行的纯量更深，YAML 会把它折进那个值');
-    scalarColumn = null;
-
-    let rest = body;
-    const dash = /^-(?: +|$)/.exec(rest);
-    if (dash !== null) {
-      line.item = true;
-      line.column += dash[0].length;
-      rest = rest.slice(dash[0].length);
-    }
-    const quotedKey = QUOTED.exec(rest);
-    if (quotedKey !== null && /^\s*:(?:\s|$)/.test(rest.slice(quotedKey[0].length))) {
-      fail('用了带引号的键');
-      continue;
-    }
-    if (rest.startsWith('<<')) {
-      fail('用了合并键');
-      continue;
-    }
-    if (/^\?(?:\s|$)/.test(rest)) {
-      fail('用了显式键');
-      continue;
-    }
-
-    const key = PLAIN_KEY.exec(rest);
-    let value;
-    // 续行和块纯量正文都要比这一列深：键值对是键所在的列，序列里的纯量是 `-` 所在的列
-    let column;
-    if (key !== null) {
-      line.key = key[1];
-      value = key[2].trimStart();
-      column = line.column;
-    } else if (line.item) {
-      // `- run : x` 在 YAML 里也是映射，只是键后面多了空格；当成序列里的纯量放过去，这一步的键就漏看了
-      if (/^[^"'[{|>#&*!][^#]*?:(?:\s|$)/.test(rest)) {
-        fail('的序列项里有认不出的键');
-        continue;
-      }
-      value = rest;
-      column = line.indent;
-    } else {
-      fail('认不出是什么结构');
-      continue;
-    }
-
-    if (value === '' || value.startsWith('#')) {
-      line.valueKind = 'empty';
-    } else if (value.startsWith('&')) {
-      fail('用了锚点');
-    } else if (value.startsWith('*')) {
-      fail('用了别名');
-    } else if (value.startsWith('!')) {
-      fail('用了标签');
-    } else if (/^[|>]/.test(value)) {
-      line.valueKind = 'block';
-      if (!BLOCK_HEADER.test(value)) fail('的块纯量头认不出');
-      blockParent = column;
-    } else if (/^[[{]/.test(value)) {
-      line.valueKind = 'flow';
-      if (!FLOW_ALLOWED.includes(raw.trim())) fail('用了白名单以外的 flow 集合');
-      scalarColumn = column;
-    } else if (/^["']/.test(value)) {
-      line.valueKind = 'quoted';
-      const closed = QUOTED.exec(value);
-      if (closed === null) fail('的引号纯量没在本行闭合');
-      else if (!/^(?:\s*|\s+#.*)$/.test(value.slice(closed[0].length))) fail('的引号纯量后面还跟着别的内容');
-      // 双引号里的转义由 YAML 先解码：写成 \x73ecrets.X 的那一行，GitHub 看到的是 secrets.X，按原文找机密和令牌就找不到
-      else if (closed[0].startsWith('"') && closed[0].includes('\\')) fail('的双引号纯量里有转义');
-      scalarColumn = column;
-    } else if (/^(?:[-?:](?:\s|$)|[,%@`])/.test(value)) {
-      fail('的值以 YAML 指示符开头');
-    } else {
-      line.valueKind = 'plain';
-      scalarColumn = column;
-    }
-  }
-  return { lines, problems };
-}
-
-const PARSED = parseWorkflow(WORKFLOW);
+const PARSED = parseWorkflow(WORKFLOW, FLOW_ALLOWED);
 const LINES = PARSED.lines;
-
-const structure = (lines) => lines.filter((line) => line.kind === 'structure');
-
-/** 真正执行的行，去掉首尾空白：结构行加块纯量正文，不含注释，也不含脚本里的 shell 注释。 */
-const codeOf = (lines) =>
-  lines
-    .filter((line) => line.kind === 'structure' || line.kind === 'content')
-    .map((line) => line.raw.trim())
-    .filter((line) => line !== '' && !line.startsWith('#'));
-
-/** 机密会落到的行：比 codeOf 多出脚本里的 shell 注释，注释里的 ${{ }} 照样被换成机密的值写进脚本。 */
-const exposedOf = (lines) => lines.filter((line) => line.kind === 'structure' || line.kind === 'content').map((line) => line.raw.trim());
-
 const CODE = codeOf(LINES);
-const JOBS_AT = LINES.findIndex((line) => line.kind === 'structure' && line.indent === 0 && line.key === 'jobs');
-
-/** jobs 下的作业名，按出现顺序。 */
-function jobNames() {
-  const names = [];
-  for (const line of structure(LINES.slice(JOBS_AT + 1))) {
-    if (line.indent === 0) break;
-    if (line.indent === 2) names.push(line.raw.trim().replace(/:$/, ''));
-  }
-  return names;
-}
-
-/** 作业 name 那一段的行：从 `  name:` 起，到下一个同级作业或顶层键之前。 */
-function jobLines(name) {
-  const start = LINES.findIndex((line, index) => index > JOBS_AT && line.kind === 'structure' && line.raw === `  ${name}:`);
-  assert.notEqual(start, -1, `beta-release.yml 里找不到作业 ${name}`);
-  const end = LINES.findIndex((line, index) => index > start && line.kind === 'structure' && line.indent <= 2);
-  return LINES.slice(start, end === -1 ? LINES.length : end);
-}
-
-const job = (name) => codeOf(jobLines(name));
-
-/** 作业级的键（缩进 4）：if、environment、runs-on 这些必须写在作业上，写进某个步骤里就只管那一步。 */
-const jobKeys = (name) => structure(jobLines(name)).filter((line) => line.indent === 4).map((line) => line.raw.trim());
-
-/** lines 里位于 column 列、值为空的 `key:` 下一层的结构行，去掉行尾注释。 */
-function blockOf(lines, column, key) {
-  const at = lines.findIndex((line) => line.kind === 'structure' && line.column === column && line.key === key && line.valueKind === 'empty');
-  assert.notEqual(at, -1, `第 ${column} 列上没有 ${key}:`);
-  const block = [];
-  for (const line of structure(lines.slice(at + 1))) {
-    if (line.indent <= column) break;
-    block.push(line.raw.trim().replace(/\s+#.*$/, ''));
-  }
-  return block;
-}
-
-const jobBlock = (name, key) => blockOf(jobLines(name), 4, key);
-
-/** 作业的步骤，每步是它的行：从缩进 6 的 `- ` 起，到下一步或下一个作业级的键之前。 */
-function steps(name) {
-  const lines = jobLines(name);
-  const at = lines.findIndex((line) => line.kind === 'structure' && line.raw === '    steps:');
-  assert.notEqual(at, -1, `作业 ${name} 没有 steps`);
-  const result = [];
-  for (const line of lines.slice(at + 1)) {
-    if (line.kind === 'structure' && line.indent <= 4) break;
-    if (line.kind === 'structure' && line.indent === 6 && line.item) result.push([line]);
-    else if (result.length > 0) result[result.length - 1].push(line);
-  }
-  return result;
-}
-
-/** 步骤自己的键：`- ` 那一行去掉前缀，加上缩进 8 的结构行；块纯量正文不算。 */
-const stepKeys = (step) => structure(step).filter((line) => line.column === 8).map((line) => line.raw.slice(8).trim());
-
-/** 步骤里除去注释和空行的原始行（保留缩进），用来整段比对。 */
-const stepText = (step) => step.filter((line) => line.kind !== 'comment' && line.raw.trim() !== '').map((line) => line.raw);
-
-const SECRET = /\bsecrets\b(?:\s*\.\s*([A-Za-z0-9_-]+)|\s*\[\s*(?:'([^']*)'|"([^"]*)")\s*\])?/gi;
-
-/**
- * 这些行里引用的机密，名字转成大写：表达式里的上下文名和机密名都不分大小写，SECRETS.X、Secrets['x'] 拿到的是同一个。
- * 点名的写法（secrets.X、secrets['X']、secrets["X"]）记名字；toJSON(secrets)、secrets[format(...)]、secrets: inherit
- * 这类一次拿走一批或绕开名字的写法记进 other，测试一律不放行，不然按名字核对就形同虚设。
- */
-function secretsIn(lines) {
-  const names = new Set();
-  const other = [];
-  for (const line of lines) {
-    for (const match of line.matchAll(SECRET)) {
-      const name = match.slice(1).find((group) => group !== undefined);
-      if (name === undefined) other.push(line);
-      else names.add(name.toUpperCase());
-    }
-  }
-  return { names: [...names].sort(), other };
-}
-
-/** 表达式里取到仓库令牌的写法：github.token，或不点名属性、一次拿走整个上下文（toJSON(github)、github['token']）。不分大小写。 */
-function tokenRefs(lines) {
-  const refs = [];
-  for (const [expression, inner] of lines.join('\n').matchAll(/\$\{\{([\s\S]*?)\}\}/g)) {
-    for (const match of inner.matchAll(/\bgithub\b(?:\s*\.\s*([A-Za-z0-9_-]+))?/gi)) {
-      if (match[1] === undefined || match[1].toLowerCase() === 'token') refs.push(expression);
-    }
-  }
-  return refs;
-}
 
 describe('beta 发布工作流的契约', () => {
   it('结构行只用解析得了的写法：没有锚点、别名、合并键、带引号的键、续行和白名单以外的 flow 集合', () => {
@@ -312,17 +151,17 @@ describe('beta 发布工作流的契约', () => {
   });
 
   it('作业只有这四个，挂了环境的都在作业级限定只在 beta 上跑', () => {
-    assert.deepEqual(jobNames(), ['build', 'sign', 'stage', 'publish-hk']);
+    assert.deepEqual(jobNames(LINES), ['build', 'sign', 'stage', 'publish-hk']);
     for (const [name, environment] of [
       ['sign', 'release-signing'],
       ['stage', 'updates-beta'],
       ['publish-hk', 'updates-beta'],
     ]) {
-      const keys = jobKeys(name);
+      const keys = jobKeys(LINES, name);
       assert.ok(keys.includes(`environment: ${environment}`), `${name} 应在作业级挂环境 ${environment}`);
       // 写进某一步的 if 只跳过那一步，作业照样启动、照样申请环境。条件只许是单独一行的 BETA_ONLY：
       // 块纯量和续行都会被 YAML 折成一个更宽的条件，而首行看着没变。
-      const lines = jobLines(name);
+      const lines = jobLines(LINES, name);
       const conditions = structure(lines).filter((line) => line.indent === 4 && /^["']?if["']?\s*:/i.test(line.raw.trim()));
       assert.deepEqual(
         conditions.map((line) => line.raw.trim()),
@@ -350,17 +189,17 @@ describe('beta 发布工作流的契约', () => {
 
   // 只有作业里的机密才按作业核对得到；工作流级 env、concurrency 这些地方引用的机密，不在任何一个作业的核对范围里。
   it('四个作业之外哪里都不引用机密', () => {
-    const inJobs = new Set(['build', 'sign', 'stage', 'publish-hk'].flatMap((name) => jobLines(name)));
+    const inJobs = new Set(['build', 'sign', 'stage', 'publish-hk'].flatMap((name) => jobLines(LINES, name)));
     const outside = LINES.filter((line) => !inJobs.has(line));
     assert.deepEqual(secretsIn(exposedOf(outside)), { names: [], other: [] });
   });
 
   it('build 在一次性托管机上跑、不挂环境，只拿要编进包里的 CurseForge key', () => {
-    const keys = jobKeys('build');
+    const keys = jobKeys(LINES, 'build');
     assert.ok(!keys.some((line) => line.startsWith('environment:')), 'build 作业不该声明环境');
     assert.ok(keys.includes('runs-on: ubuntu-24.04'), 'build 作业不再跑在一次性托管机上');
-    assert.deepEqual(secretsIn(exposedOf(jobLines('build'))), { names: ['PETALFALL_CURSEFORGE_API_KEY'], other: [] });
-    assert.deepEqual(jobBlock('build', 'permissions'), ['contents: read', 'pull-requests: read']);
+    assert.deepEqual(secretsIn(exposedOf(jobLines(LINES, 'build'))), { names: ['PETALFALL_CURSEFORGE_API_KEY'], other: [] });
+    assert.deepEqual(jobBlock(LINES, 'build', 'permissions'), ['contents: read', 'pull-requests: read']);
   });
 
   // 换成 dev 的公钥，所有 beta 客户端拒收发布钥签的包；漏了开关，detect_support 判为不支持，beta 包收不到任何更新。
@@ -368,7 +207,7 @@ describe('beta 发布工作流的契约', () => {
   // 之前也不做别的：中间多一步或多一行（比如把 tauri.conf.json 还原回去），打出的包同样不带公钥。
   it('build 紧挨着打包无条件注入发布公钥并打开 requireSignedVersion', () => {
     assert.deepEqual(CODE.filter((line) => line.includes('conf.plugins')), [PUBKEY_LINE]);
-    const buildSteps = steps('build');
+    const buildSteps = steps(LINES, 'build');
     const inject = buildSteps.findIndex((step) => codeOf(step).includes(PUBKEY_LINE));
     assert.notEqual(inject, -1, '更新插件的配置不再写在 build 作业里');
     assert.deepEqual(stepText(buildSteps[inject]), INJECT_STEP, '注入公钥那一步多了键、改了脚本，注入可能不再执行');
@@ -381,7 +220,7 @@ describe('beta 发布工作流的契约', () => {
 
   // 地址核对写在打包那一步里，这一步多一个 if 或 continue-on-error 就等于没查；env 也逐项钉住，免得在这里改写配置。
   it('打包后在 Petalfall.exe 里核对测试版清单地址，查不到就失败', () => {
-    const bundle = steps('build').find((step) => codeOf(step).includes(BUILD_COMMAND));
+    const bundle = steps(LINES, 'build').find((step) => codeOf(step).includes(BUILD_COMMAND));
     assert.notEqual(bundle, undefined, `build 作业里找不到打包启动器的那一步：${BUILD_COMMAND}`);
     assert.deepEqual(stepKeys(bundle), ['name: 构建 Windows 安装包', 'id: bundle', 'working-directory: app', 'env:', 'run: |']);
     assert.deepEqual(blockOf(bundle, 8, 'env'), ['VERSION: ${{ steps.version.outputs.version }}', `BETA_MANIFEST_URL: ${BETA_MANIFEST_URL}`]);
@@ -392,26 +231,137 @@ describe('beta 发布工作流的契约', () => {
     );
   });
 
+  // 同一基础号下 beta < dev < 正式版，测试版低于预览版、核心号高于已发布的正式版都不会自然成立，靠这一步挡。
+  // 它要拿确定版本号定出的版本去比，又要在编译之前做完：排到注入公钥之后，挡下的版本已经白编了一遍。
+  // 这一步多一个 if、continue-on-error，或脚本里少一条命令，不低于预览版、基础号已出过正式版、数据格式号倒退
+  // 或单独摘进来的测试版照样签名发布。
+  it('确定版本号之后、注入公钥之前读出各通道已发布的版本，跑 read、gate beta、data-format beta', () => {
+    const buildSteps = steps(LINES, 'build');
+    const version = buildSteps.findIndex((step) => stepKeys(step).includes('id: version'));
+    const heads = buildSteps.findIndex((step) => stepKeys(step).includes('id: heads'));
+    const inject = buildSteps.findIndex((step) => codeOf(step).includes(PUBKEY_LINE));
+    assert.notEqual(version, -1, 'build 作业里找不到确定版本号那一步（id: version）');
+    assert.notEqual(heads, -1, 'build 作业里找不到读出各通道已发布的版本那一步（id: heads）');
+    assert.notEqual(inject, -1, '更新插件的配置不再写在 build 作业里');
+    assert.ok(version < heads, '读出各通道已发布的版本排到了确定版本号之前，拿不到要检查的本包版本');
+    assert.ok(heads < inject, '读出各通道已发布的版本排到了注入公钥之后：版本先后要在编译之前查完');
+    const step = buildSteps[heads];
+    assert.deepEqual(
+      stepKeys(step),
+      ['name: 读出各通道已发布的版本', 'id: heads', 'env:', 'run: |'],
+      '读出各通道已发布的版本那一步多了键（if、continue-on-error、shell 之类），检查可能不执行，或不过也不挡构建',
+    );
+    assert.deepEqual(
+      blockOf(step, 8, 'env'),
+      ['VERSION: ${{ steps.version.outputs.version }}', 'HEADS: ${{ runner.temp }}/release-heads.json'],
+      '读出各通道已发布的版本查的不再是确定版本号定出的本包版本，或 heads 文件换了地方、写构建信息读不到',
+    );
+    assert.deepEqual(
+      codeOf(step.filter((line) => line.kind === 'content')),
+      HEADS_SCRIPT,
+      '读出各通道已发布的版本的脚本变了：read、gate beta、data-format beta 少了一条，模式不再只由分支定，或插了让检查不执行的命令',
+    );
+  });
+
+  // 正式版那一条改由 gate beta 按验过签的结果查。未验签的清单谁改得了香港机上的文件、谁能在半路改写响应，
+  // 谁就能让它显示任意版本，按它比，测试版能不能发就由伪造的人说了算；地址变量留着，迟早又被拿去读。
+  it('不再读未验签的正式版清单，也不再声明它的地址', () => {
+    assert.ok(!WORKFLOW.includes('STABLE_MANIFEST_URL'), '工作流里又出现了 STABLE_MANIFEST_URL，正式版清单只能经 release-heads.mjs 验签后采信');
+    assert.deepEqual(
+      CODE.filter((line) => line.includes('/updates/stable/')),
+      [],
+      '工作流又直接读正式版清单：版本先后只能按 release-heads.mjs 验过签的结果比',
+    );
+  });
+
+  // 构建首装引导程序之后才有要核对的引导程序与 exe；两步排在写构建信息之前，审批摘要里的载荷头就是核对过的值。
+  // 载荷头写错、漏编一把公钥，编译与打包都不报错，坏在用户那头，所以两步都不许带 if、continue-on-error，
+  // 作业级的 continue-on-error 同样会让核对失败的作业不再判这次运行失败，一并不许。
+  it('构建首装引导程序之后依次核对载荷头与内嵌的更新公钥，两步都无条件执行', () => {
+    const buildSteps = steps(LINES, 'build');
+    const at = (key) => buildSteps.findIndex((step) => stepKeys(step).includes(key));
+    const order = [
+      ['构建首装引导程序（id: bootstrap）', at('id: bootstrap')],
+      ['核对载荷头（id: payload）', at('id: payload')],
+      ['核对内嵌的更新公钥', at('name: 核对内嵌的更新公钥')],
+      ['写构建信息（id: info）', at('id: info')],
+    ];
+    for (const [what, index] of order) assert.notEqual(index, -1, `build 作业里找不到 ${what} 那一步`);
+    const indexes = order.map(([, index]) => index);
+    assert.deepEqual(
+      [...indexes].sort((a, b) => a - b),
+      indexes,
+      `顺序应为 ${order.map(([what]) => what).join('、')}，实际排在第 ${indexes.join('、')} 步`,
+    );
+    const [payload, pubkeys] = [buildSteps[indexes[1]], buildSteps[indexes[2]]];
+    for (const step of [payload, pubkeys]) {
+      const keys = stepKeys(step);
+      assert.deepEqual(
+        keys.filter((key) => /^(?:if|continue-on-error)\s*:/i.test(key)),
+        [],
+        `${keys[0]} 带了 if 或 continue-on-error：核对可能不执行，或失败了也不挡构建`,
+      );
+    }
+    assert.ok(
+      !jobKeys(LINES, 'build').some((key) => /^continue-on-error\s*:/i.test(key)),
+      'build 作业级带了 continue-on-error：核对失败的作业不再判这次运行失败',
+    );
+
+    assert.deepEqual(stepKeys(payload), ['name: 核对载荷头', 'id: payload', 'env:', 'run: |'], '核对载荷头那一步多了键，核对可能不执行');
+    assert.deepEqual(
+      blockOf(payload, 8, 'env'),
+      ['VERSION: ${{ steps.version.outputs.version }}', 'BOOTSTRAP: ${{ steps.bootstrap.outputs.bootstrap }}'],
+      '核对载荷头比的不再是本包版本，或读的不再是构建出的那份引导程序',
+    );
+    assert.deepEqual(
+      codeOf(payload.filter((line) => line.kind === 'content')),
+      PAYLOAD_SCRIPT,
+      '核对载荷头的脚本变了：读回的四项可能不再全部交给 release-heads.mjs payload 核对',
+    );
+    assert.deepEqual(stepKeys(pubkeys), ['name: 核对内嵌的更新公钥', 'run: |'], '核对内嵌的更新公钥那一步多了键，核对可能不执行');
+    assert.deepEqual(
+      codeOf(pubkeys.filter((line) => line.kind === 'content')),
+      PUBKEYS_SCRIPT,
+      '核对内嵌的更新公钥的脚本变了：两个 .pub 文件可能不再都在 Petalfall.exe 里找',
+    );
+  });
+
+  // CI 上不跑启动器的 Rust 测试，版本序、数据格式号与安装判定这些共用规则，只能靠这一行随每次构建在托管机上跑到。
+  it('跑 Rust 测试的那一行带上 petalfall-release', () => {
+    assert.deepEqual(
+      job(LINES, 'build').filter((line) => /\bcargo\s+test\b/.test(line)),
+      ['cargo test --release --locked -p petalfall-setup-payload -p petalfall-release'],
+      'build 作业里跑 Rust 测试的那一行变了：共用包 petalfall-release 的规则测试要和载荷格式的测试一起跑',
+    );
+  });
+
   // 换钥时 CI 里打包、签名、验签都对得上，坏在已装旧版的用户那头：他们只认编进旧包的公钥，换钥之后发的更新全被拒收。
   // 所以把密钥号钉死，换钥必须连这里一起改；顺带挡住把开发版公钥误当发布公钥提交。密钥号写成验签脚本输出的样子
   // （小写十六进制，和 minisign 注释里那串字节序相反）。公钥文件是 minisign 公钥框整个再做一次 base64，
   // 框的第二行解出 42 字节：算法 Ed、8 字节密钥号、32 字节 Ed25519 公钥。
+  const keyNumber = (name) => {
+    const box = Buffer.from(readFileSync(new URL(`../${name}`, import.meta.url), 'utf8').trim(), 'base64').toString('utf8').split('\n');
+    const key = Buffer.from(box[1].trim(), 'base64');
+    assert.equal(key.length, 42, `${name} 解出的公钥不是 42 字节`);
+    assert.equal(key.subarray(0, 2).toString(), 'Ed', `${name} 的算法不是 Ed`);
+    return key.subarray(2, 10).toString('hex');
+  };
+
   it('发布公钥是记录在案的那把，不是开发版的', () => {
-    const keyNumber = (name) => {
-      const box = Buffer.from(readFileSync(new URL(`../${name}`, import.meta.url), 'utf8').trim(), 'base64').toString('utf8').split('\n');
-      const key = Buffer.from(box[1].trim(), 'base64');
-      assert.equal(key.length, 42, `${name} 解出的公钥不是 42 字节`);
-      assert.equal(key.subarray(0, 2).toString(), 'Ed', `${name} 的算法不是 Ed`);
-      return key.subarray(2, 10).toString('hex');
-    };
     assert.equal(keyNumber('release-updater.pub'), 'aeeab33bdc36d624');
     assert.notEqual(keyNumber('release-updater.pub'), keyNumber('dev-updater.pub'));
+  });
+
+  // 启动器把开发版公钥也编进每个包，偏好为预览版时拿它验 dev 的清单与包，已装预览版的用户同样只认编进旧包的那把。
+  // 钉住它，换钥必须连这里一起改；在一次性分支上换成测试钥做的夹具，到了正式流水线编译之前就在这里挂掉，混不进发出去的包。
+  it('开发版公钥也是记录在案的那把', () => {
+    assert.equal(keyNumber('dev-updater.pub'), 'a85c28a4343f0962', '开发版公钥换了，或提交进来的是测试钥');
   });
 
   // 客户端开了 requireSignedVersion，签名时不把版本号写进可信注释，插件拒收每一个 beta 包。
   // 签完按仓库里的发布公钥验签、核对签名里的版本，私钥配错或漏传版本在这里挡下，不等用户拒收。
   it('sign 把版本号写进可信注释，签完按发布公钥验签', () => {
-    const sign = job('sign');
+    const sign = job(LINES, 'sign');
     const signing = sign.filter((line) => line.includes('signer sign'));
     assert.equal(signing.length, 1, `sign 作业里应恰有一条签名命令：${signing}`);
     assert.ok(signing[0].includes('signer sign --app-version "$VERSION" '), `签名不再把版本号写进可信注释：${signing[0]}`);
@@ -425,28 +375,63 @@ describe('beta 发布工作流的契约', () => {
 
   // 持私钥的作业拿不到任何发布渠道：桶凭据、香港推送钥、能写仓库的令牌都不在这里，借道 sign 签出来的包自己发不出去。
   it('sign 只拿发布私钥，没有任何写权限', () => {
-    const sign = job('sign');
+    const sign = job(LINES, 'sign');
     for (const prefix of ['OSS_', 'R2_', 'HK_']) {
       assert.deepEqual(sign.filter((line) => line.toUpperCase().includes(prefix)), [], `sign 作业里出现了 ${prefix} 开头的凭据`);
     }
-    assert.deepEqual(secretsIn(exposedOf(jobLines('sign'))), { names: ['RELEASE_UPDATER_PRIVATE_KEY'], other: [] });
-    assert.deepEqual(tokenRefs(exposedOf(jobLines('sign'))), [], 'sign 作业不该拿仓库令牌');
-    assert.deepEqual(jobBlock('sign', 'permissions'), ['contents: read']);
+    assert.deepEqual(secretsIn(exposedOf(jobLines(LINES, 'sign'))), { names: ['RELEASE_UPDATER_PRIVATE_KEY'], other: [] });
+    assert.deepEqual(tokenRefs(exposedOf(jobLines(LINES, 'sign'))), [], 'sign 作业不该拿仓库令牌');
+    assert.deepEqual(jobBlock(LINES, 'sign', 'permissions'), ['contents: read']);
+  });
+
+  // 持钥的作业里不跑包管理器：npm exec、pnpm install 按 registry 当下给的元数据取包，还会跑安装脚本，拿到的不一定是
+  // 锁文件里那一份。签名 CLI 只按锁文件记的 integrity 取，读锁文件只经 locked-cli.mjs 这一份带测试的解析，
+  // 两条流水线不各写一套。sparse 名单逐项钉住：持钥的机器上只放用得到的这几个文件。
+  it('sign 经 locked-cli.mjs 按锁文件取签名 CLI，不再内联解析锁文件', () => {
+    const signLines = jobLines(LINES, 'sign');
+    const sparseAt = signLines.findIndex((line) => line.kind === 'structure' && line.key === 'sparse-checkout');
+    assert.notEqual(sparseAt, -1, 'sign 作业的 checkout 不再用 sparse-checkout，持钥的机器上会多出整个仓库');
+    assert.equal(signLines[sparseAt].valueKind, 'block', 'sign 作业的 sparse-checkout 不再是逐行列文件的块');
+    const sparse = [];
+    for (const line of signLines.slice(sparseAt + 1)) {
+      if (line.kind !== 'content') break;
+      if (line.raw.trim() !== '') sparse.push(line.raw.trim());
+    }
+    assert.deepEqual(
+      sparse,
+      ['/.github/release-updater.pub', '/.github/scripts/locked-cli.mjs', '/.github/scripts/verify-update-signature.mjs', '/app/pnpm-lock.yaml'],
+      'sign 作业取出的文件变了：持钥的机器上只放公钥、locked-cli.mjs、验签脚本和锁文件',
+    );
+    const sign = job(LINES, 'sign');
+    assert.ok(sign.includes('sparse-checkout-cone-mode: false'), 'sign 的 sparse-checkout 不再是非 cone 模式，按文件列的名单会放宽成整个目录');
+
+    const cli = steps(LINES, 'sign').find((step) => stepKeys(step).includes('id: cli'));
+    assert.notEqual(cli, undefined, 'sign 作业里找不到按锁文件取签名 CLI 那一步（id: cli）');
+    const script = codeOf(cli.filter((line) => line.kind === 'content'));
+    assert.equal(script[0], LOCKED_CLI_CALL, '取签名 CLI 的第一件事不再是用 locked-cli.mjs 从锁文件读出 integrity');
+    assert.ok(script.includes('done < "$RUNNER_TEMP/tauri-cli.tsv"'), '下载、核对 integrity 的循环不再读 locked-cli.mjs 写出的名单');
+    assert.deepEqual(
+      sign.filter((line) => line.includes('pnpm-lock.yaml')),
+      ['/app/pnpm-lock.yaml', LOCKED_CLI_CALL],
+      'sign 作业里又有别处读锁文件：锁文件只许经 locked-cli.mjs 解析',
+    );
+    assert.deepEqual(sign.filter((line) => /\bnode\s+-(?:\s|$)/.test(line)), [], 'sign 作业里又有从标准输入读进来的内联 node 脚本');
+    assert.deepEqual(sign.filter((line) => /\b(?:npm|npx|pnpm|yarn)\s/.test(line)), [], 'sign 作业里跑了包管理器');
   });
 
   it('桶凭据只进 stage，香港推送钥只进 publish-hk', () => {
-    assert.deepEqual(secretsIn(exposedOf(jobLines('stage'))), {
+    assert.deepEqual(secretsIn(exposedOf(jobLines(LINES, 'stage'))), {
       names: ['OSS_CI_ACCESS_KEY_ID', 'OSS_CI_ACCESS_KEY_SECRET', 'R2_CI_ACCESS_KEY_ID', 'R2_CI_SECRET_ACCESS_KEY'],
       other: [],
     });
-    assert.deepEqual(secretsIn(exposedOf(jobLines('publish-hk'))), { names: ['HK_MANIFEST_SSH_KEY'], other: [] });
-    assert.deepEqual(jobBlock('publish-hk', 'permissions'), ['contents: read']);
+    assert.deepEqual(secretsIn(exposedOf(jobLines(LINES, 'publish-hk'))), { names: ['HK_MANIFEST_SSH_KEY'], other: [] });
+    assert.deepEqual(jobBlock(LINES, 'publish-hk', 'permissions'), ['contents: read']);
   });
 
   // 桶上同一个键只能写一次。传完包才失败的运行不建 tag，下一次运行算出同一个 beta.N，只带运行次数的话又从 1 起，
   // 键就撞上上次留下、覆盖不了的对象；dev-distribution.mjs 认的运行标识是 <运行号>-<运行次数>。
   it('stage 按运行标识算对象键、生成和校验清单', () => {
-    const calls = job('stage').filter((line) => /dev-distribution\.mjs (?:key|build|validate) /.test(line));
+    const calls = job(LINES, 'stage').filter((line) => /dev-distribution\.mjs (?:key|build|validate) /.test(line));
     assert.equal(calls.length, 4, `stage 里调用 key、build、validate 的地方变了：${calls}`);
     for (const call of calls) {
       assert.ok(call.includes('"$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" '), `对象键没带运行标识：${call}`);
@@ -461,16 +446,16 @@ describe('beta 发布工作流的契约', () => {
     const expected = `HK_MANIFEST_URL: ${BETA_MANIFEST_URL}`;
     const readsHkManifest = (line) => line.includes('curl ') && line.includes('"$HK_MANIFEST_URL"');
 
-    const publishHk = job('publish-hk');
-    assert.ok(jobBlock('publish-hk', 'env').includes(expected), 'publish-hk 不再在作业级声明 beta 清单地址');
+    const publishHk = job(LINES, 'publish-hk');
+    assert.ok(jobBlock(LINES, 'publish-hk', 'env').includes(expected), 'publish-hk 不再在作业级声明 beta 清单地址');
     assert.ok(publishHk.includes('run: bash .github/scripts/push-hk-manifest.sh "$MANIFEST"'), 'publish-hk 不再推送香港清单');
     assert.ok(
       publishHk.some((line) => readsHkManifest(line) && line.includes("--write-out '%{content_type}'")),
       'publish-hk 推送之后不再经公网回读香港清单、核对 Content-Type',
     );
-    assert.ok(jobBlock('stage', 'env').includes(expected), 'stage 不再在作业级声明 beta 清单地址');
-    assert.ok(job('stage').some(readsHkManifest), 'stage 不再读香港清单检查版本号有没有倒退');
-    const bundle = steps('build').find((step) => codeOf(step).includes(BUILD_COMMAND));
+    assert.ok(jobBlock(LINES, 'stage', 'env').includes(expected), 'stage 不再在作业级声明 beta 清单地址');
+    assert.ok(job(LINES, 'stage').some(readsHkManifest), 'stage 不再读香港清单检查版本号有没有倒退');
+    const bundle = steps(LINES, 'build').find((step) => codeOf(step).includes(BUILD_COMMAND));
     assert.ok(blockOf(bundle, 8, 'env').includes(`BETA_MANIFEST_URL: ${BETA_MANIFEST_URL}`), 'bundle 不再声明要在 exe 里找的清单地址');
 
     // rustfmt 会把断言拆成几行，去掉空白再比
@@ -483,7 +468,7 @@ describe('beta 发布工作流的契约', () => {
 
 describe('契约用到的解析', () => {
   /** 只留下每条问题的原因，去掉行号和原文。 */
-  const whyOf = (text) => parseWorkflow(text).problems.map((problem) => problem.replace(/^第 \d+ 行/, '').replace(/：[\s\S]*$/, ''));
+  const whyOf = (text) => parseWorkflow(text, FLOW_ALLOWED).problems.map((problem) => problem.replace(/^第 \d+ 行/, '').replace(/：[\s\S]*$/, ''));
 
   it('认得出各种机密写法，名字不分大小写', () => {
     assert.deepEqual(secretsIn(['A: ${{ secrets.X_1 }}', 'B: ${{ SECRETS.y }} ${{ Secrets . X_1 }}']), { names: ['X_1', 'Y'], other: [] });
@@ -499,7 +484,7 @@ describe('契约用到的解析', () => {
   });
 
   it('块纯量正文不当结构行，脚本里的 &&、2>&1、*.mjs、引号键都不误报', () => {
-    const { lines, problems } = parseWorkflow(['a:', '  run: |', '    echo *.mjs && b 2>&1 | c', '    "x": &y', '', '    # 注释', '  if: always()'].join('\n'));
+    const { lines, problems } = parseWorkflow(['a:', '  run: |', '    echo *.mjs && b 2>&1 | c', '    "x": &y', '', '    # 注释', '  if: always()'].join('\n'), FLOW_ALLOWED);
     assert.deepEqual(problems, []);
     assert.deepEqual(
       lines.map((line) => line.kind),
@@ -508,12 +493,12 @@ describe('契约用到的解析', () => {
   });
 
   it('脚本里 shell 注释中的机密照样算引用，YAML 注释里的不算', () => {
-    const { lines } = parseWorkflow(['a:', '  # ${{ secrets.YAML_COMMENT }}', '  run: |', '    # ${{ secrets.SHELL_COMMENT }}', '    echo'].join('\n'));
+    const { lines } = parseWorkflow(['a:', '  # ${{ secrets.YAML_COMMENT }}', '  run: |', '    # ${{ secrets.SHELL_COMMENT }}', '    echo'].join('\n'), FLOW_ALLOWED);
     assert.deepEqual(secretsIn(exposedOf(lines)), { names: ['SHELL_COMMENT'], other: [] });
   });
 
   it('步骤自己的键不含 run 脚本里的行', () => {
-    const { lines } = parseWorkflow(['      - name: 写入', '        if: always()', '        run: |', '          if: not-a-key', '          echo'].join('\n'));
+    const { lines } = parseWorkflow(['      - name: 写入', '        if: always()', '        run: |', '          if: not-a-key', '          echo'].join('\n'), FLOW_ALLOWED);
     assert.deepEqual(stepKeys(lines), ['name: 写入', 'if: always()', 'run: |']);
   });
 

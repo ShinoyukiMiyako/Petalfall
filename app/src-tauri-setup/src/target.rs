@@ -3,14 +3,18 @@
 //! 这个目录同时是数据根：便携判定写得进就把配置、账户和 `.minecraft` 放在 exe 旁边。NSIS 自己只做
 //! 弱校验，`/D=` 不合格时静默回落默认目录且退出码照常，所以能拦的都要在发起安装前拦住。
 //!
-//! 优先级：空 > 相对路径 > `!` > 禁区 > 网络 > 游戏目录 > 写不进 > 空间不足。网络排在游戏目录前，
-//! 是因为判定游戏目录要读目录内容，断开的网络位置会让这一步卡几十秒。
+//! 优先级：空 > 相对路径 > `!` > 禁区 > 网络 > 游戏目录 > 写不进 > 数据关 > 空间不足。网络排在游戏目录前，
+//! 是因为判定游戏目录要读目录内容，断开的网络位置会让这一步卡几十秒。数据关排在空间前：腾出空间也装不了，
+//! 先说空间会让用户清完盘才发现还是不行。
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use petalfall_release::data_format::DATA_FORMAT;
+
 use crate::contract::{DirCheck, DirIssue, Failure, FailureCode};
+use crate::datamark;
 use crate::existing::{APP_EXE, CONFIG_FILE, unquote};
 
 /// 非空目录追加的子目录名，也是默认安装目录的末段。
@@ -18,7 +22,7 @@ pub const APP_FOLDER: &str = "Petalfall";
 const GAME_FOLDER: &str = ".minecraft";
 const VERSIONS_FOLDER: &str = "versions";
 /// 沿用启动器便携判定的探针名，留下残骸时看得出是谁的。
-const WRITE_PROBE: &str = ".petalfall-write-probe";
+pub(crate) const WRITE_PROBE: &str = ".petalfall-write-probe";
 /// NSIS 对超过 MAX_PATH 的行为没有保证，而游戏文件还要落在这个目录更深处，这里保守收紧。按 UTF-16 码元算。
 const MAX_PATH_UNITS: usize = 200;
 /// 目标盘在 exe 之外要多留的：uninstall.exe、快捷方式和簇对齐的余量。
@@ -87,26 +91,43 @@ pub trait TargetEnv {
 /// `own_dirs` 是已知属于落樱、要接着用的目录：默认安装目录同时是启动器写不进 exe 旁边时的数据目录，
 /// 没写过 config.json 之前里面只有日志、缓存这类常见名字；半装记录里的目录可能只写了一半文件；卸载后
 /// 留下的上次安装目录里只剩数据。目录内容都证明不了归属，不传的话会被当成别人的非空目录。
+///
+/// `normalized` 里的数据格式记号高于本包认得的号、或者读不懂时，`issue` 是 `DataIncompatible`，
+/// 详情在 `data_block`。
 pub fn check_dir(input: &str, need: SpaceNeed, own_dirs: &[&str], env: &dyn TargetEnv) -> DirCheck {
+    check_dir_against(input, need, own_dirs, env, DATA_FORMAT)
+}
+
+/// `supported` 是安装包认得的数据格式号：壳与载荷出自同一次构建，生产代码里它就是 [`DATA_FORMAT`]，
+/// 单独留成参数是为了测试比本包号更低、相等与更高的记号。
+fn check_dir_against(
+    input: &str,
+    need: SpaceNeed,
+    own_dirs: &[&str],
+    env: &dyn TargetEnv,
+    supported: u32,
+) -> DirCheck {
     let cleaned = clean(input);
     // 有阻断问题时界面只显示问题，其余字段没人看
-    evaluate(&cleaned, need, own_dirs, env).unwrap_or_else(|issue| DirCheck {
+    evaluate(&cleaned, need, own_dirs, env, supported).unwrap_or_else(|issue| DirCheck {
         normalized: cleaned,
         issue: Some(issue),
         has_config: false,
         not_empty: false,
         appended: false,
         free_bytes: 0,
+        data_block: None,
     })
 }
 
-/// 问题码是固定的八个，归类按「用户该怎么办」：不是不能写、而是不该装的都算 forbidden，
+/// 问题码是固定的九个，归类按「用户该怎么办」：不是不能写、而是不该装的都算 forbidden，
 /// 包括代码页外字符和盘根；物理上落不了地的都算 unwritable，包括保留名、不存在的盘和超长路径。
 fn evaluate(
     path: &str,
     need: SpaceNeed,
     own_dirs: &[&str],
     env: &dyn TargetEnv,
+    supported: u32,
 ) -> Result<DirCheck, DirIssue> {
     if path.is_empty() {
         return Err(DirIssue::Empty);
@@ -167,10 +188,21 @@ fn evaluate(
     }
     let anchor = nearest_existing(Path::new(&target)).map_err(unwritable)?;
     probe_write(anchor).map_err(unwritable)?;
+    if anchor == Path::new(&target) {
+        probe_file(anchor).map_err(unwritable)?;
+    }
 
     let volume = env.volume(anchor).map_err(unwritable)?;
     let temp = env.volume(&env.temp_dir()).map_err(unwritable)?;
-    let issue = (!need.fits(&volume, &temp)).then_some(DirIssue::NoSpace);
+    // 装好后启动器的数据根就是这个目录：便携判定直接在这一层写文件。目录已在时上面在这一层写过文件，
+    // 还不在时在最近的上级里新建过一层、往里写过文件，与安装新建它之后的情形一样，所以便携判定会选它。
+    // 用户选的那一层在追加了子目录之后不再是数据根，不读
+    let data = datamark::inspect_target(Path::new(&target), supported);
+    let issue = if data.block.is_some() {
+        Some(DirIssue::DataIncompatible)
+    } else {
+        (!need.fits(&volume, &temp)).then_some(DirIssue::NoSpace)
+    };
     Ok(DirCheck {
         normalized: target,
         issue,
@@ -178,10 +210,11 @@ fn evaluate(
         not_empty,
         appended,
         free_bytes: volume.free_bytes,
+        data_block: data.block,
     })
 }
 
-/// 碰盘失败就是这里要的结论本身，`DirCheck` 没有放错误原文的字段。
+/// 碰盘失败就是这里要的结论本身，只给问题码，系统给的原文不交给界面；`data_block` 只为数据关服务。
 fn unwritable(_: io::Error) -> DirIssue {
     DirIssue::Unwritable
 }
@@ -212,7 +245,17 @@ pub fn write_fault(
             ),
         });
     }
-    probe_write(anchor).err().map(|err| refused(dir, &err))
+    // 目标目录已在时 NSIS 把文件直接写在这一层：建得了子目录、建不了文件的目录（C:\ 根的默认权限）也要查出来
+    probe_write(anchor)
+        .and_then(|()| {
+            if anchor == dir {
+                probe_file(anchor)
+            } else {
+                Ok(())
+            }
+        })
+        .err()
+        .map(|err| refused(dir, &err))
 }
 
 fn refused(dir: &Path, err: &io::Error) -> Failure {
@@ -437,12 +480,29 @@ fn read_contents(dir: &Path) -> io::Result<Contents> {
 ///
 /// 建目录而不是只写文件：`C:\` 的默认权限许普通用户建目录、不许建文件，只写文件会把
 /// `C:\Petalfall` 误判成写不进。名字带随机后缀，上次崩溃留下的残骸不会让这次失败。
-fn probe_write(dir: &Path) -> io::Result<()> {
+///
+/// 它答的是「能不能在这下面新建安装目录」。登记目录是不是启动器的数据根不能用它判：启动器只在那一层
+/// 写文件，见 `datamark` 的数据格式关探针。
+pub(crate) fn probe_write(dir: &Path) -> io::Result<()> {
     let probe = tempfile::Builder::new()
         .prefix(WRITE_PROBE)
         .tempdir_in(dir)?;
     fs::write(probe.path().join(WRITE_PROBE), b"")?;
     probe.close()
+}
+
+/// 在已经存在的 `dir` 这一层建一个文件再删掉。NSIS 把 exe 直接写在安装目录这一层，启动器的便携判定也直接
+/// 在这一层写探针文件；[`probe_write`] 只证明得了能在下面建子目录，`C:\` 根这类许建子目录、不许建文件的
+/// 目录上它判写得进，安装却写不进 exe。
+///
+/// 删不掉与 [`probe_write`] 一样报错：这一层的文件删不掉，卸载时就清不干净。删之前先关掉句柄，
+/// 报出来的只会是删除本身的失败。
+fn probe_file(dir: &Path) -> io::Result<()> {
+    tempfile::Builder::new()
+        .prefix(WRITE_PROBE)
+        .tempfile_in(dir)?
+        .into_temp_path()
+        .close()
 }
 
 #[cfg(windows)]
@@ -644,7 +704,10 @@ mod tests {
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
 
+    use petalfall_release::data_format::{STAMP_FILE, stamp_contents};
+
     use super::*;
+    use crate::contract::{Channel, DataBlock, DataProblem};
 
     const NEED: SpaceNeed = SpaceNeed {
         target: 100,
@@ -751,9 +814,11 @@ mod tests {
         assert!(status.success());
     }
 
+    /// 用 SID 而不是组名：组名随系统语言变。
+    const EVERYONE: &str = "*S-1-1-0";
+
     /// 给 `dir` 加一条拒绝写入的权限。测试结束前要撤掉，否则临时目录里的探针残骸删不掉。
     fn set_write_denied(dir: &Path, denied: bool) {
-        const EVERYONE: &str = "*S-1-1-0";
         let mut command = Command::new("icacls");
         command.arg(dir);
         if denied {
@@ -763,6 +828,31 @@ mod tests {
         }
         let status = command.stdout(Stdio::null()).status().unwrap();
         assert!(status.success());
+    }
+
+    /// 给 `dir` 加上 `perms` 这几条拒绝 Everyone 的权限跑完 `run` 再撤掉，断言都放在撤掉之后，免得断言挂了
+    /// 把权限留下、临时目录删不掉。`perms` 照 icacls 的写法：目录上 `WD` 管建文件，`AD` 管建子目录，
+    /// `DC` 管删里面的东西；`(OI)(IO)(NP)` 只落到直接建在这一层的文件上，不往新建的子目录里传。
+    fn with_denied<T>(dir: &Path, perms: &[&str], run: impl FnOnce() -> T) -> T {
+        let denied: Vec<String> = perms
+            .iter()
+            .map(|perm| format!("{EVERYONE}:{perm}"))
+            .collect();
+        let status = Command::new("icacls")
+            .arg(dir)
+            .arg("/deny")
+            .args(&denied)
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "icacls {} /deny {denied:?}",
+            dir.display()
+        );
+        let out = run();
+        set_write_denied(dir, false);
+        out
     }
 
     fn roomy(_: &Path) -> Option<Volume> {
@@ -831,6 +921,21 @@ mod tests {
         let prefix = format!("{} 写不进去：", dir.display());
         assert!(fault.detail.starts_with(&prefix), "{}", fault.detail);
         assert!(fault.detail.contains("os error 5"), "{}", fault.detail);
+    }
+
+    #[test]
+    fn an_existing_target_that_takes_folders_but_not_files_is_dir_unwritable() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("Petalfall");
+        fs::create_dir(&dir).unwrap();
+
+        let fault = with_denied(&dir, &["(WD)"], || write_fault(&dir, 1000, 0, roomy));
+
+        let fault = fault.unwrap();
+        assert_eq!(fault.code, FailureCode::DirUnwritable);
+        assert!(fault.detail.contains("os error 5"), "{}", fault.detail);
+        assert_eq!(entries(&dir), Vec::<String>::new());
+        temp.close().unwrap();
     }
 
     #[test]
@@ -1248,6 +1353,7 @@ mod tests {
                 not_empty: false,
                 appended: false,
                 free_bytes: 1 << 40,
+                data_block: None,
             }
         );
         assert_eq!(entries(dir.path()), Vec::<String>::new());
@@ -1285,6 +1391,55 @@ mod tests {
         assert_eq!(existing, Some(DirIssue::Unwritable));
         assert_eq!(below, Some(DirIssue::Unwritable));
         assert_eq!(entries(&locked), Vec::<String>::new());
+    }
+
+    /// `C:\` 根的默认权限就是这样：许建子目录、不许建文件。目录已经在了，NSIS 把 exe 直接写在这一层，
+    /// 启动器的便携判定也直接在这一层写探针文件，建得了子目录不算写得进；目录还不在时安装要在下面新建一层，
+    /// 建得了子目录、子目录里写得进文件就够。
+    #[test]
+    fn a_folder_that_takes_folders_but_not_files_only_takes_a_new_folder_below() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("folders-only");
+        fs::create_dir(&folder).unwrap();
+        let sub = folder.join("sub");
+
+        let (takes_folders, takes_files, existing, below) = with_denied(&folder, &["(WD)"], || {
+            (
+                fs::create_dir(&sub).and_then(|()| fs::remove_dir(&sub)),
+                fs::write(folder.join("file"), b""),
+                issue(text(&folder), &FakeEnv::default()),
+                issue(
+                    &format!(r"{}\new\Petalfall", text(&folder)),
+                    &FakeEnv::default(),
+                ),
+            )
+        });
+
+        takes_folders.unwrap();
+        assert_eq!(takes_files.unwrap_err().raw_os_error(), Some(5));
+        assert_eq!(existing, Some(DirIssue::Unwritable));
+        assert_eq!(below, None);
+        assert_eq!(entries(&folder), Vec::<String>::new());
+        dir.close().unwrap();
+    }
+
+    /// 建得了文件、删不掉：卸载时这一层清不干净，不能当写得进放过去。探针文件留在原地，名字看得出是谁的。
+    #[test]
+    fn an_existing_folder_whose_new_files_cannot_be_deleted_is_unwritable() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("no-delete");
+        fs::create_dir(&folder).unwrap();
+
+        let found = with_denied(&folder, &["(DC)", "(OI)(IO)(NP)(DE)"], || {
+            issue(text(&folder), &FakeEnv::default())
+        });
+
+        assert_eq!(found, Some(DirIssue::Unwritable));
+        let left = entries(&folder);
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(left[0].starts_with(WRITE_PROBE), "{left:?}");
+        assert!(folder.join(&left[0]).is_file(), "{left:?}");
+        dir.close().unwrap();
     }
 
     #[test]
@@ -1411,7 +1566,229 @@ mod tests {
                 not_empty: false,
                 appended: false,
                 free_bytes: free,
+                data_block: None,
             }
+        );
+    }
+
+    /// 用户选的文件夹里有别人的文件，最终目标目录是追加的那一层，交回时它还不存在。
+    fn foreign_folder() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("other.txt"), b"x").unwrap();
+        let appended = dir.path().join(APP_FOLDER);
+        (dir, appended)
+    }
+
+    fn put_stamp(dir: &Path, contents: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join(STAMP_FILE), contents).unwrap();
+    }
+
+    fn stamp_path(dir: &Path) -> String {
+        format!(r"{}\{STAMP_FILE}", text(dir))
+    }
+
+    fn check_against(path: &str, env: &FakeEnv, supported: u32) -> DirCheck {
+        check_dir_against(path, NEED, &[], env, supported)
+    }
+
+    #[test]
+    fn a_stamp_too_new_in_the_appended_folder_blocks_with_who_wrote_it() {
+        let (dir, appended) = foreign_folder();
+        put_stamp(&appended, &stamp_contents(3, Some("1.4.0-beta.2")));
+
+        let check = check_against(text(dir.path()), &FakeEnv::default(), 2);
+
+        assert_eq!(
+            check,
+            DirCheck {
+                normalized: text(&appended).to_owned(),
+                issue: Some(DirIssue::DataIncompatible),
+                has_config: false,
+                not_empty: true,
+                appended: true,
+                free_bytes: 1 << 40,
+                data_block: Some(DataBlock {
+                    problem: DataProblem::TooNew,
+                    path: stamp_path(&appended),
+                    recorded: Some(3),
+                    supported: 2,
+                    reason: None,
+                    written_by: Some("1.4.0-beta.2".to_owned()),
+                    written_by_channel: Some(Channel::Beta),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn a_stamp_in_the_folder_left_outside_is_not_read() {
+        let (dir, appended) = foreign_folder();
+        // 读了它就会被拦：缺 data_format 的记号读不懂
+        put_stamp(dir.path(), r#"{"written_by":"9.9.9"}"#);
+
+        let check = check_against(text(dir.path()), &FakeEnv::default(), 1);
+
+        assert_eq!(check.normalized, text(&appended));
+        assert_eq!(check.issue, None);
+        assert_eq!(check.data_block, None);
+    }
+
+    #[test]
+    fn an_unreadable_stamp_in_leftover_data_blocks_with_the_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let named = dir.path().join(APP_FOLDER);
+        fs::create_dir(&named).unwrap();
+        fs::write(named.join(CONFIG_FILE), b"{}").unwrap();
+        put_stamp(&named, r#"{"data_format":"2"}"#);
+
+        let check = check_against(text(&named), &FakeEnv::default(), 1);
+
+        assert_eq!(
+            check,
+            DirCheck {
+                normalized: text(&named).to_owned(),
+                issue: Some(DirIssue::DataIncompatible),
+                has_config: true,
+                not_empty: true,
+                appended: false,
+                free_bytes: 1 << 40,
+                data_block: Some(DataBlock {
+                    problem: DataProblem::Unreadable,
+                    path: stamp_path(&named),
+                    recorded: None,
+                    supported: 1,
+                    reason: Some("data_format 是字符串，不是整数".to_owned()),
+                    written_by: None,
+                    written_by_channel: None,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn a_blocked_folder_short_of_space_still_says_data_incompatible() {
+        let (dir, appended) = foreign_folder();
+        put_stamp(&appended, &stamp_contents(2, None));
+        let env = FakeEnv {
+            target_free: 0,
+            ..FakeEnv::default()
+        };
+
+        let check = check_against(text(dir.path()), &env, 1);
+
+        assert_eq!(check.issue, Some(DirIssue::DataIncompatible));
+        assert_eq!(check.free_bytes, 0);
+        assert_eq!(
+            check.data_block,
+            Some(DataBlock {
+                problem: DataProblem::TooNew,
+                path: stamp_path(&appended),
+                recorded: Some(2),
+                supported: 1,
+                reason: None,
+                written_by: None,
+                written_by_channel: None,
+            })
+        );
+    }
+
+    #[test]
+    fn stamps_at_or_below_the_package_leave_the_folder_open() {
+        // (记号里的号, 安装包认得的号)，没有记号算 1
+        for (recorded, supported) in [
+            (None, 1),
+            (None, u32::MAX),
+            (Some(1), 1),
+            (Some(1), 2),
+            (Some(u32::MAX - 1), u32::MAX),
+            (Some(u32::MAX), u32::MAX),
+        ] {
+            let (dir, appended) = foreign_folder();
+            if let Some(recorded) = recorded {
+                put_stamp(&appended, &stamp_contents(recorded, Some("1.0.0")));
+            }
+
+            let check = check_against(text(dir.path()), &FakeEnv::default(), supported);
+
+            assert_eq!(check.issue, None, "{recorded:?} {supported}");
+            assert_eq!(check.data_block, None, "{recorded:?} {supported}");
+        }
+
+        // 放行之后空间照常判
+        let (dir, appended) = foreign_folder();
+        put_stamp(&appended, &stamp_contents(1, None));
+        let env = FakeEnv {
+            target_free: 0,
+            ..FakeEnv::default()
+        };
+        let check = check_against(text(dir.path()), &env, 1);
+        assert_eq!(check.issue, Some(DirIssue::NoSpace));
+        assert_eq!(check.data_block, None);
+    }
+
+    #[test]
+    fn written_by_that_is_not_a_release_version_is_left_out() {
+        for raw in ["1.4.0-rc.1", "1.4.0+meta", "看这里 https://example.invalid"] {
+            let (dir, appended) = foreign_folder();
+            put_stamp(&appended, &stamp_contents(3, Some(raw)));
+
+            let check = check_against(text(dir.path()), &FakeEnv::default(), 2);
+
+            assert_eq!(
+                check.data_block,
+                Some(DataBlock {
+                    problem: DataProblem::TooNew,
+                    path: stamp_path(&appended),
+                    recorded: Some(3),
+                    supported: 2,
+                    reason: None,
+                    written_by: None,
+                    written_by_channel: None,
+                }),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unwritable_outranks_the_data_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join(APP_FOLDER);
+        put_stamp(&locked, &stamp_contents(2, None));
+        set_write_denied(&locked, true);
+
+        let found = check_against(text(&locked), &FakeEnv::default(), 1);
+
+        set_write_denied(&locked, false);
+        assert_eq!(found.issue, Some(DirIssue::Unwritable));
+        assert_eq!(found.data_block, None);
+    }
+
+    #[test]
+    fn check_dir_judges_against_the_format_this_build_supports() {
+        let (dir, appended) = foreign_folder();
+        put_stamp(&appended, &stamp_contents(DATA_FORMAT, None));
+        assert_eq!(
+            check(text(dir.path()), &FakeEnv::default()).data_block,
+            None
+        );
+
+        put_stamp(&appended, &stamp_contents(DATA_FORMAT + 1, Some("1.5.0")));
+        let check = check(text(dir.path()), &FakeEnv::default());
+
+        assert_eq!(check.issue, Some(DirIssue::DataIncompatible));
+        assert_eq!(
+            check.data_block,
+            Some(DataBlock {
+                problem: DataProblem::TooNew,
+                path: stamp_path(&appended),
+                recorded: Some(DATA_FORMAT + 1),
+                supported: DATA_FORMAT,
+                reason: None,
+                written_by: Some("1.5.0".to_owned()),
+                written_by_channel: Some(Channel::Stable),
+            })
         );
     }
 
@@ -1451,6 +1828,7 @@ mod tests {
                 not_empty: true,
                 appended: true,
                 free_bytes: 1 << 40,
+                data_block: None,
             }
         );
         assert!(!dir.path().join(APP_FOLDER).exists());
@@ -1536,6 +1914,7 @@ mod tests {
                 not_empty: true,
                 appended: true,
                 free_bytes: 1 << 40,
+                data_block: None,
             }
         );
         assert!(!dir.path().join(APP_FOLDER).exists());
@@ -1611,6 +1990,7 @@ mod tests {
                 not_empty: false,
                 appended: false,
                 free_bytes: 1 << 40,
+                data_block: None,
             }
         );
     }

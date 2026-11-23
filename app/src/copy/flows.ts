@@ -7,7 +7,9 @@ import type { BaseBusyLock, InstanceLock } from "../domain/instance-locks";
 import type { AccountKind, FailureCode, InstallPhase, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskPhase, TaskStatus } from "../domain/types";
 import type { CrashSource, ExitCodeKind, ExitCodeNoteDto, LaunchWarningCode } from "../ipc/diagnostics";
 import type { MoveBlockerDto, MoveFollowUpDto, NameRule, TemplateSkipReason } from "../ipc/instances";
+import type { UpdateChannel } from "../ipc/system";
 import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
+import { DATA_FORMAT_TASK_FAILURE, moveTargetDataFormatUnreadableReason, moveTargetDataTooNewReason } from "./data-format";
 
 /** 启动失败（首帧之前出错）时错误页的文案。 */
 export const BOOT_FAILURE_COPY = {
@@ -83,12 +85,23 @@ export const SETTINGS_SECTION_LABEL = {
   about: "关于",
 } as const;
 
-/** 发布通道（由版本号推出，见 lib/app-info 的 buildInfo）：关于页的通道标与版本信息。 */
+/** 发布通道（官方构建由版本号推出；自行构建的包标为 local、写「本机构建」，不在这张表里，见 lib/app-info 的 buildInfo）：关于页的通道标与版本信息。 */
 export const RELEASE_CHANNEL_LABEL: Readonly<Record<ReleaseChannel, string>> = {
   stable: "正式版",
   beta: "测试版",
   preview: "预览版",
 };
+
+// 后端通道名的映射与叫法放在这里而不放进 copy/updater：data-format 也要用，若从 updater 引，flows 引 data-format、
+// data-format 引 updater、updater 又引 flows 绕成一圈，而 updater 在模块顶层就读 flows 的导出，先加载 flows 时它读到的还是未定义。
+
+/** 后端的通道名到界面的发布通道：dev 在界面上叫预览版。 */
+export const RELEASE_CHANNEL_OF: Readonly<Record<UpdateChannel, ReleaseChannel>> = { dev: "preview", beta: "beta", stable: "stable" };
+
+/** 后端通道名在界面上的叫法，与关于页的通道标同一套（RELEASE_CHANNEL_LABEL）。 */
+export function updateChannelLabel(channel: UpdateChannel): string {
+  return RELEASE_CHANNEL_LABEL[RELEASE_CHANNEL_OF[channel]];
+}
 
 /** 加载器的官方写法（英文专名保持官方大小写）。 */
 export const LOADER_NAME: Readonly<Record<LoaderKind, string>> = {
@@ -150,7 +163,10 @@ export const OFFLINE_NAME_COPY = {
   tooLong: "最多 16 个字符",
   quote: "不能包含双引号",
   duplicate: "已经有同名账户了",
-  nonStandard: "含有非标准字符，可能无法进入 1.18 及以上版本的世界和多数服务器",
+  /** 与后端校验的提示同一句：1.20.2、1.20.3 的游戏拒收这类角色名。 */
+  spaceOrNonAscii: "含空格或非 ASCII 字符，Minecraft 1.20.2 与 1.20.3 进不了存档与服务器",
+  /** 只剩 ASCII 标点一类的符号：没有核对到哪个游戏版本拒收，不写版本号。 */
+  nonStandard: "含英文字母、数字与下划线以外的符号，部分服务器可能不接受",
   tooShort: "少于 3 个字符，多数服务器会拒绝",
   ok: "可以使用",
   submit: "添加并设为当前",
@@ -712,6 +728,7 @@ export const LAUNCH_WARNING_CODES = [
   "onedrive_folder",
   "icloud_folder",
   "long_player_name",
+  "player_name_chars",
   "jvm_memory_unit",
   "jvm_min_over_max",
   "jvm_max_too_low",
@@ -728,6 +745,7 @@ export interface LaunchWarningCopy {
 
 const CHANGE_GAME_DIR = { kind: "change_game_dir", label: "更换游戏目录" } as const;
 const OPEN_INSTANCE_SETTINGS = { kind: "instance_settings", label: CRASH_COPY.openInstanceSettings } as const;
+const MANAGE_ACCOUNTS = { kind: "manage_accounts", label: "管理账户" } as const;
 
 /** 启动提醒不中断启动：加载时只写 warn 日志，崩溃后在诊断页的「这次启动时的提醒」里按这张表呈现。 */
 export const LAUNCH_WARNING: Readonly<Record<LaunchWarningCode, LaunchWarningCopy>> = {
@@ -755,7 +773,12 @@ export const LAUNCH_WARNING: Readonly<Record<LaunchWarningCode, LaunchWarningCop
   long_player_name: {
     title: "角色名超过 16 个字符",
     body: "Minecraft 1.20.3 及更新的版本进不了存档与服务器。可以到皮肤站换一个不超过 16 个字符的角色名。",
-    action: { kind: "manage_accounts", label: "管理账户" },
+    action: MANAGE_ACCOUNTS,
+  },
+  player_name_chars: {
+    title: "角色名含空格或非 ASCII 字符",
+    body: "Minecraft 1.20.2 与 1.20.3 进不了存档与服务器。可以换一个只用英文字母、数字与下划线的角色名：离线账户新建一个，皮肤站的到皮肤站改。",
+    action: MANAGE_ACCOUNTS,
   },
   jvm_memory_unit: {
     title: "JVM 参数里的内存写法不对",
@@ -914,6 +937,16 @@ export const TASK_INTERRUPTED_CODE = "interrupted";
  */
 export const MOVE_INTERRUPTED_CODE = "move_interrupted";
 
+/**
+ * 重试被游戏目录挡住的原因：任务行上重试按钮的置灰说明，与点了重试（含通知上的）之后的报错共用。任务参数只认实例名，
+ * 同名实例在别的游戏目录里是另一个实例，所以目录对不上、或者不知道发起于哪个目录时都不重试。
+ */
+export const RETRY_GAME_DIR_REASON = {
+  elsewhere: (dir: string) => `这个任务发起于游戏目录 ${dir}，切回去再重试`,
+  unknownOrigin: "这条任务记录是旧版本留下的，不知道发起于哪个游戏目录，不能重试；需要的话重新发起",
+  currentUnknown: "还没读到当前的游戏目录，读到后再重试",
+} as const;
+
 function namedList(names: readonly string[], limit: number): string {
   const named = names
     .slice(0, limit)
@@ -962,6 +995,10 @@ export function moveBlockerReason(blocker: MoveBlockerDto): string {
     // 只在执行时出现：任务带着发起时的游戏目录，切换之后重试会被后端拦下，不去动新目录里同名的实例
     case "source_changed":
       return "当前游戏目录已经换了，切回发起移动时的游戏目录再重试";
+    case "data_too_new":
+      return moveTargetDataTooNewReason(blocker);
+    case "data_format_unreadable":
+      return moveTargetDataFormatUnreadableReason(blocker.reason);
   }
 }
 
@@ -977,6 +1014,9 @@ export function taskFailureReason(error: TaskError): string {
       return error.move_blocker === undefined ? error.message : moveBlockerReason(error.move_blocker);
     case "instance_move_verify_failed":
       return "复制出的文件和原件对不上，这次移动已放弃，原件没动";
+    // 前端重试前已经比对过，后端还是拦下：切换目录与重试撞在了一起
+    case "game_dir_changed":
+      return "当前游戏目录已经换了，切回发起任务时的游戏目录再重试";
     case "network_failed":
       return "网络连接失败";
     case "hash_mismatch":
@@ -1005,6 +1045,9 @@ export function taskFailureReason(error: TaskError): string {
       return error.message;
     case "modpack_export_check_failed":
       return "导出的文件没通过校验，已删除";
+    case "game_dir_data_too_new":
+    case "data_format_unreadable":
+      return DATA_FORMAT_TASK_FAILURE[error.code];
     default:
       return error.message;
   }
@@ -1017,13 +1060,34 @@ const ALL_MODS_LATEST = "所有 Mod 都是最新的";
 
 /** 安装时没有套上默认设置的原因（通知正文）。 */
 const TEMPLATE_SKIP_REASON: Readonly<Record<TemplateSkipReason, string>> = {
-  disabled: "新建实例时沿用默认设置已在配置里关闭",
+  disabled: "新建实例时沿用默认设置已在设置的「游戏」分区关闭",
   empty: "安装时没有找到默认设置，可能已被清除",
   shared_working_dir: "这个实例与其他未隔离的实例共用 .minecraft 里的设置",
 };
 
+/**
+ * 新建、导入、补全落地时，发起它的游戏目录已经不是当前目录（通知正文）：实例在那个目录里，跟着要做的事按实例名会落到
+ * 当前目录的同名实例上，所以没做。missed 是因此没做的事，没有为 null。
+ */
+function landedElsewhere(dir: string, missed: string | null): string {
+  return missed === null ? `它在游戏目录 ${dir} 里，切回去再启动` : `它在游戏目录 ${dir} 里，当前已换到别的目录，${missed}；切回去再启动`;
+}
+
+/** 新建、导入落地时目录已换：没写上的封面与侧栏固定。 */
+function unsettled(cover: boolean, pin: boolean): string | null {
+  if (cover && pin) return "封面与侧栏固定没有写上";
+  if (cover) return "封面没有写上";
+  return pin ? "没有固定到侧栏" : null;
+}
+
 export const TASK_TOAST = {
   ready: (name: string) => ({ title: `「${name}」已就绪`, body: "可以启动游戏了" }),
+  readyElsewhere: (name: string, dir: string, cover: boolean, pin: boolean) => ({ title: `「${name}」已就绪`, body: landedElsewhere(dir, unsettled(cover, pin)) }),
+  importedElsewhere: (name: string, dir: string, cover: boolean, pin: boolean) => ({ title: `「${name}」已导入`, body: landedElsewhere(dir, unsettled(cover, pin)) }),
+  repairedElsewhere: (name: string, dir: string, reinstalledLoader: boolean, launchAfter: boolean) => ({
+    title: reinstalledLoader ? `「${name}」的加载器已重新安装` : `「${name}」已修复`,
+    body: landedElsewhere(dir, launchAfter ? "没有接着启动" : null),
+  }),
   imported: (name: string, modCount: number | null) => (modCount === null ? { title: `「${name}」已导入` } : { title: `「${name}」已导入`, body: `含 ${modCount} 个 Mod` }),
   repaired: (name: string) => ({ title: `「${name}」已修复` }),
   loaderReinstalled: (name: string) => ({ title: `「${name}」的加载器已重新安装` }),
@@ -1066,6 +1130,14 @@ export const TASK_TOAST = {
   moveFollowUps: (instance: string, items: readonly MoveFollowUpDto[]) => ({
     title: `「${instance}」已移过去，有 ${items.length} 项要留意`,
     body: items.map(moveFollowUpText).join("；"),
+  }),
+  /**
+   * 移动完成时还排在队里、挂在这个实例上的任务开始了也做不成，已随之取消：完成通知之后补一条。正文最多显示三行，
+   * 怎么办写在任务标题前面，标题多了被截掉的部分到下载任务里看。
+   */
+  moveQueueCancelled: (instance: string, titles: readonly string[]) => ({
+    title: `已取消 ${titles.length} 个排队中的任务`,
+    body: `「${instance}」已不在当前游戏目录里，这些任务开始了也会失败，切换过去后重新发起：${titles.join("、")}`,
   }),
   /** 移动不是下载，失败不并进「n 个下载失败」。 */
   moveFailed: (title: string, reason: string) => ({ title: `${title}没有完成`, body: reason }),
@@ -1528,7 +1600,18 @@ export const DELETE_INSTANCE_COPY = {
   /** 实例上还挂着没完成的任务（新建、导入、补全、装 Mod）时追加：确认后先取消任务再删除。 */
   pendingTask: "正在进行的安装任务会先取消。",
   confirmLabel: (worlds: number) => (worlds > 0 ? `删除实例和 ${worlds} 个存档` : "删除实例"),
-  /** 删除预览看出有实例经继承依赖它：这时删不了，不进确认框。Toast 正文放不下更多名字，只点两个。 */
+  /** 点了删除先开框、后问后端：清点期间正文占位，骨架出现时读屏听到这句。 */
+  previewLoading: "正在清点会一起删除的存档…",
+  /** 删除预览没读出来：框里写明原因，确认键一直不可按。 */
+  previewFailed: (reason: string) => `没能清点会随实例一起删除的存档，这次删不了：${reason}`,
+  /** 删除预览看出有实例依赖它时确认框的正文：删不了，确认键一直不可按。 */
+  blocked: (name: string, dependents: readonly string[]): string => {
+    const { title, body } = DELETE_INSTANCE_COPY.hasDependents(name, dependents);
+    return `${title}：${body}。`;
+  },
+  /** 删不了（预览失败、有实例依赖它）时取消键的文案：没有要取消的动作，只剩关掉。 */
+  close: "关闭",
+  /** 删除预览看出有实例经继承依赖它：这时删不了，确认框里经 blocked 说明。只点两个名字，其余写总数。 */
   hasDependents: (name: string, dependents: readonly string[]) => {
     if (dependents.length === 0) throw new Error(`没有实例依赖「${name}」，不该走到这句`);
     const named = dependents
@@ -1619,6 +1702,12 @@ const INSTANCE_LOCK_REASON = {
     move: "实例正在移到其他游戏目录",
   },
 } as const;
+
+/**
+ * 失败任务挂在移动中的实例上时重试的悬停原因，与移动菜单项同一句。不说「完成后才能重试」：移动成功后这些任务跟着实例
+ * 记到了目标目录，要切过去才能重试。
+ */
+export const RETRY_MOVING_REASON = INSTANCE_LOCK_REASON.moving.move;
 
 /** 锁定原因的悬停文字；没有锁为 undefined，可以直接交给 disabledReason。 */
 export function lockReason(lock: InstanceLock | BaseBusyLock | null, kind: "mods" | "rename" | "repair" | "reinstallLoader" | "delete" | "move"): string | undefined {

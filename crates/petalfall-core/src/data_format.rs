@@ -1,0 +1,2149 @@
+//! 数据格式号在启动器这一侧的把关：数据目录、游戏目录，以及下好的更新包。
+//!
+//! 规则本身（号是多少、记号怎么读、什么算太新）在 petalfall-release；这里做碰磁盘的那一半：读写记号文件，
+//! 在读配置之前、在动游戏目录之前先核对。
+//!
+//! - [`check_data_root`]：读配置之前核对数据目录根下的记号。
+//! - [`Petalfall::guard_game_dir`]、[`Petalfall::guard_game_dir_at`]：动游戏目录之前核对
+//!   `<游戏目录>/.petalfall/data-format.json`。
+//! - [`package_info`]：从下好、验过签的更新包字节里读载荷头。
+//!
+//! 记号里的 `written_by` 可能出自别人的机器：这里只原样带出、转义后进日志，要给人看先经 [`trusted_written_by`]。
+
+use std::collections::BTreeSet;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use petalfall_base::fs::{DataDirResolution, PROBE_RETRY_DELAYS, atomic_write};
+use petalfall_instance::PETALFALL_META_DIR;
+use petalfall_release::data_format::{
+    Stamp, StampFile, StampRead, StampVerdict, WrittenBy, judge_stamp, parse_stamp, stamp_contents,
+};
+
+pub use petalfall_release::data_format::{
+    DATA_FORMAT, STAMP_FILE, TrustedWrittenBy, trusted_written_by,
+};
+/// [`package_info`] 读不出载荷头时的错误。外壳不直接依赖载荷格式的包，经这里拿到这个类型。
+pub use petalfall_setup_payload::Error as PackageHeaderError;
+
+use crate::error::{CoreError, GameDirProblem, Result};
+use crate::facade::Petalfall;
+use crate::folders::DIR_PROBE_TIMEOUT;
+
+/// 数据目录的关卡不放行的原因。三种都发生在读配置之前，那时还没有窗口。
+#[derive(Debug, thiserror::Error)]
+pub enum DataRootRefusal {
+    /// 记号的号比这一版大：这份数据被更新的落樱用过。数据目录里的文件一个没动。
+    #[error("数据格式记录 {path} 记着更新的格式，这个版本读不了这里的数据")]
+    TooNew {
+        /// 记号文件；数据目录是它的上一级。
+        path: PathBuf,
+        /// 记号里的号。
+        found: u32,
+        /// 这一版的号。
+        supported: u32,
+        /// 记号里 `written_by` 的原文，没有或不是字符串时为 `None`。给人看之前经 [`trusted_written_by`]。
+        written_by: Option<String>,
+    },
+    /// 记号读不懂：无从知道数据是哪一版写的。
+    #[error("数据格式记录 {path} 读不懂：{reason}")]
+    Unreadable {
+        /// 记号文件。
+        path: PathBuf,
+        /// 出了什么错，不照抄文件里的内容。
+        reason: String,
+    },
+    /// 数据目录写得进去，记号却重试之后仍没写成。这次启动接下来会写出这一版格式的数据，记号没记上的话，
+    /// 号更低的版本以后会读错它，所以不放行。
+    #[error("没能把数据格式记进 {path}")]
+    NotRecorded {
+        /// 记号文件，多半还不存在。
+        path: PathBuf,
+        /// 最后一次写入的错误。
+        #[source]
+        source: petalfall_base::Error,
+    },
+}
+
+/// 读配置之前核对数据目录根下的记号：号比 `own` 大或读不懂就拒绝；比 `own` 小就把记号原子写成 `own`，
+/// 写不进去按 [`PROBE_RETRY_DELAYS`] 的间隔重试三次，仍不成就拒绝；相等时什么都不写。每次写之前都再读一次
+/// （见 [`raise_if_still_lower`]）：单实例保护只在本机按路径占位，共用盘上的便携版从两台电脑同时打开时挡不住。
+///
+/// `own` 是这一版的数据格式号，生产代码传 [`DATA_FORMAT`]。`app_version` 记进新记号的 `written_by`；门面在
+/// 构造时还没有应用版本，传 `None`，写出的记号就不带这一项。
+///
+/// 定位结果说整个数据目录写不进去（[`DataDirResolution::write_failure`] 有值）时，号低也不抬：这次启动什么都
+/// 写不下，数据仍是记号所记的形态。这时记的 warn 同一个数据目录在进程里只记一次（见 [`warn_not_raised_once`]）。
+/// 号高、读不懂照样拒绝。
+pub async fn check_data_root(
+    resolution: &DataDirResolution,
+    own: u32,
+    app_version: Option<&str>,
+) -> std::result::Result<(), DataRootRefusal> {
+    check_data_root_with(
+        resolution,
+        own,
+        app_version,
+        async |path: &Path| read_stamp_on_disk(path).await,
+        async |path: &Path, bytes: &[u8]| atomic_write(path, bytes).await,
+    )
+    .await
+}
+
+/// [`check_data_root`] 的实现。读记号（第一次读与写之前的再读）由 `read_stamp` 做，写记号由 `write` 做，
+/// 测试换成别处刚抬过号的读法与会失败的写法。
+async fn check_data_root_with(
+    resolution: &DataDirResolution,
+    own: u32,
+    app_version: Option<&str>,
+    mut read_stamp: impl AsyncFnMut(&Path) -> StampRead,
+    write: impl AsyncFnMut(&Path, &[u8]) -> petalfall_base::Result<()>,
+) -> std::result::Result<(), DataRootRefusal> {
+    let path = resolution.path.join(STAMP_FILE);
+    let read = read_stamp(&path).await;
+    warn_if_written_by_not_text(&path, &read);
+    let (found, written_by) = stamp_facts(&read);
+    let outcome = match judge_stamp(&read, own) {
+        StampVerdict::Raise => match &resolution.write_failure {
+            Some(failure) => {
+                warn_not_raised_once(&path, failure);
+                Ok("数据目录不可写，不抬号，放行")
+            }
+            None => {
+                let contents = stamp_contents(own, app_version);
+                match raise_with_retries(&path, own, contents.as_bytes(), read_stamp, write).await {
+                    Ok(Raised::Written) => Ok("已抬号，放行"),
+                    Ok(Raised::Skipped(again)) => {
+                        warn_if_written_by_not_text(&path, &again);
+                        let (now, now_written_by) = stamp_facts(&again);
+                        tracing::info!(
+                            own,
+                            found = ?found,
+                            now = ?now,
+                            now_written_by = ?now_written_by,
+                            path = %path.display(),
+                            "写数据格式记号之前再读，号已不低于这一版，不写"
+                        );
+                        settle_root(&path, own, judge_stamp(&again, own))
+                            .map(|()| "再读时号已不低于这一版，没写，放行")
+                    }
+                    Err(source) => Err(DataRootRefusal::NotRecorded {
+                        path: path.clone(),
+                        source,
+                    }),
+                }
+            }
+        },
+        verdict => settle_root(&path, own, verdict).map(|()| "放行"),
+    };
+    // 排错用的诊断日志：读到的号、written_by 原文（转义）与结论都在这一行里。
+    match &outcome {
+        Ok(conclusion) => tracing::info!(
+            own,
+            found = ?found,
+            path = %path.display(),
+            written_by = ?written_by,
+            conclusion,
+            "核对数据目录的数据格式"
+        ),
+        Err(refusal) => tracing::warn!(
+            own,
+            found = ?found,
+            path = %path.display(),
+            written_by = ?written_by,
+            refusal = %petalfall_base::error_with_causes(refusal),
+            "核对数据目录的数据格式，拒绝打开"
+        ),
+    }
+    outcome.map(|_| ())
+}
+
+/// 数据目录写不进去、号低不抬时记 warn，同一个记号路径在进程里只记头一回。桌面应用启动时外壳在建窗口之前核对
+/// 一次，构造门面时又对同一个数据目录核对一次；数据目录的定位进程内只做一次，两次碰上的是同一个写不进去，第二条
+/// 不带新东西。命令行没有外壳那一关，门面那次就是头一回，照记。每次核对那行诊断日志不受影响，结论里写着没抬号。
+fn warn_not_raised_once(path: &Path, failure: &str) {
+    static WARNED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+    let first = WARNED
+        .lock()
+        .expect("记过不抬号的记号路径表的锁已中毒")
+        .insert(path.to_owned());
+    if first {
+        tracing::warn!(
+            path = %path.display(),
+            failure = %failure,
+            "数据目录写不进去，这次不抬数据格式号"
+        );
+    }
+}
+
+/// 不抬号时数据目录的结论：相等放行，更高、读不懂拒绝。号更低的记号由调用方抬号或因数据目录不可写而放行；
+/// 再读之后交到这里的号不会更低（见 [`raise_if_still_lower`]）。
+fn settle_root(
+    path: &Path,
+    own: u32,
+    verdict: StampVerdict,
+) -> std::result::Result<(), DataRootRefusal> {
+    match verdict {
+        StampVerdict::Pass => Ok(()),
+        StampVerdict::TooNew { found, written_by } => Err(DataRootRefusal::TooNew {
+            path: path.to_owned(),
+            found,
+            supported: own,
+            written_by,
+        }),
+        StampVerdict::Unreadable { reason } => Err(DataRootRefusal::Unreadable {
+            path: path.to_owned(),
+            reason,
+        }),
+        StampVerdict::Raise => unreachable!("号更低的数据根记号由调用方处理，不在这里下结论"),
+    }
+}
+
+/// 抬号这一步的结果。
+#[derive(Debug)]
+enum Raised {
+    /// 再读时号仍低于这一版，已写成这一版。
+    Written,
+    /// 再读时号已经不低于这一版（相等或更高）或读不懂，没写。带出再读到的记号，调用方照它重新下结论。
+    Skipped(StampRead),
+}
+
+/// 写记号之前再读一次，号仍低于 `own` 才写。两个号不同的落樱同时第一次核对同一个目录时都读到缺失；号高的
+/// 先写下，号低的再照第一次读到的结论写，记号就被覆盖回低号，号低的版本之后会接着读写号高的格式。
+///
+/// 再读没有消除这个竞态，只是把窗口从整个核对过程缩到「再读」到「改名生效」之间（含写临时文件与落盘）：
+/// 另一个进程恰好在这段时间里写下的更高的号仍会被覆盖。
+async fn raise_if_still_lower(
+    path: &Path,
+    own: u32,
+    contents: &[u8],
+    reread: impl AsyncFnOnce(&Path) -> StampRead,
+    write: impl AsyncFnOnce(&Path, &[u8]) -> petalfall_base::Result<()>,
+) -> petalfall_base::Result<Raised> {
+    let again = reread(path).await;
+    if !matches!(judge_stamp(&again, own), StampVerdict::Raise) {
+        return Ok(Raised::Skipped(again));
+    }
+    write(path, contents).await?;
+    Ok(Raised::Written)
+}
+
+/// 抬号，写失败时按 [`PROBE_RETRY_DELAYS`] 的间隔重试：杀软扫新文件这类一时的占用几百毫秒就放开。每次写之前
+/// 都经 [`raise_if_still_lower`] 再读一次，重试的间隔里别处抬上去的号也不会被覆盖。都失败时交回最后一次的错误。
+async fn raise_with_retries(
+    path: &Path,
+    own: u32,
+    contents: &[u8],
+    mut read_stamp: impl AsyncFnMut(&Path) -> StampRead,
+    mut write: impl AsyncFnMut(&Path, &[u8]) -> petalfall_base::Result<()>,
+) -> petalfall_base::Result<Raised> {
+    let mut delays = PROBE_RETRY_DELAYS.into_iter();
+    loop {
+        let err = match raise_if_still_lower(path, own, contents, &mut read_stamp, &mut write).await
+        {
+            Ok(raised) => return Ok(raised),
+            Err(err) => err,
+        };
+        let Some(delay) = delays.next() else {
+            return Err(err);
+        };
+        tracing::warn!(
+            path = %path.display(),
+            error = %petalfall_base::error_with_causes(&err),
+            retry_in_ms = delay.as_millis() as u64,
+            "写数据格式记号失败，稍后重试"
+        );
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// 用到游戏目录之前怎么核对。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardMode {
+    /// 「使用」：接下来要读写这个目录。号低于这一版时先把记号抬上去，号更高、读不懂都报错。
+    Use,
+    /// 「只判断」：只想知道这个目录能不能用。什么都不写，号更高、读不懂都交回给调用方处理。
+    Inspect,
+}
+
+/// 游戏目录核对的结论（核对本身没出错时）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GameDirCheck {
+    /// 游戏目录本身不存在，这里没有任何数据。没建目录，也没写记号。
+    Absent,
+    /// 可以用：记号不高于这一版；「使用」方式下需要时已经抬到这一版。
+    Ready,
+    /// 只在「只判断」方式下出现：记号比这一版新。字段同 [`CoreError::GameDirDataTooNew`]。
+    TooNew {
+        path: PathBuf,
+        found: u32,
+        supported: u32,
+        written_by: Option<String>,
+    },
+    /// 只在「只判断」方式下出现：记号读不懂。字段同 [`CoreError::DataFormatUnreadable`]。
+    Unreadable { path: PathBuf, reason: String },
+}
+
+impl Petalfall {
+    /// 动当前游戏目录之前核对它的数据格式记号，规则见 [`Petalfall::guard_game_dir_at`]。
+    pub async fn guard_game_dir(&self, mode: GuardMode) -> Result<GameDirCheck> {
+        self.guard_game_dir_at(self.game_dir(), mode).await
+    }
+
+    /// 动 `dir` 这个游戏目录之前核对它的记号。切换目录、移动实例的目标、首次向导选的目录都不是门面当前的
+    /// 游戏目录，走这个入口。
+    ///
+    /// 看目录在不在与读记号放在一个阻塞任务里，共用 [`DIR_PROBE_TIMEOUT`]；「使用」方式下抬号时的再读与写记号
+    /// 也算在这同一个时限里。时限内没有结论（网络盘挂起、写挂起、任务异常结束），或者看目录时这个位置此刻够不着
+    /// （Windows 上盘符无效、找不到网络路径或网络名），两种方式都报 [`GameDirProblem::Unavailable`]，不读写这个
+    /// 目录：没核对过就往下走，号更低的这一版可能写坏里面的数据，宁可让用户重试。其余情况：
+    /// - 目录本身不存在（文件或路径不存在）：交回 [`GameDirCheck::Absent`]，不建目录、不写；
+    /// - 看目录时出错（上面两种以外）：报读写错误；
+    /// - 号不高于这一版：交回 [`GameDirCheck::Ready`]；「使用」方式下号更低时先把记号原子写成这一版，写不进去
+    ///   报读写错误。写之前再读一次（见 [`raise_if_still_lower`]），那时号已经不低于这一版就不写，照再读到的
+    ///   记号下结论；
+    /// - 号更高：「使用」报 [`CoreError::GameDirDataTooNew`]，「只判断」交回 [`GameDirCheck::TooNew`]；
+    /// - 记号读不懂：「使用」报 [`CoreError::DataFormatUnreadable`]，「只判断」交回 [`GameDirCheck::Unreadable`]。
+    ///
+    /// 每次调用都重读记号、不记「核对过」：两台电脑共用一个目录时，另一台随时可能把号抬上去。写进记号的
+    /// `written_by` 取门面上的应用版本，没有时不写这一项。
+    pub async fn guard_game_dir_at(&self, dir: &Path, mode: GuardMode) -> Result<GameDirCheck> {
+        let app_version = self.app_version.as_deref();
+        let reread = async |path: &Path| read_stamp_on_disk(path).await;
+        let write = async |path: &Path, bytes: &[u8]| atomic_write(path, bytes).await;
+        #[cfg(test)]
+        if let Some(fixture) = testing::current() {
+            return match fixture.look {
+                Some(look) => {
+                    guard_dir(
+                        dir,
+                        mode,
+                        fixture.own,
+                        app_version,
+                        look(dir),
+                        reread,
+                        write,
+                    )
+                    .await
+                }
+                None => {
+                    guard_dir(
+                        dir,
+                        mode,
+                        fixture.own,
+                        app_version,
+                        look_on_disk(dir.to_owned()),
+                        reread,
+                        write,
+                    )
+                    .await
+                }
+            };
+        }
+        guard_dir(
+            dir,
+            mode,
+            DATA_FORMAT,
+            app_version,
+            look_on_disk(dir.to_owned()),
+            reread,
+            write,
+        )
+        .await
+    }
+}
+
+/// 一次核对里「看目录 + 读记号」的结果。
+#[derive(Debug)]
+pub(crate) enum DirLook {
+    /// 游戏目录本身不存在。
+    Absent,
+    /// 目录在，这是记号的读取结论（文件不存在算 1）。
+    Stamp(StampRead),
+    /// 看目录时这个位置此刻够不着（见 [`is_missing`]），不知道目录在不在。
+    Unreachable(io::Error),
+    /// 看目录时出错（不存在、够不着以外）。
+    Failed(io::Error),
+    /// 做这件事的阻塞任务异常结束，没有结论。
+    Lost,
+}
+
+/// 游戏目录关卡的实现：`look` 给出「看目录 + 读记号」的结果，时限从这里开始算。「使用」方式下要抬号时，
+/// `reread` 在写之前再读一次记号，`write` 写记号，两步与 `look` 共用一个截止时刻。
+async fn guard_dir(
+    dir: &Path,
+    mode: GuardMode,
+    own: u32,
+    app_version: Option<&str>,
+    look: impl Future<Output = DirLook>,
+    reread: impl AsyncFnOnce(&Path) -> StampRead,
+    write: impl AsyncFnOnce(&Path, &[u8]) -> petalfall_base::Result<()>,
+) -> Result<GameDirCheck> {
+    let deadline = tokio::time::Instant::now() + DIR_PROBE_TIMEOUT;
+    let mut read = match tokio::time::timeout_at(deadline, look).await {
+        Ok(DirLook::Stamp(read)) => read,
+        Ok(DirLook::Absent) => {
+            tracing::debug!(dir = %dir.display(), ?mode, "游戏目录不存在，不写数据格式记号");
+            return Ok(GameDirCheck::Absent);
+        }
+        Ok(DirLook::Failed(source)) => {
+            return Err(CoreError::Base(petalfall_base::Error::Io {
+                path: dir.to_owned(),
+                source,
+            }));
+        }
+        Ok(DirLook::Unreachable(source)) => {
+            tracing::info!(
+                dir = %dir.display(),
+                ?mode,
+                error = %source,
+                "看游戏目录时这个位置够不着，不当作目录不存在，按暂时连不上处理"
+            );
+            return Err(CoreError::InvalidGameDirectory {
+                path: dir.to_owned(),
+                problem: GameDirProblem::Unavailable,
+            });
+        }
+        Ok(DirLook::Lost) | Err(_) => {
+            tracing::info!(
+                dir = %dir.display(),
+                ?mode,
+                "核对游戏目录的数据格式在时限内没有结论，按暂时连不上处理"
+            );
+            return Err(CoreError::InvalidGameDirectory {
+                path: dir.to_owned(),
+                problem: GameDirProblem::Unavailable,
+            });
+        }
+    };
+    let stamp = stamp_path(dir);
+    warn_if_written_by_not_text(&stamp, &read);
+    if mode == GuardMode::Use && matches!(judge_stamp(&read, own), StampVerdict::Raise) {
+        let found = stamp_facts(&read).0;
+        let contents = stamp_contents(own, app_version);
+        // 能读不能写的网络盘上写会挂起，不限时的话列实例会一直等着，不会在时限后报暂时连不上。与看目录共用一个
+        // 截止时刻、不另起一份时限：挂起的目录不该把等待拖到两倍。
+        //
+        // 时限到了就丢下这一步、报暂时连不上，但已经交给阻塞线程池的那一小步撤不回来。停在写临时文件时会留下原子写
+        // 的临时文件，它不是记号，不影响判读。停在改名时，改名可能在报错之后才落地：写前的再读只保证再读那一刻号
+        // 还低，从再读到改名落地隔着整段挂起，这期间另一台电脑写下的更高的号会被改回这一版的号；直到那台电脑下次
+        // 核对时把号抬回去之前，这一版会把那边写过的数据当作自己的格式来读写。这就是 raise_if_still_lower 说的
+        // 窗口，被挂起拉长了，没有被再读兜住。接受它：共用目录上没有跨机器的锁，要等改名做完又会让挂起的盘重新
+        // 拖住关卡；碰上它要两台号不同的落樱恰好在这段挂起期间先后写同一个记号。
+        let raised = tokio::time::timeout_at(
+            deadline,
+            raise_if_still_lower(&stamp, own, contents.as_bytes(), reread, write),
+        )
+        .await;
+        let Ok(raised) = raised else {
+            tracing::info!(
+                dir = %dir.display(),
+                ?mode,
+                "写游戏目录的数据格式记号在时限内没有完成，按暂时连不上处理"
+            );
+            return Err(CoreError::InvalidGameDirectory {
+                path: dir.to_owned(),
+                problem: GameDirProblem::Unavailable,
+            });
+        };
+        match raised? {
+            Raised::Written => {
+                tracing::info!(
+                    path = %stamp.display(),
+                    found = ?found,
+                    own,
+                    "抬高了游戏目录的数据格式记号"
+                );
+                return Ok(GameDirCheck::Ready);
+            }
+            Raised::Skipped(again) => {
+                warn_if_written_by_not_text(&stamp, &again);
+                tracing::info!(
+                    path = %stamp.display(),
+                    found = ?found,
+                    now = ?stamp_facts(&again).0,
+                    own,
+                    "写游戏目录的数据格式记号之前再读，号已不低于这一版，不写"
+                );
+                read = again;
+            }
+        }
+    }
+    let written_by = stamp_facts(&read).1;
+    match judge_stamp(&read, own) {
+        // 号更低只在「只判断」方式下走到这里，不写；「使用」方式在上面抬过号，或者再读到的号已不低于这一版。
+        StampVerdict::Pass | StampVerdict::Raise => Ok(GameDirCheck::Ready),
+        StampVerdict::TooNew {
+            found,
+            written_by: raw,
+        } => {
+            tracing::warn!(
+                path = %stamp.display(),
+                found,
+                own,
+                written_by = ?written_by,
+                ?mode,
+                "游戏目录的数据格式比这一版新"
+            );
+            match mode {
+                GuardMode::Use => Err(CoreError::GameDirDataTooNew {
+                    path: dir.to_owned(),
+                    found,
+                    supported: own,
+                    written_by: raw,
+                }),
+                GuardMode::Inspect => Ok(GameDirCheck::TooNew {
+                    path: dir.to_owned(),
+                    found,
+                    supported: own,
+                    written_by: raw,
+                }),
+            }
+        }
+        StampVerdict::Unreadable { reason } => {
+            tracing::warn!(
+                path = %stamp.display(),
+                reason = %reason,
+                ?mode,
+                "游戏目录的数据格式记号读不懂"
+            );
+            match mode {
+                GuardMode::Use => Err(CoreError::DataFormatUnreadable {
+                    path: dir.to_owned(),
+                    reason,
+                }),
+                GuardMode::Inspect => Ok(GameDirCheck::Unreadable {
+                    path: dir.to_owned(),
+                    reason,
+                }),
+            }
+        }
+    }
+}
+
+/// 在阻塞线程池里看目录、读记号：挂起的网络盘上这两步都可能卡住几秒，不能占着异步线程。
+async fn look_on_disk(dir: PathBuf) -> DirLook {
+    let shown = dir.clone();
+    match tokio::task::spawn_blocking(move || look_at_game_dir(&dir)).await {
+        Ok(look) => look,
+        Err(join) => {
+            tracing::warn!(dir = %shown.display(), error = %join, "看游戏目录的线程异常结束");
+            DirLook::Lost
+        }
+    }
+}
+
+fn look_at_game_dir(dir: &Path) -> DirLook {
+    match std::fs::metadata(dir) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return DirLook::Failed(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "这个位置是文件，不是文件夹",
+            ));
+        }
+        Err(err) => return dir_error_look(err),
+    }
+    DirLook::Stamp(stamp_read(std::fs::read(stamp_path(dir))))
+}
+
+/// 取游戏目录的元数据出错时的结论：确实不存在（见 [`is_missing`]）是目录不存在；同样被归成 `NotFound` 的其余
+/// 几种是这一刻够不着；别的是读写错误。
+fn dir_error_look(err: io::Error) -> DirLook {
+    if is_missing(&err) {
+        DirLook::Absent
+    } else if err.kind() == io::ErrorKind::NotFound {
+        DirLook::Unreachable(err)
+    } else {
+        DirLook::Failed(err)
+    }
+}
+
+fn stamp_path(game_dir: &Path) -> PathBuf {
+    game_dir.join(PETALFALL_META_DIR).join(STAMP_FILE)
+}
+
+/// 读 `path` 这个记号文件并判读。数据根的每次读、游戏目录抬号前的再读都走这里。
+async fn read_stamp_on_disk(path: &Path) -> StampRead {
+    stamp_read(tokio::fs::read(path).await)
+}
+
+/// 读记号文件的结果交给共用包判读：文件确实不存在算缺失，别的读错都是读不懂，不当作缺失。
+fn stamp_read(file: io::Result<Vec<u8>>) -> StampRead {
+    match file {
+        Ok(bytes) => parse_stamp(StampFile::Contents(&bytes)),
+        Err(err) => parse_stamp(stamp_file_error(&err)),
+    }
+}
+
+/// 读盘报的错是不是「确实不存在」。
+///
+/// Windows 上标准库把盘符无效（15）、找不到网络路径（53）、找不到网络名（67）也归成 `NotFound`。报这几种说明
+/// 这一刻够不着那个位置（多半是网络盘一时断开），而不是东西不存在：读记号时当成缺失接着抬号，会把已有的更高的号
+/// 覆盖成低号；看游戏目录时当成目录不存在，关卡就不核对、直接放行，建好目录之后的那次核对也一样。所以只认文件
+/// 不存在、路径不存在（2、3）。
+#[cfg(windows)]
+pub(crate) fn is_missing(err: &io::Error) -> bool {
+    // ERROR_FILE_NOT_FOUND、ERROR_PATH_NOT_FOUND。
+    const MISSING: [i32; 2] = [2, 3];
+    err.raw_os_error()
+        .is_some_and(|code| MISSING.contains(&code))
+}
+
+/// 别的平台上 `NotFound` 只表示文件或路径不存在。
+#[cfg(not(windows))]
+pub(crate) fn is_missing(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::NotFound
+}
+
+/// 读记号文件出错时，这算记号缺失还是读出错：确实不存在（见 [`is_missing`]）才算缺失，其余一律按读出错，原因带
+/// 系统错误原文。
+fn stamp_file_error(err: &io::Error) -> StampFile<'static> {
+    if is_missing(err) {
+        StampFile::Missing
+    } else {
+        StampFile::ReadFailed(err.to_string())
+    }
+}
+
+/// 进日志的两项：读到的号（读不懂时没有）与 `written_by` 原文。
+fn stamp_facts(read: &StampRead) -> (Option<u32>, Option<&str>) {
+    match read {
+        StampRead::Valid(Stamp {
+            data_format,
+            written_by,
+        }) => (Some(*data_format), written_by.text()),
+        StampRead::Unreadable { .. } => (None, None),
+    }
+}
+
+fn warn_if_written_by_not_text(path: &Path, read: &StampRead) {
+    if let StampRead::Valid(Stamp {
+        written_by: WrittenBy::NotText(value),
+        ..
+    }) = read
+    {
+        tracing::warn!(
+            path = %path.display(),
+            value = ?value,
+            "数据格式记号里的 written_by 不是字符串，当作没有"
+        );
+    }
+}
+
+/// 更新包载荷头里启动器要看的几项。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageInfo {
+    /// 头里的版本号原文。
+    pub version: String,
+    /// 包认得的数据格式号。早于数据格式号的旧包（载荷头是 `PFSETUP1`）为 0。
+    pub data_format: u32,
+    /// 能力位。旧包没有这一项。
+    pub caps: Option<u32>,
+}
+
+/// `PFSETUP1` 的包早于数据格式号，没人核实过它能不能读现在的数据，按比任何真实的号都小的 0 算。
+const PFSETUP1_DATA_FORMAT: u32 = 0;
+
+/// 从下好并验过签的更新包字节里读载荷头。包就是引导程序本身，头在可执行文件的节末端之后，整个文件都在
+/// 更新签名的覆盖范围里，所以这是包号与能力位的唯一权威。
+///
+/// 两种 magic 都不是、头或载荷被截断、不是 PE、`PFSETUP2` 头里号为 0 都报错，各自是
+/// [`PackageHeaderError`] 的一种。
+pub fn package_info(bytes: &[u8]) -> std::result::Result<PackageInfo, PackageHeaderError> {
+    let header = petalfall_setup_payload::locate(&mut io::Cursor::new(bytes))?.header;
+    Ok(PackageInfo {
+        version: header.version,
+        data_format: header.data_format.unwrap_or(PFSETUP1_DATA_FORMAT),
+        caps: header.caps,
+    })
+}
+
+/// 测试里替换游戏目录关卡的本版号与读盘，供经门面各个入口的测试使用。
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::path::Path;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use super::DirLook;
+
+    /// 换掉「看目录 + 读记号」这一步：交回的 future 多久给出什么结论由测试决定。
+    pub(crate) type LookFn =
+        Arc<dyn Fn(&Path) -> Pin<Box<dyn Future<Output = DirLook> + Send>> + Send + Sync>;
+
+    /// 游戏目录关卡在测试里用的本版号与读盘。
+    #[derive(Clone)]
+    pub(crate) struct GuardFixture {
+        /// 当作这一版的数据格式号：号为 1 时一个记号都不写，测抬号与太新要换成别的号。
+        pub(crate) own: u32,
+        /// 换掉读盘；`None` 时照常读盘。
+        pub(crate) look: Option<LookFn>,
+    }
+
+    tokio::task_local! {
+        static FIXTURE: GuardFixture;
+    }
+
+    /// 在 `fixture` 下跑 `body`：其间这个任务里的游戏目录关卡都按它来。`tokio::spawn` 出去的任务不继承。
+    pub(crate) async fn with_fixture<F: Future>(fixture: GuardFixture, body: F) -> F::Output {
+        FIXTURE.scope(fixture, body).await
+    }
+
+    pub(super) fn current() -> Option<GuardFixture> {
+        FIXTURE.try_with(GuardFixture::clone).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::Duration;
+
+    use petalfall_setup_payload::{CAP_CHANNEL_SWITCH, HEADER_LEN_V2, Header, SHIPPED_CAPS};
+    use tokio::time::Instant;
+
+    use super::testing::{GuardFixture, LookFn, with_fixture};
+    use super::*;
+    use crate::config::PetalfallConfig;
+
+    /// 被更新的预览版抬到 3 的记号。
+    const STAMP_3: &str = r#"{"data_format":3,"written_by":"1.1.0-dev.57"}"#;
+    const WRITER: &str = "1.1.0-dev.57";
+
+    fn resolution(root: &Path, write_failure: Option<&str>) -> DataDirResolution {
+        DataDirResolution {
+            path: root.to_owned(),
+            portable: true,
+            fallback_reason: None,
+            write_failure: write_failure.map(str::to_owned),
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    fn write_file(path: &Path, contents: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    /// 目录下全部条目（相对路径）与文件字节，文件夹记 `None`；目录不存在时为空。前后各拍一次，比对出有没有
+    /// 改动、多出或少了文件。
+    fn snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+        fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let relative = path.strip_prefix(root).unwrap().to_owned();
+                if path.is_dir() {
+                    out.insert(relative, None);
+                    walk(root, &path, out);
+                } else {
+                    out.insert(relative, Some(std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        if root.exists() {
+            walk(root, root, &mut out);
+        }
+        out
+    }
+
+    fn names(root: &Path) -> BTreeSet<PathBuf> {
+        snapshot(root).into_keys().collect()
+    }
+
+    fn disk_full(path: &Path) -> petalfall_base::Error {
+        petalfall_base::Error::Io {
+            path: path.to_owned(),
+            source: io::Error::other("磁盘已满"),
+        }
+    }
+
+    fn reason_of(contents: &[u8]) -> String {
+        match parse_stamp(StampFile::Contents(contents)) {
+            StampRead::Unreadable { reason } => reason,
+            other => panic!("夹具应当读不懂，实际是 {other:?}"),
+        }
+    }
+
+    // ---- 数据目录 ----
+
+    #[tokio::test]
+    async fn a_newer_root_is_refused_and_no_file_changes() {
+        // 数据目录写不进去时也一样拒绝：这一行与可写不可写无关。
+        for write_failure in [None, Some("拒绝访问。 (os error 5)")] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            write_file(
+                &root.join("config.json"),
+                br#"{"first_run_completed":true}"#,
+            );
+            write_file(&root.join(STAMP_FILE), STAMP_3.as_bytes());
+            let before = snapshot(root);
+
+            let refusal =
+                check_data_root(&resolution(root, write_failure), 2, Some("1.0.0-beta.5"))
+                    .await
+                    .unwrap_err();
+
+            // 给人看的文字不带记号里的原文：它可能出自别人的机器。
+            assert!(!refusal.to_string().contains(WRITER), "{refusal}");
+            match refusal {
+                DataRootRefusal::TooNew {
+                    path,
+                    found,
+                    supported,
+                    written_by,
+                } => {
+                    assert_eq!(path, root.join(STAMP_FILE));
+                    assert_eq!((found, supported), (3, 2));
+                    assert_eq!(written_by.as_deref(), Some(WRITER));
+                }
+                other => panic!("应判为数据比这一版新，实际是 {other:?}"),
+            }
+            assert_eq!(snapshot(root), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn format_one_creates_no_file_where_the_stamp_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 第一次启动时数据目录可能还不存在。
+        let root = tmp.path().join("Petalfall");
+        check_data_root(&resolution(&root, None), 1, Some("1.0.0-dev.3"))
+            .await
+            .unwrap();
+        assert!(!root.exists());
+
+        write_file(&root.join("config.json"), b"{}");
+        let before = snapshot(&root);
+        check_data_root(&resolution(&root, None), 1, Some("1.0.0-dev.3"))
+            .await
+            .unwrap();
+        assert_eq!(snapshot(&root), before);
+    }
+
+    #[tokio::test]
+    async fn a_lower_root_stamp_is_raised_to_own_with_or_without_written_by() {
+        let with_writer = r#"{"data_format":2,"written_by":"1.1.0-dev.57"}"#;
+        let without_writer = r#"{"data_format":2}"#;
+        for (existing, app_version, expected) in [
+            (None, Some(WRITER), with_writer),
+            (Some(r#"{"data_format":1}"#), Some(WRITER), with_writer),
+            (None, None, without_writer),
+            (
+                Some(r#"{"data_format":1,"written_by":"1.0.0"}"#),
+                None,
+                without_writer,
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            write_file(&root.join("config.json"), b"{}");
+            if let Some(existing) = existing {
+                write_file(&root.join(STAMP_FILE), existing.as_bytes());
+            }
+
+            check_data_root(&resolution(root, None), 2, app_version)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                std::fs::read_to_string(root.join(STAMP_FILE)).unwrap(),
+                expected,
+                "原有记号 {existing:?}"
+            );
+            // 原子写的临时文件不留下。
+            assert_eq!(
+                names(root),
+                BTreeSet::from([PathBuf::from("config.json"), PathBuf::from(STAMP_FILE)])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_root_stamp_is_refused_and_left_alone() {
+        for contents in [
+            &b"not json"[..],
+            br#"[2]"#,
+            br#"{"data_format":0}"#,
+            br#"{"data_format":"2"}"#,
+            br#"{"written_by":"1.0.0"}"#,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            write_file(&root.join("config.json"), b"{}");
+            write_file(&root.join(STAMP_FILE), contents);
+            let before = snapshot(root);
+
+            let refusal = check_data_root(&resolution(root, None), 2, Some(WRITER))
+                .await
+                .unwrap_err();
+
+            match refusal {
+                DataRootRefusal::Unreadable { path, reason } => {
+                    assert_eq!(path, root.join(STAMP_FILE));
+                    assert_eq!(reason, reason_of(contents));
+                }
+                other => panic!("应判为读不懂，实际是 {other:?}"),
+            }
+            assert_eq!(snapshot(root), before);
+        }
+
+        // 读文件本身出错（这里同名的是个文件夹）也是读不懂，不当作缺失去覆盖它。
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join(STAMP_FILE)).unwrap();
+        let before = snapshot(root);
+        let refusal = check_data_root(&resolution(root, None), 2, Some(WRITER))
+            .await
+            .unwrap_err();
+        match refusal {
+            DataRootRefusal::Unreadable { path, reason } => {
+                assert_eq!(path, root.join(STAMP_FILE));
+                assert!(reason.starts_with("读文件出错："), "{reason}");
+            }
+            other => panic!("应判为读不懂，实际是 {other:?}"),
+        }
+        assert_eq!(snapshot(root), before);
+    }
+
+    #[tokio::test]
+    async fn an_unwritable_root_starts_without_trying_to_raise() {
+        for existing in [None, Some(r#"{"data_format":1}"#)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            write_file(&root.join("config.json"), b"{}");
+            if let Some(existing) = existing {
+                write_file(&root.join(STAMP_FILE), existing.as_bytes());
+            }
+            let before = snapshot(root);
+            let mut attempts = 0;
+
+            check_data_root_with(
+                &resolution(root, Some("拒绝访问。 (os error 5)")),
+                2,
+                Some(WRITER),
+                async |path: &Path| read_stamp_on_disk(path).await,
+                async |_: &Path, _: &[u8]| {
+                    attempts += 1;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(attempts, 0, "原有记号 {existing:?}");
+            assert_eq!(snapshot(root), before);
+        }
+    }
+
+    /// 数据目录写不进去、号低不抬时记的 warn。
+    const NOT_RAISED: &str = "数据目录写不进去，这次不抬数据格式号";
+
+    /// 收下装上订阅器之后当前线程打出的日志（不带颜色）。
+    #[derive(Clone)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Captured {
+        /// tracing-core 只登记着一个调度器时，日志点头一回被走到，按走到它的那条线程自己的默认调度器定兴趣并全局
+        /// 缓存。并行的别的用例没装订阅器，先走到同一个日志点，就把它缓存成「不启用」，这里装的订阅器就收不到那一行。
+        /// 所以先常驻登记一个级别上限为 OFF 的调度器，登记在册的总不止一个，兴趣按所有存活的调度器合起来算。
+        fn new() -> Self {
+            use tracing_subscriber::layer::SubscriberExt as _;
+            static GATE: OnceLock<tracing::Dispatch> = OnceLock::new();
+            GATE.get_or_init(|| {
+                tracing::Dispatch::new(
+                    tracing_subscriber::registry()
+                        .with(tracing_subscriber::filter::LevelFilter::OFF),
+                )
+            });
+            Self(Arc::default())
+        }
+
+        /// 在当前线程上装一个把日志写到这里的订阅器，守卫放掉时卸下。
+        fn install(&self) -> tracing::subscriber::DefaultGuard {
+            let writer = self.clone();
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::INFO)
+                    .with_writer(move || writer.clone())
+                    .finish(),
+            )
+        }
+
+        /// 收到的日志里含 `needle` 的行。
+        fn lines_with(&self, needle: &str) -> Vec<String> {
+            String::from_utf8(self.0.lock().expect("收日志的锁已中毒").clone())
+                .expect("fmt 写进来的是格式化好的文本，应是 UTF-8")
+                .lines()
+                .filter(|line| line.contains(needle))
+                .map(str::to_owned)
+                .collect()
+        }
+    }
+
+    impl io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("收日志的锁已中毒")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 桌面应用启动时，外壳在建窗口之前带着应用版本核对数据目录，构造门面时又不带版本核对同一个数据目录。数据目录
+    /// 写不进去时两次都号低不抬：这条 warn 只在外壳那次记，门面那次不再记；两次各自那行核对的诊断日志照记。另一个
+    /// 写不进去的数据目录头一次核对照样记。
+    #[tokio::test]
+    async fn an_unwritable_root_warns_once_across_the_shell_gate_and_the_facade() {
+        let captured = Captured::new();
+        let _installed = captured.install();
+        let failure = "拒绝访问。 (os error 5)";
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_file(&root.join("config.json"), b"{}");
+        let unwritable = resolution(root, Some(failure));
+        let stamp = root.join(STAMP_FILE).display().to_string();
+
+        check_data_root(&unwritable, 2, Some(WRITER)).await.unwrap();
+        let warned = captured.lines_with(NOT_RAISED);
+        assert_eq!(warned.len(), 1, "外壳那次应记一条：{warned:#?}");
+        assert!(warned[0].contains(" WARN "), "{warned:#?}");
+        assert!(warned[0].contains(&stamp), "{warned:#?}");
+        assert!(warned[0].contains(failure), "{warned:#?}");
+
+        check_data_root(&unwritable, 2, None).await.unwrap();
+        assert_eq!(captured.lines_with(NOT_RAISED), warned, "门面那次不该再记");
+
+        let checked = captured.lines_with("数据目录不可写，不抬号，放行");
+        assert_eq!(checked.len(), 2, "两次核对各记一行诊断日志：{checked:#?}");
+        for line in &checked {
+            assert!(line.contains(" INFO "), "{line}");
+            assert!(line.contains(&stamp), "{line}");
+        }
+
+        let other = tempfile::tempdir().unwrap();
+        check_data_root(&resolution(other.path(), Some(failure)), 2, None)
+            .await
+            .unwrap();
+        let warned = captured.lines_with(NOT_RAISED);
+        assert_eq!(warned.len(), 2, "{warned:#?}");
+        assert!(
+            warned[1].contains(&other.path().join(STAMP_FILE).display().to_string()),
+            "{warned:#?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_root_write_that_keeps_failing_is_retried_on_the_probe_delays_then_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_file(&root.join("config.json"), b"{}");
+        let before = snapshot(root);
+        let started = Instant::now();
+        let mut attempts = Vec::new();
+
+        let refusal = check_data_root_with(
+            &resolution(root, None),
+            2,
+            None,
+            async |path: &Path| read_stamp_on_disk(path).await,
+            async |path: &Path, bytes: &[u8]| {
+                attempts.push((started.elapsed(), path.to_owned(), bytes.to_vec()));
+                Err(disk_full(path))
+            },
+        )
+        .await
+        .unwrap_err();
+
+        // 第一次立刻写，之后每次失败等下一个间隔：一共四次。
+        let mut expected_at = vec![Duration::ZERO];
+        for delay in PROBE_RETRY_DELAYS {
+            expected_at.push(*expected_at.last().unwrap() + delay);
+        }
+        assert_eq!(
+            attempts.iter().map(|(at, ..)| *at).collect::<Vec<_>>(),
+            expected_at
+        );
+        for (_, path, bytes) in &attempts {
+            assert_eq!(path, &root.join(STAMP_FILE));
+            assert_eq!(bytes, br#"{"data_format":2}"#);
+        }
+        match refusal {
+            DataRootRefusal::NotRecorded { path, source } => {
+                assert_eq!(path, root.join(STAMP_FILE));
+                assert_eq!(
+                    petalfall_base::error_with_causes(&source),
+                    petalfall_base::error_with_causes(&disk_full(&path))
+                );
+            }
+            other => panic!("应判为没能记下，实际是 {other:?}"),
+        }
+        assert_eq!(snapshot(root), before);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_root_write_that_recovers_within_the_retries_lets_the_root_through() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mut attempts = 0;
+
+        check_data_root_with(
+            &resolution(root, None),
+            2,
+            Some(WRITER),
+            async |path: &Path| read_stamp_on_disk(path).await,
+            async |path: &Path, bytes: &[u8]| {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(disk_full(path))
+                } else {
+                    atomic_write(path, bytes).await
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(attempts, 3);
+        assert_eq!(
+            std::fs::read_to_string(root.join(STAMP_FILE)).unwrap(),
+            r#"{"data_format":2,"written_by":"1.1.0-dev.57"}"#
+        );
+    }
+
+    /// 本版号 2 的落樱抬号时写出的记号。
+    const RAISED_TO_2: &[u8] = br#"{"data_format":2,"written_by":"1.1.0-dev.57"}"#;
+
+    /// 数据根第一次读到缺失，写之前的再读交回 `again`：记下每次读与写，读写都不碰磁盘。
+    async fn raise_root_with_reread(
+        again: StampRead,
+    ) -> (
+        std::result::Result<(), DataRootRefusal>,
+        Vec<PathBuf>,
+        Vec<(PathBuf, Vec<u8>)>,
+    ) {
+        let mut reads = Vec::new();
+        let mut writes = Vec::new();
+        let result = check_data_root_with(
+            &resolution(Path::new("D:/Petalfall"), None),
+            2,
+            Some(WRITER),
+            async |path: &Path| {
+                reads.push(path.to_owned());
+                if reads.len() == 1 {
+                    parse_stamp(StampFile::Missing)
+                } else {
+                    again.clone()
+                }
+            },
+            async |path: &Path, bytes: &[u8]| {
+                writes.push((path.to_owned(), bytes.to_vec()));
+                Ok(())
+            },
+        )
+        .await;
+        (result, reads, writes)
+    }
+
+    /// 两个号不同的落樱共用数据根：第一次读到缺失，写之前再读时别处已经抬了号。更高就不写、按太新拒绝；等于这一版
+    /// 就不写、放行；读不懂就不写、拒绝；仍缺失或更低才照常写。
+    #[tokio::test]
+    async fn a_root_stamp_is_reread_before_it_is_raised() {
+        let path = Path::new("D:/Petalfall").join(STAMP_FILE);
+        let both_reads = [path.clone(), path.clone()];
+
+        let (result, reads, writes) =
+            raise_root_with_reread(parse_stamp(StampFile::Contents(STAMP_3.as_bytes()))).await;
+        match result {
+            Err(DataRootRefusal::TooNew {
+                path: refused,
+                found,
+                supported,
+                written_by,
+            }) => {
+                assert_eq!(refused, path);
+                assert_eq!((found, supported), (3, 2));
+                assert_eq!(written_by.as_deref(), Some(WRITER));
+            }
+            other => panic!("再读到更高的号应拒绝，实际是 {other:?}"),
+        }
+        assert_eq!(reads, both_reads);
+        assert!(writes.is_empty(), "再读到更高的号不该写：{writes:?}");
+
+        let (result, reads, writes) =
+            raise_root_with_reread(parse_stamp(StampFile::Contents(br#"{"data_format":2}"#))).await;
+        result.unwrap();
+        assert_eq!(reads, both_reads);
+        assert!(writes.is_empty(), "再读到相等的号不该写：{writes:?}");
+
+        let unreadable = br#"{"data_format":"3"}"#;
+        let (result, reads, writes) =
+            raise_root_with_reread(parse_stamp(StampFile::Contents(unreadable))).await;
+        match result {
+            Err(DataRootRefusal::Unreadable {
+                path: refused,
+                reason,
+            }) => {
+                assert_eq!(refused, path);
+                assert_eq!(reason, reason_of(unreadable));
+            }
+            other => panic!("再读到读不懂的记号应拒绝，实际是 {other:?}"),
+        }
+        assert_eq!(reads, both_reads);
+        assert!(writes.is_empty(), "再读到读不懂的记号不该写：{writes:?}");
+
+        for again in [
+            parse_stamp(StampFile::Missing),
+            parse_stamp(StampFile::Contents(br#"{"data_format":1}"#)),
+        ] {
+            let case = format!("{again:?}");
+            let (result, reads, writes) = raise_root_with_reread(again).await;
+            result.unwrap_or_else(|refusal| panic!("{case}：应放行，实际拒绝 {refusal:?}"));
+            assert_eq!(reads, both_reads, "{case}");
+            assert_eq!(writes, [(path.clone(), RAISED_TO_2.to_vec())], "{case}");
+        }
+    }
+
+    /// 写失败后等重试的间隔里别处抬高了号：下一次写之前的再读看到它，就不再写、按太新拒绝。
+    #[tokio::test(start_paused = true)]
+    async fn a_root_stamp_raised_between_retries_stops_the_retries() {
+        let mut reads = 0;
+        let mut writes = 0;
+
+        let refusal = check_data_root_with(
+            &resolution(Path::new("D:/Petalfall"), None),
+            2,
+            Some(WRITER),
+            async |_: &Path| {
+                reads += 1;
+                // 第一次读与第一次写之前的再读都是缺失，第二次写之前再读到 3。
+                if reads <= 2 {
+                    parse_stamp(StampFile::Missing)
+                } else {
+                    parse_stamp(StampFile::Contents(STAMP_3.as_bytes()))
+                }
+            },
+            async |path: &Path, _: &[u8]| {
+                writes += 1;
+                Err(disk_full(path))
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!((reads, writes), (3, 1));
+        match refusal {
+            DataRootRefusal::TooNew {
+                found, supported, ..
+            } => assert_eq!((found, supported), (3, 2)),
+            other => panic!("应判为数据比这一版新，实际是 {other:?}"),
+        }
+    }
+
+    /// 固定种子的随机 (记号, 本版号)，含号的两端：拒绝当且仅当记号大于本版号；相等时不写；抬号后读回等于本版号。
+    #[tokio::test]
+    async fn random_stamps_against_random_own_formats() {
+        let mut rng = fastrand::Rng::with_seed(0x5EED_DA7A);
+        let mut cases = vec![
+            (1, 1),
+            (1, 2),
+            (2, 1),
+            (1, u32::MAX),
+            (u32::MAX, 1),
+            (u32::MAX - 1, u32::MAX),
+            (u32::MAX, u32::MAX),
+        ];
+        cases.extend((0..48).map(|_| (rng.u32(1..=6), rng.u32(1..=6))));
+
+        for (stamp, own) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            write_file(&root.join("config.json"), b"{}");
+            // 号 1 既可能写在文件里，也可能根本没有文件。
+            let missing = stamp == 1 && rng.bool();
+            if !missing {
+                write_file(
+                    &root.join(STAMP_FILE),
+                    format!(r#"{{"data_format":{stamp}}}"#).as_bytes(),
+                );
+            }
+            let before = snapshot(root);
+            let case = format!("记号 {stamp}（缺失 {missing}），本版 {own}");
+
+            let result = check_data_root(&resolution(root, None), own, Some("1.0.0")).await;
+
+            if stamp > own {
+                match result {
+                    Err(DataRootRefusal::TooNew {
+                        found, supported, ..
+                    }) => assert_eq!((found, supported), (stamp, own), "{case}"),
+                    other => panic!("{case}：应拒绝，实际是 {other:?}"),
+                }
+                assert_eq!(snapshot(root), before, "{case}");
+            } else {
+                result.unwrap_or_else(|refusal| panic!("{case}：应放行，实际拒绝 {refusal:?}"));
+                if stamp == own {
+                    assert_eq!(snapshot(root), before, "{case}");
+                } else {
+                    let written = std::fs::read(root.join(STAMP_FILE)).unwrap();
+                    assert_eq!(
+                        parse_stamp(StampFile::Contents(&written)),
+                        StampRead::Valid(Stamp {
+                            data_format: own,
+                            written_by: WrittenBy::Text("1.0.0".to_owned()),
+                        }),
+                        "{case}"
+                    );
+                }
+            }
+        }
+    }
+
+    // ---- 游戏目录 ----
+
+    fn facade(data_dir: &Path, game_dir: &Path, app_version: Option<&str>) -> Petalfall {
+        let mut petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
+            data_dir.to_owned(),
+            game_dir.to_owned(),
+        );
+        petalfall.app_version = app_version.map(str::to_owned);
+        petalfall
+    }
+
+    fn own(own: u32) -> GuardFixture {
+        GuardFixture { own, look: None }
+    }
+
+    const INSTANCE_JSON: &str = r#"{"id":"生存"}"#;
+
+    fn instance_json(dir: &Path) -> PathBuf {
+        dir.join("versions").join("生存").join("生存.json")
+    }
+
+    /// 带一个实例的游戏目录。
+    fn game_dir_with_instance(dir: &Path) {
+        write_file(&instance_json(dir), INSTANCE_JSON.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn a_newer_game_dir_is_refused_on_use_and_reported_on_inspect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".minecraft");
+        game_dir_with_instance(&dir);
+        write_file(&stamp_path(&dir), STAMP_3.as_bytes());
+        let before = snapshot(&dir);
+        let petalfall = facade(tmp.path(), &dir, Some("1.0.0-beta.5"));
+
+        let err = with_fixture(own(2), petalfall.guard_game_dir(GuardMode::Use))
+            .await
+            .unwrap_err();
+        assert!(!err.to_string().contains(WRITER), "{err}");
+        match err {
+            CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            } => {
+                assert_eq!(path, dir);
+                assert_eq!((found, supported), (3, 2));
+                assert_eq!(written_by.as_deref(), Some(WRITER));
+            }
+            other => panic!("应报游戏目录太新，实际是 {other:?}"),
+        }
+
+        let check = with_fixture(own(2), petalfall.guard_game_dir(GuardMode::Inspect))
+            .await
+            .unwrap();
+        assert_eq!(
+            check,
+            GameDirCheck::TooNew {
+                path: dir.clone(),
+                found: 3,
+                supported: 2,
+                written_by: Some(WRITER.to_owned()),
+            }
+        );
+        assert_eq!(snapshot(&dir), before);
+    }
+
+    /// 不换本版号、照常读盘：生产的这条路同样拦得住比它新的目录。
+    #[tokio::test]
+    async fn the_shipped_format_refuses_a_game_dir_stamped_higher() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".minecraft");
+        write_file(
+            &stamp_path(&dir),
+            format!(r#"{{"data_format":{}}}"#, u32::MAX).as_bytes(),
+        );
+        let petalfall = facade(tmp.path(), &dir, None);
+
+        match petalfall.guard_game_dir(GuardMode::Use).await.unwrap_err() {
+            CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            } => {
+                assert_eq!(path, dir);
+                assert_eq!((found, supported), (u32::MAX, DATA_FORMAT));
+                assert_eq!(written_by, None);
+            }
+            other => panic!("应报游戏目录太新，实际是 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_game_dir_stamp_is_refused_on_use_and_reported_on_inspect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".minecraft");
+        game_dir_with_instance(&dir);
+        let contents = br#"{"data_format":"2"}"#;
+        write_file(&stamp_path(&dir), contents);
+        let before = snapshot(&dir);
+        let petalfall = facade(tmp.path(), &dir, Some(WRITER));
+
+        match with_fixture(own(2), petalfall.guard_game_dir(GuardMode::Use))
+            .await
+            .unwrap_err()
+        {
+            CoreError::DataFormatUnreadable { path, reason } => {
+                assert_eq!(path, dir);
+                assert_eq!(reason, reason_of(contents));
+            }
+            other => panic!("应报记号读不懂，实际是 {other:?}"),
+        }
+        assert_eq!(
+            with_fixture(own(2), petalfall.guard_game_dir(GuardMode::Inspect))
+                .await
+                .unwrap(),
+            GameDirCheck::Unreadable {
+                path: dir.clone(),
+                reason: reason_of(contents),
+            }
+        );
+        assert_eq!(snapshot(&dir), before);
+    }
+
+    /// 读记号超过探测时限：两种方式都报暂时连不上，不抬号；用户重试时及时读到「太新」就照常拦下。
+    #[tokio::test(start_paused = true)]
+    async fn a_look_past_the_probe_limit_is_unavailable_and_a_timely_newer_stamp_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".minecraft");
+        game_dir_with_instance(&dir);
+        let before = snapshot(&dir);
+        let petalfall = facade(tmp.path(), &dir, Some(WRITER));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let look: LookFn = {
+            let calls = calls.clone();
+            Arc::new(move |_: &Path| {
+                let call = calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if call < 2 {
+                        // 挂起的网络盘：迟迟读不完，读完了也只是号更低、该抬号的记号。
+                        tokio::time::sleep(DIR_PROBE_TIMEOUT * 3).await;
+                        DirLook::Stamp(parse_stamp(StampFile::Missing))
+                    } else {
+                        DirLook::Stamp(parse_stamp(StampFile::Contents(STAMP_3.as_bytes())))
+                    }
+                })
+            })
+        };
+        let fixture = GuardFixture {
+            own: 2,
+            look: Some(look),
+        };
+
+        for mode in [GuardMode::Use, GuardMode::Inspect] {
+            let started = Instant::now();
+            let err = with_fixture(fixture.clone(), petalfall.guard_game_dir(mode))
+                .await
+                .unwrap_err();
+            let elapsed = started.elapsed();
+            match err {
+                CoreError::InvalidGameDirectory { path, problem } => {
+                    assert_eq!(path, dir);
+                    assert_eq!(problem, GameDirProblem::Unavailable);
+                }
+                other => panic!("{mode:?} 应报暂时连不上，实际是 {other:?}"),
+            }
+            assert!(elapsed >= DIR_PROBE_TIMEOUT, "提前放弃了：{elapsed:?}");
+            assert!(elapsed < DIR_PROBE_TIMEOUT * 5 / 4, "等太久：{elapsed:?}");
+        }
+        assert_eq!(snapshot(&dir), before, "超时后不该抬号");
+
+        match with_fixture(fixture, petalfall.guard_game_dir(GuardMode::Use))
+            .await
+            .unwrap_err()
+        {
+            CoreError::GameDirDataTooNew {
+                found, supported, ..
+            } => assert_eq!((found, supported), (3, 2)),
+            other => panic!("应报游戏目录太新，实际是 {other:?}"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    /// 看目录的线程异常结束同样没有结论，也是暂时连不上，不当作放行。
+    #[tokio::test]
+    async fn a_lost_look_is_unavailable() {
+        let dir = PathBuf::from("N:/.minecraft");
+        for mode in [GuardMode::Use, GuardMode::Inspect] {
+            let err = guard_dir(
+                &dir,
+                mode,
+                2,
+                None,
+                async { DirLook::Lost },
+                async |_: &Path| -> StampRead { panic!("没有结论时不该再读记号") },
+                async |_: &Path, _: &[u8]| -> petalfall_base::Result<()> {
+                    panic!("没有结论时不该写记号")
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    CoreError::InvalidGameDirectory {
+                        path,
+                        problem: GameDirProblem::Unavailable,
+                    } if *path == dir
+                ),
+                "{mode:?}：{err:?}"
+            );
+        }
+    }
+
+    /// 记号能读不能写：写一直挂起时也受探测时限约束，看目录用掉的时间算在同一个时限里，到点报暂时连不上。
+    #[tokio::test(start_paused = true)]
+    async fn a_stamp_write_that_hangs_is_unavailable_at_the_probe_limit() {
+        let dir = PathBuf::from("N:/.minecraft");
+        let mut wrote = false;
+        let started = Instant::now();
+        let guarded = guard_dir(
+            &dir,
+            GuardMode::Use,
+            2,
+            Some(WRITER),
+            async {
+                // 看目录用掉大半个时限，留给写的只剩一小段。
+                tokio::time::sleep(DIR_PROBE_TIMEOUT * 3 / 4).await;
+                DirLook::Stamp(parse_stamp(StampFile::Missing))
+            },
+            async |_: &Path| parse_stamp(StampFile::Missing),
+            async |_: &Path, _: &[u8]| {
+                wrote = true;
+                std::future::pending::<petalfall_base::Result<()>>().await
+            },
+        );
+        // 写不受时限约束的话关卡会一直等：外面套一层宽得多的时限，让测试照常失败而不是卡住。
+        let err = tokio::time::timeout(DIR_PROBE_TIMEOUT * 20, guarded)
+            .await
+            .expect("写挂起时关卡应在探测时限后放弃")
+            .unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(wrote, "应当已经开始写记号");
+        match err {
+            CoreError::InvalidGameDirectory { path, problem } => {
+                assert_eq!(path, dir);
+                assert_eq!(problem, GameDirProblem::Unavailable);
+            }
+            other => panic!("写挂起应报暂时连不上，实际是 {other:?}"),
+        }
+        assert!(elapsed >= DIR_PROBE_TIMEOUT, "提前放弃了：{elapsed:?}");
+        assert!(
+            elapsed < DIR_PROBE_TIMEOUT * 5 / 4,
+            "时限被累加了：{elapsed:?}"
+        );
+    }
+
+    /// 游戏目录第一次读到缺失，写之前的再读交回 `again`：记下再读与写，读写都不碰磁盘。
+    async fn guard_with_reread(
+        mode: GuardMode,
+        again: StampRead,
+    ) -> (Result<GameDirCheck>, Vec<PathBuf>, Vec<(PathBuf, Vec<u8>)>) {
+        let mut rereads = Vec::new();
+        let mut writes = Vec::new();
+        let result = guard_dir(
+            Path::new("N:/.minecraft"),
+            mode,
+            2,
+            Some(WRITER),
+            async { DirLook::Stamp(parse_stamp(StampFile::Missing)) },
+            async |path: &Path| {
+                rereads.push(path.to_owned());
+                again
+            },
+            async |path: &Path, bytes: &[u8]| {
+                writes.push((path.to_owned(), bytes.to_vec()));
+                Ok(())
+            },
+        )
+        .await;
+        (result, rereads, writes)
+    }
+
+    /// 两个号不同的落樱共用游戏目录：「使用」方式第一次读到缺失，写之前再读时别处已经抬了号。更高就不写、报太新；
+    /// 等于这一版就不写、放行；读不懂就不写、报读不懂；仍缺失或更低才写。「只判断」方式既不再读也不写。
+    #[tokio::test]
+    async fn a_game_dir_stamp_is_reread_before_it_is_raised() {
+        let dir = PathBuf::from("N:/.minecraft");
+        let stamp = stamp_path(&dir);
+
+        let (result, rereads, writes) = guard_with_reread(
+            GuardMode::Use,
+            parse_stamp(StampFile::Contents(STAMP_3.as_bytes())),
+        )
+        .await;
+        match result {
+            Err(CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            }) => {
+                assert_eq!(path, dir);
+                assert_eq!((found, supported), (3, 2));
+                assert_eq!(written_by.as_deref(), Some(WRITER));
+            }
+            other => panic!("再读到更高的号应报游戏目录太新，实际是 {other:?}"),
+        }
+        assert_eq!(rereads, std::slice::from_ref(&stamp));
+        assert!(writes.is_empty(), "再读到更高的号不该写：{writes:?}");
+
+        let (result, rereads, writes) = guard_with_reread(
+            GuardMode::Use,
+            parse_stamp(StampFile::Contents(br#"{"data_format":2}"#)),
+        )
+        .await;
+        assert_eq!(result.unwrap(), GameDirCheck::Ready);
+        assert_eq!(rereads, std::slice::from_ref(&stamp));
+        assert!(writes.is_empty(), "再读到相等的号不该写：{writes:?}");
+
+        let unreadable = br#"{"data_format":"3"}"#;
+        let (result, rereads, writes) =
+            guard_with_reread(GuardMode::Use, parse_stamp(StampFile::Contents(unreadable))).await;
+        match result {
+            Err(CoreError::DataFormatUnreadable { path, reason }) => {
+                assert_eq!(path, dir);
+                assert_eq!(reason, reason_of(unreadable));
+            }
+            other => panic!("再读到读不懂的记号应报读不懂，实际是 {other:?}"),
+        }
+        assert_eq!(rereads, std::slice::from_ref(&stamp));
+        assert!(writes.is_empty(), "再读到读不懂的记号不该写：{writes:?}");
+
+        for again in [
+            parse_stamp(StampFile::Missing),
+            parse_stamp(StampFile::Contents(br#"{"data_format":1}"#)),
+        ] {
+            let case = format!("{again:?}");
+            let (result, rereads, writes) = guard_with_reread(GuardMode::Use, again).await;
+            assert_eq!(result.unwrap(), GameDirCheck::Ready, "{case}");
+            assert_eq!(rereads, std::slice::from_ref(&stamp), "{case}");
+            assert_eq!(writes, [(stamp.clone(), RAISED_TO_2.to_vec())], "{case}");
+        }
+
+        let (result, rereads, writes) = guard_with_reread(
+            GuardMode::Inspect,
+            parse_stamp(StampFile::Contents(STAMP_3.as_bytes())),
+        )
+        .await;
+        assert_eq!(result.unwrap(), GameDirCheck::Ready);
+        assert!(rereads.is_empty(), "只判断不该再读：{rereads:?}");
+        assert!(writes.is_empty(), "只判断不该写：{writes:?}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_game_dir_passes_without_creating_anything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let drive = tmp.path().join("移动硬盘");
+        let dir = drive.join(".minecraft");
+        let petalfall = facade(tmp.path(), &dir, Some(WRITER));
+
+        for mode in [GuardMode::Use, GuardMode::Inspect] {
+            assert_eq!(
+                with_fixture(own(2), petalfall.guard_game_dir(mode))
+                    .await
+                    .unwrap(),
+                GameDirCheck::Absent
+            );
+        }
+        assert!(!drive.exists());
+    }
+
+    /// 只有文件不存在、路径不存在算记号缺失。盘符无效、找不到网络路径、找不到网络名也被标准库归成 `NotFound`，
+    /// 但只说明这一刻够不着那个位置，按读出错；拒绝访问是普通的读错。
+    #[cfg(windows)]
+    #[test]
+    fn only_a_missing_file_or_path_counts_as_a_missing_stamp() {
+        for code in [2, 3] {
+            assert_eq!(
+                stamp_file_error(&io::Error::from_raw_os_error(code)),
+                StampFile::Missing,
+                "os error {code}"
+            );
+        }
+        for code in [15, 53, 67, 5] {
+            let err = io::Error::from_raw_os_error(code);
+            // 前三种正是被标准库混进 NotFound、要分开的那几种。
+            assert_eq!(
+                err.kind() == io::ErrorKind::NotFound,
+                code != 5,
+                "os error {code}"
+            );
+            match stamp_file_error(&err) {
+                StampFile::ReadFailed(reason) => {
+                    assert_eq!(reason, err.to_string());
+                    assert!(reason.ends_with(&format!("(os error {code})")), "{reason}");
+                }
+                other => panic!("os error {code} 应按读出错，实际是 {other:?}"),
+            }
+            assert_eq!(
+                stamp_read(Err(io::Error::from_raw_os_error(code))),
+                parse_stamp(StampFile::ReadFailed(err.to_string())),
+                "os error {code}"
+            );
+        }
+        // 不带系统错误码的 NotFound 说不清是哪一种，同样按读出错。
+        let bare = io::Error::from(io::ErrorKind::NotFound);
+        assert_eq!(
+            stamp_file_error(&bare),
+            StampFile::ReadFailed(bare.to_string())
+        );
+    }
+
+    /// 看游戏目录用同一条规矩：只有文件不存在、路径不存在算目录不存在；盘符无效、找不到网络路径、找不到网络名是
+    /// 这一刻够不着，原错误带着交出去；拒绝访问是普通的读写错误。说不清是哪一种的 `NotFound` 也算够不着，不放行。
+    #[cfg(windows)]
+    #[test]
+    fn only_a_missing_file_or_path_counts_as_a_missing_game_dir() {
+        for code in [2, 3] {
+            let look = dir_error_look(io::Error::from_raw_os_error(code));
+            assert!(matches!(look, DirLook::Absent), "os error {code}：{look:?}");
+        }
+        for code in [15, 53, 67] {
+            match dir_error_look(io::Error::from_raw_os_error(code)) {
+                DirLook::Unreachable(err) => assert_eq!(err.raw_os_error(), Some(code)),
+                other => panic!("os error {code} 应判为够不着，实际是 {other:?}"),
+            }
+        }
+        match dir_error_look(io::Error::from_raw_os_error(5)) {
+            DirLook::Failed(err) => assert_eq!(err.raw_os_error(), Some(5)),
+            other => panic!("拒绝访问应判为读写错误，实际是 {other:?}"),
+        }
+        match dir_error_look(io::Error::from(io::ErrorKind::NotFound)) {
+            DirLook::Unreachable(err) => {
+                assert_eq!(
+                    (err.kind(), err.raw_os_error()),
+                    (io::ErrorKind::NotFound, None)
+                );
+            }
+            other => panic!("不带系统错误码的 NotFound 应判为够不着，实际是 {other:?}"),
+        }
+    }
+
+    /// 看目录时够不着：两种方式都报暂时连不上，不当作目录不存在放行，也不再读、不写记号。
+    #[tokio::test]
+    async fn an_unreachable_game_dir_is_unavailable_not_absent() {
+        let dir = PathBuf::from(r"\\nas\share\.minecraft");
+        for mode in [GuardMode::Use, GuardMode::Inspect] {
+            let err = guard_dir(
+                &dir,
+                mode,
+                2,
+                Some(WRITER),
+                async { DirLook::Unreachable(io::Error::from_raw_os_error(53)) },
+                async |_: &Path| -> StampRead { panic!("够不着时不该再读记号") },
+                async |_: &Path, _: &[u8]| -> petalfall_base::Result<()> {
+                    panic!("够不着时不该写记号")
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    CoreError::InvalidGameDirectory {
+                        path,
+                        problem: GameDirProblem::Unavailable,
+                    } if *path == dir
+                ),
+                "{mode:?}：{err:?}"
+            );
+        }
+    }
+
+    /// 真实磁盘上走到的两种「不存在」：游戏目录本身不存在（连上一级都不在也一样）是目录不存在；目录在而
+    /// `.petalfall` 不在、`.petalfall` 在而记号不在，都是记号缺失、按 1 算。数据根一侧同样。
+    #[tokio::test]
+    async fn a_missing_game_dir_is_absent_and_a_missing_stamp_reads_as_format_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".minecraft");
+        for missing in [dir.clone(), tmp.path().join("移动硬盘").join(".minecraft")] {
+            let look = look_at_game_dir(&missing);
+            assert!(
+                matches!(look, DirLook::Absent),
+                "{}：{look:?}",
+                missing.display()
+            );
+        }
+
+        let one = parse_stamp(StampFile::Missing);
+        std::fs::create_dir(&dir).unwrap();
+        match look_at_game_dir(&dir) {
+            DirLook::Stamp(read) => assert_eq!(read, one, "没有 .petalfall"),
+            other => panic!("没有 .petalfall 时应读到缺失的记号，实际是 {other:?}"),
+        }
+        std::fs::create_dir(dir.join(PETALFALL_META_DIR)).unwrap();
+        match look_at_game_dir(&dir) {
+            DirLook::Stamp(read) => assert_eq!(read, one, "有 .petalfall、没有记号"),
+            other => panic!("没有记号时应读到缺失的记号，实际是 {other:?}"),
+        }
+
+        let root = tmp.path().join("Petalfall");
+        assert_eq!(
+            read_stamp_on_disk(&root.join(STAMP_FILE)).await,
+            one,
+            "数据根还不存在"
+        );
+        std::fs::create_dir(&root).unwrap();
+        assert_eq!(
+            read_stamp_on_disk(&root.join(STAMP_FILE)).await,
+            one,
+            "数据根在、没有记号"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_in_place_of_the_game_dir_is_an_io_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".minecraft");
+        write_file(&dir, b"");
+        let petalfall = facade(tmp.path(), &dir, None);
+
+        for mode in [GuardMode::Use, GuardMode::Inspect] {
+            match with_fixture(own(2), petalfall.guard_game_dir(mode))
+                .await
+                .unwrap_err()
+            {
+                CoreError::Base(petalfall_base::Error::Io { path, source }) => {
+                    assert_eq!(path, dir);
+                    assert_eq!(source.kind(), io::ErrorKind::NotADirectory);
+                }
+                other => panic!("{mode:?} 应报读写错误，实际是 {other:?}"),
+            }
+        }
+        assert_eq!(std::fs::read(&dir).unwrap(), b"");
+    }
+
+    #[tokio::test]
+    async fn inspect_leaves_a_lower_stamp_alone_and_use_raises_it() {
+        for existing in [None, Some(r#"{"data_format":1}"#)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join(".minecraft");
+            game_dir_with_instance(&dir);
+            if let Some(existing) = existing {
+                write_file(&stamp_path(&dir), existing.as_bytes());
+            }
+            let before = snapshot(&dir);
+            let petalfall = facade(tmp.path(), &dir, Some(WRITER));
+
+            assert_eq!(
+                with_fixture(own(2), petalfall.guard_game_dir(GuardMode::Inspect))
+                    .await
+                    .unwrap(),
+                GameDirCheck::Ready
+            );
+            assert_eq!(
+                snapshot(&dir),
+                before,
+                "只判断不该写，原有记号 {existing:?}"
+            );
+
+            assert_eq!(
+                with_fixture(own(2), petalfall.guard_game_dir(GuardMode::Use))
+                    .await
+                    .unwrap(),
+                GameDirCheck::Ready
+            );
+            assert_eq!(
+                std::fs::read_to_string(stamp_path(&dir)).unwrap(),
+                r#"{"data_format":2,"written_by":"1.1.0-dev.57"}"#,
+                "原有记号 {existing:?}"
+            );
+            // 原子写的临时文件不留下，实例文件不动。
+            assert_eq!(
+                names(&dir.join(PETALFALL_META_DIR)),
+                BTreeSet::from([PathBuf::from(STAMP_FILE)])
+            );
+            assert_eq!(
+                std::fs::read_to_string(instance_json(&dir)).unwrap(),
+                INSTANCE_JSON
+            );
+        }
+    }
+
+    /// 门面没有应用版本（调试命令行、测试）时写出的记号不带 `written_by`。
+    #[tokio::test]
+    async fn a_facade_without_app_version_writes_no_written_by() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".minecraft");
+        game_dir_with_instance(&dir);
+        let petalfall = facade(tmp.path(), &dir, None);
+
+        with_fixture(own(2), petalfall.guard_game_dir(GuardMode::Use))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(stamp_path(&dir)).unwrap(),
+            r#"{"data_format":2}"#
+        );
+    }
+
+    /// 本版号为 1 时，没有记号的目录与记着 1 的目录都原样放行，一个文件都不产生。
+    #[tokio::test]
+    async fn format_one_never_writes_a_game_dir_stamp() {
+        for existing in [None, Some(r#"{"data_format":1}"#)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join(".minecraft");
+            game_dir_with_instance(&dir);
+            if let Some(existing) = existing {
+                write_file(&stamp_path(&dir), existing.as_bytes());
+            }
+            let before = snapshot(&dir);
+            let petalfall = facade(tmp.path(), &dir, Some(WRITER));
+
+            assert_eq!(
+                with_fixture(own(1), petalfall.guard_game_dir(GuardMode::Use))
+                    .await
+                    .unwrap(),
+                GameDirCheck::Ready
+            );
+            assert_eq!(snapshot(&dir), before, "原有记号 {existing:?}");
+        }
+    }
+
+    /// 两次调用之间记号被别处改高，第二次就拦下：门面不记「核对过」。
+    #[tokio::test]
+    async fn a_stamp_raised_between_two_calls_is_caught_by_the_second() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".minecraft");
+        game_dir_with_instance(&dir);
+        let petalfall = facade(tmp.path(), &dir, Some(WRITER));
+
+        assert_eq!(
+            with_fixture(own(2), petalfall.guard_game_dir(GuardMode::Use))
+                .await
+                .unwrap(),
+            GameDirCheck::Ready
+        );
+        write_file(&stamp_path(&dir), STAMP_3.as_bytes());
+
+        match with_fixture(own(2), petalfall.guard_game_dir(GuardMode::Use))
+            .await
+            .unwrap_err()
+        {
+            CoreError::GameDirDataTooNew {
+                found, supported, ..
+            } => assert_eq!((found, supported), (3, 2)),
+            other => panic!("第二次应报游戏目录太新，实际是 {other:?}"),
+        }
+    }
+
+    /// 对另一个目录的核对只看那个目录，不看门面当前的游戏目录。
+    #[tokio::test]
+    async fn guard_game_dir_at_judges_the_given_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = tmp.path().join("current");
+        let target = tmp.path().join("target");
+        game_dir_with_instance(&current);
+        write_file(&stamp_path(&target), STAMP_3.as_bytes());
+        let petalfall = facade(tmp.path(), &current, None);
+
+        assert_eq!(
+            with_fixture(
+                own(2),
+                petalfall.guard_game_dir_at(&target, GuardMode::Inspect)
+            )
+            .await
+            .unwrap(),
+            GameDirCheck::TooNew {
+                path: target.clone(),
+                found: 3,
+                supported: 2,
+                written_by: Some(WRITER.to_owned()),
+            }
+        );
+        assert_eq!(
+            with_fixture(own(2), petalfall.guard_game_dir(GuardMode::Inspect))
+                .await
+                .unwrap(),
+            GameDirCheck::Ready
+        );
+    }
+
+    /// `.petalfall` 被同名文件占着时记号写不进去：「使用」照实报读写错误，「只判断」不写所以放行。Windows 上
+    /// 隔着文件读记号报的是找不到路径，记号按缺失算，才走得到写这一步。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_game_dir_stamp_that_cannot_be_written_stops_use() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".minecraft");
+        game_dir_with_instance(&dir);
+        write_file(&dir.join(PETALFALL_META_DIR), b"");
+        let before = snapshot(&dir);
+        let petalfall = facade(tmp.path(), &dir, Some(WRITER));
+
+        assert!(matches!(
+            with_fixture(own(2), petalfall.guard_game_dir(GuardMode::Use)).await,
+            Err(CoreError::Base(petalfall_base::Error::Io { .. }))
+        ));
+        assert_eq!(
+            with_fixture(own(2), petalfall.guard_game_dir(GuardMode::Inspect))
+                .await
+                .unwrap(),
+            GameDirCheck::Ready
+        );
+        assert_eq!(snapshot(&dir), before);
+    }
+
+    /// 外壳的异步命令要求 future 能跨线程：关卡不是 `Send` 的话，接上它的命令就编不过。
+    #[test]
+    fn the_gates_are_send() {
+        fn assert_send<T: Send>(_: &T) {}
+        let root = Path::new("D:/Petalfall");
+        let resolution = resolution(root, None);
+        assert_send(&check_data_root(&resolution, DATA_FORMAT, None));
+        let petalfall = facade(root, &root.join(".minecraft"), None);
+        assert_send(&petalfall.guard_game_dir(GuardMode::Use));
+        assert_send(&petalfall.guard_game_dir_at(root, GuardMode::Inspect));
+    }
+
+    // ---- 读更新包的载荷头 ----
+
+    /// 最小的 PE：DOS 头指向 0x80 处的 PE 签名，一个节、没有可选头，节占 0x200 到 0x400，载荷头从 0x400 起。
+    fn bare_pe() -> Vec<u8> {
+        let mut pe = vec![0u8; 0x400];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+        // COFF 头紧跟签名：+2 是节数；+16 是可选头长度，留 0，节表紧跟 COFF 头。
+        pe[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());
+        let section = 0x84 + 20;
+        pe[section + 16..section + 20].copy_from_slice(&0x200u32.to_le_bytes());
+        pe[section + 20..section + 24].copy_from_slice(&0x200u32.to_le_bytes());
+        pe
+    }
+
+    const PAYLOAD: &[u8] = b"nsis payload";
+
+    fn v2_header(data_format: u32, caps: u32) -> Header {
+        Header {
+            data_format: Some(data_format),
+            caps: Some(caps),
+            ..Header::new(PAYLOAD, b"exe", "1.1.0-dev.57").unwrap()
+        }
+    }
+
+    fn package(header_bytes: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut bytes = bare_pe();
+        bytes.extend_from_slice(header_bytes);
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    /// 旧包的 136 字节头，按旧格式逐字段拼：载荷格式的包已经写不出这种头。
+    fn v1_header_bytes(version: &str) -> Vec<u8> {
+        let header = Header::new(PAYLOAD, b"exe", version).unwrap();
+        let mut out = vec![0u8; 136];
+        out[0..8].copy_from_slice(b"PFSETUP1");
+        out[8..16].copy_from_slice(&header.payload_len.to_le_bytes());
+        out[16..48].copy_from_slice(&header.payload_sha256);
+        out[48..56].copy_from_slice(&header.exe_len.to_le_bytes());
+        out[56..88].copy_from_slice(&header.exe_sha256);
+        out[88..88 + version.len()].copy_from_slice(version.as_bytes());
+        out
+    }
+
+    #[test]
+    fn a_v2_package_reports_its_version_format_and_caps() {
+        for (data_format, caps) in [(1, CAP_CHANNEL_SWITCH), (3, 0), (u32::MAX, SHIPPED_CAPS)] {
+            let header = v2_header(data_format, caps).to_bytes().unwrap();
+            assert_eq!(
+                package_info(&package(&header, PAYLOAD)).unwrap(),
+                PackageInfo {
+                    version: "1.1.0-dev.57".to_owned(),
+                    data_format,
+                    caps: Some(caps),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_v1_package_counts_as_format_zero_without_caps() {
+        assert_eq!(
+            package_info(&package(&v1_header_bytes("1.0.0-beta.2"), PAYLOAD)).unwrap(),
+            PackageInfo {
+                version: "1.0.0-beta.2".to_owned(),
+                data_format: 0,
+                caps: None,
+            }
+        );
+    }
+
+    #[test]
+    fn broken_packages_are_errors() {
+        let header = v2_header(2, CAP_CHANNEL_SWITCH).to_bytes().unwrap();
+
+        assert!(matches!(
+            package_info(b"not a portable executable"),
+            Err(PackageHeaderError::NotPe(_))
+        ));
+        assert!(matches!(
+            package_info(&bare_pe()),
+            Err(PackageHeaderError::NoOverlay)
+        ));
+
+        let mut wrong_magic = header;
+        wrong_magic[..8].copy_from_slice(b"PFSETUP9");
+        assert!(matches!(
+            package_info(&package(&wrong_magic, PAYLOAD)),
+            Err(PackageHeaderError::BadMagic)
+        ));
+
+        // 头只到一半：按 magic 认出的头长都不够。
+        assert!(matches!(
+            package_info(&package(&header[..HEADER_LEN_V2 - 4], &[])),
+            Err(PackageHeaderError::PayloadTruncated { .. })
+        ));
+        // 头完整，载荷少了一截。
+        assert!(matches!(
+            package_info(&package(&header, &PAYLOAD[..PAYLOAD.len() - 1])),
+            Err(PackageHeaderError::PayloadTruncated { .. })
+        ));
+
+        let mut zero_format = header;
+        zero_format[136..140].copy_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            package_info(&package(&zero_format, PAYLOAD)),
+            Err(PackageHeaderError::DataFormatZero)
+        ));
+    }
+}

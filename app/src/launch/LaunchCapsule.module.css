@@ -169,7 +169,7 @@
   color: var(--sk-accent-ink);
   box-shadow: var(--sk-accent-glow), var(--sk-gloss);
   font-family: inherit;
-  font-size: 15px;
+  font-size: var(--sk-fs-section);
   font-weight: var(--sk-w-title);
   white-space: nowrap;
   cursor: pointer;
@@ -180,9 +180,9 @@
     opacity var(--sk-dur-hover) var(--sk-ease);
 }
 
+/* 大号只放宽内边距；字号与中号同取 section，字阶里没有 16 这一档 */
 .capsule[data-size="lg"] .go {
   padding: 0 30px 0 26px;
-  font-size: 16px;
 }
 
 /* 悬停叠一层，只朝提高对比度的方向，不用 filter */
@@ -276,15 +276,20 @@
   line-height: 1.25;
 }
 
+/* 行高随 .text 的 1.25，不换 body 的 22：中号胶囊内高 34，22 加副行就超出了；按 1.25 两行合计 32.5 */
 .title {
-  font-size: 13.5px;
+  font-size: var(--sk-fs-body);
   font-weight: var(--sk-w-title);
   font-variant-numeric: tabular-nums;
 }
 
+/*
+ * 副行有实例名与失败原因，是中文，字号取 caption；行高随 .text 的 1.25，不换 caption 的 18：
+ * 中号胶囊内高 34，标题行 14 × 1.25 再加 18 就超出了
+ */
 .sub {
   color: var(--sk-text-2);
-  font-size: 11.5px;
+  font-size: var(--sk-fs-caption);
   font-variant-numeric: tabular-nums;
 }
 
@@ -319,7 +324,7 @@
   flex: none;
   padding: 0 var(--sk-space-4);
   color: var(--sk-accent-strong);
-  font-size: 18px;
+  font-size: var(--sk-fs-heading);
   font-weight: var(--sk-w-title);
   font-variant-numeric: tabular-nums;
   text-align: end;
@@ -357,7 +362,7 @@
   background: var(--sk-bg-2);
   color: var(--sk-text);
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: var(--sk-fs-small);
   font-weight: var(--sk-w-title);
   white-space: nowrap;
   cursor: pointer;
@@ -425,13 +430,22 @@
     color var(--sk-dur-hover) var(--sk-ease);
 }
 
+/*
+ * 悬停与按下铺半透明叠层：实色 bg-2 落在夜樱加载面的 surface 上只差 1.04:1、日樱失败面的 danger-tint 上只差 1.02:1，
+ * 看不出悬停
+ */
 .iconAction:hover:not([aria-disabled="true"]) {
-  background: var(--sk-bg-2);
+  background: var(--sk-fill-hover);
   color: var(--sk-text);
 }
 
-/* 方形图标按钮的按压：与同一面上胶囊内按钮的按压同一手感，小控件缩得更深一点 */
+/*
+ * 方形图标按钮的按压：与同一面上胶囊内按钮的按压同一手感，小控件缩得更深一点。
+ * 叠层换成 fill-press；图标同样提到 text，键盘按住空格时只有 :active、没有 :hover
+ */
 .iconAction:active:not([aria-disabled="true"]) {
+  background: var(--sk-fill-press);
+  color: var(--sk-text);
   transform: scale(0.94);
 }
 
@@ -448,13 +462,4 @@
 .iconAction[aria-disabled="true"] {
   cursor: default;
   opacity: 0.5;
-}
-
-.srOnly {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
 }

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
-use crate::launch::LaunchWarning;
+use crate::launch::{LaunchWarning, RecordsLaunchWarnings, WithAddedWarnings};
 use crate::session::{GameRun, JavaUsed, RunInfo};
 
 /// 接回记录的文件名，位于数据目录下。
@@ -147,7 +147,8 @@ impl Petalfall {
 
     /// 写下接回记录（原子写，不会留下写到一半的文件）。
     pub async fn save_running_record(&self, record: &RunningRecord) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(record).map_err(CoreError::JsonSerialize)?;
+        let bytes = serde_json::to_vec_pretty(&WithAddedWarnings::store(record.clone()))
+            .map_err(CoreError::JsonSerialize)?;
         petalfall_base::fs::atomic_write(self.running_record_path(), &bytes).await?;
         Ok(())
     }
@@ -247,7 +248,14 @@ fn parse_record(bytes: &[u8]) -> std::result::Result<RunningRecord, serde_json::
             "格式版本是 {format}，这个版本的落樱只认 {RECORD_FORMAT}"
         )));
     }
-    serde_json::from_slice(bytes)
+    serde_json::from_slice::<WithAddedWarnings<RunningRecord>>(bytes)
+        .map(WithAddedWarnings::restore)
+}
+
+impl RecordsLaunchWarnings for RunningRecord {
+    fn launch_warnings(&mut self) -> &mut Vec<LaunchWarning> {
+        &mut self.warnings
+    }
 }
 
 /// 接着写会话日志，先留一行接回的说明。续写不了时记日志、返回 `None`。
@@ -391,6 +399,54 @@ mod tests {
         assert!(!petalfall.running_record_path().exists());
         // 已经没有了再删也不算失败。
         petalfall.remove_running_record().await.unwrap();
+    }
+
+    /// 数据格式号为 1 的版本不认得的提醒另存在 `added_warnings`：读回时并回原位；更新的版本另存的取值这一版不认得，
+    /// 记录照样接得回，不被当作读不懂改名留存。
+    #[tokio::test]
+    async fn warnings_added_after_format_1_are_saved_aside_and_read_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall(tmp.path());
+        let identity = ProcessIdentity {
+            pid: 4242,
+            created: 133_000_000_000_000_000,
+            exe: PathBuf::from(r"C:\Java\bin\java.exe"),
+        };
+        let mut saved = record(tmp.path(), identity, 1_798_000_000_123);
+        saved.warnings = vec![
+            LaunchWarning::LongPlayerName,
+            LaunchWarning::PlayerNameChars,
+            LaunchWarning::OnedriveFolder,
+        ];
+        petalfall.save_running_record(&saved).await.unwrap();
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(petalfall.running_record_path()).unwrap())
+                .unwrap();
+        assert_eq!(
+            json["warnings"],
+            serde_json::json!(["long_player_name", "onedrive_folder"])
+        );
+        assert_eq!(
+            json["added_warnings"],
+            serde_json::json!(["player_name_chars"])
+        );
+        assert_eq!(json["pid"], 4242);
+        match petalfall.load_running_record().await.unwrap() {
+            RecordLoad::Loaded(loaded) => assert_eq!(loaded, saved),
+            other => panic!("应读回同一份记录：{other:?}"),
+        }
+
+        json["added_warnings"] = serde_json::json!(["from_a_newer_petalfall", "player_name_chars"]);
+        std::fs::write(
+            petalfall.running_record_path(),
+            serde_json::to_vec_pretty(&json).unwrap(),
+        )
+        .unwrap();
+        match petalfall.load_running_record().await.unwrap() {
+            RecordLoad::Loaded(loaded) => assert_eq!(loaded, saved),
+            other => panic!("认不得的另存提醒不该让记录读不出：{other:?}"),
+        }
+        assert!(!tmp.path().join(BROKEN_RECORD_FILE).exists());
     }
 
     #[tokio::test]

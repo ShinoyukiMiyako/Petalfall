@@ -242,6 +242,7 @@ async fn picks_the_newest_trustworthy_release_with_the_full_set() {
     let status = fx.refresh().await;
     // 加载器版本、快照与哈希不符的 1.21.2 都更新，却都被跳过。
     assert_eq!(status.source.as_deref(), Some("1.21.1"));
+    assert!(!status.degraded, "含 1.20 材质标志的是完整集");
     assert!(status.panorama);
     assert_eq!(fx.service.status(), status);
 }
@@ -250,7 +251,10 @@ async fn picks_the_newest_trustworthy_release_with_the_full_set() {
 async fn falls_back_to_a_degraded_source_then_to_none() {
     let fx = fixture();
     std::fs::remove_dir_all(fx.settings.join("versions/1.21.1")).unwrap();
-    assert_eq!(fx.refresh().await.source.as_deref(), Some("1.16.5"));
+    let status = fx.refresh().await;
+    assert_eq!(status.source.as_deref(), Some("1.16.5"));
+    assert!(status.degraded, "只有扁平化方块路径的是降级集");
+    assert_eq!(fx.service.status(), status);
 
     // 降级源里名单内的方块一个都没有：请求合法，但是 404。
     let missing = fx
@@ -262,11 +266,64 @@ async fn falls_back_to_a_degraded_source_then_to_none() {
     std::fs::remove_dir_all(fx.settings.join("versions/1.16.5")).unwrap();
     let status = fx.refresh().await;
     assert_eq!(status.source, None);
+    assert!(!status.degraded, "没有材质源不算降级");
     let none = fx
         .service
         .respond("/art/block/cherry_planks.png", Some("1.16.5"))
         .await;
     assert_eq!(none.status(), 404);
+}
+
+#[tokio::test]
+async fn default_skin_set_follows_the_source() {
+    let fx = fixture();
+    let full = fx.refresh().await;
+    assert_eq!(full.default_skins, DefaultSkinSet::Modern);
+
+    std::fs::remove_dir_all(fx.settings.join("versions/1.21.1")).unwrap();
+    let stone = tex("block/stone");
+    let steve = tex("entity/steve");
+    let alex = tex("entity/alex");
+    let grey = || png(16, 16, |_, _| [120, 120, 120, 255]);
+    rewrite_jar(
+        &fx.settings,
+        "1.16.5",
+        &[
+            (stone.as_str(), grey()),
+            (steve.as_str(), png(64, 64, |_, _| PINK)),
+            (alex.as_str(), png(64, 64, |_, _| PINK)),
+        ],
+    );
+    let legacy = fx.refresh().await;
+    assert_eq!(legacy.source.as_deref(), Some("1.16.5"));
+    assert!(legacy.degraded);
+    assert_eq!(legacy.default_skins, DefaultSkinSet::Legacy);
+    assert_eq!(fx.service.status(), legacy);
+    let served = body(
+        fx.service
+            .respond("/art/entity/alex.png", Some("1.16.5"))
+            .await,
+    );
+    assert_eq!(dims(&served), (64, 64));
+
+    // 1.19.3、1.19.4 这样的降级集已经换成 18 款：降级不等于旧版皮肤
+    let slim_alex = tex("entity/player/slim/alex");
+    rewrite_jar(
+        &fx.settings,
+        "1.16.5",
+        &[
+            (stone.as_str(), grey()),
+            (slim_alex.as_str(), png(64, 64, |_, _| PINK)),
+        ],
+    );
+    let degraded = fx.refresh().await;
+    assert!(degraded.degraded);
+    assert_eq!(degraded.default_skins, DefaultSkinSet::Modern);
+
+    std::fs::remove_dir_all(fx.settings.join("versions/1.16.5")).unwrap();
+    let none = fx.refresh().await;
+    assert_eq!(none.source, None);
+    assert_eq!(none.default_skins, DefaultSkinSet::Modern);
 }
 
 #[tokio::test]
@@ -579,6 +636,36 @@ async fn unusable_skins_fall_back_to_none() {
                 .exists()
         );
     }
+}
+
+/// 下载失败时界面画默认皮肤，这个结果不能被记住：服务端后来能下了，下一次查询就要拿到真实皮肤。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_skin_download_is_retried_on_the_next_query() {
+    let fx = fixture();
+    let server = MockServer::start().await;
+    let skin = SkinRef {
+        url: format!("{}/later.png", server.uri()),
+        model: SkinModel::Slim,
+    };
+    assert_eq!(
+        fx.service.skin_info(&skin).await,
+        None,
+        "还没有这张皮肤时回落"
+    );
+
+    Mock::given(method("GET"))
+        .and(url_path("/later.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(png(64, 64, |_, _| PINK)))
+        .mount(&server)
+        .await;
+    let info = fx
+        .service
+        .skin_info(&skin)
+        .await
+        .expect("服务端能下之后应拿到真实皮肤");
+    assert_eq!(info.sha1, remote::sha1_hex(skin.url.as_bytes()));
+    assert_eq!(info.model, SkinModel::Slim);
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
 /// 皮肤地址来自外置登录服务器的档案，指向超大文件时不能整个读进内存：正文超过上限就中止，界面回落，
@@ -1354,18 +1441,24 @@ async fn source_priority_is_local_full_then_download_then_local_degraded() {
     fx.adopt("26.4", true).await;
 
     // 本机完整集优先，即使下载来的更新；下载缓存留着。
-    assert_eq!(fx.refresh().await.source.as_deref(), Some("26.3"));
+    let local_full = fx.refresh().await;
+    assert_eq!(local_full.source.as_deref(), Some("26.3"));
+    assert!(!local_full.degraded);
     assert!(fx.art(".download-cache/manifest.json").is_file());
 
-    // 本机只剩降级集：用下载缓存，本机旧缓存被清掉。
+    // 本机只剩降级集：用下载缓存，本机旧缓存被清掉。下载来的是最新正式版，不算降级，前端不再给下载入口。
     std::fs::remove_dir_all(fx.game.join("versions/26.3")).unwrap();
-    assert_eq!(fx.refresh().await.source.as_deref(), Some("26.4"));
+    let downloaded = fx.refresh().await;
+    assert_eq!(downloaded.source.as_deref(), Some("26.4"));
+    assert!(!downloaded.degraded);
     assert_eq!(fx.service.catalog().unwrap().version_id, "26.4");
     assert!(!fx.art("26.3").exists());
 
     // 下载缓存也没了：退到本机降级集。
     std::fs::remove_dir_all(fx.art(".download-cache")).unwrap();
-    assert_eq!(fx.refresh().await.source.as_deref(), Some("1.16.5"));
+    let local_degraded = fx.refresh().await;
+    assert_eq!(local_degraded.source.as_deref(), Some("1.16.5"));
+    assert!(local_degraded.degraded);
     let degraded = fx.service.catalog().unwrap();
     assert_eq!(degraded.version_id, "1.16.5");
     assert_eq!(degraded.blocks, Vec::new(), "降级源的 jar 里没有方块状态");

@@ -7,7 +7,7 @@
 //   所以视图变化后先把旧面「留住」一小段（useFaceHold），时长按方块报来的组装进度算；减少动画时不留，直接换。
 // - 进度填充在容器级的裁切层里，按 translateX((p − 1) × 100%) 移动，不随面的入场位移一起动。
 
-import { AnimatePresence, motion, useReducedMotionConfig, useTransform, type Variants } from "framer-motion";
+import { AnimatePresence, frameData, motion, useReducedMotionConfig, useTransform, type Variants } from "framer-motion";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Icon } from "../art/Icon";
 import { AssemblingBlock, assemblyExitMs, assemblySeatInMs, type AssemblyClock, type AssemblyExit } from "../art/iso/AssemblingBlock";
@@ -21,7 +21,7 @@ import { useNow } from "../state/launcher";
 import { DOWNLOAD_STAGE, type SessionState } from "../state/session";
 import { progressTrack } from "../state/tasks";
 import { softDisabledProps } from "../ui/Button";
-import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
+import { fillOffset, MIN_VISIBLE_PROGRESS, useSmoothProgress } from "../ui/ProgressBar";
 import { Tooltip } from "../ui/Tooltip";
 import { useBreathPhase } from "./breath";
 import { useInstanceCover } from "./cover";
@@ -41,6 +41,13 @@ export interface LaunchCapsuleProps {
   /** 崩溃诊断页上就绪面写「重新启动」。 */
   relaunch?: boolean;
   className?: string;
+  /**
+   * 胶囊的布局形变起步时调用（framer-motion 的 onLayoutAnimationStart：提交后的微任务里冲刷布局、建好形变的那一刻），
+   * startedAt 是形变的起步时刻。所在的动作行挂了 morph 让位时传 useReflow 返回值的 sync：尺寸观察要到下一帧的渲染步骤才报，
+   * 兄弟靠它让位会比胶囊的边缘晚一帧以上起步，宽度变化大时两者先挤到一起再分开；补跑时按 startedAt 钉起步时刻，
+   * 不另读此刻，两者才在同一个时刻起步。
+   */
+  onMorphStart?: (startedAt: number) => void;
 }
 
 export const CAPSULE_HEIGHT: Readonly<Record<LaunchCapsuleSize, number>> = { md: 48, lg: 56 };
@@ -227,7 +234,7 @@ export const faceSwap: Variants = {
   leave: (reduced: boolean) => (reduced ? { opacity: 0, transition: fade.out } : { opacity: 0, y: -6, transition: fade.out }),
 };
 
-export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch = false, className }: LaunchCapsuleProps) {
+export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch = false, className, onMorphStart }: LaunchCapsuleProps) {
   const entry = useLaunch(instanceId);
   const reduced = useReducedMotionConfig() === true;
   // 加载面、安装中面上方块的组装进度，由方块写入；换面时据此决定旧面留多久
@@ -254,6 +261,9 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
   const announce = entry.view.kind === "loading" || entry.view.kind === "running" || entry.view.kind === "stopped" || entry.view.kind === "failed" || entry.view.kind === "crashed"
     ? sessionPhaseLabel(entry.view.session)
     : "";
+  // framer-motion 12.43 的形变在它的帧处理里建（冲刷布局或帧循环都先写 frameData.timestamp、置 isProcessing），
+  // JSAnimation.play 先调这个回调，再取 driver.now() 作 startTime，处理中取的就是 frameData.timestamp
+  const morphStarted = onMorphStart === undefined ? undefined : () => onMorphStart(frameData.timestamp);
 
   return (
     // 不撑满时胶囊自己的位置与宽度都由布局动画管：所在的动作行挂了兄弟让位（lib/reflow）时，它不再被让位重复位移一次
@@ -262,6 +272,7 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
       layout
       layoutDependency={layoutKey}
       transition={{ layout: springs.morph }}
+      onLayoutAnimationStart={morphStarted}
       role="group"
       aria-label={LAUNCH_COPY.group(entry.instance.name)}
       tabIndex={-1}
@@ -281,7 +292,7 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
         {fill !== null && <Fill key="fill" value={fill.value} track={fill.track} tone={fill.tone} appear={mounted.current} />}
       </AnimatePresence>
       {/* 只播报 phase 的变化，计时与百分比不播报 */}
-      <span className={styles.srOnly} aria-live="polite">
+      <span className="sk-sr-only" aria-live="polite">
         {announce}
       </span>
       {/* 退场的面按这里的 custom 取退场变体：它的 props 停在离场那一刻，减少动画的设置在那之后变了也按当前的走 */}
@@ -306,17 +317,22 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
   );
 }
 
+/**
+ * 进度填充。安装中面在任务完成后、落地重扫回来之前拿到的是那个已完成的任务（launchView 的 installing.task）：文字写着 100%，
+ * 填充也按满格留着，沿同一个 track 从完成前的位置走满，到就绪换面时才随面淡出，不在完成那一刻先没掉。
+ */
 export function fillOf(face: LaunchView, seat: boolean): { value: number; track: string; tone: "loading" | "info" } | null {
   if (face.kind === "loading") return { value: seat ? 1 : face.session.progress, track: face.session.taskId, tone: "loading" };
-  if (face.kind === "installing" && face.task !== null && face.task.status === "running") {
-    return { value: seat ? 1 : face.task.progress, track: progressTrack(face.task), tone: "info" };
+  if (face.kind === "installing" && face.task !== null && (face.task.status === "running" || face.task.status === "done")) {
+    return { value: seat || face.task.status === "done" ? 1 : face.task.progress, track: progressTrack(face.task), tone: "info" };
   }
   return null;
 }
 
 /** appear：胶囊挂载之后才出现（排队的安装开始跑、点了启动），淡入；随胶囊一起挂载的直接显示。 */
 function Fill({ value, track, tone, appear }: { value: number; track: string; tone: "loading" | "info"; appear: boolean }) {
-  const { smooth } = useSmoothProgress(value, track);
+  // 最少显示长度落在平滑的终点上，逐帧的位移不再加下限：从 0 起步时填充一帧帧长出来，不在第一帧冒出那一截
+  const { smooth } = useSmoothProgress(value, track, MIN_VISIBLE_PROGRESS);
   const x = useTransform(smooth, fillOffset);
   return (
     <motion.span

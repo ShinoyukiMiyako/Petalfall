@@ -15,10 +15,12 @@ function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): Instance
     quick_play: { singleplayer: true, multiplayer: true },
     mod_count: 0,
     world_count: 0,
+    resource_pack_count: 0,
     isolated: false,
     description: null,
     cover: null,
     cover_image: null,
+    cover_image_hue: null,
     background: "follow",
     background_image: null,
     memory_mb: null,
@@ -126,21 +128,21 @@ describe("实例 DTO 适配：状态", () => {
     expect(instanceFromDto(instanceDto("Other"), { pins: ["生存 1.21"], busyTaskInstanceIds: new Set() }).pinned).toBe(false);
   });
 
-  it("存档数、隔离生效值、自定内存与最近崩溃原样带过，读不出的原因各自保留", () => {
+  it("存档数、资源包数、隔离生效值、自定内存与最近崩溃原样带过，读不出的原因各自保留", () => {
     const inst = instanceFromDto(
-      instanceDto("隔离", { world_count: 3, isolated: true, memory_mb: 6144, last_crash_at: 1_720_000_000_000, modpack_error: "整合包记录解析失败" }),
+      instanceDto("隔离", { world_count: 3, resource_pack_count: 4, isolated: true, memory_mb: 6144, last_crash_at: 1_720_000_000_000, modpack_error: "整合包记录解析失败" }),
       idle,
     );
-    expect(inst).toMatchObject({ worldCount: 3, isolated: true, memoryMb: 6144, lastCrashAt: 1_720_000_000_000, lastCrashError: null, modpack: null, modpackError: "整合包记录解析失败" });
-    const unread = instanceFromDto(instanceDto("坏", { world_count: null, isolated: null, last_crash_error: "格式版本是 9" }), idle);
-    expect(unread).toMatchObject({ worldCount: null, isolated: null, memoryMb: null, lastCrashAt: null, lastCrashError: "格式版本是 9" });
+    expect(inst).toMatchObject({ worldCount: 3, resourcePackCount: 4, isolated: true, memoryMb: 6144, lastCrashAt: 1_720_000_000_000, lastCrashError: null, modpack: null, modpackError: "整合包记录解析失败" });
+    const unread = instanceFromDto(instanceDto("坏", { world_count: null, resource_pack_count: null, isolated: null, last_crash_error: "格式版本是 9" }), idle);
+    expect(unread).toMatchObject({ worldCount: null, resourcePackCount: null, isolated: null, memoryMb: null, lastCrashAt: null, lastCrashError: "格式版本是 9" });
   });
 
   it("游玩记录读不出：时长为 null、原因带过；实例目录读不出的原因同样带过", () => {
     const unread = instanceFromDto(instanceDto("坏", { playtime_min: null, last_played_at: null, play_error: "解析 游玩记录 失败" }), idle);
     expect(unread).toMatchObject({ playtimeMin: null, lastPlayedAt: null, playError: "解析 游玩记录 失败", dirError: null });
-    const dir = instanceFromDto(instanceDto("目录", { mod_count: null, world_count: null, isolated: null, dir_error: "文件 IO 失败: mods" }), idle);
-    expect(dir).toMatchObject({ modCount: null, worldCount: null, isolated: null, dirError: "文件 IO 失败: mods", playtimeMin: 0, playError: null });
+    const dir = instanceFromDto(instanceDto("目录", { mod_count: null, world_count: null, resource_pack_count: null, isolated: null, dir_error: "文件 IO 失败: mods" }), idle);
+    expect(dir).toMatchObject({ modCount: null, worldCount: null, resourcePackCount: null, isolated: null, dirError: "文件 IO 失败: mods", playtimeMin: 0, playError: null });
   });
 
   it("继承链上的基底正忙：是哪个基底、在做什么原样带过；基底闲着为 null", () => {
@@ -155,6 +157,18 @@ describe("实例 DTO 适配：状态", () => {
   it("时长与读取错误对不上是契约破了：不让界面在 0 和读不到之间猜", () => {
     expect(() => instanceFromDto(instanceDto("X", { playtime_min: null }), idle)).toThrow("实例 X 的游玩时长与它的读取错误对不上");
     expect(() => instanceFromDto(instanceDto("Y", { playtime_min: 3, play_error: "坏了" }), idle)).toThrow("实例 Y 的游玩时长与它的读取错误对不上");
+  });
+
+  it("封面方块图片的色调随取图键带过，两端都收；没有取图键却有色调、不是 0-359 的整数是契约破了，抛错", () => {
+    const key = "0123456789abcdef0123456789abcdef01234567";
+    for (const hue of [0, 359, null]) {
+      expect(instanceFromDto(instanceDto("A", { cover_image: key, cover_image_hue: hue }), idle).coverImageHue).toBe(hue);
+    }
+    expect(instanceFromDto(instanceDto("B"), idle).coverImageHue).toBeNull();
+    expect(() => instanceFromDto(instanceDto("C", { cover_image_hue: 120 }), idle)).toThrow("实例 C 的封面方块图片色调不对");
+    for (const hue of [360, -1, 12.5]) {
+      expect(() => instanceFromDto(instanceDto("D", { cover_image: key, cover_image_hue: hue }), idle), String(hue)).toThrow("实例 D 的封面方块图片色调不对");
+    }
   });
 
   it("直达能力逐位带过：旧版只能加入服务器、读不出版本信息为 null", () => {

@@ -1,0 +1,9 @@
+.go {
+  padding: 0 26px 0 22px;
+  font-size: var(--sk-fs-section);
+}
+
+.badge {
+  /* sk-guard-allow T2: 角标里的符号跟圆点直径走，不是正文 */
+  font-size: 9px;
+}

@@ -5,10 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { fade } from "../lib/motion";
 import { REFLOW_PAUSED_ATTR } from "../lib/reflow";
+import type { Appearance } from "../domain/types";
 import { DEFAULT_APPEARANCE, AppearanceProvider } from "../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { activeAccount } from "../state/selectors";
-import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { fakeAnimate, keydown, render, stubMatchMedia, stubMediaQueries, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { ChromeProvider, type ChromeApi } from "./chrome";
@@ -58,9 +59,9 @@ const flush = () =>
     await settle();
   });
 
-async function mount() {
+async function mount(appearance: Appearance = DEFAULT_APPEARANCE) {
   view = render(
-    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+    <AppearanceProvider initial={appearance}>
       <LauncherProvider>
         <ShellProvider>
           <ChromeProvider value={chrome}>
@@ -174,6 +175,22 @@ describe("命令面板", () => {
     await flush();
     expect(nav.route).toEqual({ page: "settings", section: "general" });
     expect(callsOf(ipc, "microsoft_login")).toEqual([]);
+  });
+
+  it("明暗跟随系统时按眼前画的那一档给出切换：系统深色就给「切换到日樱」，执行后写成日樱、不再跟随", async () => {
+    const media = stubMediaQueries({ "(prefers-reduced-motion: reduce)": false, "(prefers-color-scheme: dark)": true });
+    ipc.overrides.set("set_appearance", (args) => ({ mode: "system", accent: "sakura", petals: true, panorama: false, reduce_motion: false, cover_background: "texture", ...(args.patch as object) }));
+    await mount({ ...DEFAULT_APPEARANCE, mode: "system" });
+    act(() => shell.openPalette("zhuti"));
+    await flush();
+    expect(activeLabel()?.startsWith(PALETTE_COPY.toDay)).toBe(true);
+    keydown(input(), "Enter");
+    await flush();
+    expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { mode: "day" } }]);
+    expect(document.documentElement.getAttribute("data-sk-mode")).toBe("day");
+    media["(prefers-color-scheme: dark)"].set(false);
+    media["(prefers-color-scheme: dark)"].set(true);
+    expect(document.documentElement.getAttribute("data-sk-mode")).toBe("day");
   });
 
   it("Tab 不把焦点带出输入框；Esc 关闭并把焦点还给打开前的元素", async () => {
@@ -370,10 +387,7 @@ describe("命令面板的结果列表：后台变化让位，键入过滤整批�
     Object.defineProperty(HTMLDivElement.prototype, "animate", {
       configurable: true,
       writable: true,
-      value(this: HTMLDivElement, frames: Keyframe[], options: KeyframeAnimationOptions) {
-        played.push({ el: this, frames, options });
-        return {} as Animation;
-      },
+      value: fakeAnimate((el, frames, options) => played.push({ el, frames, options })),
     });
     onTestFinished(() => {
       Reflect.deleteProperty(HTMLDivElement.prototype, "animate");

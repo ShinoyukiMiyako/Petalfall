@@ -1,0 +1,20 @@
+/* 组件自己画聚焦环：关掉兜底 outline，环画在 box-shadow 上。注释里写的 outline: var(--sk-focus) 不算 */
+.tile:focus-visible {
+  outline: none;
+  box-shadow: var(--sk-focus);
+}
+
+.tile {
+  --tile-ring: var(--sk-focus);
+  box-shadow:
+    inset 0 0 0 1px var(--sk-accent),
+    var(--sk-shadow-sm);
+  outline: 2px solid var(--sk-accent);
+  padding: var(--sk-space-2);
+}
+
+.caption {
+  text-shadow: var(--sk-media-text-shadow);
+}
+
+.row { box-shadow: var(--sk-ring), var(--sk-gloss); }

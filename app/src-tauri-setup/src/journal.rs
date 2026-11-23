@@ -204,13 +204,19 @@ pub fn recover(
 /// 修复的目录取自登记，没有登记就没有现成的安装可修。
 ///
 /// 记录只有核验通过才删，标准安装程序、NSIS 原包和自更新都不碰它，所以它可能早已过期，这时以登记为准：
-/// 登记的版本比载荷新时，改成首装或修复都等于绕过降级保护；比记录新时那次安装早被盖过了，半装留下的登记只会比
+/// 登记的版本比载荷新时，改成首装或修复都等于绕过降级保护；换通道（switch）也是登记的比载荷新，改成修复就绕过了
+/// 装回较早版本要在「换到」页上确认的那一步，所以同样保持原判；比记录新时那次安装早被盖过了，半装留下的登记只会比
 /// 记录旧，这时藏起现有安装，用户在选目录页换个位置，那份数据就成了孤儿；登记在别的目录时，按记录走首装或修复
 /// 都会带着 /D= 把登记改指回记录的目录，原来那份成孤儿。
+///
+/// 过期时核验查出的程序文件不符也不拿来改判：核验只在记录与载荷同版本时比长度与哈希，比的是记录那个版本，
+/// 登记的是另一个版本时完好的程序文件同样对不上，分不出是不是写了一半；登记在别的目录时，核验查的又不是登记的那份。
+/// 没过期时不看不符项，一律改成修复或首装，都不会再给「打开」。
 pub fn mark_interrupted(probe: Probe, journal: &Journal) -> Probe {
     let dir = journal.instdir.to_string_lossy().into_owned();
     let superseded = probe.existing.as_ref().is_some_and(|existing| {
         existing.kind == ExistingKind::Newer
+            || existing.kind == ExistingKind::Switch
             || classify(&existing.version, &journal.version) == ExistingKind::Newer
             || fold_dir(&existing.dir) != fold_dir(&dir)
     });
@@ -230,6 +236,7 @@ pub fn mark_interrupted(probe: Probe, journal: &Journal) -> Probe {
             kind: ExistingKind::Broken,
             version: existing.version,
             dir,
+            channel: existing.channel,
         }),
         interrupted: true,
         ..probe
@@ -239,13 +246,21 @@ pub fn mark_interrupted(probe: Probe, journal: &Journal) -> Probe {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
     use std::process::{Command, Stdio};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    use petalfall_setup_payload::Header;
     use serde_json::json;
 
     use super::*;
+    use crate::contract::Channel;
+    use crate::existing::{APP_EXE, DISPLAY_VERSION, INSTALL_LOCATION};
+    use crate::overlay::test_support::random_bytes;
+    use crate::verify::test_support::MemoryEntry;
+    use crate::verify::{Expected, UNINSTALLER_NAME, verify};
 
     fn sample(pid: Option<u32>) -> Journal {
         Journal {
@@ -464,12 +479,18 @@ mod tests {
     fn probe(existing: Option<Existing>) -> Probe {
         Probe {
             payload_version: "0.3.0".into(),
+            payload_channel: Some(Channel::Stable),
             default_dir: r"C:\Users\a\AppData\Local\Petalfall".into(),
             required_bytes: 123,
             existing,
             interrupted: false,
             elevated: true,
             update: None,
+            newer_reason: None,
+            allowed_modes: Vec::new(),
+            unattended: None,
+            handoff: false,
+            data_block: None,
         }
     }
 
@@ -479,6 +500,7 @@ mod tests {
             kind: ExistingKind::Upgrade,
             version: "0.2.0-dev.7".into(),
             dir: r"D:\游戏 目录\Petalfall".into(),
+            channel: Some(Channel::Dev),
         }));
 
         let marked = mark_interrupted(half_registered, &sample(None));
@@ -487,12 +509,18 @@ mod tests {
             marked,
             Probe {
                 payload_version: "0.3.0".into(),
+                payload_channel: Some(Channel::Stable),
                 default_dir: r"D:\游戏 目录\Petalfall".into(),
                 required_bytes: 123,
                 existing: None,
                 interrupted: true,
                 elevated: true,
                 update: None,
+                newer_reason: None,
+                allowed_modes: Vec::new(),
+                unattended: None,
+                handoff: false,
+                data_block: None,
             }
         );
     }
@@ -511,11 +539,145 @@ mod tests {
                     kind: ExistingKind::Newer,
                     version: "0.4.0".into(),
                     dir: dir.into(),
+                    channel: Some(Channel::Stable),
                 }));
 
                 assert_eq!(mark_interrupted(found.clone(), &journal), found);
             }
         }
+    }
+
+    fn payload_with(version: &str, channel: Channel, existing: Existing) -> Probe {
+        Probe {
+            payload_version: version.into(),
+            payload_channel: Some(channel),
+            ..probe(Some(existing))
+        }
+    }
+
+    #[test]
+    fn a_switch_keeps_its_consent_page_whatever_the_record_says() {
+        // 记录不比登记旧时只有种类在挡：记录正是登记的版本（更早一次升级没装完），或比登记还新
+        for was_fresh in [true, false] {
+            for version in ["1.1.0-dev.61", "1.2.0-dev.1"] {
+                let journal = Journal {
+                    was_fresh,
+                    version: version.into(),
+                    ..sample(None)
+                };
+                for dir in [r"D:\游戏 目录\Petalfall", r"E:\Elsewhere"] {
+                    let found = payload_with(
+                        "1.0.0-beta.5",
+                        Channel::Beta,
+                        Existing {
+                            kind: ExistingKind::Switch,
+                            version: "1.1.0-dev.61".into(),
+                            dir: dir.into(),
+                            channel: Some(Channel::Dev),
+                        },
+                    );
+
+                    assert_eq!(
+                        mark_interrupted(found.clone(), &journal),
+                        found,
+                        "{was_fresh} {version} {dir}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 换通道装到一半，不论卸载项改没改，重跑目标包或原来的包都有路可走。
+    #[test]
+    fn a_half_switch_is_finished_or_undone_by_rerunning_either_package() {
+        let journal = Journal {
+            was_fresh: false,
+            version: "1.0.0-beta.5".into(),
+            ..sample(None)
+        };
+        let installed = |kind: ExistingKind, version: &str, channel: Channel| Existing {
+            kind,
+            version: version.into(),
+            dir: r"D:\游戏 目录\Petalfall".into(),
+            channel: Some(channel),
+        };
+
+        // 卸载项还是原来的预览版：重跑目标包仍得 switch，在「换到」页再确认一次；重跑原来的包是同版本，重新安装即恢复
+        for found in [
+            payload_with(
+                "1.0.0-beta.5",
+                Channel::Beta,
+                installed(ExistingKind::Switch, "1.1.0-dev.61", Channel::Dev),
+            ),
+            payload_with(
+                "1.1.0-dev.61",
+                Channel::Dev,
+                installed(ExistingKind::Same, "1.1.0-dev.61", Channel::Dev),
+            ),
+        ] {
+            assert_eq!(mark_interrupted(found.clone(), &journal), found);
+        }
+
+        // 卸载项已改成目标版本：重跑目标包是同版本、重跑原来的包是升级，都按半装走修复
+        for (payload, channel, kind) in [
+            ("1.0.0-beta.5", Channel::Beta, ExistingKind::Same),
+            ("1.1.0-dev.61", Channel::Dev, ExistingKind::Upgrade),
+        ] {
+            let marked = mark_interrupted(
+                payload_with(
+                    payload,
+                    channel,
+                    installed(kind, "1.0.0-beta.5", Channel::Beta),
+                ),
+                &journal,
+            );
+
+            assert_eq!(
+                marked.existing,
+                Some(installed(
+                    ExistingKind::Broken,
+                    "1.0.0-beta.5",
+                    Channel::Beta
+                )),
+                "{payload}"
+            );
+            assert!(marked.interrupted, "{payload}");
+        }
+    }
+
+    /// 已发出的引导程序留下的记录就是这五个键。加一个不带默认值的字段，它们留下的记录就读不出、被当成读不懂删掉，
+    /// 换通道的半装也用不着新字段。
+    #[test]
+    fn a_switch_install_writes_the_same_five_fields() {
+        let journal = Journal::begin(Path::new(r"D:\Petalfall"), false, "1.0.0-beta.5");
+
+        let value = serde_json::to_value(&journal).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "instdir",
+                "payload_pid",
+                "started_at",
+                "version",
+                "was_fresh"
+            ]
+        );
+        let shipped = br#"{"instdir":"D:\\Petalfall","was_fresh":false,"version":"1.0.0-beta.5","payload_pid":null,"started_at":1793000000}"#;
+        let read: Journal = serde_json::from_slice(shipped).unwrap();
+        assert_eq!(
+            read,
+            Journal {
+                started_at: 1_793_000_000,
+                ..journal
+            }
+        );
     }
 
     #[test]
@@ -525,6 +687,7 @@ mod tests {
             kind: ExistingKind::Upgrade,
             version: "0.2.0-dev.7".into(),
             dir: r"C:\Users\a\AppData\Local\Petalfall".into(),
+            channel: Some(Channel::Dev),
         }));
 
         assert_eq!(mark_interrupted(found.clone(), &sample(None)), found);
@@ -547,6 +710,7 @@ mod tests {
                     kind,
                     version: version.into(),
                     dir: r"D:\游戏 目录\Petalfall".into(),
+                    channel: Some(Channel::Stable),
                 }));
 
                 assert_eq!(mark_interrupted(found.clone(), &journal), found);
@@ -565,6 +729,7 @@ mod tests {
             kind: ExistingKind::Upgrade,
             version: "0.1.0".into(),
             dir: r"E:\Old".into(),
+            channel: Some(Channel::Stable),
         }));
 
         assert_eq!(mark_interrupted(found.clone(), &journal), found);
@@ -580,6 +745,7 @@ mod tests {
             kind: ExistingKind::Upgrade,
             version: "0.1.0".into(),
             dir: r"d:\游戏 目录\PETALFALL\".into(),
+            channel: Some(Channel::Stable),
         });
 
         let marked = mark_interrupted(probe(existing), &journal);
@@ -598,6 +764,7 @@ mod tests {
             kind: ExistingKind::Upgrade,
             version: "0.1.0".into(),
             dir: r"D:\游戏 目录\Petalfall".into(),
+            channel: Some(Channel::Stable),
         });
 
         let marked = mark_interrupted(probe(existing), &journal);
@@ -608,6 +775,7 @@ mod tests {
                 kind: ExistingKind::Broken,
                 version: "0.1.0".into(),
                 dir: r"D:\游戏 目录\Petalfall".into(),
+                channel: Some(Channel::Stable),
             })
         );
         assert!(marked.interrupted);
@@ -632,6 +800,155 @@ mod tests {
                 ..probe(None)
             }
         );
+    }
+
+    fn random_below(bound: u64) -> u64 {
+        RandomState::new().build_hasher().finish() % bound
+    }
+
+    const PAYLOAD_EXE_LEN: usize = 4096;
+
+    /// 在记录的目录里放 `on_disk` 与卸载程序，卸载项登记 `registered` 版本、指向 `registered_dir`，载荷与记录同版本，
+    /// 照启动时那样恢复一次，返回留下的记录与核验出的不符项。
+    fn recover_with_exe(
+        journal: &Journal,
+        payload_exe: &[u8],
+        on_disk: &[u8],
+        registered: &str,
+        registered_dir: &Path,
+    ) -> (Journal, Vec<Mismatch>) {
+        let (_state, store) = store();
+        fs::create_dir_all(&journal.instdir).unwrap();
+        fs::write(journal.instdir.join(APP_EXE), on_disk).unwrap();
+        fs::write(journal.instdir.join(UNINSTALLER_NAME), b"MZ").unwrap();
+        let header = Header::new(b"payload", payload_exe, &journal.version).unwrap();
+        let location = format!("\"{}\"", registered_dir.display());
+        let entry =
+            MemoryEntry::with(&[(DISPLAY_VERSION, registered), (INSTALL_LOCATION, &location)]);
+        store.save(journal).unwrap();
+
+        let recovery = recover(&store, &Scripted::new(0), Duration::ZERO, |journal| {
+            verify(&Expected::for_journal(journal, &header), &entry)
+        })
+        .unwrap();
+
+        match recovery {
+            Recovery::Interrupted {
+                journal,
+                mismatches,
+            } => (journal, mismatches),
+            other => panic!("程序文件对不上，记录应当留着：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_half_written_exe_under_a_live_record_is_only_offered_a_reinstall() {
+        // 升级写到一半：卸载项还是旧版本，程序文件只落下了新版本开头的一段
+        let payload_exe = random_bytes(PAYLOAD_EXE_LEN);
+        let random_cut = 1 + random_below(PAYLOAD_EXE_LEN as u64 - 2) as usize;
+        for cut in [1, random_cut, PAYLOAD_EXE_LEN - 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let instdir = dir.path().join("Petalfall");
+            let journal = Journal {
+                instdir: instdir.clone(),
+                was_fresh: false,
+                version: "1.0.0-beta.5".into(),
+                ..sample(None)
+            };
+
+            let (left, mismatches) = recover_with_exe(
+                &journal,
+                &payload_exe,
+                &payload_exe[..cut],
+                "1.0.0-beta.4",
+                &instdir,
+            );
+            assert!(
+                mismatches.contains(&Mismatch::ExeLength {
+                    expected: PAYLOAD_EXE_LEN as u64,
+                    actual: cut as u64,
+                }),
+                "{cut} {mismatches:?}"
+            );
+
+            let registered = Existing {
+                kind: ExistingKind::Upgrade,
+                version: "1.0.0-beta.4".into(),
+                dir: instdir.to_string_lossy().into_owned(),
+                channel: Some(Channel::Beta),
+            };
+            let marked = mark_interrupted(
+                payload_with("1.0.0-beta.5", Channel::Beta, registered.clone()),
+                &left,
+            );
+
+            assert_eq!(
+                marked.existing,
+                Some(Existing {
+                    kind: ExistingKind::Broken,
+                    ..registered
+                }),
+                "{cut}"
+            );
+            assert!(marked.interrupted, "{cut}");
+        }
+    }
+
+    /// 登记的是比记录新的另一个版本时，完好的程序文件和写了一半的报出同一种长度不符；登记在别的目录时核验查的是
+    /// 记录的目录。凭这一项改判，降级保护、「换到」页的确认和别处的登记都会被绕过去。
+    #[test]
+    fn an_exe_mismatch_under_an_expired_record_lifts_no_guard() {
+        let payload_exe = random_bytes(PAYLOAD_EXE_LEN);
+        let half_written = &payload_exe[..1 + random_below(PAYLOAD_EXE_LEN as u64 - 1) as usize];
+        let intact_other_version = random_bytes(PAYLOAD_EXE_LEN + 1 + random_below(4096) as usize);
+        let dir = tempfile::tempdir().unwrap();
+        let instdir = dir.path().join("Petalfall");
+        let elsewhere = dir.path().join("Elsewhere");
+        let cases = [
+            (ExistingKind::Switch, "1.1.0-dev.61", Channel::Dev, &instdir),
+            (ExistingKind::Newer, "1.0.0-beta.6", Channel::Beta, &instdir),
+            (
+                ExistingKind::Upgrade,
+                "1.0.0-beta.4",
+                Channel::Beta,
+                &elsewhere,
+            ),
+        ];
+        for was_fresh in [true, false] {
+            let journal = Journal {
+                instdir: instdir.clone(),
+                was_fresh,
+                version: "1.0.0-beta.5".into(),
+                ..sample(None)
+            };
+            for (kind, version, channel, registered_dir) in &cases {
+                for on_disk in [half_written, &intact_other_version[..]] {
+                    let context = format!("{was_fresh} {kind:?} 程序文件 {} 字节", on_disk.len());
+                    let (left, mismatches) =
+                        recover_with_exe(&journal, &payload_exe, on_disk, version, registered_dir);
+                    assert!(
+                        mismatches.contains(&Mismatch::ExeLength {
+                            expected: PAYLOAD_EXE_LEN as u64,
+                            actual: on_disk.len() as u64,
+                        }),
+                        "{context} {mismatches:?}"
+                    );
+
+                    let found = payload_with(
+                        "1.0.0-beta.5",
+                        Channel::Beta,
+                        Existing {
+                            kind: *kind,
+                            version: (*version).into(),
+                            dir: registered_dir.to_string_lossy().into_owned(),
+                            channel: Some(*channel),
+                        },
+                    );
+
+                    assert_eq!(mark_interrupted(found.clone(), &left), found, "{context}");
+                }
+            }
+        }
     }
 
     #[test]

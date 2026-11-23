@@ -12,6 +12,7 @@ import { Field } from "./Field";
 import { RadioGroup, type RadioOption } from "./RadioGroup";
 import { RadioTile } from "./RadioTile";
 import { Toggle } from "./Toggle";
+import { Tooltip } from "./Tooltip";
 
 let view: Rendered | undefined;
 
@@ -131,6 +132,73 @@ describe("开关圆钮的按下拉伸", () => {
   });
 });
 
+describe("减少动画时开关圆钮不平移，开关两处各一枚圆钮淡入淡出", () => {
+  const css = styleOf("./Toggle.module.css");
+  const REDUCED = ":global([data-sk-reduced])";
+  const ON = '.root[aria-checked="true"]';
+  const travelOf = (rule: string) => {
+    const m = /transform: translateX\((\d+)px\);/.exec(rule);
+    if (m === null) throw new Error(`规则里没有 translateX：${rule}`);
+    return Number(m[1]);
+  };
+  const pxOf = (rule: string, prop: string) => {
+    const m = new RegExp(`(?:^|[;\\s])${prop}: (\\d+)px;`).exec(rule);
+    if (m === null) throw new Error(`规则里没有 ${prop}：${rule}`);
+    return Number(m[1]);
+  };
+  /** 选择器单独成一条的那条规则：开态那枚的选择器也出现在与 .knob 共用外观的那条里，ruleOf 会先找到那条。 */
+  const ownRule = (selector: string) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, (ch) => `\\${ch}`);
+    const m = new RegExp(`(?:^|\\}\\s*)${escaped} \\{([^}]*)\\}`).exec(css);
+    if (m === null) throw new Error(`样式里缺少单独的 ${selector} 规则`);
+    return m[1];
+  };
+
+  it("圆钮层固定在关态位置，不过渡；关态那枚（.knob）开时淡出，开态那枚（圆钮层的 ::after）开时淡入", () => {
+    expect(ownRule(`${REDUCED} .thumb`)).toMatch(/transition: none;/);
+    expect(ownRule(`${REDUCED} ${ON} .thumb`)).toMatch(/transform: none;/);
+
+    // 出现走 dur-in / ease-out，消失走 dur-out / ease-in：过渡写在目标态上
+    const fadeIn = /transition: opacity var\(--sk-dur-in\) var\(--sk-ease-out\);/;
+    const fadeOut = /transition: opacity var\(--sk-dur-out\) var\(--sk-ease-in\);/;
+    const offKnob = ownRule(`${REDUCED} .knob`);
+    expect(offKnob).toMatch(fadeIn);
+    expect(offKnob).not.toMatch(/opacity: 0;/);
+    const offKnobOn = ownRule(`${REDUCED} ${ON} .knob`);
+    expect(offKnobOn).toMatch(/opacity: 0;/);
+    expect(offKnobOn).toMatch(fadeOut);
+
+    const onKnob = ownRule(`${REDUCED} .thumb::after`);
+    expect(onKnob).toMatch(/content: "";/);
+    expect(onKnob).toMatch(/opacity: 0;/);
+    expect(onKnob).toMatch(fadeOut);
+    const onKnobOn = ownRule(`${REDUCED} ${ON} .thumb::after`);
+    expect(onKnobOn).toMatch(/opacity: 1;/);
+    expect(onKnobOn).toMatch(fadeIn);
+  });
+
+  it("开态那枚停在不减少动画时圆钮滑到的位置，落在轨道内，外观与关态那枚是同一条规则", () => {
+    const onKnob = ownRule(`${REDUCED} .thumb::after`);
+    expect(onKnob).toMatch(/position: absolute;/);
+    expect(onKnob).toMatch(/inset: 0;/);
+    expect(onKnob).toMatch(/pointer-events: none;/);
+    const travel = travelOf(ruleOf(css, `${ON} .thumb`));
+    expect(travel).toBe(16);
+    expect(travelOf(onKnob)).toBe(travel);
+    const thumb = ruleOf(css, ".thumb");
+    const track = ruleOf(css, ".track");
+    // 开态那枚的右缘与关态那枚的左缘到轨道两端的距离相同
+    expect(pxOf(track, "width") - (pxOf(thumb, "left") + travel + pxOf(thumb, "width"))).toBe(pxOf(thumb, "left"));
+
+    const look = /\n\.knob,\r?\n:global\(\[data-sk-reduced\]\) \.thumb::after \{([^}]*)\}/.exec(css);
+    if (look === null) throw new Error("圆钮外观不是 .knob 与开态那枚共用的一条规则");
+    expect(look[1]).toMatch(/border-radius: var\(--sk-r-pill\);/);
+    expect(look[1]).toMatch(/background: #FFFFFF;/);
+    expect(look[1]).toMatch(/box-shadow: 0 1px 3px rgba\(60, 20, 40, 0\.25\);/);
+    expect(ruleOf(css, ".knob")).not.toMatch(/background|box-shadow|border-radius/);
+  });
+});
+
 describe("Toggle", () => {
   function Host({ onChange, initial = false }: { onChange: (v: boolean) => void; initial?: boolean }) {
     const [on, set] = useState(initial);
@@ -176,6 +244,33 @@ describe("Toggle", () => {
     click(hard);
     expect(onChange).not.toHaveBeenCalled();
     expect(hard.disabled).toBe(true);
+  });
+
+  it("外面再包一层 Tooltip（Mod 列表的开关）：外层气泡显示时开关经 aria-describedby 关联到它", () => {
+    const TIP = "停用后下次启动不再加载";
+    mount(
+      <Tooltip content={TIP} open>
+        <Toggle checked ariaLabel="启用 Sodium" onChange={() => undefined} />
+      </Tooltip>,
+    );
+    const sw = document.querySelector<HTMLButtonElement>('[role="switch"]');
+    const bubble = document.querySelector<HTMLElement>('[role="tooltip"]');
+    if (sw === null || bubble === null) throw new Error("开关或提示气泡没有渲染出来");
+    expect(bubble.id).not.toBe("");
+    expect(sw.getAttribute("aria-describedby")).toBe(bubble.id);
+    expect(document.getElementById(bubble.id)?.textContent).toBe(TIP);
+  });
+
+  it("调用方传的 aria-describedby 落到开关上；带原因禁用时同样保留", () => {
+    mount(
+      <>
+        <Toggle checked={false} ariaLabel="全屏启动" aria-describedby="row-note" onChange={() => undefined} />
+        <Toggle checked={false} ariaLabel="启用 Sodium" aria-describedby="row-note-2" disabledReason="游戏运行中不能修改" onChange={() => undefined} />
+      </>,
+    );
+    const [plain, soft] = [...document.querySelectorAll<HTMLButtonElement>('[role="switch"]')];
+    expect(plain.getAttribute("aria-describedby")).toBe("row-note");
+    expect(soft.getAttribute("aria-describedby")).toBe("row-note-2");
   });
 
   it("没有可见标签也没有 ariaLabel 时抛错", () => {

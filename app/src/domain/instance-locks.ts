@@ -3,14 +3,14 @@
 import type { InstanceSummary } from "./adapt";
 import type { BaseBlockingActivity } from "./types";
 
-/** 别的实例正以它为基底：那个实例启动到游戏退出、补全或导入整合包期间要读写这里的客户端 jar 与 natives。 */
+/** 别的实例正以它为基底：那个实例启动到游戏退出、补全或导入整合包期间要读写这里的客户端 jar 与 natives，移到别的游戏目录期间要把这里的版本 JSON 与客户端 jar 带过去。 */
 export interface InheritedLock {
   kind: "inherited";
   /** 正在用它的实例。 */
   usedBy: string;
 }
 
-/** 继承链上的基底正忙：补全要占住基底，它在运行或目录正被重写时，任务一开工就被后端拒绝。 */
+/** 继承链上的基底正忙：补全与移动要占住基底，它在运行或目录正被重写时，任务一开工就被后端拒绝。 */
 export interface BaseBusyLock {
   kind: "base_busy";
   /** 挡路的那个基底。 */
@@ -29,7 +29,7 @@ export interface InstanceLocks {
   /** 启用、停用、更新、移除 Mod 与回滚。 */
   mods: "running" | "installing" | "moving" | null;
   rename: InstanceLock | null;
-  /** 补全游戏文件：安装中显示「进行中」而不是禁用原因。只有它要占基底，所以只有它看基底忙不忙。 */
+  /** 补全游戏文件：安装中显示「进行中」而不是禁用原因。它要占基底，所以与移动一样看基底忙不忙。 */
   repair: InstanceLock | BaseBusyLock | null;
   delete: "running" | "moving" | HeldActivity | InheritedLock | null;
   /** 启动：正在移走或被当作基底会挡住。存档正忙另由 savesBusy 判定，它还要看前端排着的存档任务。 */
@@ -42,9 +42,9 @@ export interface InstanceLocks {
  * busy：本实例的会话在准备、下载、启动或运行中（JVM 占着 Mod 文件，Windows 下改名、替换、删除都会失败）。
  * installing：安装或补全任务正在写这个实例的目录。
  * modifying：后端正占着实例改动 Mod、资源或设置。backingUp：后端正在备份、恢复或导出存档（游戏退出后的
- * 自动备份也算）。两者都与 Mod 改动兼容，所以不锁 Mod 操作；但与改名、删除、补全互斥，不提前禁用的话
+ * 自动备份也算）。两者都与 Mod 改动兼容，所以不锁 Mod 操作；但与改名、删除、补全、移动互斥，不提前禁用的话
  * 只能等后端以 instance_busy 拒绝后再报错。后端只报告一种活动，两者不会同时为真。
- * usedBy：正以它为基底的实例。基底照样能改动 Mod，所以不锁 Mod 操作；改名、删除、补全会挪走或重写它的目录，
+ * usedBy：正以它为基底的实例。基底照样能改动 Mod，所以不锁 Mod 操作；改名、删除、补全、移动会挪走或重写它的目录，
  * 与之互斥；启动也互斥，游戏映射着 natives 时用它的实例写不了。几种原因同时在时报实例自己的事。
  * baseBusy：继承链上容不下基底占用的基底。后端先占实例自己、再占基底，所以它排在所有实例自己的原因之后。
  * moving：实例正被移到别的游戏目录（前端排着的移动任务也算），后端记为与一切互斥，什么都做不了；排在游戏与安装之后，

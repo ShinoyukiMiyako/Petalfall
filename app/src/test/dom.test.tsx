@@ -1,15 +1,14 @@
 // @vitest-environment jsdom
-import { motion } from "framer-motion";
+import { cancelFrame, frame, frameData, motion } from "framer-motion";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { drainFrames, render, stepFrames, stubSpanAnimations, waitForFrames, type Rendered } from "./dom";
 
 let view: Rendered | undefined;
 
+// 有的用例在真实计时器上等动画，后面的用例一开头就换上假时钟逐帧走：全局收尾只在假定时器上排空，真实计时器上还排着的那一帧
+// 会让换上假时钟之后的头几步推进扑空，所以这里不论在哪种计时器上都再排空一次
 afterEach(async () => {
-  view?.unmount();
-  view = undefined;
   await drainFrames();
-  vi.useRealTimers();
 });
 
 const fadeIn = (id: string, seconds: number) => (
@@ -101,6 +100,30 @@ describe("drainFrames", () => {
     view.unmount();
     view = undefined;
     await drainFrames();
+    vi.useRealTimers();
+
+    view = render(fadeIn("next", 0.1));
+    await waitForFrames(() => expect(box("next").style.opacity).toBe("1"));
+  });
+
+  it("新装的假时钟上第一帧与上一个假时钟的最后一帧同在第 16 ms：照样认出这一帧，等帧循环停下才返回，换回真实计时器后帧循环照常走", async () => {
+    vi.useFakeTimers();
+    frame.render(() => undefined);
+    await stepFrames(1);
+    expect(frameData.timestamp).toBe(16);
+    await drainFrames();
+    vi.useRealTimers();
+
+    // 新的假时钟又从 0 计时，frameData 还停在 16：保持活跃的回调每帧都跑，跑满三帧撤掉自己
+    vi.useFakeTimers();
+    const seen: number[] = [];
+    const tick = () => {
+      seen.push(frameData.timestamp);
+      if (seen.length === 3) cancelFrame(tick);
+    };
+    frame.update(tick, true);
+    await drainFrames();
+    expect(seen).toEqual([16, 32, 48]);
     vi.useRealTimers();
 
     view = render(fadeIn("next", 0.1));

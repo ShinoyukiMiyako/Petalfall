@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mockGameDir } from "./mock/handlers/config";
 import { invoke } from "./bridge";
 import { IpcError } from "./errors";
 import { listHistory, rollback, rollbackChecks } from "./history";
@@ -227,7 +228,7 @@ describe("更新检查与更新", () => {
     const stages: string[] = [];
     subscribeMockEvent(CORE_EVENT, (payload) => stages.push((payload as { message: string }).message));
 
-    const outcome = await updateMod("task-u1", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060");
+    const outcome = await updateMod("task-u1", mockGameDir(), MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060");
     expect(outcome).toMatchObject({ file_name: "AANobbMI-0.6.0.jar", platform: "modrinth" });
     // 这一版带着可选前置 Mod Menu：可选的不算没照办，不进结果
     expect(outcome.skipped).toEqual([]);
@@ -263,8 +264,8 @@ describe("更新检查与更新", () => {
   });
 
   it("新版本要的必需前置找不到适配版本：说明随结果带回，确认计划的出参不多这个键", async () => {
-    await installMod("task-forge", "1.20.1-Forge", "modrinth", "AANobbMI", "sodium-053");
-    const outcome = await updateMod("task-forge-up", "1.20.1-Forge", "AANobbMI-0.5.3.jar", "sodium-060");
+    await installMod("task-forge", mockGameDir(), "1.20.1-Forge", "modrinth", "AANobbMI", "sodium-053");
+    const outcome = await updateMod("task-forge-up", mockGameDir(), "1.20.1-Forge", "AANobbMI-0.5.3.jar", "sodium-060");
     expect(outcome.file_name).toBe("AANobbMI-0.6.0.jar");
     expect(outcome.skipped).toEqual(["前置 Fabric API 没有适配该实例的版本，未加入计划"]);
     expect(Object.keys(await planInstall("1.20.1-Forge", "modrinth", "AANobbMI", "sodium-060")).sort()).toEqual(["items", "skipped"]);
@@ -272,7 +273,7 @@ describe("更新检查与更新", () => {
 
   it("停用的 Mod 更新后仍停用：落盘与返回都带 .disabled，卷宗与历史按启用态文件名记账", async () => {
     await setModEnabled(MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", false);
-    const outcome = await updateMod("task-off", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar.disabled", "sodium-060");
+    const outcome = await updateMod("task-off", mockGameDir(), MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar.disabled", "sodium-060");
     expect(outcome.file_name).toBe("AANobbMI-0.6.0.jar.disabled");
     expect(outcome.path.endsWith("/mods/AANobbMI-0.6.0.jar.disabled")).toBe(true);
 
@@ -283,22 +284,22 @@ describe("更新检查与更新", () => {
   });
 
   it("启用着的 Mod 更新后仍启用，从发现页重装停用的 Mod 也沿用停用态", async () => {
-    expect((await updateMod("task-on", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060")).file_name).toBe("AANobbMI-0.6.0.jar");
+    expect((await updateMod("task-on", mockGameDir(), MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060")).file_name).toBe("AANobbMI-0.6.0.jar");
     await setModEnabled(MOCK_MOD_INSTANCE, "P7dR8mSH-0.92.2.jar", false);
-    const again = await installMod("task-reinstall", MOCK_MOD_INSTANCE, "modrinth", "P7dR8mSH", "fapi-0927");
+    const again = await installMod("task-reinstall", mockGameDir(), MOCK_MOD_INSTANCE, "modrinth", "P7dR8mSH", "fapi-0927");
     expect(again.file_name).toBe("P7dR8mSH-0.92.7.jar.disabled");
   });
 
   it("参数非法先于登记任务拒绝；任务 id 冲突与取消和后端同码", async () => {
-    expect(await failure(updateMod("task-u2", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", ""))).toMatchObject({
+    expect(await failure(updateMod("task-u2", mockGameDir(), MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", ""))).toMatchObject({
       code: "invalid_argument",
       message: "mod_version_id 不能为空",
     });
     beginMockTask("task-u3");
-    expect(await failure(updateMod("task-u3", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060"))).toMatchObject({ code: "task_conflict" });
+    expect(await failure(updateMod("task-u3", mockGameDir(), MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060"))).toMatchObject({ code: "task_conflict" });
     endMockTask("task-u3");
 
-    const pending = updateMod("task-u4", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060");
+    const pending = updateMod("task-u4", mockGameDir(), MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060");
     expect(await cancelTask("task-u4")).toBe(true);
     expect(await failure(pending)).toMatchObject({ code: "cancelled" });
     // 取消后一个文件都没动。
@@ -308,25 +309,25 @@ describe("更新检查与更新", () => {
   it("全部更新的一项：update_mod 把调用时给的 step 标在每条事件上；单独调用的事件不带这个键", async () => {
     const events: Record<string, unknown>[] = [];
     subscribeMockEvent(CORE_EVENT, (payload) => events.push(payload as Record<string, unknown>));
-    await updateMod("task-one", MOCK_MOD_INSTANCE, "P7dR8mSH-0.92.2.jar", "fapi-0927");
-    await updateMod("task-all", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060", 0);
+    await updateMod("task-one", mockGameDir(), MOCK_MOD_INSTANCE, "P7dR8mSH-0.92.2.jar", "fapi-0927");
+    await updateMod("task-all", mockGameDir(), MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060", 0);
     expect(events.map((e) => [e.task_id, "step" in e, e.step, e.message])).toEqual([
       ["task-one", false, undefined, "准备把 P7dR8mSH-0.92.2.jar 更新到版本 fapi-0927"],
       ["task-one", false, undefined, "模组 P7dR8mSH-0.92.7.jar 已安装"],
       ["task-all", true, 0, "准备把 AANobbMI-0.5.3.jar 更新到版本 sodium-060"],
       ["task-all", true, 0, "模组 AANobbMI-0.6.0.jar 已安装"],
     ]);
-    expect(await failure(updateMod("task-bad", MOCK_MOD_INSTANCE, "P7dR8mSH-0.92.7.jar", "fapi-0927", -1))).toMatchObject({
+    expect(await failure(updateMod("task-bad", mockGameDir(), MOCK_MOD_INSTANCE, "P7dR8mSH-0.92.7.jar", "fapi-0927", -1))).toMatchObject({
       code: "unknown",
       message: "invalid args `step` for command `update_mod`: expected u32",
     });
   });
 
   it("来源不明的文件不能更新；被占用时报 mod_file_busy", async () => {
-    const unknown = await failure(updateMod("task-u5", MOCK_MOD_INSTANCE, "handmade-1.0.jar", "x"));
+    const unknown = await failure(updateMod("task-u5", mockGameDir(), MOCK_MOD_INSTANCE, "handmade-1.0.jar", "x"));
     expect(unknown.detail).toEqual({ causes: ["handmade-1.0.jar 没有平台来源记录，无法自动更新（先检查更新识别它）"] });
     setMockModFileBusy(MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", true);
-    expect(await failure(updateMod("task-u6", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060"))).toMatchObject({ code: "mod_file_busy" });
+    expect(await failure(updateMod("task-u6", mockGameDir(), MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060"))).toMatchObject({ code: "mod_file_busy" });
   });
 });
 
@@ -454,7 +455,7 @@ describe("忽略与锁定更新", () => {
 
   it("更新后新文件沿用装进实例的时刻与更新检查设置；禁用态文件名也能设置", async () => {
     await setModUpdateHold(MOCK_MOD_INSTANCE, SODIUM, { kind: "pinned", version_id: "sodium-060" });
-    await updateMod("task-hold", MOCK_MOD_INSTANCE, SODIUM, "sodium-060");
+    await updateMod("task-hold", mockGameDir(), MOCK_MOD_INSTANCE, SODIUM, "sodium-060");
     const updated = (await listMods(MOCK_MOD_INSTANCE)).find((m) => m.file_name === "AANobbMI-0.6.0.jar");
     expect(updated?.source).toMatchObject({ version_id: "sodium-060", installed_at: 1_788_220_800, update_hold: { kind: "pinned", version_id: "sodium-060" } });
 
@@ -464,7 +465,7 @@ describe("忽略与锁定更新", () => {
 
   it("新装的 Mod 装进实例的时刻是落位那一刻，设置为空", async () => {
     const before = Math.floor(Date.now() / 1000);
-    await installMod("t-fresh", "1.21.1-Fabric", "modrinth", "YL57xq9U", "iris-181");
+    await installMod("t-fresh", mockGameDir(), "1.21.1-Fabric", "modrinth", "YL57xq9U", "iris-181");
     const after = Math.floor(Date.now() / 1000);
     const iris = (await listMods("1.21.1-Fabric")).find((m) => m.source?.project_id === "YL57xq9U");
     if (iris === undefined || iris.source === null) throw new Error("Iris 没装上");
@@ -530,7 +531,7 @@ describe("更新日志", () => {
   });
 
   it("CurseForge 的文件给 HTML；补全进行中照样能读（只读，不占实例）", async () => {
-    await installMod("t-cf", MOCK_MOD_INSTANCE, "curseforge", "394468", "4957843");
+    await installMod("t-cf", mockGameDir(), MOCK_MOD_INSTANCE, "curseforge", "394468", "4957843");
     const repairing = acquireMockInstance(MOCK_MOD_INSTANCE, "repairing");
     try {
       expect(await modUpdateChangelog(MOCK_MOD_INSTANCE, "394468-0.5.3.jar", "4957843")).toEqual({
@@ -661,7 +662,7 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
     });
     expect(plan.skipped).toEqual(["可选前置 Mod Menu 未自动安装，需要时手动添加"]);
 
-    expect((await installMod("t-delisted", MOCK_MOD_INSTANCE, "modrinth", "AANobbMI", "sodium-060")).file_name).toBe("AANobbMI-0.6.0.jar");
+    expect((await installMod("t-delisted", mockGameDir(), MOCK_MOD_INSTANCE, "modrinth", "AANobbMI", "sodium-060")).file_name).toBe("AANobbMI-0.6.0.jar");
     // 只落下主项，下架的 Fabric API 原样留着、卷宗记录不变。
     const mods = await listMods(MOCK_MOD_INSTANCE);
     expect(mods.map((m) => [m.file_name, m.source?.version_id])).toEqual([

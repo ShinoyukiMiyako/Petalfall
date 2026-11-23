@@ -17,10 +17,10 @@ use petalfall_base::error_with_causes;
 use petalfall_instance::{
     BrokenReason, BrokenVersion, DiscoveredVersion, Disposer, IncompleteMarker, InstanceContent,
     MarkerStore, PETALFALL_META_DIR, PinsViolation, VersionProbe, VersionScan, VersionSettings,
-    VersionSettingsStore, WorldEntry, check_instance_name, count_mod_files, count_worlds,
-    dir_footprint, discover_versions, has_existing_mods_or_saves, is_backup_file_name,
-    is_safe_instance_id, list_version_dirs, list_worlds, probe_version, read_instance_content,
-    resolve_isolation,
+    VersionSettingsStore, WorldEntry, check_instance_name, count_mod_files, count_resource_packs,
+    count_worlds, dir_footprint, discover_versions, has_existing_mods_or_saves,
+    is_backup_file_name, is_safe_instance_id, list_version_dirs, list_worlds, probe_version,
+    read_instance_content, resolve_isolation,
 };
 use petalfall_launch::{QuickPlaySupport, quick_play_support};
 use petalfall_version::{LoaderInfo, VersionJson, identify_mc_version};
@@ -30,6 +30,7 @@ use tokio::task::JoinSet;
 
 use crate::InstanceError;
 use crate::crashdiag::last_crash_at;
+use crate::data_format::{GameDirCheck, GuardMode, is_missing};
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
 use crate::folders::same_path;
@@ -114,6 +115,9 @@ pub struct ReadyVersion {
     pub mod_count: Option<u32>,
     /// 工作目录 `saves/` 下的存档数，口径同 [`count_worlds`]；何时为 `None` 同 `mod_count`。
     pub world_count: Option<u32>,
+    /// 工作目录 `resourcepacks/` 下的资源包数，口径同 [`count_resource_packs`]（与
+    /// [`Petalfall::instance_content`] 列出的资源包一一对应）；何时为 `None` 同 `mod_count`。
+    pub resource_pack_count: Option<u32>,
     /// 隔离的生效值（实例覆盖、全局档位与磁盘上已有数据共同决定）；何时为 `None` 同 `mod_count`。
     pub isolated: Option<bool>,
 }
@@ -133,6 +137,18 @@ pub struct DeletionPreview {
     pub backups_dir: PathBuf,
     /// 这个实例名下的备份份数（各存档清单的条目数之和）。
     pub backup_count: u32,
+}
+
+/// 读一次侧栏固定的结果，见 [`Petalfall::read_sidebar_pins`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebarPins {
+    /// 侧栏要显示的固定，保持配置里的顺序，重复的只留第一项。
+    pub shown: Vec<String>,
+    /// 确认已不在游戏目录里的固定项，按配置里的顺序、不重复，经 [`Petalfall::prune_sidebar_pins`] 从配置里去掉。
+    pub gone: Vec<String>,
+    /// 读的那一刻的游戏目录与配置里的整份固定列表：去掉之前据此确认配置在读完之后没被别处改过。
+    game_dir: PathBuf,
+    pinned: Vec<String>,
 }
 
 impl Petalfall {
@@ -175,7 +191,14 @@ impl Petalfall {
     ///
     /// Mod 数只数 `mods/` 下的文件，不解析 jar；存档数只数 `saves/` 下的文件夹，不读 level.dat；
     /// 版本 JSON 解析走进程内缓存，文件没变就不重读。玩家没建过的依赖版本目录不列出。
+    ///
+    /// 扫描之前以「使用」方式核对游戏目录的数据格式记号（[`Petalfall::guard_game_dir`]）：号比这一版新、
+    /// 记号读不懂、时限内看不出结论都直接报错，一个实例文件也不读。游戏目录不存在时交回空列表。
     pub async fn list_instances(&self) -> Result<Vec<InstanceSummary>> {
+        // 关卡已在时限内判定目录不存在：不再去看第二遍，也不扫描关卡之后才冒出来、没核对过记号的目录。
+        if self.guard_game_dir(GuardMode::Use).await? == GameDirCheck::Absent {
+            return Ok(Vec::new());
+        }
         let mut scan = discover_versions(self.game_dir()).await?;
         // 先算再隐藏：这两项要沿继承链走，隐藏的版本可能正是链上的一环。
         let javas = java_majors(&scan);
@@ -229,7 +252,19 @@ impl Petalfall {
 
     /// 整份写入实例设置；任一字段不合法报 [`InstanceError::InvalidSettings`]，不改动文件。保存后删掉
     /// 卡面图片目录里不再被引用的图片（玩家清除图片、换回方块时旧文件随之删掉）。
+    ///
+    /// `cover_image_hue` 不经这里写，给了也不算数：方块图片没换时沿用盘上记的，换掉或清掉时一起清空，
+    /// 只有导入图片（[`Petalfall::import_cover_image`]）写它。
+    ///
+    /// 先以「使用」方式核对游戏目录的数据格式记号，被拒时原样报错、什么都不写：任务重试与列实例被拒后
+    /// 留下的旧列表都不经过列实例，不能指望调用方核对过。
     pub async fn set_instance_settings(&self, id: &str, settings: &VersionSettings) -> Result<()> {
+        self.guard_game_dir(GuardMode::Use).await?;
+        // 调用方多半是拿读到的设置改了几项再整份写回：清掉方块图片时带着的旧色调不该让校验拒掉这次保存
+        let settings = VersionSettings {
+            cover_image_hue: None,
+            ..settings.clone()
+        };
         settings
             .validate()
             .map_err(|violation| InstanceError::InvalidSettings {
@@ -237,7 +272,7 @@ impl Petalfall {
                 reason: violation.reason,
             })?;
         let dir = self.existing_instance_dir(id).await?;
-        crate::cover_image::save_settings_and_prune(&dir, settings).await
+        crate::cover_image::save_settings_and_prune(&dir, &settings).await
     }
 
     /// 版本 JSON 可用的实例；目录不在报未安装，JSON 缺失或损坏报 [`InstanceError::Broken`]。
@@ -296,12 +331,14 @@ impl Petalfall {
     /// 把实例目录交给 `disposer`（生产是系统回收站）。返回目录原先是否存在：不存在时什么都不做，
     /// 重复删除是幂等的。有别的实例依赖它时报 [`InstanceError::HasDependents`]。
     ///
-    /// 只处理文件；配置里的引用由调用方随后经 [`Petalfall::forget_instance`] 清掉。
+    /// 只处理文件；配置里的引用由调用方随后经 [`Petalfall::forget_instance`] 清掉。先核对游戏目录的数据格式
+    /// 记号，规则同 [`Petalfall::set_instance_settings`]。
     pub async fn delete_instance_files(
         &self,
         id: &str,
         disposer: impl Disposer + 'static,
     ) -> Result<bool> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dir = self.instance_dir(id)?;
         match tokio::fs::metadata(&dir).await {
             Ok(meta) if meta.is_dir() => {}
@@ -333,8 +370,9 @@ impl Petalfall {
         pins_changed || was_selected || servers_changed
     }
 
-    /// 实例从 `from_game_dir` 移走后去掉配置对它的引用。`from` 是当前目录时同 [`Petalfall::forget_instance`]；
-    /// 否则只改 `parked_directories` 里 `from` 那条的固定与选中（固定服务器记的是当前目录的实例，不动），改完那条
+    /// 实例 `id` 已不在游戏目录 `from_game_dir` 里时，去掉配置在那个目录名下对它的引用：实例移到了别的游戏目录，
+    /// 或整合包导入没成、半成品已删掉，都是这种情况。`from_game_dir` 是当前目录时同 [`Petalfall::forget_instance`]；
+    /// 否则只改 `parked_directories` 里这个目录那条的固定与选中（固定服务器记的是当前目录的实例，不动），改完那条
     /// 固定与选中都空了就整条删掉，同切换目录时收起它们的规则。返回配置是否有变化，有变化时调用方落盘。
     pub fn forget_moved_instance(&mut self, id: &str, from_game_dir: &Path) -> bool {
         if same_path(from_game_dir, self.game_dir()) {
@@ -358,11 +396,75 @@ impl Petalfall {
         changed
     }
 
+    /// 实例在游戏目录 `in_game_dir` 里从 `old` 改名成了 `new`，把配置在那个目录名下对它的引用跟着改。改名跑在门面快照上，
+    /// 后端不拦改名途中切换当前目录：`in_game_dir` 仍是当前目录时同 [`Petalfall::rename_instance_refs`]；已切走时只改
+    /// `parked_directories` 里那个目录那条的固定与选中（固定服务器记的是当前目录的实例，不动），当前目录里同名的引用是
+    /// 那边另一个实例的。规则同 [`Petalfall::forget_moved_instance`]。返回配置是否有变化，有变化时调用方落盘。
+    pub fn rename_moved_instance_refs(&mut self, old: &str, new: &str, in_game_dir: &Path) -> bool {
+        if same_path(in_game_dir, self.game_dir()) {
+            return self.rename_instance_refs(old, new);
+        }
+        let mut changed = false;
+        self.config_mut().parked_directories.retain_mut(|parked| {
+            if !same_path(&parked.path, in_game_dir) {
+                return true;
+            }
+            let renamed = renamed_pins(&parked.sidebar_pins, old, new);
+            let mut touched = renamed != parked.sidebar_pins;
+            parked.sidebar_pins = renamed;
+            if parked.selected_version.as_deref() == Some(old) {
+                parked.selected_version = Some(new.to_owned());
+                touched = true;
+            }
+            changed |= touched;
+            // 去掉同名旧固定之后可能固定与选中都空了，同切换目录时收起它们的规则整条删掉。
+            !(touched && parked.sidebar_pins.is_empty() && parked.selected_version.is_none())
+        });
+        changed
+    }
+
+    /// 新建或导入的实例 `name` 已在游戏目录 `in_game_dir` 里建出来，去掉配置在那个目录名下与它同名（不分大小写，同命名规则
+    /// 查重）的侧栏固定。实例目录是这次建的，建的时候名字下什么都没有，这样的固定只可能是在落樱之外删掉的同名旧实例留下的，
+    /// 留着的话新实例一出现就是固定的；新实例要不要固定由前端按入队时的打算另行写入。当前选中与固定服务器记住的实例不动：
+    /// 新建入队时前端就把当前选中设成了新实例。
+    ///
+    /// `in_game_dir` 是当前目录时改当前的固定；已切走时只改 `parked_directories` 里那个目录那条，改完固定与选中都空了就整条删掉，
+    /// 规则同 [`Petalfall::forget_moved_instance`]。返回配置是否有变化，有变化时调用方落盘。
+    pub fn forget_namesake_pins(&mut self, name: &str, in_game_dir: &Path) -> bool {
+        if same_path(in_game_dir, self.game_dir()) {
+            let pins = &self.config().sidebar_pins;
+            let kept: Vec<String> = pins
+                .iter()
+                .filter(|pin| !is_namesake(pin, name))
+                .cloned()
+                .collect();
+            if kept.len() == pins.len() {
+                return false;
+            }
+            self.set_sidebar_pins(kept);
+            return true;
+        }
+        let mut changed = false;
+        self.config_mut().parked_directories.retain_mut(|parked| {
+            if !same_path(&parked.path, in_game_dir) {
+                return true;
+            }
+            let pins = parked.sidebar_pins.len();
+            parked.sidebar_pins.retain(|pin| !is_namesake(pin, name));
+            let touched = parked.sidebar_pins.len() != pins;
+            changed |= touched;
+            !(touched && parked.sidebar_pins.is_empty() && parked.selected_version.is_none())
+        });
+        changed
+    }
+
     /// 改名：实例目录、版本 JSON（文件名与其中的 `id`）、客户端 jar 与 natives 目录一起改。
     ///
     /// 新名字按命名规则校验（不分大小写重名，自己除外）；有实例依赖它时拒绝。中途失败时把已经改掉的
     /// 逐项改回去再报错。只处理文件；配置里的引用由调用方随后经 [`Petalfall::rename_instance_refs`] 同步。
+    /// 先核对游戏目录的数据格式记号，规则同 [`Petalfall::set_instance_settings`]。
     pub async fn rename_instance_files(&self, old: &str, new: &str) -> Result<()> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let old_dir = self.existing_instance_dir(old).await?;
         let names = self.instance_names().await?;
         check_instance_name(new, names.iter().map(String::as_str), Some(old)).map_err(
@@ -384,20 +486,11 @@ impl Petalfall {
         Ok(())
     }
 
-    /// 把配置里对 `old` 的引用改成 `new`（侧栏固定保持原位，当前选中与固定服务器记住的实例跟着走）。
-    /// 返回配置是否有变化。
+    /// 把配置里对 `old` 的引用改成 `new`（侧栏固定保持原位，当前选中与固定服务器记住的实例跟着走）。固定里与 `new` 同名的
+    /// 旧项一并去掉，当前选中不动，理由同 [`Petalfall::forget_namesake_pins`]。返回配置是否有变化。
     pub fn rename_instance_refs(&mut self, old: &str, new: &str) -> bool {
         let pins = &self.config().sidebar_pins;
-        let renamed: Vec<String> = pins
-            .iter()
-            .map(|pin| {
-                if pin == old {
-                    new.to_owned()
-                } else {
-                    pin.clone()
-                }
-            })
-            .collect();
+        let renamed = renamed_pins(pins, old, new);
         let pins_changed = renamed != *pins;
         if pins_changed {
             self.set_sidebar_pins(renamed);
@@ -410,24 +503,97 @@ impl Petalfall {
         pins_changed || was_selected || servers_changed
     }
 
-    /// 配置里固定的实例中当前仍在实例库里的那些，保持顺序。不列出的版本目录也不算：侧栏看不见它，它却占着名额，
-    /// 玩家就再也固定不满。
-    pub async fn existing_sidebar_pins(&self) -> Result<Vec<String>> {
-        let mut scan = discover_versions(self.game_dir()).await?;
-        hide_base_versions(self.game_dir(), &mut scan).await;
+    /// 读侧栏固定。要显示的是配置里固定的实例中当前仍在实例库里的那些，保持顺序；不列出的版本目录也不算：侧栏看不见它，
+    /// 它却占着名额，玩家就再也固定不满。
+    ///
+    /// 同时找出确认已不在游戏目录里的固定项：在落樱之外删掉的实例一直留在配置里，之后新建或导入同名的实例一出现就是固定的。
+    /// 确认要分清实例确实不在与目录这一刻读不到：先以「使用」方式核对游戏目录（同 [`Petalfall::list_instances`]），被拒、
+    /// 时限内没有结论都照常报错，扫描出错也照常报错；不在扫描结果里的固定项再看一眼它的实例目录，确实不存在
+    /// （见 [`is_missing`]）才算不在，够不着、没有权限照常报错。游戏目录本身不存在时一个都不算：多半是移动硬盘没插、
+    /// 网络盘没连上，接上之后实例还在。名字拼不进路径的不可能是实例，直接算不在。
+    pub async fn read_sidebar_pins(&self) -> Result<SidebarPins> {
+        let game_dir = self.game_dir().to_path_buf();
+        let pinned = self.config().sidebar_pins.clone();
+        if self.guard_game_dir(GuardMode::Use).await? == GameDirCheck::Absent {
+            return Ok(SidebarPins {
+                shown: Vec::new(),
+                gone: Vec::new(),
+                game_dir,
+                pinned,
+            });
+        }
+        let mut scan = discover_versions(&game_dir).await?;
+        let mut gone: Vec<String> = Vec::new();
+        {
+            // 取隐藏之前的扫描结果：被隐藏的依赖版本目录还在，不算不在。
+            let listed: HashSet<&str> = scan
+                .versions
+                .iter()
+                .map(|version| version.id.as_str())
+                .chain(scan.broken.iter().map(|broken| broken.id.as_str()))
+                .collect();
+            for pin in &pinned {
+                if listed.contains(pin.as_str()) || gone.contains(pin) {
+                    continue;
+                }
+                if self.pin_dir_missing(pin).await? {
+                    gone.push(pin.clone());
+                }
+            }
+        }
+        hide_base_versions(&game_dir, &mut scan).await;
         let visible: HashSet<&str> = scan
             .versions
             .iter()
             .map(|version| version.id.as_str())
             .chain(scan.broken.iter().map(|broken| broken.id.as_str()))
             .collect();
-        Ok(self
-            .config()
-            .sidebar_pins
+        // 改名占住同名旧固定的名字时，旧版本会把配置写成两项同名；前端照显示的整组写回，有重复就整组被拒，所以只显示第一项。
+        let mut seen = HashSet::new();
+        let shown = pinned
             .iter()
-            .filter(|pin| visible.contains(pin.as_str()))
+            .filter(|pin| visible.contains(pin.as_str()) && seen.insert(pin.as_str()))
             .cloned()
-            .collect())
+            .collect();
+        Ok(SidebarPins {
+            shown,
+            gone,
+            game_dir,
+            pinned,
+        })
+    }
+
+    /// 不在扫描结果里的固定项，它的实例目录是不是确实不存在。看的是这一项本身（`symlink_metadata`）：链接指向的位置
+    /// 这一刻够不着时，链接还在，不能算不在。
+    async fn pin_dir_missing(&self, pin: &str) -> Result<bool> {
+        if !is_safe_instance_id(pin) {
+            return Ok(true);
+        }
+        let dir = self.instance_dir(pin)?;
+        let looked = tokio::fs::symlink_metadata(&dir).await.map(|_| ());
+        missing_by_lookup(dir, looked)
+    }
+
+    /// 把 [`Petalfall::read_sidebar_pins`] 确认已不在的固定项从配置里去掉，其余保持原顺序。返回配置是否有变化，有变化时
+    /// 调用方落盘。
+    ///
+    /// 读完之后切换过游戏目录、或固定列表被别处改过（固定、改名、删除）时什么都不做：确认只对读的那一刻的列表成立，
+    /// 套到改过的列表上可能去掉刚固定的同名新实例。没去掉的下次读时再清。
+    pub fn prune_sidebar_pins(&mut self, read: &SidebarPins) -> bool {
+        if read.gone.is_empty()
+            || !same_path(&read.game_dir, self.game_dir())
+            || self.config().sidebar_pins != read.pinned
+        {
+            return false;
+        }
+        let kept = read
+            .pinned
+            .iter()
+            .filter(|pin| !read.gone.contains(pin))
+            .cloned()
+            .collect();
+        self.set_sidebar_pins(kept);
+        true
     }
 
     /// 校验一份侧栏固定列表：不超过 [`MAX_SIDEBAR_PINS`] 个、不重复、每个都是现有实例。
@@ -473,6 +639,40 @@ impl Petalfall {
 
 fn not_installed(id: &str) -> CoreError {
     CoreError::VersionNotInstalled { id: id.to_owned() }
+}
+
+/// 两个实例名算不算同名：不分大小写，同命名规则查重（[`check_instance_name`]）。
+fn is_namesake(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
+/// 实例从 `old` 改名成 `new` 之后的固定列表：`old` 原位换成 `new`，重复的只留第一项；与 `new` 同名的别的固定去掉。改名校验过
+/// 新名字不与别的实例同名，这样的固定只可能是在落樱之外删掉的同名旧实例留下的，原样换的话列表里有两项 `new`，之后整组写入
+/// 固定都按重复被拒。
+fn renamed_pins(pins: &[String], old: &str, new: &str) -> Vec<String> {
+    let mut placed = false;
+    pins.iter()
+        .filter_map(|pin| {
+            if pin == old && !placed {
+                placed = true;
+                Some(new.to_owned())
+            } else if pin == old || is_namesake(pin, new) {
+                None
+            } else {
+                Some(pin.clone())
+            }
+        })
+        .collect()
+}
+
+/// 看固定项实例目录的结果怎么算：确实不存在才算不在；有这一项就不算（不是文件夹、扫描之后才建出来的都一样）；
+/// 其余错误照常报错，网络盘断开时 Windows 报的找不到网络路径也在其中。
+fn missing_by_lookup(dir: PathBuf, looked: std::io::Result<()>) -> Result<bool> {
+    match looked {
+        Ok(()) => Ok(false),
+        Err(err) if is_missing(&err) => Ok(true),
+        Err(source) => Err(petalfall_base::Error::Io { path: dir, source }.into()),
+    }
 }
 
 /// 损坏原因的人类可读说明（列表、错误信息共用）。
@@ -586,9 +786,10 @@ async fn summarize(
                 java_major,
                 quick_play,
                 bases,
-                mod_count: workdir.map(|(mods, _, _)| mods),
-                world_count: workdir.map(|(_, worlds, _)| worlds),
-                isolated: workdir.map(|(_, _, isolated)| isolated),
+                mod_count: workdir.map(|facts| facts.mods),
+                world_count: workdir.map(|facts| facts.worlds),
+                resource_pack_count: workdir.map(|facts| facts.resource_packs),
+                isolated: workdir.map(|facts| facts.isolated),
             })
         }
     };
@@ -605,14 +806,23 @@ async fn summarize(
     }
 }
 
-/// 工作目录里列表要的 Mod 数、存档数与隔离生效值。
+/// 工作目录里列表要的 Mod 数、存档数、资源包数与隔离生效值。三个数同是 `u32`，按名字取，免得排错位置。
+#[derive(Clone, Copy)]
+struct WorkdirFacts {
+    mods: u32,
+    worlds: u32,
+    resource_packs: u32,
+    isolated: bool,
+}
+
+/// 任一项读不出就整组不给：列表把原因记进 `dir_error`，几个数一起为 `None`。
 async fn workdir_facts(
     game_dir: &Path,
     id: &str,
     policy: petalfall_instance::IsolationPolicy,
     settings: &VersionSettings,
     version: &DiscoveredVersion,
-) -> Result<(u32, u32, bool)> {
+) -> Result<WorkdirFacts> {
     let resolved = resolve_isolation(
         game_dir,
         id,
@@ -624,7 +834,13 @@ async fn workdir_facts(
     .await?;
     let mods = count_mod_files(&resolved.working_dir.join("mods")).await?;
     let worlds = count_worlds(&resolved.working_dir.join("saves")).await?;
-    Ok((mods, worlds, resolved.isolated))
+    let resource_packs = count_resource_packs(&resolved.working_dir.join("resourcepacks")).await?;
+    Ok(WorkdirFacts {
+        mods,
+        worlds,
+        resource_packs,
+        isolated: resolved.isolated,
+    })
 }
 
 /// 实例备份目录下各存档里的备份文件数，按文件名认，不读清单。
@@ -770,10 +986,12 @@ impl Petalfall {
     /// `id` 继承链上除它自己以外的版本 id，由近及远，最后一个是客户端 jar 与 natives 所在的链根。
     /// 没有 `inheritsFrom` 时为空。
     ///
-    /// 只读链上各环的版本 JSON，不扫整个 `versions/`：启动与补全在开局就要它，用来在任务期间占住
-    /// 这些基底版本。某一环的 JSON 不在或解析不了时停在那一环（它的 id 已经收进结果）：链断在哪、为什么
-    /// 由启动与补全自己按失败码报出，这里提前报错只会把具体的失败原因换成笼统的错误。读文件本身出错
-    /// （权限、磁盘）照实报错。`inheritsFrom` 来自盘上的文件，指向不能安全拼进路径的 id 时不再往下读。
+    /// 只读链上各环的版本 JSON，不扫整个 `versions/`：启动、接回游戏、补全与移动在开局就要它，用来在任务
+    /// 期间占住这些基底版本。某一环的 JSON 不在或解析不了时停在那一环（它的 id 已经收进结果）：链断在哪、
+    /// 为什么由启动与补全自己按失败码报出；移动的预检要合并出完整的版本 JSON，在 `move_deps::read_chain` 里
+    /// 自己沿链再读一遍、另行报错；接回的游戏已经在跑，断处以外的基底不占也就不报。这里提前报错只会把具体的
+    /// 失败原因换成笼统的错误。读文件本身出错（权限、磁盘）照实报错。`inheritsFrom` 来自盘上的文件，
+    /// 指向不能安全拼进路径的 id 时不再往下读。
     pub async fn inheritance_chain(&self, id: &str) -> Result<Vec<String>> {
         if !is_safe_instance_id(id) {
             return Err(InstanceError::InvalidId { id: id.to_owned() }.into());
@@ -1160,6 +1378,17 @@ pub(crate) mod tests {
     use serde_json::json;
     use std::sync::Mutex;
 
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use petalfall_release::data_format::{StampFile, StampRead, parse_stamp};
+    use tokio::time::Instant;
+
+    use crate::data_format::testing::{GuardFixture, LookFn, with_fixture};
+    use crate::data_format::{DATA_FORMAT, DirLook, STAMP_FILE};
+    use crate::error::GameDirProblem;
+    use crate::folders::DIR_PROBE_TIMEOUT;
+
     pub(crate) fn petalfall_at(root: &Path) -> Petalfall {
         Petalfall::for_test(
             PetalfallConfig::default(),
@@ -1220,6 +1449,8 @@ pub(crate) mod tests {
         }
         // 原版不隔离：公共目录里的存档算在原版头上，不算进隔离的模组实例。
         std::fs::create_dir_all(game.join("saves").join("公共存档")).unwrap();
+        std::fs::create_dir_all(game.join("resourcepacks").join("公共材质")).unwrap();
+        std::fs::write(game.join("resourcepacks").join("Fresh.zip"), b"PK").unwrap();
         VersionSettingsStore::for_version_dir(&modded)
             .save(&VersionSettings {
                 description: Some("周末一起玩".into()),
@@ -1258,6 +1489,7 @@ pub(crate) mod tests {
         // 原版正式版按默认档位不隔离，数的是公共 mods 目录（不存在为 0）。
         assert_eq!(vanilla.mod_count, Some(0));
         assert_eq!(vanilla.world_count, Some(1));
+        assert_eq!(vanilla.resource_pack_count, Some(2));
         assert_eq!(vanilla.isolated, Some(false));
         assert!(list[0].incomplete.is_none());
         assert_eq!(list[0].modpack, Readable::Read(None));
@@ -1284,6 +1516,7 @@ pub(crate) mod tests {
         );
         assert_eq!(fabric.mod_count, Some(2), "只数 .jar 与 .jar.disabled");
         assert_eq!(fabric.world_count, Some(2));
+        assert_eq!(fabric.resource_pack_count, Some(0), "公共目录的资源包不算");
         assert_eq!(fabric.isolated, Some(true), "装了加载器的实例默认隔离");
         let Readable::Read(settings) = &list[2].settings else {
             panic!("设置应可读");
@@ -1307,13 +1540,15 @@ pub(crate) mod tests {
         };
         assert_eq!(ready.mod_count, None, "定不了工作目录就不数");
         assert_eq!(ready.world_count, None);
+        assert_eq!(ready.resource_pack_count, None);
         assert_eq!(ready.isolated, None);
     }
 
-    /// 工作目录里的 `mods`、`saves` 打不开（这里是同名普通文件）：只有这个实例数不出来，别的实例照常。
+    /// 工作目录里的 `mods`、`saves`、`resourcepacks` 打不开（这里是同名普通文件）：只有这个实例数不出来，
+    /// 别的实例照常。
     #[tokio::test]
     async fn unreadable_working_dir_is_reported_per_instance_instead_of_failing_the_list() {
-        for blocked in ["mods", "saves"] {
+        for blocked in ["mods", "saves", "resourcepacks"] {
             let tmp = tempfile::tempdir().unwrap();
             let petalfall = petalfall_at(tmp.path());
             let game = petalfall.game_dir().to_path_buf();
@@ -1330,6 +1565,7 @@ pub(crate) mod tests {
             };
             assert_eq!(ready.mod_count, None, "{blocked}");
             assert_eq!(ready.world_count, None, "{blocked}");
+            assert_eq!(ready.resource_pack_count, None, "{blocked}");
             assert_eq!(ready.isolated, None, "{blocked}");
             let reason = list[1].dir_error.as_deref().unwrap();
             assert!(reason.contains(blocked), "{reason}");
@@ -1339,6 +1575,54 @@ pub(crate) mod tests {
             assert_eq!(healthy.mod_count, Some(0), "{blocked}");
             assert_eq!(list[0].dir_error, None, "{blocked}");
         }
+    }
+
+    /// 列表里的资源包数要与内容页读到的资源包一样多：概览卡按前者画读到之前的占位，按后者画读到的行，
+    /// 差一个就会在读到时跳一行。随机摆几类条目，两边都要等于按口径算出的数。
+    #[tokio::test]
+    async fn listed_resource_pack_count_matches_the_instance_content() {
+        let seed = fastrand::get_seed();
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        let modded = write_version(&game, "模组", &fabric_json("模组", "1.21.1"));
+        let packs = modded.join("resourcepacks");
+        std::fs::create_dir_all(&packs).unwrap();
+        let zips = fastrand::usize(0..6);
+        let upper_zips = fastrand::usize(0..3);
+        let folders = fastrand::usize(0..4);
+        let others = fastrand::usize(0..4);
+        for i in 0..zips {
+            std::fs::write(packs.join(format!("材质{i}.zip")), b"PK").unwrap();
+        }
+        for i in 0..upper_zips {
+            std::fs::write(packs.join(format!("PACK{i}.ZIP")), b"PK").unwrap();
+        }
+        for i in 0..folders {
+            std::fs::create_dir_all(packs.join(format!("文件夹{i}"))).unwrap();
+        }
+        for i in 0..others {
+            std::fs::write(packs.join(format!("说明{i}.txt")), b"x").unwrap();
+        }
+        // 模组实例隔离，公共目录的资源包不算在它头上。
+        std::fs::create_dir_all(game.join("resourcepacks").join("公共材质")).unwrap();
+        let expected = zips + upper_zips + folders;
+        let context =
+            format!("seed {seed}: {zips} zip, {upper_zips} ZIP, {folders} 文件夹, {others} 其它");
+
+        let list = petalfall.list_instances().await.unwrap();
+        let modded = list.iter().find(|i| i.id == "模组").unwrap();
+        let InstanceVersion::Ready(ready) = &modded.version else {
+            panic!("模组实例应可用：{:?}", modded.version);
+        };
+        assert_eq!(
+            ready.resource_pack_count,
+            Some(expected as u32),
+            "{context}"
+        );
+        let content = petalfall.instance_content("模组").await.unwrap();
+        assert_eq!(content.resource_packs.len(), expected, "{context}");
     }
 
     /// 列出目录之后实例目录就没了（别处正删着它）：这一项拿不到创建时刻，整张列表照常出来。
@@ -2720,6 +3004,67 @@ pub(crate) mod tests {
         assert!(!petalfall.forget_moved_instance("生存", Path::new("G:/没记过/.minecraft")));
     }
 
+    /// 改名途中切走了当前目录：只改改名所在的那个收起目录那条的固定与选中，当前目录里同名的引用、固定服务器与别的
+    /// 收起目录都不动；改名所在的仍是当前目录时同 rename_instance_refs，连固定服务器一起改。
+    #[test]
+    fn renaming_in_a_parked_directory_only_edits_that_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        petalfall.set_sidebar_pins(vec!["生存".to_owned()]);
+        petalfall.set_selected_version(Some("生存".to_owned()));
+        petalfall
+            .set_pinned_servers(vec![pinned("a.example", Some("生存"))])
+            .unwrap();
+        let hmcl = parked("E:/HMCL/.minecraft", &["生存"], Some("生存"));
+        petalfall.config_mut().parked_directories = vec![
+            parked("E:/PCL2/.minecraft", &["创造", "生存"], Some("生存")),
+            hmcl.clone(),
+        ];
+
+        assert!(petalfall.rename_moved_instance_refs(
+            "生存",
+            "生存二",
+            Path::new("e:\\pcl2\\.minecraft\\")
+        ));
+        assert_eq!(
+            petalfall.config().parked_directories,
+            vec![
+                parked("E:/PCL2/.minecraft", &["创造", "生存二"], Some("生存二")),
+                hmcl
+            ]
+        );
+        assert_eq!(petalfall.config().sidebar_pins, vec!["生存".to_owned()]);
+        assert_eq!(petalfall.config().selected_version.as_deref(), Some("生存"));
+        assert_eq!(
+            pinned_instances(&petalfall),
+            vec![("a.example".to_owned(), Some("生存".to_owned()))]
+        );
+        // 那条里已经没有旧名，也没有与新名字同名的固定：不报变化。再用「生存二」当新名字就是改名占住同名旧固定的名字，
+        // 那一项会被当成旧固定去掉。
+        assert!(!petalfall.rename_moved_instance_refs(
+            "生存",
+            "生存四",
+            Path::new("E:/PCL2/.minecraft")
+        ));
+        assert!(!petalfall.rename_moved_instance_refs(
+            "生存",
+            "生存二",
+            Path::new("G:/没记过/.minecraft")
+        ));
+
+        let current = petalfall.game_dir().to_path_buf();
+        assert!(petalfall.rename_moved_instance_refs("生存", "生存三", &current));
+        assert_eq!(petalfall.config().sidebar_pins, vec!["生存三".to_owned()]);
+        assert_eq!(
+            petalfall.config().selected_version.as_deref(),
+            Some("生存三")
+        );
+        assert_eq!(
+            pinned_instances(&petalfall),
+            vec![("a.example".to_owned(), Some("生存三".to_owned()))]
+        );
+    }
+
     #[tokio::test]
     async fn sidebar_pins_reject_overflow_duplicates_and_unknown_ids() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2754,13 +3099,13 @@ pub(crate) mod tests {
         );
 
         petalfall.set_sidebar_pins(vec!["i2".into(), "gone".into(), "i1".into()]);
-        assert_eq!(
-            petalfall.existing_sidebar_pins().await.unwrap(),
-            vec!["i2".to_owned(), "i1".to_owned()]
-        );
+        let read = petalfall.read_sidebar_pins().await.unwrap();
+        assert_eq!(read.shown, vec!["i2".to_owned(), "i1".to_owned()]);
+        assert_eq!(read.gone, vec!["gone".to_owned()]);
     }
 
-    /// 固定过的目录后来不列出了：侧栏看不见它，它也不该占名额。损坏的实例照常列在实例库里，固定着就还算。
+    /// 固定过的目录后来不列出了：侧栏看不见它，它也不该占名额，但目录还在，不从配置里清掉。损坏的实例照常列在
+    /// 实例库里，固定着就还算。
     #[tokio::test]
     async fn hidden_versions_take_no_sidebar_pin_slot() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2787,13 +3132,337 @@ pub(crate) mod tests {
         pins.extend(visible.iter().cloned());
         pins.push("坏的".to_owned());
         pins.push("光影叠加".to_owned());
-        petalfall.set_sidebar_pins(pins);
+        petalfall.set_sidebar_pins(pins.clone());
 
-        let existing = petalfall.existing_sidebar_pins().await.unwrap();
+        let read = petalfall.read_sidebar_pins().await.unwrap();
 
-        assert_eq!(existing, ["i1", "i2", "i3", "坏的", "光影叠加"]);
-        assert_eq!(existing.len(), MAX_SIDEBAR_PINS);
-        petalfall.validate_sidebar_pins(&existing).await.unwrap();
+        assert_eq!(read.shown, ["i1", "i2", "i3", "坏的", "光影叠加"]);
+        assert_eq!(read.shown.len(), MAX_SIDEBAR_PINS);
+        petalfall.validate_sidebar_pins(&read.shown).await.unwrap();
+        assert_eq!(read.gone, Vec::<String>::new());
+        assert!(!petalfall.prune_sidebar_pins(&read));
+        assert_eq!(petalfall.config().sidebar_pins, pins);
+    }
+
+    /// 在落樱之外删掉的实例：读固定时确认它不在了，从配置里去掉（重复的、拼不进路径的一并去掉），其余保持原顺序；
+    /// 之后新建同名的实例，它不再一出现就是固定的。
+    #[tokio::test]
+    async fn pins_of_an_instance_deleted_outside_are_pruned_so_a_namesake_starts_unpinned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        write_version(&game, "生存", &vanilla_json("1.21.1"));
+        let doomed = write_version(&game, "旧档", &vanilla_json("1.21.1"));
+        write_version(&game, "创造", &vanilla_json("1.21.1"));
+        petalfall.set_sidebar_pins(vec![
+            "生存".into(),
+            "旧档".into(),
+            "创造".into(),
+            "旧档".into(),
+            "../别处".into(),
+        ]);
+        std::fs::remove_dir_all(&doomed).unwrap();
+
+        let read = petalfall.read_sidebar_pins().await.unwrap();
+        assert_eq!(read.shown, ["生存", "创造"]);
+        assert_eq!(read.gone, ["旧档", "../别处"]);
+        assert!(petalfall.prune_sidebar_pins(&read));
+        assert_eq!(petalfall.config().sidebar_pins, ["生存", "创造"]);
+
+        write_version(&game, "旧档", &vanilla_json("1.21.1"));
+        let again = petalfall.read_sidebar_pins().await.unwrap();
+        assert_eq!(again.shown, ["生存", "创造"]);
+        assert_eq!(again.gone, Vec::<String>::new());
+        assert!(!petalfall.prune_sidebar_pins(&again));
+        assert_eq!(petalfall.config().sidebar_pins, ["生存", "创造"]);
+    }
+
+    /// 游戏目录还在、`versions` 整个没了：固定的实例确实都不在了。
+    #[tokio::test]
+    async fn pins_are_gone_when_the_game_dir_has_no_versions_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        std::fs::create_dir_all(petalfall.game_dir()).unwrap();
+        petalfall.set_sidebar_pins(vec!["生存".into(), "创造".into()]);
+
+        let read = petalfall.read_sidebar_pins().await.unwrap();
+        assert_eq!(read.shown, Vec::<String>::new());
+        assert_eq!(read.gone, ["生存", "创造"]);
+        assert!(petalfall.prune_sidebar_pins(&read));
+        assert_eq!(petalfall.config().sidebar_pins, Vec::<String>::new());
+    }
+
+    /// 游戏目录这一刻读不到（网络盘断开、数据格式记号比这一版新、读 versions 出错）都照常报错，游戏目录本身不在时
+    /// 一个都不算不在：配置里的固定原样留着，包括盘上确实没有的那个。
+    #[tokio::test]
+    async fn pins_are_kept_when_the_game_dir_cannot_be_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        write_version(&game, "生存", &vanilla_json("1.21.1"));
+        let pins = vec!["生存".to_owned(), "旧档".to_owned()];
+        petalfall.set_sidebar_pins(pins.clone());
+
+        let unreachable: LookFn = Arc::new(|_: &Path| {
+            Box::pin(async {
+                DirLook::Unreachable(std::io::Error::from(std::io::ErrorKind::NotFound))
+            })
+        });
+        let fixture = GuardFixture {
+            own: 1,
+            look: Some(unreachable),
+        };
+        match with_fixture(fixture, petalfall.read_sidebar_pins())
+            .await
+            .unwrap_err()
+        {
+            CoreError::InvalidGameDirectory { path, problem } => {
+                assert_eq!(path, game);
+                assert_eq!(problem, GameDirProblem::Unavailable);
+            }
+            other => panic!("应报暂时连不上，实际是 {other:?}"),
+        }
+
+        write_stamp(&game, NEWER_STAMP);
+        let err = with_fixture(own_format(2), petalfall.read_sidebar_pins())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::GameDirDataTooNew { found: 3, .. }),
+            "{err:?}"
+        );
+        std::fs::remove_file(stamp_file(&game)).unwrap();
+
+        std::fs::rename(game.join("versions"), tmp.path().join("versions-moved")).unwrap();
+        std::fs::write(game.join("versions"), b"not a folder").unwrap();
+        match petalfall.read_sidebar_pins().await.unwrap_err() {
+            CoreError::Instance(InstanceError::Io { path, .. }) => {
+                assert_eq!(path, game.join("versions"));
+            }
+            other => panic!("应在 versions 上报读写错误，实际是 {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&game).unwrap();
+        let read = petalfall.read_sidebar_pins().await.unwrap();
+        assert_eq!(read.shown, Vec::<String>::new());
+        assert_eq!(read.gone, Vec::<String>::new());
+        assert!(!petalfall.prune_sidebar_pins(&read));
+        assert_eq!(petalfall.config().sidebar_pins, pins);
+    }
+
+    /// 只有文件或路径不存在才算不在。Windows 上盘符无效、找不到网络路径、找不到网络名也被标准库归成 NotFound，
+    /// 指定的网络名不再可用是网络盘中途断开：都是这一刻够不着，照常报错。
+    #[test]
+    fn only_a_missing_instance_dir_counts_a_pin_as_gone() {
+        let dir = PathBuf::from("versions").join("生存");
+        let io_path = |err: CoreError| match err {
+            CoreError::Base(petalfall_base::Error::Io { path, .. }) => path,
+            other => panic!("应报读写错误，实际是 {other:?}"),
+        };
+        assert!(!missing_by_lookup(dir.clone(), Ok(())).unwrap());
+        #[cfg(windows)]
+        {
+            for code in [2, 3] {
+                let looked = Err(std::io::Error::from_raw_os_error(code));
+                assert!(missing_by_lookup(dir.clone(), looked).unwrap(), "{code}");
+            }
+            for code in [15, 53, 64, 67] {
+                let looked = Err(std::io::Error::from_raw_os_error(code));
+                let err = missing_by_lookup(dir.clone(), looked).unwrap_err();
+                assert_eq!(io_path(err), dir, "{code}");
+            }
+        }
+        #[cfg(not(windows))]
+        assert!(
+            missing_by_lookup(
+                dir.clone(),
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+            )
+            .unwrap()
+        );
+        let denied = Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert_eq!(
+            io_path(missing_by_lookup(dir.clone(), denied).unwrap_err()),
+            dir
+        );
+    }
+
+    /// 读完之后固定列表被改过、或换了游戏目录：确认只对读的那一刻的列表成立，这次什么都不去掉。
+    #[tokio::test]
+    async fn pruning_skips_pins_changed_after_the_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        let first = petalfall.game_dir().to_path_buf();
+        write_version(&first, "生存", &vanilla_json("1.21.1"));
+        let pins = vec!["生存".to_owned(), "旧档".to_owned()];
+        petalfall.set_sidebar_pins(pins.clone());
+        let read = petalfall.read_sidebar_pins().await.unwrap();
+        assert_eq!(read.gone, ["旧档"]);
+
+        // 读完之后侧栏整组写入过一次：写入时每项都核对过是现有实例，读时的确认对它已不成立。
+        let refreshed = vec!["旧档".to_owned(), "生存".to_owned()];
+        petalfall.set_sidebar_pins(refreshed.clone());
+        assert!(!petalfall.prune_sidebar_pins(&read));
+        assert_eq!(petalfall.config().sidebar_pins, refreshed);
+
+        petalfall.set_sidebar_pins(pins.clone());
+        let second = tmp.path().join("second").join(".minecraft");
+        std::fs::create_dir_all(&second).unwrap();
+        let probe = petalfall.probe_current_game_dir().await;
+        petalfall.switch_game_directory(&second, &probe);
+        petalfall.set_sidebar_pins(pins.clone());
+        assert!(!petalfall.prune_sidebar_pins(&read));
+        assert_eq!(petalfall.config().sidebar_pins, pins);
+        let parked: Vec<_> = petalfall
+            .config()
+            .parked_directories
+            .iter()
+            .map(|parked| (parked.path.clone(), parked.sidebar_pins.clone()))
+            .collect();
+        assert_eq!(parked, vec![(first, pins)]);
+    }
+
+    /// 新建、导入建出实例之后：配置里与它同名（不分大小写）的固定去掉，其余保持原顺序；当前选中与固定服务器记住的实例不动，
+    /// 收起的别的目录里同名的固定也不动。
+    #[test]
+    fn a_new_instance_drops_the_namesake_pins_but_keeps_the_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        petalfall.set_sidebar_pins(vec![
+            "生存".to_owned(),
+            "Sky".to_owned(),
+            "创造".to_owned(),
+            "SKY".to_owned(),
+        ]);
+        petalfall.set_selected_version(Some("Sky".to_owned()));
+        petalfall
+            .set_pinned_servers(vec![pinned("a.example", Some("Sky"))])
+            .unwrap();
+        let elsewhere = parked("E:/PCL2/.minecraft", &["Sky"], Some("Sky"));
+        petalfall.config_mut().parked_directories = vec![elsewhere.clone()];
+        let current = PathBuf::from(
+            petalfall
+                .game_dir()
+                .display()
+                .to_string()
+                .to_uppercase()
+                .replace('\\', "/"),
+        );
+
+        assert!(petalfall.forget_namesake_pins("sky", &current));
+        assert_eq!(petalfall.config().sidebar_pins, ["生存", "创造"]);
+        assert_eq!(petalfall.config().selected_version.as_deref(), Some("Sky"));
+        assert_eq!(
+            pinned_instances(&petalfall),
+            vec![("a.example".to_owned(), Some("Sky".to_owned()))]
+        );
+        assert_eq!(petalfall.config().parked_directories, vec![elsewhere]);
+        assert!(!petalfall.forget_namesake_pins("sky", &current));
+        assert!(!petalfall.forget_namesake_pins("空岛", &current));
+        assert_eq!(petalfall.config().sidebar_pins, ["生存", "创造"]);
+    }
+
+    /// 新建、导入途中切走了当前目录：只改建出实例的那个收起目录那条，选中照旧；改完固定与选中都空了的整条删掉。
+    #[test]
+    fn a_new_instance_in_a_parked_directory_only_edits_that_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        petalfall.set_sidebar_pins(vec!["生存".to_owned()]);
+        let hmcl = parked("E:/HMCL/.minecraft", &["生存"], None);
+        petalfall.config_mut().parked_directories = vec![
+            parked("E:/PCL2/.minecraft", &["创造", "生存"], Some("生存")),
+            hmcl.clone(),
+            parked("F:/mc", &["生存"], None),
+        ];
+
+        assert!(petalfall.forget_namesake_pins("生存", Path::new("e:\\pcl2\\.minecraft\\")));
+        assert_eq!(
+            petalfall.config().parked_directories,
+            vec![
+                parked("E:/PCL2/.minecraft", &["创造"], Some("生存")),
+                hmcl.clone(),
+                parked("F:/mc", &["生存"], None),
+            ]
+        );
+        assert_eq!(petalfall.config().sidebar_pins, ["生存"]);
+
+        assert!(petalfall.forget_namesake_pins("生存", Path::new("F:/mc")));
+        assert_eq!(
+            petalfall.config().parked_directories,
+            vec![parked("E:/PCL2/.minecraft", &["创造"], Some("生存")), hmcl]
+        );
+        assert!(!petalfall.forget_namesake_pins("生存", Path::new("G:/没记过/.minecraft")));
+    }
+
+    /// 旧名还留在固定里时把另一个实例改名成它：去掉旧的那一项，改名的实例留在自己原来的位置，列表里只有一项新名字，
+    /// 整组写回照常通过；当前选中不动。只改大小写、配置里本来就重复的也只留一项。
+    #[tokio::test]
+    async fn renaming_onto_a_name_left_in_the_pins_keeps_a_single_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        write_version(&game, "创造", &vanilla_json("1.21.1"));
+        write_version(&game, "空岛", &vanilla_json("1.21.1"));
+        petalfall.set_sidebar_pins(vec!["生存".into(), "创造".into(), "空岛".into()]);
+        petalfall.set_selected_version(Some("生存".to_owned()));
+
+        petalfall
+            .rename_instance_files("空岛", "生存")
+            .await
+            .unwrap();
+        assert!(petalfall.rename_instance_refs("空岛", "生存"));
+        assert_eq!(petalfall.config().sidebar_pins, ["创造", "生存"]);
+        assert_eq!(petalfall.config().selected_version.as_deref(), Some("生存"));
+        let pins = petalfall.config().sidebar_pins.clone();
+        petalfall.validate_sidebar_pins(&pins).await.unwrap();
+        assert_eq!(petalfall.read_sidebar_pins().await.unwrap().shown, pins);
+
+        petalfall.set_sidebar_pins(vec!["sky".into(), "a".into(), "x".into()]);
+        assert!(petalfall.rename_instance_refs("x", "Sky"));
+        assert_eq!(petalfall.config().sidebar_pins, ["a", "Sky"]);
+        assert!(petalfall.rename_instance_refs("Sky", "sky"));
+        assert_eq!(petalfall.config().sidebar_pins, ["a", "sky"]);
+        petalfall.set_sidebar_pins(vec!["y".into(), "a".into(), "y".into()]);
+        assert!(petalfall.rename_instance_refs("y", "z"));
+        assert_eq!(petalfall.config().sidebar_pins, ["z", "a"]);
+    }
+
+    /// 改名途中切走了当前目录：收起的那条同样只留一项新名字；去掉之后固定与选中都空了的整条删掉。
+    #[test]
+    fn renaming_onto_a_pinned_name_in_a_parked_directory_keeps_a_single_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        petalfall.config_mut().parked_directories = vec![
+            parked("E:/PCL2/.minecraft", &["生存", "创造", "空岛"], None),
+            parked("F:/mc", &["生存"], None),
+        ];
+
+        assert!(petalfall.rename_moved_instance_refs(
+            "空岛",
+            "生存",
+            Path::new("E:/PCL2/.minecraft")
+        ));
+        assert!(petalfall.rename_moved_instance_refs("空岛", "生存", Path::new("F:/mc")));
+        assert_eq!(
+            petalfall.config().parked_directories,
+            vec![parked("E:/PCL2/.minecraft", &["创造", "生存"], None)]
+        );
+    }
+
+    /// 配置里已经有两项同名（旧版本改名留下的）：只显示第一项，前端照显示的整组写回时不被按重复拒掉。
+    #[tokio::test]
+    async fn duplicated_pins_are_shown_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        write_version(&game, "生存", &vanilla_json("1.21.1"));
+        write_version(&game, "创造", &vanilla_json("1.21.1"));
+        petalfall.set_sidebar_pins(vec!["生存".into(), "创造".into(), "生存".into()]);
+
+        let read = petalfall.read_sidebar_pins().await.unwrap();
+        assert_eq!(read.shown, ["生存", "创造"]);
+        assert_eq!(read.gone, Vec::<String>::new());
+        petalfall.validate_sidebar_pins(&read.shown).await.unwrap();
     }
 
     #[tokio::test]
@@ -2813,6 +3482,410 @@ pub(crate) mod tests {
                 ..
             })
         ));
+    }
+
+    // ---- 游戏目录的数据格式记号 ----
+
+    /// 被更新的预览版抬到 3 的记号。测试经 [`with_fixture`] 把这一版的号当作 2，它就比这一版新。
+    pub(crate) const NEWER_STAMP: &str = r#"{"data_format":3,"written_by":"1.1.0-dev.57"}"#;
+    /// [`NEWER_STAMP`] 里 `written_by` 的原文。
+    pub(crate) const NEWER_WRITER: &str = "1.1.0-dev.57";
+
+    pub(crate) fn own_format(own: u32) -> GuardFixture {
+        GuardFixture { own, look: None }
+    }
+
+    pub(crate) fn stamp_file(game_dir: &Path) -> PathBuf {
+        game_dir.join(PETALFALL_META_DIR).join(STAMP_FILE)
+    }
+
+    pub(crate) fn write_stamp(game_dir: &Path, contents: &str) {
+        let path = stamp_file(game_dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    /// 目录下每个条目的相对路径、修改时间与文件字节（文件夹不记字节）。前后各拍一次，比对出有没有文件
+    /// 被改过、多出或少了。
+    pub(crate) fn disk_state(root: &Path) -> BTreeMap<PathBuf, (SystemTime, Option<Vec<u8>>)> {
+        walk(root)
+            .into_iter()
+            .map(|path| {
+                let meta = std::fs::metadata(&path).unwrap();
+                let bytes = meta.is_file().then(|| std::fs::read(&path).unwrap());
+                let relative = path.strip_prefix(root).unwrap().to_owned();
+                (relative, (meta.modified().unwrap(), bytes))
+            })
+            .collect()
+    }
+
+    fn unreadable_reason(contents: &str) -> String {
+        match parse_stamp(StampFile::Contents(contents.as_bytes())) {
+            StampRead::Unreadable { reason } => reason,
+            other => panic!("夹具应当读不懂，实际是 {other:?}"),
+        }
+    }
+
+    /// 有两个实例的游戏目录：原版，以及装了 Mod、有存档与设置、继承原版的模组实例。
+    async fn game_dir_with_instances(game_dir: &Path) {
+        write_version(game_dir, "1.21.1", &vanilla_json("1.21.1"));
+        let modded = write_version(game_dir, "生存", &fabric_json("生存", "1.21.1"));
+        std::fs::create_dir_all(modded.join("mods")).unwrap();
+        std::fs::write(modded.join("mods").join("sodium.jar"), b"jar").unwrap();
+        std::fs::create_dir_all(modded.join("saves").join("世界")).unwrap();
+        VersionSettingsStore::for_version_dir(&modded)
+            .save(&VersionSettings {
+                description: Some("周末一起玩".into()),
+                ..VersionSettings::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    /// `versions` 是个文件的游戏目录：扫描读它必然出错，交回的错误能看出有没有走到扫描。
+    fn game_dir_that_fails_the_scan(game_dir: &Path) {
+        std::fs::create_dir_all(game_dir).unwrap();
+        std::fs::write(game_dir.join("versions"), b"not a folder").unwrap();
+    }
+
+    fn ids(list: &[InstanceSummary]) -> Vec<&str> {
+        list.iter().map(|summary| summary.id.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn list_instances_refuses_a_newer_game_dir_and_touches_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        game_dir_with_instances(&game).await;
+        write_stamp(&game, NEWER_STAMP);
+        let before = disk_state(tmp.path());
+
+        match with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap_err()
+        {
+            CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            } => {
+                assert_eq!(path, game);
+                assert_eq!((found, supported), (3, 2));
+                assert_eq!(written_by.as_deref(), Some(NEWER_WRITER));
+            }
+            other => panic!("应报游戏目录太新，实际是 {other:?}"),
+        }
+        assert_eq!(disk_state(tmp.path()), before);
+    }
+
+    /// 不换本版号：读不懂与号是多少无关，生产的这条路同样在扫描之前拦下。
+    #[tokio::test]
+    async fn list_instances_refuses_an_unreadable_stamp_and_touches_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        game_dir_with_instances(&game).await;
+        let contents = r#"{"data_format":"3"}"#;
+        write_stamp(&game, contents);
+        let before = disk_state(tmp.path());
+
+        match petalfall.list_instances().await.unwrap_err() {
+            CoreError::DataFormatUnreadable { path, reason } => {
+                assert_eq!(path, game);
+                assert_eq!(reason, unreadable_reason(contents));
+            }
+            other => panic!("应报记号读不懂，实际是 {other:?}"),
+        }
+        assert_eq!(disk_state(tmp.path()), before);
+    }
+
+    #[tokio::test]
+    async fn a_refused_game_dir_is_not_scanned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        game_dir_that_fails_the_scan(&game);
+
+        // 对照：记号等于这一版时放行，扫描照常进行，在 versions 上出错。
+        write_stamp(&game, r#"{"data_format":2}"#);
+        match with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap_err()
+        {
+            CoreError::Instance(InstanceError::Io { path, .. }) => {
+                assert_eq!(path, game.join("versions"));
+            }
+            other => panic!("放行后应扫描并在 versions 上出错，实际是 {other:?}"),
+        }
+
+        write_stamp(&game, NEWER_STAMP);
+        let err = with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::GameDirDataTooNew { found: 3, .. }),
+            "{err:?}"
+        );
+
+        write_stamp(&game, "not json");
+        let err = with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::DataFormatUnreadable { reason, .. } if *reason == unreadable_reason("not json")),
+            "{err:?}"
+        );
+    }
+
+    /// 看目录、读记号超过探测时限：报暂时连不上，不扫描、不抬号；用户重试时及时读到「太新」就照常拦下。
+    #[tokio::test(start_paused = true)]
+    async fn a_stamp_read_past_the_probe_limit_is_unavailable_and_nothing_is_scanned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        game_dir_that_fails_the_scan(&game);
+        let before = disk_state(tmp.path());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let look: LookFn = {
+            let calls = calls.clone();
+            Arc::new(move |_: &Path| {
+                let call = calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if call == 0 {
+                        // 挂起的网络盘：迟迟读不完，读完了也只是号更低、该抬号的记号。
+                        tokio::time::sleep(DIR_PROBE_TIMEOUT * 3).await;
+                        DirLook::Stamp(parse_stamp(StampFile::Missing))
+                    } else {
+                        DirLook::Stamp(parse_stamp(StampFile::Contents(NEWER_STAMP.as_bytes())))
+                    }
+                })
+            })
+        };
+        let fixture = GuardFixture {
+            own: 2,
+            look: Some(look),
+        };
+
+        let started = Instant::now();
+        let err = with_fixture(fixture.clone(), petalfall.list_instances())
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        match err {
+            CoreError::InvalidGameDirectory { path, problem } => {
+                assert_eq!(path, game);
+                assert_eq!(problem, GameDirProblem::Unavailable);
+            }
+            other => panic!("应报暂时连不上，实际是 {other:?}"),
+        }
+        assert!(elapsed >= DIR_PROBE_TIMEOUT, "提前放弃了：{elapsed:?}");
+        assert!(elapsed < DIR_PROBE_TIMEOUT * 5 / 4, "等太久：{elapsed:?}");
+        assert_eq!(disk_state(tmp.path()), before, "超时后不该抬号");
+
+        match with_fixture(fixture, petalfall.list_instances())
+            .await
+            .unwrap_err()
+        {
+            CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            } => {
+                assert_eq!(path, game);
+                assert_eq!((found, supported), (3, 2));
+                assert_eq!(written_by.as_deref(), Some(NEWER_WRITER));
+            }
+            other => panic!("应报游戏目录太新，实际是 {other:?}"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(disk_state(tmp.path()), before);
+    }
+
+    #[tokio::test]
+    async fn a_missing_game_dir_lists_nothing_and_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+
+        // 本版号取 2：关卡要是在这里写记号，一定会留下文件。
+        let list = with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap();
+        assert_eq!(list, Vec::<InstanceSummary>::new());
+        assert!(!petalfall.game_dir().exists());
+        assert_eq!(disk_state(tmp.path()), BTreeMap::new());
+    }
+
+    /// 关卡不记「核对过」：两次列实例之间另一台电脑把号抬高了，第二次就拒绝。
+    #[tokio::test]
+    async fn a_stamp_raised_between_two_listings_is_refused_by_the_second() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        game_dir_with_instances(&game).await;
+
+        // 记号缺失算 1：「使用」方式把它抬到这一版的 2，照常列出。
+        let list = with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap();
+        assert_eq!(ids(&list), vec!["1.21.1", "生存"]);
+        assert_eq!(
+            std::fs::read_to_string(stamp_file(&game)).unwrap(),
+            r#"{"data_format":2}"#
+        );
+        // 记号等于这一版：不写，照常列出。
+        let before = disk_state(tmp.path());
+        let list = with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap();
+        assert_eq!(ids(&list), vec!["1.21.1", "生存"]);
+        assert_eq!(disk_state(tmp.path()), before);
+
+        write_stamp(&game, NEWER_STAMP);
+        match with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap_err()
+        {
+            CoreError::GameDirDataTooNew {
+                found, supported, ..
+            } => assert_eq!((found, supported), (3, 2)),
+            other => panic!("应报游戏目录太新，实际是 {other:?}"),
+        }
+    }
+
+    /// 号比这一版大一的记号，`written_by` 同 [`NEWER_STAMP`]。不换本版号，走生产的那条路。
+    fn next_format_stamp() -> String {
+        format!(
+            r#"{{"data_format":{},"written_by":"{NEWER_WRITER}"}}"#,
+            DATA_FORMAT + 1
+        )
+    }
+
+    /// 号等于这一版的记号：关卡放行，什么都不写。
+    pub(crate) fn current_format_stamp() -> String {
+        format!(r#"{{"data_format":{DATA_FORMAT}}}"#)
+    }
+
+    /// 号写成了字符串，哪一版都读不懂。
+    const UNREADABLE_STAMP: &str = r#"{"data_format":"3"}"#;
+
+    /// `err` 应是 `game` 被 [`next_format_stamp`] 拦下时的报错：带出记号里的号、这一版的号与写它的版本。
+    fn assert_too_new(err: CoreError, game: &Path) {
+        match err {
+            CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            } => {
+                assert_eq!(path, game);
+                assert_eq!((found, supported), (DATA_FORMAT + 1, DATA_FORMAT));
+                assert_eq!(written_by.as_deref(), Some(NEWER_WRITER));
+            }
+            other => panic!("应报游戏目录太新，实际是 {other:?}"),
+        }
+    }
+
+    /// `err` 应是 `game` 被 [`UNREADABLE_STAMP`] 拦下时的报错。
+    fn assert_unreadable(err: CoreError, game: &Path) {
+        match err {
+            CoreError::DataFormatUnreadable { path, reason } => {
+                assert_eq!(path, game);
+                assert_eq!(reason, unreadable_reason(UNREADABLE_STAMP));
+            }
+            other => panic!("应报记号读不懂，实际是 {other:?}"),
+        }
+    }
+
+    /// 断言某个游戏目录被关卡拦下时报的错，见 [`assert_too_new`]、[`assert_unreadable`]。
+    pub(crate) type AssertRefused = fn(CoreError, &Path);
+
+    /// 关卡该拦下的两种记号，与各自该报的错。
+    pub(crate) fn refusing_stamps() -> [(String, AssertRefused); 2] {
+        [
+            (next_format_stamp(), assert_too_new),
+            (UNREADABLE_STAMP.to_owned(), assert_unreadable),
+        ]
+    }
+
+    /// 会往游戏目录写的实例入口，都对 [`game_dir_with_instances`] 里的「生存」下手。
+    #[derive(Debug, Clone, Copy)]
+    enum InstanceWrite {
+        Settings,
+        Delete,
+        Rename,
+    }
+
+    impl InstanceWrite {
+        const ALL: [Self; 3] = [Self::Settings, Self::Delete, Self::Rename];
+
+        fn wanted_settings() -> VersionSettings {
+            VersionSettings {
+                memory_mb: Some(6144),
+                ..VersionSettings::default()
+            }
+        }
+
+        async fn run(self, petalfall: &Petalfall) -> Result<()> {
+            match self {
+                Self::Settings => {
+                    petalfall
+                        .set_instance_settings("生存", &Self::wanted_settings())
+                        .await
+                }
+                Self::Delete => petalfall
+                    .delete_instance_files("生存", RecordingDisposer::default())
+                    .await
+                    .map(|_existed| ()),
+                Self::Rename => petalfall.rename_instance_files("生存", "创造").await,
+            }
+        }
+
+        /// 放行时这次写入在盘上留下的结果。
+        async fn assert_landed(self, game: &Path) {
+            let versions = game.join("versions");
+            match self {
+                Self::Settings => assert_eq!(
+                    VersionSettingsStore::for_version_dir(&versions.join("生存"))
+                        .load()
+                        .await
+                        .unwrap(),
+                    Self::wanted_settings()
+                ),
+                Self::Delete => assert!(!versions.join("生存").exists()),
+                Self::Rename => {
+                    assert!(!versions.join("生存").exists());
+                    assert!(versions.join("创造").join("创造.json").is_file());
+                }
+            }
+        }
+    }
+
+    /// 任务重试与列实例被拒后留下的旧列表都不经过列实例：每个写入口自己在动盘之前拦下。
+    #[tokio::test]
+    async fn instance_writes_refuse_a_newer_or_unreadable_game_dir_and_touch_no_file() {
+        for write in InstanceWrite::ALL {
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall_at(tmp.path());
+            let game = petalfall.game_dir().to_path_buf();
+            game_dir_with_instances(&game).await;
+            for (stamp, assert_refused) in refusing_stamps() {
+                write_stamp(&game, &stamp);
+                let before = disk_state(tmp.path());
+                let Err(err) = write.run(&petalfall).await else {
+                    panic!("{write:?} 应被记号 {stamp} 拦下");
+                };
+                assert_refused(err, &game);
+                assert_eq!(disk_state(tmp.path()), before, "{write:?} 被拦下后动了盘");
+            }
+
+            // 对照：号等于这一版时放行，这次写入真的落盘，上面盘面没变不是因为它本来就不写。
+            write_stamp(&game, &current_format_stamp());
+            write.run(&petalfall).await.unwrap();
+            write.assert_landed(&game).await;
+        }
     }
 
     fn walk(dir: &Path) -> Vec<PathBuf> {

@@ -1,6 +1,8 @@
+/* 有几个选项就一行几等分：日樱、夜樱、跟随系统三张卡排一行 */
 .modes {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
   gap: var(--sk-space-12);
 }
 
@@ -109,6 +111,19 @@
 
 .mini[data-mode="night"][data-tint="moss"] {
   --mini-accent: var(--sk-preview-night-moss);
+}
+
+/* 跟随系统：日樱、夜樱两幅预览叠在同一格里，夜樱只露出对角线右下的一半 */
+.split {
+  display: grid;
+}
+
+.split > .mini {
+  grid-area: 1 / 1;
+}
+
+.split > .mini[data-mode="night"] {
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
 }
 
 .side {

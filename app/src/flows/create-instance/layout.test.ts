@@ -1,7 +1,13 @@
 // jsdom 不做布局，这里直接读样式表核对：开局选项的说明行里有后端原文（读不到默认设置、开局 Mod 查不到），
 // 其中的 Windows 路径没有空格可断，右栏又裁掉横向溢出，不放开折行后半截就看不见了。
 import { readFileSync } from "node:fs";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import buttonStyles from "../../ui/Button.module.css";
+import styles from "./create.module.css";
+import { STEP_ORDER, type StepId } from "./model";
+import { StepNav } from "./Rail";
 
 const css = readFileSync(new URL("./create.module.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
@@ -43,10 +49,17 @@ describe("版本列表", () => {
     expect(declarations("listArea")).toMatch(/overflow:\s*hidden/);
   });
 
-  it("给读屏的加载说明绝对定位、裁成一像素：不进步骤的弹性布局，不多出一道间距", () => {
-    const sr = declarations("srOnly");
-    expect(sr).toMatch(/position:\s*absolute/);
-    expect(sr).toMatch(/clip-path:\s*inset\(50%\)/);
+  it("加载慢的说明叠在骨架层里、贴住列表区的下沿：列表区不因它变矮，骨架层退场抽出布局时也不挪位置", () => {
+    const note = declarations("skeletonNote");
+    expect(note).toMatch(/position:\s*sticky/);
+    expect(note).toMatch(/bottom:\s*0/);
+    expect(note).toMatch(/opacity:\s*0/);
+    expect(note).toMatch(/background:\s*var\(--sk-surface\)/);
+    expect(block(".skeletonNote[data-shown]")).toMatch(/opacity:\s*1/);
+  });
+
+  it("给读屏的加载说明交给 Loadable 的 busyLabel：步骤样式表里不再自带一份视觉隐藏规则", () => {
+    expect(css).not.toMatch(/clip-path:\s*inset\(50%\)/);
   });
 
   it("筛选行不折行，计数在余下的宽度里靠右、放不下出省略号", () => {
@@ -55,6 +68,12 @@ describe("版本列表", () => {
     expect(count).toMatch(/flex:\s*1 1 0/);
     expect(count).toMatch(/text-overflow:\s*ellipsis/);
     expect(block(".filterCount[data-pending]")).toMatch(/opacity:\s*0/);
+  });
+});
+
+describe("步骤标题", () => {
+  it("换步后焦点兜底落到标题上不画聚焦框：标题只是程序落点，键盘换步后照样匹配 :focus-visible", () => {
+    expect(block(".stepTitle:focus-visible")).toMatch(/outline:\s*none/);
   });
 });
 
@@ -84,6 +103,93 @@ describe("选中勾", () => {
   });
 });
 
+describe("左栏", () => {
+  const tokens = readFileSync(new URL("../../styles/tokens.css", import.meta.url), "utf8");
+  const rail = readFileSync(new URL("./Rail.tsx", import.meta.url), "utf8");
+
+  /** 一个长度值换成像素：字面的 px，或令牌（只认值是 px 的令牌）。 */
+  function px(value: string): number {
+    const literal = /^(\d+(?:\.\d+)?)px$/.exec(value.trim());
+    if (literal !== null) return Number(literal[1]);
+    const token = /^var\((--[\w-]+)\)$/.exec(value.trim());
+    if (token === null) throw new Error(`认不出的长度：${value}`);
+    const declared = new RegExp(`${token[1]}:\\s*(\\d+(?:\\.\\d+)?)px;`).exec(tokens) ?? new RegExp(`${token[1]}:\\s*(\\d+(?:\\.\\d+)?)px;`).exec(css);
+    if (declared === null) throw new Error(`令牌 ${token[1]} 没有像素值`);
+    return Number(declared[1]);
+  }
+  function property(selector: string, name: string): string {
+    const found = new RegExp(`(?:^|[\\s;])${name}:\\s*([^;]+);`).exec(declarations(selector));
+    if (found === null) throw new Error(`.${selector} 里没有 ${name}`);
+    return found[1];
+  }
+
+  it("竖向放得下：上下内边距、预览卡（卡面加上下描边）、间距与六行步骤加起来不超过主体高度，不出滚动条", () => {
+    const body = px(property("layout", "--cr-body-height"));
+    const [top, , bottom] = property("rail", "padding").split(/\s+(?![^(]*\))/);
+    const previewHeight = /const PREVIEW_HEIGHT = (\d+);/.exec(rail);
+    if (previewHeight === null) throw new Error("Rail.tsx 里没有预览卡高度");
+    const border = px(property("preview", "border").split(/\s+/)[0]);
+    const row = px(property("steps", "--cr-step-min-height"));
+    // 行高取最小高度的前提：有值的行（标签加值行）也不超过它
+    const [rowPadY] = property("stepButton", "padding").split(/\s+(?![^(]*\))/);
+    expect(px(property("stepLabel", "line-height")) + px(property("stepValue", "line-height")) + 2 * px(rowPadY)).toBeLessThanOrEqual(row);
+    const rows = STEP_ORDER.length;
+    const total = px(top) + Number(previewHeight[1]) + 2 * border + px(property("rail", "gap")) + rows * row + (rows - 1) * px(property("steps", "gap")) + px(bottom);
+    expect(total).toBeLessThanOrEqual(body);
+  });
+});
+
+describe("弹窗高度", () => {
+  const sheet = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const tokens = sheet("../../styles/tokens.css");
+  const modal = sheet("../../ui/Modal.module.css");
+  const button = sheet("../../ui/Button.module.css");
+  const flow = readFileSync(new URL("./index.tsx", import.meta.url), "utf8");
+  const conf = JSON.parse(readFileSync(new URL("../../../src-tauri/tauri.conf.json", import.meta.url), "utf8")) as {
+    app: { windows: { label: string; minHeight: number }[] };
+  };
+
+  /** 字面的 px 或像素令牌换成数值。 */
+  function pixels(value: string): number {
+    const literal = /^(\d+(?:\.\d+)?)px$/.exec(value.trim());
+    if (literal !== null) return Number(literal[1]);
+    const token = /^var\((--[\w-]+)\)$/.exec(value.trim());
+    if (token === null) throw new Error(`认不出的长度：${value}`);
+    const declared = new RegExp(`${token[1]}:\\s*(\\d+(?:\\.\\d+)?)px;`).exec(tokens);
+    if (declared === null) throw new Error(`令牌 ${token[1]} 没有像素值`);
+    return Number(declared[1]);
+  }
+  /** 样式表里选择器恰好是 .selector 的那条规则中 name 的值。 */
+  function value(source: string, selector: string, name: string): string {
+    const rule = new RegExp(`(?:^|\\n)\\.${selector}\\s*\\{([^}]*)\\}`).exec(source);
+    if (rule === null) throw new Error(`样式表里没有 .${selector}`);
+    const found = new RegExp(`(?:^|[\\s;])${name}:\\s*([^;]+);`).exec(rule[1]);
+    if (found === null) throw new Error(`.${selector} 里没有 ${name}`);
+    return found[1];
+  }
+  const first = (shorthand: string) => shorthand.trim().split(/\s+/)[0];
+
+  it("最小窗口高度下整个弹窗放得下：主体不出滚动条，不和步骤自己的滚动条叠成两条", () => {
+    const main = conf.app.windows.find((w) => w.label === "main");
+    if (main === undefined) throw new Error("tauri.conf.json 里没有主窗口");
+    const icon = /<InstanceAvatarBase\b[^>]*\bsize=\{(\d+)\}/.exec(flow);
+    if (icon === null) throw new Error("index.tsx 里没有标题图标的尺寸");
+
+    const [headTop, , headBottom] = value(modal, "head", "padding").split(/\s+/);
+    const headText =
+      pixels(value(modal, "headText", "padding-top")) +
+      pixels(value(modal, "title", "font-size")) * Number(value(modal, "title", "line-height")) +
+      pixels(first(value(modal, "subtitle", "margin"))) +
+      pixels(value(modal, "subtitle", "line-height"));
+    const head = pixels(headTop) + Math.max(Number(icon[1]), headText) + pixels(headBottom);
+    const [footTop, , footBottom] = value(modal, "footer", "padding").split(/\s+/);
+    const foot = pixels(first(value(modal, "footer", "border-top"))) + pixels(footTop) + pixels(value(button, "button", "--button-height")) + pixels(footBottom);
+    const frame = 2 * pixels(value(modal, "layer", "padding")) + 2 * pixels(first(value(modal, "dialog", "border")));
+
+    expect(pixels(value(css, "layout", "--cr-body-height"))).toBeLessThanOrEqual(main.minHeight - frame - head - foot);
+  });
+});
+
 describe("步骤导航", () => {
   it("圆点换态与所在行同一拍渐变；当前步的渐变底画在叠层上，只淡入淡出叠层", () => {
     const dot = declarations("stepDot");
@@ -95,6 +201,25 @@ describe("步骤导航", () => {
     expect(block('.stepButton[data-state="current"] .stepDot')).not.toMatch(/background|box-shadow/);
   });
 
+  it("圆点里的序号与勾号叠在定死的 12 × 12 格子里居中：序号换成勾号时格子不变高变矮", () => {
+    const glyph = declarations("stepGlyph");
+    expect(glyph).toMatch(/--cr-step-glyph:\s*12px/);
+    expect(glyph).toMatch(/(^|[\s;])width:\s*var\(--cr-step-glyph\)/);
+    expect(glyph).toMatch(/(^|[\s;])height:\s*var\(--cr-step-glyph\)/);
+    expect(glyph).toMatch(/line-height:\s*var\(--cr-step-glyph\)/);
+    // 居中不在 .stepGlyph 里写：格子就是步骤圆里的图标位（GlyphSlot），同一个元素带着它的 glyphSlot 类，
+    // 各层按自身尺寸居中由那条规则给（ui/Button.test.tsx 钉着它的 place-items）。不经 GlyphSlot 的话格子不居中
+    const values = Object.fromEntries(STEP_ORDER.map((id) => [id, null])) as Record<StepId, string | null>;
+    const html = renderToStaticMarkup(createElement(StepNav, { visible: STEP_ORDER, current: STEP_ORDER[0], reached: 0, values, onJump: () => {} }));
+    const cells = [...html.matchAll(/class="([^"]*)"/g)].map((m) => m[1].split(" ")).filter((names) => names.includes(styles.stepGlyph));
+    expect(cells).toHaveLength(STEP_ORDER.length);
+    for (const names of cells) expect(names).toContain(buttonStyles.glyphSlot);
+  });
+
+  it("文字列是定位基准：值行退场时抽出布局，跟着让位滑动的文字列一起走，不按外层重新定位", () => {
+    expect(declarations("stepText")).toMatch(/position:\s*relative/);
+  });
+
   it("当前步的底色是一块垫在各行之下的滑块，不是各行自己的底色", () => {
     expect(declarations("stepMark")).toMatch(/position:\s*absolute/);
     expect(declarations("stepMark")).toMatch(/z-index:\s*-1/);
@@ -102,18 +227,64 @@ describe("步骤导航", () => {
   });
 });
 
+describe("外观色样", () => {
+  it("晚一拍补上的卡面铺满定位的画面格、垫在方块下面，只淡入透明度", () => {
+    expect(declarations("swatchArt")).toMatch(/position:\s*relative/);
+    const cover = declarations("swatchCover");
+    expect(cover).toMatch(/position:\s*absolute/);
+    expect(cover).toMatch(/inset:\s*0/);
+    expect(cover).toMatch(/animation:\s*swatchReveal var\(--sk-dur-in\) var\(--sk-ease-out\)/);
+    expect(css).toMatch(/@keyframes swatchReveal\s*\{\s*from\s*\{\s*opacity:\s*0;\s*\}\s*\}/);
+    expect(declarations("swatchBlock")).toMatch(/position:\s*relative/);
+  });
+});
+
 describe("底栏", () => {
-  it("两句提示叠在同一格，主按钮与隐形的创建按钮叠在同一格", () => {
+  it("两句提示叠在同一格", () => {
     expect(declarations("footHint")).toMatch(/display:\s*inline-grid/);
     expect(declarations("footHintLine")).toMatch(/grid-area:\s*1 \/ 1/);
-    expect(block(".primaryButton,\n.primaryGhost")).toMatch(/grid-area:\s*1 \/ 1/);
-    expect(block(".primaryGhost")).toMatch(/visibility:\s*hidden/);
+  });
+
+  it("主按钮不垫隐形的整颗按钮", () => {
+    expect(css).not.toMatch(/primaryGhost|primarySlot/);
+  });
+
+  it("主按钮的文案各一层交叉淡化：只动透明度，换上来的淡入、换下去的淡出；创建与创建中两层叠在同一格", () => {
+    const face = declarations("primaryFace");
+    // 只认恰好为 0：半透明的旧文案会叠在新文案上
+    expect(face).toMatch(/(^|[\s;])opacity:\s*0\s*;/);
+    expect(face).toMatch(/transition:\s*opacity var\(--sk-dur-out\) var\(--sk-ease-in\)/);
+    const current = block(".primaryFace[data-current]");
+    expect(current).toMatch(/opacity:\s*1\s*;/);
+    expect(current).toMatch(/transition:\s*opacity var\(--sk-dur-in\) var\(--sk-ease-out\)/);
+    expect(declarations("primaryLabels")).toMatch(/display:\s*inline-grid/);
+    expect(declarations("primaryLabel")).toMatch(/grid-area:\s*1 \/ 1/);
+  });
+
+  it("「下一步」那层铺满按钮，按不带前置图标的按钮那样居中：文字与箭头停在原来后置箭头的按钮上的位置", () => {
+    const next = declarations("primaryNext");
+    expect(next).toMatch(/position:\s*absolute/);
+    expect(next).toMatch(/inset:\s*0/);
+    expect(next).toMatch(/align-items:\s*center/);
+    expect(next).toMatch(/justify-content:\s*center/);
+    expect(next).toMatch(/gap:\s*calc\(var\(--sk-space-8\) - 1px\)/);
+    expect(next).toMatch(/padding-inline:\s*var\(--sk-space-14\)/);
+  });
+
+  it("前置图标位在「下一步」时透明并缩小，进确认步淡入并弹到原大，退场的那层不接这条过渡；减少动画不缩放", () => {
+    const hidden = block('.primaryButton[data-face="next"] [data-glyph]');
+    expect(hidden).toMatch(/(^|[\s;])opacity:\s*0\s*;/);
+    expect(hidden).toMatch(/scale:\s*0\.6/);
+    expect(hidden).toMatch(/opacity var\(--sk-dur-out\) var\(--sk-ease-in\)/);
+    const shown = block(".primaryButton [data-glyph]:not([data-leaving])");
+    expect(shown).toMatch(/opacity var\(--sk-dur-in\) var\(--sk-ease-out\)/);
+    expect(shown).toMatch(/scale var\(--sk-spring-pop-dur\) var\(--sk-spring-pop\)/);
+    expect(block(":global([data-sk-reduced]) .primaryButton [data-glyph]")).toMatch(/scale:\s*none/);
   });
 
   it("按钮行占满提示之外的宽度：宽度不随按钮增减变化，让位才接得住", () => {
     const actions = declarations("footActions");
     expect(actions).toMatch(/flex:\s*1 1 0/);
     expect(actions).toMatch(/justify-content:\s*flex-end/);
-    expect(actions).toMatch(/position:\s*relative/);
   });
 });

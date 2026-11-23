@@ -1,6 +1,6 @@
 // 设置页样式里与动效、尺寸稳定有关的约定。jsdom 不做样式计算，这里直接读样式表核对：
 // 导航锚点的留白与吸顶对齐；图标底座的渐变只能叠一层淡入淡出，减少动画时选中不上浮；
-// 更新卡状态行在没有次句时也不变矮。
+// 更新卡状态行在没有次句时也不变矮；设置行之间的分隔线不等退场中的块从文档里拿掉。
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -58,6 +58,43 @@ describe("设置分区导航的图标底座", () => {
 describe("许可弹窗", () => {
   it("打开就取满高：读取中与读到后同一个框，读到时不从转圈的高度撑开", () => {
     expect(block(".licenseDialog").get("height")).toBe("100%");
+  });
+});
+
+/** 设置行样式表里画行间分隔线的那条规则：选择器列表与 border-top 的值。 */
+function rowSeparator(): { selectors: string[]; line: string } {
+  const rowCss = readFileSync(new URL("../../ui/SettingRow.module.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = [...rowCss.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter((m) => /border-top\s*:/.test(m[2]));
+  if (rules.length !== 1) throw new Error(`设置行样式表里画分隔线的规则应正好一条，实际 ${rules.length} 条`);
+  const line = /border-top:\s*([^;]+);/.exec(rules[0][2]);
+  if (line === null) throw new Error("设置行的分隔线规则里没有 border-top 的值");
+  return { selectors: rules[0][1].split(",").map((s) => s.trim()), line: line[1] };
+}
+
+describe("设置行的分隔线", () => {
+  it("画在相邻两行之间，也画在只隔着一块退场块（inert）的两行之间：退场块一开始淡出，线就交给下一行", () => {
+    expect(rowSeparator().selectors).toEqual([".row + .row", ".row + [inert] + .row"]);
+  });
+});
+
+describe("更新通道选项块", () => {
+  it("上下两条分隔线与设置行之间的那条同一个写法：状态行与「自动检查更新」之间像隔着一行设置", () => {
+    const rowLine = rowSeparator().line;
+    expect(rowLine).toBe("1px solid var(--sk-line)");
+    const channel = block(".channelBlock");
+    expect([channel.get("border-top"), channel.get("border-bottom")]).toEqual([rowLine, rowLine]);
+    // 块内上下留白同设置行，上沿补到与状态行文字隔开同样的距离（状态行自带 4px 底边距）
+    expect(channel.get("padding")).toBe("var(--sk-space-14) 0");
+    expect(block(".updateRow").get("padding-bottom")).toBe("var(--sk-space-4)");
+    expect(channel.get("margin-top")).toBe("var(--sk-space-10)");
+  });
+
+  it("占位网格与选项块同列数、同间距，compact 档同样两列", () => {
+    expect(block(".channelSkeleton").get("grid-template-columns")).toBe("repeat(3, minmax(0, 1fr))");
+    expect(block(".channelSkeleton").get("gap")).toBe("var(--sk-space-10)");
+    expect(block(':global([data-sk-tier="compact"]) .channelSkeleton').get("grid-template-columns")).toBe("repeat(2, minmax(0, 1fr))");
+    const tileCss = readFileSync(new URL("../../ui/RadioTile.module.css", import.meta.url), "utf8");
+    expect(/\.grid\s*\{[^}]*gap:\s*([^;]+);/.exec(tileCss)?.[1]).toBe("var(--sk-space-10)");
   });
 });
 

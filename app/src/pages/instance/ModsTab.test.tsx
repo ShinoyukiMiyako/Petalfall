@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { hueOf } from "../../art/illustrations/seed";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { formatDate } from "../../domain/format";
 import { IpcError } from "../../ipc/errors";
@@ -18,7 +19,7 @@ import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type Windo
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
-import { render, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
+import { fakeAnimate, render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
@@ -27,12 +28,66 @@ import InstancePage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+// Mod 表格渲染了几遍：换成计数外壳，直接调原组件函数（整页只有 Mod 标签用它）
+const tableRenders = vi.hoisted(() => ({ count: 0 }));
+vi.mock("../../ui/Table", async (orig) => {
+  const mod = await orig<typeof import("../../ui/Table")>();
+  const table = mod.Table as (props: Parameters<typeof mod.Table>[0]) => ReactNode;
+  return {
+    ...mod,
+    Table: (props: Parameters<typeof mod.Table>[0]) => {
+      tableRenders.count += 1;
+      return table(props);
+    },
+  };
+});
+// 行里各格画了几遍：勾选框、开关与更多菜单记下名称，缩略图记下种类、尺寸与色相（Mod 列每行一个 40 号的，色相按行而异）。同样直接调原组件函数
+const cellRenders = vi.hoisted((): string[] => []);
+vi.mock("../../ui/Checkbox", async (orig) => {
+  const mod = await orig<typeof import("../../ui/Checkbox")>();
+  return {
+    ...mod,
+    Checkbox: (props: Parameters<typeof mod.Checkbox>[0]) => {
+      cellRenders.push(`勾选框:${props.ariaLabel}`);
+      return mod.Checkbox(props);
+    },
+  };
+});
+vi.mock("../../ui/Toggle", async (orig) => {
+  const mod = await orig<typeof import("../../ui/Toggle")>();
+  return {
+    ...mod,
+    Toggle: (props: Parameters<typeof mod.Toggle>[0]) => {
+      cellRenders.push(`开关:${props.ariaLabel}`);
+      return mod.Toggle(props);
+    },
+  };
+});
+vi.mock("../../ui/MoreMenu", async (orig) => {
+  const mod = await orig<typeof import("../../ui/MoreMenu")>();
+  return {
+    ...mod,
+    MoreMenu: (props: Parameters<typeof mod.MoreMenu>[0]) => {
+      cellRenders.push(`更多菜单:${props.label}`);
+      return mod.MoreMenu(props);
+    },
+  };
+});
+vi.mock("../../ui/Thumb", async (orig) => {
+  const mod = await orig<typeof import("../../ui/Thumb")>();
+  return {
+    ...mod,
+    Thumb: (props: Parameters<typeof mod.Thumb>[0]) => {
+      cellRenders.push(`缩略图:${props.kind}/${props.size}/${props.hue}`);
+      return mod.Thumb(props);
+    },
+  };
+});
 
 const ID = "樱花生存";
 const DAY = 24 * 3600 * 1000;
 const NOW = new Date(2026, 9, 31, 12, 0, 0).getTime();
 
-let view: Rendered | undefined;
 let nav: NavApi;
 let launcher: LauncherApi;
 let shell: ShellApi;
@@ -77,7 +132,7 @@ const flush = () =>
   });
 
 async function open(tab: InstanceTab = "mods") {
-  view = render(
+  render(
     <Providers>
       <Probe />
       <Routed />
@@ -275,9 +330,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  view?.unmount();
-  view = undefined;
-  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -651,8 +703,12 @@ describe("摘要行与锁定横幅的出入场", () => {
     expect(item.style.opacity).not.toBe("");
     expect(Number(item.style.opacity)).toBeLessThan(1);
     expect(item.hasAttribute("inert")).toBe(false);
+    // 横幅先停在起点，画出第一帧之后才淡入；还没起步就撤掉的不播退场、当场移除。先推几帧让它淡入起步，再结束游戏
+    await stepFrames(3);
+    expect(Number(item.style.opacity)).toBeGreaterThan(0);
 
     await setActivity(null);
+    expect(bannerItem()).toBe(item);
     expect(bannerItem()?.hasAttribute("inert")).toBe(true);
   });
 
@@ -886,17 +942,17 @@ describe("更新检查晚到时行里不跳", () => {
     return value;
   };
 
-  const checkLater = () => {
+  const checkLater = (to = "1.1") => {
     const checking = deferred<UpdateCandidate[]>();
     ipc.overrides.set("check_updates", () => checking.promise);
     return async () =>
       act(async () => {
-        checking.resolve([candidate("sodium.jar", "Sodium", "AANobbMI", "1.0", "1.1")]);
+        checking.resolve([candidate("sodium.jar", "Sodium", "AANobbMI", "1.0", to)]);
         await settle(20);
       });
   };
 
-  it("宽档：「可更新到」与行内更新按钮淡入，挂载时就有的状态标签不另外淡入；版本格钉在单元格顶部，两行标签也放得下", async () => {
+  it("宽档：「可更新到」与行内更新按钮淡入，挂载时就有的状态标签不另外淡入", async () => {
     const arrive = checkLater();
     await open();
     const versionCell = (name: string) => rowEl(name).querySelector('[class*="versionCell"]');
@@ -909,21 +965,87 @@ describe("更新检查晚到时行里不跳", () => {
     expect(textOf(update)).toBe("可更新到 1.1");
     expect(arriving(fadeOf(update))).toBe(true);
     expect(arriving(fadeOf(button("更新 Sodium")))).toBe(true);
+  });
 
+  it("宽档：版本格与 Mod 列同高、同样居中，版本号对齐名称首行；标签晚到前后版本号是同一个节点，有无更新的行版本号位置相同", async () => {
+    const arrive = checkLater();
+    await open();
+    const versionOf = (name: string): HTMLElement => {
+      const el = rowEl(name).querySelector<HTMLElement>('[class*="versionCell"] [class*="modVersion"]');
+      if (el === null) throw new Error(`${name} 这一行没有版本号`);
+      return el;
+    };
+    const before = versionOf("Sodium");
+    await arrive();
+    // 标签在版本号下面淡入：版本号不重挂、不换字
+    expect(versionOf("Sodium")).toBe(before);
+    expect(textOf(before)).toBe("1.0");
+    expect(before.closest('[class*="appearInline"]')).toBeNull();
+
+    // jsdom 不做布局：按样式表原文与令牌表算。版本格与 Mod 列的文字列同高、都随单元格居中，两者的顶边就落在同一处，
+    // 与行高、密度、末行有没有下边线都无关；格高固定，有没有标签都不改变版本号的位置
     const css = instanceCss();
     const cell = ruleBody(css, ".versionCell");
-    const tag = ruleBody(css, ".versionCell .updateTag");
-    // 标签折成几行都只往下长：不随单元格居中，也不靠最小高度（居中时标签一折行就把版本号顶上去）
-    expect(declOf(cell, "align-self")).toBe("flex-start");
-    expect(cell).not.toContain("min-height");
-    // 最坏的常见情况：版本号一行、间距、折成两行的「可更新到」。按样式表原文与令牌表算，不超出单元格（行高扣掉 1px 下边线），上下留白相等
-    const vars = { "--table-row": `${ROW_HEIGHT.regular}px`, "--update-tag-lh": declOf(cell, "--update-tag-lh"), "--update-tag-pad": declOf(cell, "--update-tag-pad") };
-    const px = (expr: string) => cssPx(expr, vars);
-    const twoLineTag = 2 * px(declOf(tag, "line-height")) * px("var(--sk-fs-caption)") + 2 * px(declOf(tag, "padding-block"));
-    const stack = px("var(--sk-lh-body)") + px(declOf(cell, "gap")) + twoLineTag;
-    const top = px(declOf(cell, "padding-top"));
-    expect(top + stack).toBeLessThanOrEqual(ROW_HEIGHT.regular - 1);
-    expect(top).toBeCloseTo((ROW_HEIGHT.regular - 1 - stack) / 2, 5);
+    const px = (expr: string) => cssPx(expr, {});
+    const modTextHeight = px("var(--sk-lh-body)") + px(declOf(ruleBody(css, ".modText"), "gap")) + px(declOf(ruleBody(css, ".modSub"), "line-height"));
+    expect(declOf(cell, "align-self")).toBe("center");
+    expect(px(declOf(cell, "height"))).toBe(modTextHeight);
+    expect(cell).not.toContain("padding");
+    expect(declOf(cell, "gap")).toBe(declOf(ruleBody(css, ".modText"), "gap"));
+    // Mod 列靠单元格的 align-items 居中，版本格与它同一种居中
+    const tableCss = stripComments(readFileSync(resolve(__dirname, "../../ui/Table.module.css"), "utf8"));
+    expect(declOf(ruleBody(tableCss, ".cell"), "align-items")).toBe("center");
+    expect(ruleBody(css, ".modCell")).not.toContain("align-self");
+    // 版本号一行、间距、单行标签正好放满格高，不溢出也不被单元格裁掉
+    const tagCss = stripComments(readFileSync(resolve(__dirname, "../../ui/Tag.module.css"), "utf8"));
+    const tagHeight = px(declOf(ruleBody(tagCss, '.tag[data-size="sm"]'), "--tag-height"));
+    expect(px("var(--sk-lh-body)") + px(declOf(cell, "gap")) + tagHeight).toBe(modTextHeight);
+    // 固定的格高在两种密度的行里都放得下（行高扣掉 1px 下边线）
+    expect(modTextHeight).toBeLessThanOrEqual(Math.min(ROW_HEIGHT.regular, ROW_HEIGHT.compact) - 1);
+  });
+
+  it("宽档：长版本号与「可更新到」都压成一行，过长截断，悬停看全文", async () => {
+    const LONG_FROM = "0.6.13+mc1.21.4-fabric.build.2048";
+    const LONG_TO = "0.6.14+mc1.21.4-fabric.build.2077";
+    mods = mods.map((m) => (m.file_name === "sodium.jar" && m.metadata !== null ? { ...m, metadata: { ...m.metadata, version: LONG_FROM } } : m));
+    const arrive = checkLater(LONG_TO);
+    await open();
+    await arrive();
+    const cell = rowEl("Sodium").querySelector('[class*="versionCell"]');
+    if (cell === null) throw new Error("Sodium 没有版本格");
+    const version = cell.querySelector<HTMLElement>('[class*="modVersion"]');
+    if (version === null) throw new Error("版本格里没有版本号");
+    const [update] = tagsIn(cell);
+    // 截断只靠样式：节点里是全文，读屏照常读全
+    expect(textOf(version)).toBe(LONG_FROM);
+    const label = update.querySelector('[class*="updateTagText"]');
+    if (label === null) throw new Error("标签文字没有包在可截断的那一层里");
+    expect(textOf(label)).toBe(`可更新到 ${LONG_TO}`);
+    expect(await hoverReason(version)).toBe(LONG_FROM);
+    expect(await hoverReason(update)).toBe(`可更新到 ${LONG_TO}`);
+
+    const css = instanceCss();
+    // 单行：不折行、不撑高，超出的部分省略号截掉
+    const versionRule = ruleBody(css, ".versionCell .modVersion");
+    expect(declOf(versionRule, "white-space")).toBe("nowrap");
+    expect(declOf(versionRule, "overflow")).toBe("hidden");
+    expect(declOf(versionRule, "text-overflow")).toBe("ellipsis");
+    expect(declOf(versionRule, "max-width")).toBe("100%");
+    expect(versionRule).not.toContain("overflow-wrap");
+    // 标签的基础样式不收缩（flex: none）：这里要能被压窄，省略号落在里面的文字层上
+    const tagRule = ruleBody(css, ".versionCell .updateTag");
+    expect(declOf(tagRule, "flex")).toBe("0 1 auto");
+    expect(declOf(tagRule, "min-width")).toBe("0");
+    for (const banned of ["height", "line-height", "padding-block", "white-space", "overflow-wrap"]) expect(tagRule).not.toMatch(new RegExp(`(?:^|\\s)${banned}:`));
+    const textRule = ruleBody(css, ".updateTagText");
+    expect(declOf(textRule, "min-width")).toBe("0");
+    expect(declOf(textRule, "overflow")).toBe("hidden");
+    expect(declOf(textRule, "text-overflow")).toBe("ellipsis");
+    expect(declOf(textRule, "white-space")).toBe("nowrap");
+    // 文字层与标签同高：裁切框不比标签矮，降部不被切掉，字的位置与不裁时相同（两者都在标签里居中）
+    const tagCss = stripComments(readFileSync(resolve(__dirname, "../../ui/Tag.module.css"), "utf8"));
+    const tagHeight = declOf(ruleBody(tagCss, '.tag[data-size="sm"]'), "--tag-height");
+    expect(cssPx(declOf(textRule, "line-height"), { "--tag-height": tagHeight })).toBe(cssPx(tagHeight, {}));
   });
 
   it("紧凑档：更新状态插在来源后面，从透明淡入，其余标注照旧", async () => {
@@ -1012,11 +1134,13 @@ describe("更新检查晚到时行里不跳", () => {
     await pastHold();
     expect(watched()).toEqual([]);
 
-    // 行重新挂上（虚拟化的长表格滚动时就是这样）也不挂：可更新项已在缓存里，不再检查
+    // 行重新挂上（虚拟化的长表格滚动时就是这样）也不挂：可更新项已在缓存里，不再检查。
+    // 切回来时 Mod 列表照例重读一次，重读期间与回来后的停留时长里挂着，过了才断言
     act(() => nav.go({ page: "instance", id: ID, tab: "overview" }));
     await flush();
     act(() => nav.go({ page: "instance", id: ID, tab: "mods" }));
     await flush();
+    await pastHold();
     expect(subs()).toHaveLength(4);
     expect(watched()).toEqual([]);
   });
@@ -1046,13 +1170,7 @@ describe("更新检查晚到时行里不跳", () => {
     if (fresh === undefined || fresh === null) throw new Error("「新增」不在出入场的包裹层里");
     // 被挪动的是包裹层（div）：jsdom 没有 Web Animations，只给它这一个元素装上，记下让位起的关键帧
     const slides: Keyframe[][] = [];
-    Object.defineProperty(fresh, "animate", {
-      configurable: true,
-      value: (frames: Keyframe[]) => {
-        slides.push(frames);
-        return { currentTime: 0, cancel() {}, onfinish: null, oncancel: null };
-      },
-    });
+    Object.defineProperty(fresh, "animate", { configurable: true, value: fakeAnimate((_el, frames) => slides.push(frames)) });
     // 观察者挂上后的第一趟：只记位置
     observers.resize(sub, 0);
     expect(slides).toEqual([]);
@@ -1094,6 +1212,44 @@ describe("更新检查晚到时行里不跳", () => {
       holding.resolve(null);
       await settle(20);
     });
+    await pastHold();
+    expect(observers.observed()).not.toContain(sub);
+  });
+
+  it("紧凑档：忽略回来后 Mod 列表重读得慢，让位一直挂到列表回来、换上「不检查更新」之后", async () => {
+    vi.stubGlobal("innerWidth", 1024);
+    stubSpanAnimations();
+    const observers = stubResizeObserver();
+    updates = [candidate("sodium.jar", "Sodium", "AANobbMI", "1.0", "1.1")];
+    await open();
+    await pastHold();
+    const sub = rowEl("Sodium").querySelector('[class*="modSub"]');
+    if (sub === null) throw new Error("Sodium 没有第二行");
+    expect(observers.observed()).not.toContain(sub);
+    const present = () => tagsIn(sub).filter((t) => t.closest("[inert]") === null);
+    expect(present().map(textOf)).toEqual(["Modrinth", "可更新到 1.1", "新增"]);
+
+    // 写卷宗立即回来，可更新项也立即重查完；状态标签来自 Mod 列表，列表要过很久才回来
+    const listing = deferred<InstalledMod[]>();
+    ipc.overrides.set("list_mods", () => listing.promise);
+    click(button("Sodium 的更多操作"));
+    const ignore = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "忽略这个 Mod 的更新");
+    if (ignore === undefined) throw new Error("菜单里没有「忽略这个 Mod 的更新」");
+    click(ignore);
+    await flush();
+    expect(callsOf(ipc, "set_mod_update_hold")).toEqual([{ versionId: ID, fileName: "sodium.jar", hold: { kind: "ignored" } }]);
+    await pastHold();
+    // 远过了更新检查回来后的停留时长：列表还在路上，第二行还没换，让位仍挂着
+    expect(present().map(textOf)).toEqual(["Modrinth", "可更新到 1.1", "新增"]);
+    expect(observers.observed()).toContain(sub);
+
+    await act(async () => {
+      listing.resolve(mods.map((m) => (m.file_name === "sodium.jar" && m.source !== null ? { ...m, source: { ...m.source, update_hold: { kind: "ignored" } } } : m)));
+      await settle(20);
+    });
+    // 换字的这一次提交里还挂着，观察者下一帧才报上来
+    expect(present().map(textOf)).toEqual(["Modrinth", "不检查更新", "新增"]);
+    expect(observers.observed()).toContain(sub);
     await pastHold();
     expect(observers.observed()).not.toContain(sub);
   });
@@ -1797,6 +1953,14 @@ describe("切到 Mod 页与回到前台时重读 mods 目录", () => {
     act(async () => {
       await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
     });
+  /**
+   * 走过第一帧：切到 Mod 页时的重读排在第一帧画出来之后才发。走两帧：第一帧的回调里排的任务是在推进途中登记的，
+   * 假时钟把这种 0 毫秒的计时器记成 1 毫秒之后，要再推进才到点。
+   */
+  const pastFirstFrame = async () => {
+    await stepFrames(2);
+    await flush();
+  };
 
   /** 摘要行的总数。 */
   function total(): number {
@@ -1823,7 +1987,7 @@ describe("切到 Mod 页与回到前台时重读 mods 目录", () => {
     expect(badge()).toBe(4);
     dropInJar();
     switchTo("mods");
-    await flush();
+    await pastFirstFrame();
     expect(gridNames()).toEqual(["Fabric API", "Handmade", "Iris", "Lithium", "Sodium"]);
     expect(total()).toBe(5);
     expect(badge()).toBe(5);
@@ -1844,7 +2008,7 @@ describe("切到 Mod 页与回到前台时重读 mods 目录", () => {
     await open("overview");
     mods = mods.filter((m) => m.file_name !== "handmade.jar");
     switchTo("mods");
-    await flush();
+    await pastFirstFrame();
     expect(gridNames()).toEqual(["Fabric API", "Iris", "Sodium"]);
     expect(total()).toBe(3);
     expect(badge()).toBe(3);
@@ -1885,8 +2049,44 @@ describe("切到 Mod 页与回到前台时重读 mods 目录", () => {
     const before = lists();
     focusWindow();
     switchTo("mods");
-    await flush();
+    await pastFirstFrame();
     expect(lists()).toBe(before + 1);
+  });
+
+  it("从概览切过来：点标签的这次提交里整张表只渲染挂载的一遍，重读等第一帧画出来之后才发，读回来照常换上", async () => {
+    await open("overview");
+    const before = lists();
+    dropInJar();
+    tableRenders.count = 0;
+    // 点标签是离散事件：挂载与挂载后的 effect 在第一帧之前同步跑完，这期间再渲染一遍整张表就吃掉了面板淡入的前段
+    switchTo("mods");
+    expect(tableRenders.count).toBe(1);
+    expect(lists()).toBe(before);
+    await pastFirstFrame();
+    expect(lists()).toBe(before + 1);
+    expect(gridNames()).toEqual(["Fabric API", "Handmade", "Iris", "Lithium", "Sodium"]);
+  });
+
+  it("第一次打开 Mod 页、列表在第一帧之前就读回来：初次加载已经是盘上的，第一帧之后不再补读一遍", async () => {
+    await open();
+    expect(lists()).toBe(1);
+    await pastFirstFrame();
+    await pastFirstFrame();
+    expect(lists()).toBe(1);
+    expect(gridNames()).toEqual(OLD_NAMES);
+  });
+
+  it("启停回来后重扫出一份新列表：以重扫的为准，乐观的开关值丢掉，盘上没改成的照盘上显示", async () => {
+    await open();
+    // 后端报停用成功，重扫时盘上却还是启用的（例如被别的程序改了回来），同时多了一个 jar：内容变了，列表换成新的一份
+    ipc.overrides.set("set_mod_enabled", () => "sodium.jar.disabled");
+    click(find("switch", "停用 Sodium"));
+    expect(find("switch", "启用 Sodium").getAttribute("aria-checked")).toBe("false");
+    dropInJar();
+    await flush();
+    expect(lists()).toBe(2);
+    expect(gridNames()).toContain("Lithium");
+    expect(find("switch", "停用 Sodium").getAttribute("aria-checked")).toBe("true");
   });
 
   it("每切回来一次读一次；盘上没变时不多扫实例列表", async () => {
@@ -1895,7 +2095,7 @@ describe("切到 Mod 页与回到前台时重读 mods 目录", () => {
     switchTo("overview");
     await flush();
     switchTo("mods");
-    await flush();
+    await pastFirstFrame();
     expect(lists()).toBe(before.lists + 1);
     expect(scans()).toBe(before.scans);
   });
@@ -1949,5 +2149,75 @@ describe("切到 Mod 页与回到前台时重读 mods 目录", () => {
     await flush();
     expect(gridNames()).toEqual(OLD_NAMES);
     expect(textOf(document.body)).toContain("已选 2 个");
+  });
+
+  /** 行里各格的渲染记录：只留指名某一行的勾选框、开关、更多菜单与 Mod 列的缩略图；表头的全选框、页头的菜单不算。 */
+  const rowRenders = () => cellRenders.filter((e) => e.startsWith("缩略图:mod/40/") || /^(勾选框:选择 |开关:(停用|启用) |更多菜单:.+ 的更多操作$)/.test(e)).sort();
+  /** 某一行 Mod 列的缩略图：色相取自 mod_id，与 modDto 同一推法。 */
+  const thumbOf = (name: string) => `缩略图:mod/40/${hueOf(name.toLowerCase().replace(/\s+/g, "_"))}`;
+  /** names 里的每一行各格画一遍。 */
+  const eachRowOnce = (names: readonly string[]) => names.flatMap((n) => [`勾选框:选择 ${n}`, `开关:停用 ${n}`, `更多菜单:${n} 的更多操作`, thumbOf(n)]).sort();
+  /** 远长于重读结束后让位的停留时长（一个 settle 弹簧）。 */
+  const pastHold = () =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+  it("切过来后的重读内容没变：整张表只画挂载的那一遍，重读开始、读回来、让位摘下都不再重画任何一行", async () => {
+    await open("overview");
+    const before = lists();
+    tableRenders.count = 0;
+    cellRenders.length = 0;
+    switchTo("mods");
+    await pastFirstFrame();
+    expect(lists()).toBe(before + 1);
+    await pastHold();
+    expect(gridNames()).toEqual(OLD_NAMES);
+    expect(tableRenders.count).toBe(1);
+    expect(rowRenders()).toEqual(eachRowOnce(OLD_NAMES));
+  });
+
+  it("紧凑档的重读：第二行的让位照样在重读期间挂上、过后摘下，开关翻转时不重画任何一行", async () => {
+    vi.stubGlobal("innerWidth", 1024);
+    stubSpanAnimations();
+    const observers = stubResizeObserver();
+    await open();
+    await pastHold();
+    const subs = () => [...grid().querySelectorAll<HTMLElement>('[class*="modSub"]')];
+    const watched = () => subs().filter((el) => observers.observed().includes(el));
+    expect(subs()).toHaveLength(4);
+    expect(watched()).toEqual([]);
+
+    const rescan = deferred<InstalledMod[]>();
+    ipc.overrides.set("list_mods", () => rescan.promise);
+    tableRenders.count = 0;
+    cellRenders.length = 0;
+    focusWindow();
+    await flush();
+    // 重读期间挂着：读回来的状态标签可能换字、变宽，挂上的那一趟只记位置，要在变化之前就挂好
+    expect(watched()).toHaveLength(4);
+    rescan.resolve(structuredClone(mods));
+    await flush();
+    expect(watched()).toHaveLength(4);
+    await pastHold();
+    expect(watched()).toEqual([]);
+    expect(tableRenders.count).toBe(0);
+    expect(rowRenders()).toEqual([]);
+  });
+
+  it("重读回来只有一个 Mod 变了：只重画那一行里随它变的格，别的行一格不动", async () => {
+    await open();
+    await pastHold();
+    mods = mods.map((m) => (m.file_name === "sodium.jar" && m.metadata !== null ? { ...m, metadata: { ...m.metadata, version: "2.0" } } : m));
+    cellRenders.length = 0;
+    focusWindow();
+    await flush();
+    await pastHold();
+    const sodium = [...grid().querySelectorAll<HTMLElement>('[role="row"][data-row-index]')].find((r) => r.querySelector('[class*="modName"]')?.textContent === "Sodium");
+    if (sodium === undefined) throw new Error("没有 Sodium 这一行");
+    expect([...sodium.querySelectorAll('[class*="modVersion"]')].map(textOf)).toEqual(["2.0"]);
+    // 画过的只有这一行；行勾选框只认名称与勾选状态，版本变了不用重画。看的是哪些行画过，不数遍数：
+    // 缩略图在父格重画之后会因自己的状态再空转一遍（渲染了发现没变就收手）
+    expect([...new Set(rowRenders())]).toEqual(["开关:停用 Sodium", "更多菜单:Sodium 的更多操作", thumbOf("Sodium")].sort());
   });
 });

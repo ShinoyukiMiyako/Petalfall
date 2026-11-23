@@ -5,8 +5,10 @@ import { dirname, join, posix, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { APP_LICENSE, COPYRIGHT_HOLDER, FIRST_RELEASE_YEAR } from "../src/lib/app-info";
+import { parseLegalNotice } from "../src/lib/legal-notice";
 import { ABOUT_COPY } from "../src/pages/settings/copy";
 import { COPY as SETUP_COPY } from "../src/setup/copy";
+import { parseMarkdown, type Block, type Inline } from "../src/ui/richtext-parse";
 
 const APP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_DIR = join(APP_DIR, "..");
@@ -411,5 +413,66 @@ describe("README 的许可一节", () => {
     const targets = [...readme.matchAll(/\]\(([^)\s]+)\)/g)].map((m) => m[1]).filter((t) => !/^(https?:|mailto:|#)/.test(t));
     expect(targets.length).toBeGreaterThan(0);
     for (const target of targets) expect(existsSync(join(REPO_DIR, target)), target).toBe(true);
+  });
+});
+
+/** 节点树里全部行内节点，含粗体与链接里嵌套的。 */
+function inlinesOf(blocks: readonly Block[]): Inline[] {
+  const out: Inline[] = [];
+  const walkInline = (nodes: readonly Inline[]) => {
+    for (const node of nodes) {
+      out.push(node);
+      if (node.t === "strong" || node.t === "em" || node.t === "link") walkInline(node.c);
+    }
+  };
+  for (const block of blocks) {
+    if (block.t === "heading" || block.t === "p") walkInline(block.c);
+    else if (block.t === "list") for (const item of block.items) out.push(...inlinesOf(item));
+  }
+  return out;
+}
+
+// 关于页按受限富文本显示这两份（首次启动也读同一份文件）：用了它画不了的写法，那部分在界面上会走样或整段丢掉，
+// 用户在启动器里读到的就和仓库里的原文对不上。加粗的是与权利义务关系较大的条款，界面上也必须是粗体
+describe.each([
+  { name: "使用须知", file: "docs/usage-notice.md" },
+  { name: "隐私说明", file: "docs/privacy.md" },
+])("$name", ({ name, file }) => {
+  const text = readRepo(file);
+  const notice = parseLegalNotice(text, name);
+  const blocks = parseMarkdown(notice.body);
+  const inlines = inlinesOf(blocks);
+
+  it("第一行是标题，第三行是版本号", () => {
+    expect(text.split("\n")[2]).toBe(`版本：${notice.version}`);
+  });
+
+  it("正文不用表格、引用、缩进与嵌套列表、分隔线、代码块、图片、HTML 与一级或四级以下的标题", () => {
+    const unsupported = notice.body.split("\n").filter(
+      (line) =>
+        /^\s+\S/.test(line) ||
+        /^ {0,3}(?:>|\||```|~~~)/.test(line) ||
+        /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line) ||
+        /!\[/.test(line) ||
+        /<\/?[A-Za-z][^<>]*>|<!--/.test(line) ||
+        /^#(?!#{1,2} )/.test(line),
+    );
+    expect(unsupported).toEqual([]);
+  });
+
+  it("每一处加粗在界面上都画成粗体，没有落单的 ** 漏成正文", () => {
+    const pairs = [...notice.body.matchAll(/\*\*/g)].length;
+    expect(pairs).toBeGreaterThan(0);
+    expect(pairs % 2).toBe(0);
+    expect(inlines.filter((n) => n.t === "strong")).toHaveLength(pairs / 2);
+    expect(inlines.filter((n) => n.t === "text" && n.v.includes("*"))).toEqual([]);
+  });
+
+  // 裸网址在 GitHub 与受限富文本里对紧跟的全角标点切法不同，一律写成 [文字](地址)
+  it("网址都写成 Markdown 链接，界面上每一条都是可点的链接，指向原文写的地址", () => {
+    const written = [...notice.body.matchAll(/\]\((https:\/\/[^)\s]+)\)/g)].map((m) => m[1]);
+    expect(inlines.filter((n): n is Extract<Inline, { t: "link" }> => n.t === "link").map((n) => n.href)).toEqual(written);
+    const outside = notice.body.replace(/\[[^\]]*\]\([^)\s]+\)/g, "").replace(/`[^`]*`/g, "");
+    expect(outside).not.toMatch(/https?:\/\//);
   });
 });

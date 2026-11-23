@@ -6,6 +6,7 @@ import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
+import { refuseHiddenFocus } from "../test/focus-fixup";
 import { Field } from "./Field";
 import { SELECT_EMPTY_COPY, SELECT_FILTER_THRESHOLD, Select, type SelectOption } from "./Select";
 import { TYPEAHEAD_WINDOW_MS } from "./typeahead";
@@ -258,6 +259,21 @@ describe("过滤框", () => {
     expect(document.querySelector(`${LIVE} [role="status"]`)?.textContent).toBe(SELECT_EMPTY_COPY);
   });
 
+  // 面板定位前是隐藏的，浏览器不给隐藏的元素焦点：挂载时就聚焦的话焦点留在触发器上，键入与方向键都到不了过滤框
+  it("过滤框在面板可见之后才聚焦：键盘打开后焦点进过滤框，↓ 经它移动高亮", () => {
+    mount(<Host options={versions(SELECT_FILTER_THRESHOLD + 1)} initial="v0" onChange={() => undefined} />);
+    focusTrigger();
+    const calls = refuseHiddenFocus();
+    press("ArrowDown");
+    const filter = filterBox();
+    if (!filter) throw new Error("没有出现过滤框");
+    expect(calls.map((c) => [c.target, c.hidden])).toEqual([[filter, false]]);
+    expect(document.activeElement).toBe(filter);
+    expect(highlighted()).toBe("1.21");
+    press("ArrowDown");
+    expect(highlighted()).toBe("1.20");
+  });
+
   // 安装面板的版本下拉在版本读取中就能点开：读到后超过 12 项，过滤框在顶上插进来、把「自动」行下推，焦点也被抢走
   it("过滤框有没有在打开那一刻定下：开着时选项才多起来不插进过滤框，重新打开才有", () => {
     const handles: { set?: (n: number) => void } = {};
@@ -354,6 +370,24 @@ describe("尺寸稳定", () => {
     // 半角 6 个、空格 1 个、全角 2 个按 4 算：权重 11，比其余的「1.xxx」（5）都宽
     expect(reserved[0]).toBe("24w14a 快照");
     expect(reserved.slice(1).every((label) => label !== undefined && /^1\.\d{3}$/.test(label))).toBe(true);
+  });
+
+  // 定宽的触发器把长选项省略掉，列表还留在浮层默认的 360 里的话，全名在列表里也看不全
+  it("列表默认沿用浮层的宽度上限；listMaxWidth 为 window 时列表的浮层放开上限，触发器不受影响", () => {
+    const livePanel = () => document.querySelector<HTMLElement>(LIVE) as HTMLElement;
+    mount(<Select value="j8" options={JAVA} ariaLabel="Java 运行时" onChange={() => undefined} />);
+    const closedTrigger = trigger().outerHTML;
+    act(() => trigger().click());
+    expect(listbox()).not.toBeNull();
+    expect(livePanel().hasAttribute("data-max-width")).toBe(false);
+    view?.unmount();
+
+    mount(<Select listMaxWidth="window" value="j8" options={JAVA} ariaLabel="Java 运行时" onChange={() => undefined} />);
+    // 放开的只是弹出列表：触发器与默认的一模一样，定宽与省略照旧
+    expect(trigger().outerHTML).toBe(closedTrigger);
+    act(() => trigger().click());
+    expect(listbox()).not.toBeNull();
+    expect(livePanel().getAttribute("data-max-width")).toBe("window");
   });
 
   it("列表的滚动条槽位常驻，槽位吃进面板右侧的内边距；过滤框内缩到与选项的右缘对齐", () => {

@@ -17,7 +17,7 @@
 //! 凭据库读不出来（换了机器或 Windows 用户、文件被改坏）时原文件改名留存、按空库继续，经过供启动提示取用
 //! （[`Petalfall::credential_recoveries`]）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -215,6 +215,79 @@ struct RotationInFlight(Arc<tokio::sync::watch::Sender<Rotations>>);
 impl Drop for RotationInFlight {
     fn drop(&mut self) {
         self.0.send_modify(|rotations| rotations.running -= 1);
+    }
+}
+
+/// 后台改写账户记录的通知：后台提前续期、启动前的验证与续期、启动时顺带的外置档案同步改写了账户记录之后，发出那个
+/// 账户的 uuid。账户页的刷新、登录、切换与删除由界面自己发起，界面做完就重读，不经这里。
+///
+/// 外壳订阅它转成前端事件，界面据此重读账户、让这个账户的皮肤缓存失效：不然档案后来取到的皮肤、改过的名字只在手动
+/// 刷新、重新登录或重启后才换上。放在门面上随快照共享，与 [`RotationGate`] 一样：续期多半跑在命令的快照上。
+#[derive(Clone)]
+pub(crate) struct AccountChanges(tokio::sync::broadcast::Sender<String>);
+
+/// 通知的积压上限。订阅方逐条转发、几乎不积压，一次启动至多两条；真积压满了，最早的几条被挤掉，订阅方会收到
+/// `Lagged` 并记下。
+const ACCOUNT_CHANGES_CAPACITY: usize = 32;
+
+impl Default for AccountChanges {
+    fn default() -> Self {
+        Self(tokio::sync::broadcast::Sender::new(
+            ACCOUNT_CHANGES_CAPACITY,
+        ))
+    }
+}
+
+impl AccountChanges {
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<String> {
+        self.0.subscribe()
+    }
+
+    fn notify(&self, uuid: &str) {
+        // 没有订阅方时发送报错：命令行与测试的门面没人订阅，这时也没有界面要更新。
+        if self.0.send(uuid.to_owned()).is_err() {
+            tracing::debug!(uuid, "账户记录在后台改写了，没有订阅方");
+        }
+    }
+}
+
+/// 续期的结局里账户记录被改写过没有：续成了（令牌、名字、皮肤、验证时刻），或被判定要重新登录（状态落成失效；
+/// 被拒的若是重新登录之前的旧凭据则没有落，多通知一次只是让界面多读一遍）。别的失败没动记录里界面看得见的部分，
+/// 顶多先写回了轮换出来的 refresh token。
+fn rewrote_record<T>(outcome: &Result<T>) -> bool {
+    match outcome {
+        Ok(_) => true,
+        Err(err) => matches!(
+            err,
+            crate::error::CoreError::Auth(AuthError::ReloginRequired)
+        ),
+    }
+}
+
+/// 外置档案的后台同步正在跑的账户，键与续期闸相同，见 [`Petalfall::sync_authlib_profile_in_background`]。
+///
+/// 同一个账户同一时刻只跑一份：连着点几次启动，后面的撞上还没回来的那份就不再发，那份回来时取到的就是此刻的档案。
+/// 表里只有键，中毒不携带需要放弃的状态。
+static PROFILE_SYNCS: LazyLock<Mutex<HashSet<GateKey>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// 一份进行中的后台档案同步；放下即注销。
+struct ProfileSyncInFlight(GateKey);
+
+impl ProfileSyncInFlight {
+    /// 登记一份同步；这个账户已有一份在跑就不登记，交回 `None`。
+    fn try_begin(key: GateKey) -> Option<Self> {
+        let mut syncs = PROFILE_SYNCS.lock().unwrap_or_else(PoisonError::into_inner);
+        syncs.insert(key.clone()).then(|| Self(key))
+    }
+}
+
+impl Drop for ProfileSyncInFlight {
+    fn drop(&mut self) {
+        PROFILE_SYNCS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.0);
     }
 }
 
@@ -778,7 +851,7 @@ impl Petalfall {
 
     /// 等待选择的每个角色当前的皮肤，与 `pending.profiles` 一一对应，供角色列表画头像。
     ///
-    /// 并发查询，每个角色限时 [`PROFILE_SKIN_TIMEOUT`]；取不到的记 warn 并为 None，界面画剪影。
+    /// 并发查询，每个角色限时 [`PROFILE_SKIN_TIMEOUT`]；取不到的记 warn 并为 None，界面画按角色 UUID 选的默认皮肤。
     pub async fn authlib_profile_skins(&self, pending: &AuthlibPending) -> Vec<Option<SkinRef>> {
         let mut tasks = tokio::task::JoinSet::new();
         for (index, profile) in pending.profiles.iter().enumerate() {
@@ -793,7 +866,7 @@ impl Petalfall {
                 {
                     Ok(skin) => skin,
                     Err(_) => {
-                        tracing::warn!(profile_id = %id, "查询外置角色皮肤超时，界面将回落到剪影");
+                        tracing::warn!(profile_id = %id, "查询外置角色皮肤超时，界面改画默认皮肤");
                         None
                     }
                 };
@@ -873,7 +946,8 @@ impl Petalfall {
     /// - 外置：先向服务器校验令牌，有效则记一次验证时刻；无效则刷新令牌并回写。
     /// - 离线：原样返回。
     ///
-    /// 续期被判定为凭据失效时账户落成「需要重新登录」并报 [`AuthError::ReloginRequired`]。
+    /// 续期被判定为凭据失效时账户落成「需要重新登录」并报 [`AuthError::ReloginRequired`]。联网改写了账户记录后发
+    /// 账户变更通知（[`AccountChanges`]）；外置令牌有效时另在后台顺带同步一次角色档案，不等它。
     ///
     /// 要联网时先排进这个账户的续期闸，再以库里此刻的记录为准：排队期间别处可能刚续过，
     /// 传进来的那份凭据已经作废。联网的部分跑在独立任务里：启动被取消时以 [`AuthError::Cancelled`]
@@ -1001,13 +1075,18 @@ impl Petalfall {
                 {
                     Ok(true) => {
                         let uuid = account.uuid.clone();
-                        self.blocking(move |petalfall| {
-                            petalfall.update_credential_account(&uuid, |stored| {
-                                stored.last_verified_at = Some(unix_millis());
-                                stored.status = AccountStatus::Ok;
+                        let checked = self
+                            .blocking(move |petalfall| {
+                                petalfall.update_credential_account(&uuid, |stored| {
+                                    stored.last_verified_at = Some(unix_millis());
+                                    stored.status = AccountStatus::Ok;
+                                })
                             })
-                        })
-                        .await
+                            .await;
+                        if checked.is_ok() {
+                            self.sync_authlib_profile_in_background(&creds.api_root, &account.uuid);
+                        }
+                        checked
                     }
                     Ok(false) => self.refresh_authlib(&account, creds).await,
                     Err(err) => Err(err.into()),
@@ -1016,6 +1095,9 @@ impl Petalfall {
             AccountCredentials::Offline => return Ok(account.clone()),
         };
         note(timing, |timing| timing.online = Some(started.elapsed()));
+        if rewrote_record(&verified) {
+            self.account_changes.notify(uuid);
+        }
         verified
     }
 
@@ -1028,6 +1110,7 @@ impl Petalfall {
     ///
     /// 和启动前的续期排同一把闸：点启动时这边正在续，启动那边等它落盘后直接用新令牌；这边因网络或登录服务
     /// 故障失败，结局是 [`AheadOutcome::Unreachable`]，原错误留给那个启动沿用。其余失败照常以 `Err` 返回。
+    /// 续成了、或账户被判定要重新登录，都发账户变更通知（[`AccountChanges`]）：名字、皮肤与状态可能都变了。
     pub async fn renew_current_ahead(&self) -> Result<AheadOutcome> {
         let Some(account) = self
             .blocking(|petalfall| petalfall.current_account())
@@ -1057,7 +1140,11 @@ impl Petalfall {
             }
             _ => return Ok(AheadOutcome::NotNeeded),
         };
-        match self.refresh_microsoft(&account, &refresh_token).await {
+        let renewed = self.refresh_microsoft(&account, &refresh_token).await;
+        if rewrote_record(&renewed) {
+            self.account_changes.notify(uuid);
+        }
+        match renewed {
             Ok(fresh) => Ok(AheadOutcome::Renewed(Box::new(fresh))),
             Err(err) if unreachable_service(&err) => {
                 tracing::warn!(
@@ -1196,31 +1283,71 @@ impl Petalfall {
         client: &YggdrasilClient,
         account: &Account,
     ) -> Result<Account> {
-        let profile = match client.session_profile(&account.uuid).await {
-            Ok(profile) => Some(profile),
-            Err(err) => {
-                tracing::warn!(uuid = %account.uuid, error = %err, "取外置角色档案失败，角色名与皮肤保持原样");
-                None
-            }
-        };
+        let profile = fetch_authlib_profile(client, &account.uuid).await;
         let uuid = account.uuid.clone();
         self.blocking(move |petalfall| {
             petalfall.update_credential_account(&uuid, |stored| {
-                match profile {
-                    Some(Some(profile)) => {
-                        if let Some(name) = profile.name {
-                            stored.name = name;
-                        }
-                        stored.skin = profile.skin;
-                    }
-                    Some(None) => stored.skin = None,
-                    None => {}
+                if let Some(profile) = profile {
+                    apply_session_profile(stored, profile);
                 }
                 stored.status = AccountStatus::Ok;
                 stored.last_verified_at = Some(unix_millis());
             })
         })
         .await
+    }
+
+    /// 启动时令牌校验通过：在后台顺带取一次外置角色档案，写回名字与皮肤，不拖慢启动。校验通过时不再刷新令牌，
+    /// 不顺带取的话，登录时没取到档案的账户要等令牌失效、手动刷新或重新登录才换上真皮肤，改过的名字也一样。
+    ///
+    /// 只改名字与皮肤：状态与验证时刻刚由启动那一程写过，这期间别处的刷新要是判了令牌失效，也不能被这里改回正常。
+    /// 名字或皮肤变了才发账户变更通知（[`AccountChanges`]），验证时刻那一笔启动那一程已经通知过。取不到档案只记
+    /// warn、原样不动；同一账户已有一份在跑就不再发（见 [`PROFILE_SYNCS`]）。
+    fn sync_authlib_profile_in_background(&self, api_root: &str, uuid: &str) {
+        let Some(in_flight) = ProfileSyncInFlight::try_begin(self.gate_key(uuid)) else {
+            tracing::info!(uuid, "这个外置账户的档案已在后台同步，不再另发一份");
+            return;
+        };
+        let petalfall = self.clone();
+        let client = self.yggdrasil(api_root);
+        let uuid = uuid.to_owned();
+        tokio::spawn(async move {
+            let _in_flight = in_flight;
+            let Some(profile) = fetch_authlib_profile(&client, &uuid).await else {
+                return;
+            };
+            let target = uuid.clone();
+            let written = petalfall
+                .blocking(move |petalfall| {
+                    let mut changed = false;
+                    petalfall.update_credential_account(&target, |stored| {
+                        let before = (stored.name.clone(), stored.skin.clone());
+                        apply_session_profile(stored, profile);
+                        changed = before != (stored.name.clone(), stored.skin.clone());
+                    })?;
+                    Ok(changed)
+                })
+                .await;
+            match written {
+                Ok(true) => {
+                    tracing::info!(uuid, "后台同步的外置角色档案改了名字或皮肤");
+                    petalfall.account_changes.notify(&uuid);
+                }
+                Ok(false) => {}
+                Err(err) => tracing::warn!(
+                    uuid,
+                    error = %err,
+                    causes = %petalfall_base::error_with_causes(&err),
+                    "后台同步的外置角色档案没能写回，下次启动时再同步"
+                ),
+            }
+        });
+    }
+
+    /// 订阅后台改写账户记录的通知（见 [`AccountChanges`]），收到的是改了的账户 uuid。这个门面与它的快照、克隆共用
+    /// 一条通道，订阅之前发出的收不到。
+    pub fn subscribe_account_changes(&self) -> tokio::sync::broadcast::Receiver<String> {
+        self.account_changes.subscribe()
     }
 
     /// 把账户落成「需要重新登录」，然后报 [`AuthError::ReloginRequired`]。`rejected` 是这次续期
@@ -1314,12 +1441,43 @@ impl Petalfall {
     }
 }
 
+/// 从会话服务器取外置角色的档案。取不到（连不上、服务器出错）只记 warn 并为 None，调用方据此让角色名与皮肤保持原样，
+/// 不拿空值盖掉；角色在服务器上已不存在（204）时为 `Some(None)`。
+async fn fetch_authlib_profile(
+    client: &YggdrasilClient,
+    uuid: &str,
+) -> Option<Option<petalfall_auth::yggdrasil::SessionProfile>> {
+    match client.session_profile(uuid).await {
+        Ok(profile) => Some(profile),
+        Err(err) => {
+            tracing::warn!(uuid, error = %err, "取外置角色档案失败，角色名与皮肤保持原样");
+            None
+        }
+    }
+}
+
+/// 把取到的档案写进账户：名字（服务器写了才换）与皮肤以它为准；角色已不存在时没有皮肤可显示，皮肤清空、名字留着。
+fn apply_session_profile(
+    stored: &mut Account,
+    profile: Option<petalfall_auth::yggdrasil::SessionProfile>,
+) {
+    match profile {
+        Some(profile) => {
+            if let Some(name) = profile.name {
+                stored.name = name;
+            }
+            stored.skin = profile.skin;
+        }
+        None => stored.skin = None,
+    }
+}
+
 /// 取外置角色的皮肤；失败不影响登录与刷新，只记 warn 让界面回落。
 async fn profile_skin_or_warn(client: &YggdrasilClient, profile_id: &str) -> Option<SkinRef> {
     match client.profile_skin(profile_id).await {
         Ok(skin) => skin,
         Err(err) => {
-            tracing::warn!(profile_id, error = %err, "取外置角色皮肤失败，界面将回落到剪影");
+            tracing::warn!(profile_id, error = %err, "取外置角色皮肤失败，界面改画默认皮肤");
             None
         }
     }
@@ -3281,6 +3439,263 @@ mod tests {
                     .last_verified_at,
                 checked.last_verified_at
             );
+        }
+
+        const SYNCED_AT_LAUNCH: &str = "9999999999999999cccccccccccccccc";
+        const SYNC_ONCE: &str = "aaaaaaaaaaaaaaaa1111111111111111";
+
+        /// 等下一条账户变更通知，交回 uuid。
+        async fn next_change(changes: &mut tokio::sync::broadcast::Receiver<String>) -> String {
+            tokio::time::timeout(Duration::from_secs(15), changes.recv())
+                .await
+                .expect("15 秒内没收到账户变更通知")
+                .expect("门面还在，通知通道不会关闭")
+        }
+
+        fn no_change(changes: &mut tokio::sync::broadcast::Receiver<String>) {
+            assert_eq!(
+                changes.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty),
+                "不该有账户变更通知"
+            );
+        }
+
+        /// 会话服务器上 `uuid` 的档案：名字 HeroRenamed，细臂皮肤 [`renamed_skin`]。
+        fn renamed_profile(uuid: &str) -> ResponseTemplate {
+            let textures = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                json!({ "textures": { "SKIN": {
+                    "url": "https://skins.example/renamed.png", "metadata": { "model": "slim" }
+                } } })
+                .to_string(),
+            );
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": uuid, "name": "HeroRenamed",
+                "properties": [ { "name": "textures", "value": textures } ]
+            }))
+        }
+
+        fn renamed_skin() -> SkinRef {
+            SkinRef {
+                url: "https://skins.example/renamed.png".into(),
+                model: SkinModel::Slim,
+            }
+        }
+
+        /// 存一个外置账户（名字 Hero，登录时没取到皮肤），校验接口一律判令牌有效。
+        async fn authlib_still_valid(
+            server: &MockServer,
+            petalfall: &Petalfall,
+            uuid: &str,
+        ) -> Account {
+            Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .respond_with(ResponseTemplate::new(204))
+                .mount(server)
+                .await;
+            let info = AuthServerInfo {
+                api_root: format!("{}/", server.uri()),
+                server_name: "Petal Skin".into(),
+                host: "127.0.0.1".into(),
+            };
+            petalfall
+                .store_login(authlib_account(
+                    &info,
+                    "hero@example.com",
+                    "acc".into(),
+                    "cli".into(),
+                    GameProfile {
+                        id: uuid.into(),
+                        name: "Hero".into(),
+                    },
+                    None,
+                ))
+                .unwrap()
+        }
+
+        /// 等这个账户的后台档案同步跑完（登记注销）。
+        async fn until_profile_synced(petalfall: &Petalfall, uuid: &str) {
+            let key = petalfall.gate_key(uuid);
+            tokio::time::timeout(Duration::from_secs(15), async {
+                while PROFILE_SYNCS.lock().unwrap().contains(&key) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("15 秒内后台档案同步没有跑完");
+        }
+
+        /// 后台提前续期与启动前的续期改写了账户记录就通知；订阅在门面上、续期跑在它的克隆（快照）上也收得到。没联网的
+        /// （令牌还有余量）与界面自己发起的手动刷新不通知。删掉 renew_ahead_now 里的通知，第一段即挂；删掉
+        /// ensure_account_fresh_now 里的，最后一段即挂。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn background_and_launch_renewals_notify_but_manual_refresh_does_not() {
+            let server = MockServer::start().await;
+            mount_full_login(&server, 200).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            let mut changes = petalfall.subscribe_account_changes();
+            let snapshot = petalfall.clone();
+            snapshot
+                .store_login(microsoft_expiring_in(JUST_INSIDE))
+                .unwrap();
+
+            assert!(matches!(
+                snapshot.renew_current_ahead().await.unwrap(),
+                AheadOutcome::Renewed(_)
+            ));
+            assert_eq!(next_change(&mut changes).await, MS_UUID);
+            assert_eq!(
+                snapshot.renew_current_ahead().await.unwrap(),
+                AheadOutcome::NotNeeded
+            );
+            no_change(&mut changes);
+
+            // 令牌还有效的启动不联网，记录没动。
+            let valid = snapshot.find_account(MS_UUID).unwrap().unwrap();
+            snapshot.ensure_account_fresh(&valid).await.unwrap();
+            no_change(&mut changes);
+
+            // 账户页的手动刷新：界面做完自己重读。
+            snapshot.refresh_account(MS_UUID).await.unwrap();
+            no_change(&mut changes);
+
+            let expired = snapshot
+                .update_credential_account(MS_UUID, |stored| {
+                    if let AccountCredentials::Microsoft(creds) = &mut stored.credentials {
+                        creds.minecraft_expires_at = Some(1);
+                    }
+                })
+                .unwrap();
+            let renewed = snapshot.ensure_account_fresh(&expired).await.unwrap();
+            assert_eq!(renewed.name, "PetalPlayer");
+            assert_eq!(next_change(&mut changes).await, MS_UUID);
+            no_change(&mut changes);
+        }
+
+        /// 后台提前续期被判定要重新登录：账户落成失效，界面要跟着显示，同样通知。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn background_renewal_that_expires_the_account_notifies() {
+            let server = MockServer::start().await;
+            mount_full_login(&server, 400).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            petalfall
+                .store_login(microsoft_expiring_in(JUST_INSIDE))
+                .unwrap();
+            let mut changes = petalfall.subscribe_account_changes();
+
+            let err = petalfall.renew_current_ahead().await.unwrap_err();
+            assert!(
+                matches!(err, CoreError::Auth(AuthError::ReloginRequired)),
+                "得到 {err:?}"
+            );
+            assert_eq!(next_change(&mut changes).await, MS_UUID);
+            assert_eq!(
+                petalfall.find_account(MS_UUID).unwrap().unwrap().status,
+                AccountStatus::Expired
+            );
+        }
+
+        /// 外置令牌在启动时校验有效：启动不等档案，档案在后台取回后写回名字与皮肤并通知。只改名字与皮肤：同步期间
+        /// 账户被判了失效，取回档案也不把它改回正常。把后台同步改回在启动路径上等着，启动卡在扣着的档案上，第一段
+        /// 即挂；把它整个去掉，等不到档案请求。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn valid_authlib_launch_syncs_the_profile_without_waiting_for_it() {
+            let server = MockServer::start().await;
+            let (reply, mut gate) = hold(renamed_profile(SYNCED_AT_LAUNCH));
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/sessionserver/session/minecraft/profile/{SYNCED_AT_LAUNCH}"
+                )))
+                .respond_with(reply)
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall_at(tmp.path());
+            let account = authlib_still_valid(&server, &petalfall, SYNCED_AT_LAUNCH).await;
+            let mut changes = petalfall.subscribe_account_changes();
+
+            let checked = tokio::time::timeout(
+                Duration::from_secs(15),
+                petalfall.ensure_account_fresh(&account),
+            )
+            .await
+            .expect("启动不该等后台的档案同步")
+            .unwrap();
+            assert_eq!((checked.name.as_str(), &checked.skin), ("Hero", &None));
+            // 启动这一程记下了验证时刻，先通知一次。
+            assert_eq!(next_change(&mut changes).await, SYNCED_AT_LAUNCH);
+
+            gate.arrived().await;
+            petalfall
+                .update_credential_account(SYNCED_AT_LAUNCH, |stored| {
+                    stored.status = AccountStatus::Expired;
+                })
+                .unwrap();
+            gate.release();
+            assert_eq!(next_change(&mut changes).await, SYNCED_AT_LAUNCH);
+            let stored = petalfall_at(tmp.path())
+                .find_account(SYNCED_AT_LAUNCH)
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.name, "HeroRenamed");
+            assert_eq!(stored.skin, Some(renamed_skin()));
+            assert_eq!(
+                stored.status,
+                AccountStatus::Expired,
+                "后台同步不该把失效改回正常"
+            );
+            assert_eq!(stored.credentials, account.credentials);
+        }
+
+        /// 同一个账户的后台档案同步不叠加：前一份还没回来时再触发，不另发请求；回来之后再触发照常发。取回的档案与库里
+        /// 一样（名字与皮肤都没变）时不通知。去掉 PROFILE_SYNCS 的登记，前一份还在路上时会再发一个档案请求，本用例即挂；
+        /// 档案没变也通知的话，最后一处即挂。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn background_profile_syncs_do_not_stack_and_unchanged_profiles_stay_quiet() {
+            let server = MockServer::start().await;
+            let (reply, mut gate) = hold(renamed_profile(SYNC_ONCE));
+            let profile_path = format!("/sessionserver/session/minecraft/profile/{SYNC_ONCE}");
+            Mock::given(method("GET"))
+                .and(path(profile_path.as_str()))
+                .respond_with(reply)
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall_at(tmp.path());
+            authlib_still_valid(&server, &petalfall, SYNC_ONCE).await;
+            let api_root = format!("{}/", server.uri());
+            let mut changes = petalfall.subscribe_account_changes();
+            let profile_requests = || async {
+                server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r.url.path() == profile_path)
+                    .count()
+            };
+
+            petalfall.sync_authlib_profile_in_background(&api_root, SYNC_ONCE);
+            gate.arrived().await;
+            petalfall.sync_authlib_profile_in_background(&api_root, SYNC_ONCE);
+            gate.release();
+            assert_eq!(next_change(&mut changes).await, SYNC_ONCE);
+            until_profile_synced(&petalfall, SYNC_ONCE).await;
+            assert_eq!(profile_requests().await, 1);
+            assert_eq!(
+                petalfall.find_account(SYNC_ONCE).unwrap().unwrap().name,
+                "HeroRenamed"
+            );
+            no_change(&mut changes);
+
+            petalfall.sync_authlib_profile_in_background(&api_root, SYNC_ONCE);
+            gate.arrived().await;
+            gate.release();
+            until_profile_synced(&petalfall, SYNC_ONCE).await;
+            assert_eq!(profile_requests().await, 2);
+            no_change(&mut changes);
         }
 
         /// 等到 mock 服务器收到发往 `endpoint` 的请求。

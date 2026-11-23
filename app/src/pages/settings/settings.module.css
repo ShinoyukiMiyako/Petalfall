@@ -152,16 +152,23 @@
 
 .navHint {
   overflow: hidden;
-  font-size: var(--sk-fs-micro);
-  line-height: var(--sk-lh-micro);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
   color: var(--sk-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+  /* 悬停时提到 text，与导航项的底色同一段过渡 */
+  transition: color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .navHint[data-tone="accent"] {
   color: var(--sk-accent-strong);
+}
+
+/* 未选项悬停铺的叠层上 text-2 不到 4.5:1（夜樱 4.32），说明跟着提到 text；强调色的说明在叠层上仍有 5.1:1 以上，不提 */
+.navItem:hover:not([data-on]) .navHint:not([data-tone]) {
+  color: var(--sk-text);
 }
 
 .navDot {
@@ -180,8 +187,8 @@
   display: block;
   color: var(--sk-text-2);
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   overflow-wrap: anywhere;
   user-select: text;
 }
@@ -374,8 +381,8 @@
 .monoLine {
   overflow: hidden;
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   color: var(--sk-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -387,8 +394,8 @@
   display: block;
   overflow: hidden;
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
   user-select: text;
@@ -559,8 +566,8 @@
 .dirPath {
   overflow: hidden;
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   color: var(--sk-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -594,7 +601,7 @@
   min-width: 0;
   overflow: hidden;
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
+  font-size: var(--sk-fs-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
   user-select: text;
@@ -691,8 +698,8 @@
 .licenseText {
   margin: 0;
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   color: var(--sk-text-2);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -784,28 +791,6 @@
   overflow-wrap: anywhere;
 }
 
-.licensesLoading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--sk-space-10);
-  padding: var(--sk-space-32) 0;
-  font-size: var(--sk-fs-small);
-  color: var(--sk-text-2);
-}
-
-/* 只给读屏的读取中说明：不占位置、看不见，但仍在无障碍树里 */
-.srOnly {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-  border: 0;
-}
-
 /* ---------------------------------------------------------------- 启动器更新 */
 
 .updateRow {
@@ -841,4 +826,51 @@
 /* 试过多个下载源都失败时，后端原文逐行一个源，换行要保留 */
 .updateText .errorText {
   white-space: pre-line;
+}
+
+/*
+ * 更新通道：状态行与「自动检查更新」之间的一块。选项块放不进设置行六成宽的控件区，所以单独成块，
+ * 上下各一条与设置行之间同样的分隔线；上沿与状态行文字的距离补到与设置行的上下留白一样。
+ */
+.channelBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-10);
+  min-width: 0;
+  margin-top: var(--sk-space-10);
+  padding: var(--sk-space-14) 0;
+  border-top: 1px solid var(--sk-line);
+  border-bottom: 1px solid var(--sk-line);
+}
+
+/* 小标题与说明照设置行的文字列写 */
+.channelText {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+}
+
+.channelTitle {
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text);
+}
+
+.channelDesc {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+/* 选项块的占位：与选项块网格同列数、同间距，compact 档同样两列 */
+.channelSkeleton {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sk-space-10);
+}
+
+:global([data-sk-tier="compact"]) .channelSkeleton {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }

@@ -19,6 +19,11 @@ const OPTIONS: readonly ModeOption[] = [
   { value: "night", label: "夜樱", desc: "深紫灰底与紫水晶点缀" },
 ];
 
+const SYSTEM_OPTION: ModeOption = { value: "system", label: "跟随系统", desc: "随 Windows 的浅色、深色模式切换" };
+
+/** 有自己一套预览令牌的明暗；跟随系统借这两套叠画。 */
+const PAINTED_MODES = ["day", "night"] as const;
+
 /** 受控用法：回报的取值写回 value，与页面里的用法一致。 */
 function Controlled({ initial, accent, onChange }: { initial: PreviewMode; accent: PreviewAccent; onChange: (mode: PreviewMode) => void }) {
   const [value, setValue] = useState(initial);
@@ -74,10 +79,10 @@ describe("取值与领域模型同形", () => {
     const accents: readonly PreviewAccent[] = ACCENT_NAMES;
     const backMode: AppearanceMode = "night" satisfies PreviewMode;
     const backAccent: AccentName = "moss" satisfies PreviewAccent;
-    expect([...modes]).toEqual(["day", "night"]);
+    expect([...modes]).toEqual(["day", "night", "system"]);
     expect([...accents]).toEqual(["sakura", "amethyst", "moss"]);
     expect([backMode, backAccent]).toEqual(["night", "moss"]);
-    expect(MODE_ICON).toEqual({ day: "sun", night: "moon" });
+    expect(MODE_ICON).toEqual({ day: "sun", night: "moon", system: "monitor" });
   });
 });
 
@@ -128,9 +133,34 @@ describe("ModeCards", () => {
     expect(radios().map((r) => r.textContent)).toEqual(["日樱浅粉白底，适合白天", "夜樱深紫灰底与紫水晶点缀"]);
   });
 
+  it("跟随系统那张卡叠画日樱、夜樱两幅真实预览，强调色同样跟随传入的；三张卡排成一组单选", () => {
+    const onChange = vi.fn();
+    view = render(<ModeCards value="system" accent="moss" options={[...OPTIONS, SYSTEM_OPTION]} onChange={onChange} ariaLabel="明暗" />);
+    expect(radios().map((r) => r.getAttribute("aria-checked"))).toEqual(["false", "false", "true"]);
+    expect(radios().map((r) => r.textContent)).toEqual(["日樱浅粉白底，适合白天", "夜樱深紫灰底与紫水晶点缀", "跟随系统随 Windows 的浅色、深色模式切换"]);
+    const split = radios()[2].querySelectorAll<HTMLElement>("[data-mode]");
+    expect([...split].map((m) => [m.dataset.mode, m.dataset.tint])).toEqual([
+      ["day", "moss"],
+      ["night", "moss"],
+    ]);
+    for (const mini of split) expect(mini.querySelectorAll("i, b")).toHaveLength(8);
+    expect(split[0].parentElement?.getAttribute("aria-hidden")).toBe("true");
+    act(() => radios()[0].click());
+    expect(onChange.mock.calls).toEqual([["day"]]);
+  });
+
   it("选项重复是调用方的错误", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     expect(() => render(<ModeCards value="day" accent="sakura" options={[OPTIONS[0], OPTIONS[0]]} onChange={() => undefined} ariaLabel="明暗" />)).toThrow("重复的明暗");
+  });
+});
+
+describe("排列", () => {
+  it("有几个选项就一行几等分，不写死两列", () => {
+    const rule = ruleOf(".modes");
+    expect(rule).toMatch(/grid-auto-flow: column;/);
+    expect(rule).toMatch(/grid-auto-columns: minmax\(0, 1fr\);/);
+    expect(rule).not.toMatch(/grid-template-columns/);
   });
 });
 
@@ -170,14 +200,21 @@ describe("单选圆", () => {
 });
 
 describe("迷你预览的取色", () => {
-  it.each(APPEARANCE_MODES)("%s：中性色取该明暗的预览令牌", (mode) => {
+  it.each(PAINTED_MODES)("%s：中性色取该明暗的预览令牌", (mode) => {
     for (const part of ["bg", "surface", "line", "line-2"]) expect(varIn(`.mini[data-mode="${mode}"]`, `--mini-${part}`)).toBe(`--sk-preview-${mode}-${part}`);
   });
 
   it("六种明暗与强调色组合各取对应的预览强调色", () => {
-    for (const mode of APPEARANCE_MODES) {
+    for (const mode of PAINTED_MODES) {
       for (const accent of ACCENT_NAMES) expect(varIn(`.mini[data-mode="${mode}"][data-tint="${accent}"]`, "--mini-accent")).toBe(`--sk-preview-${mode}-${accent}`);
     }
+  });
+
+  it("跟随系统不另设颜色：两幅预览叠在同一格，夜樱按对角线只露出右下一半", () => {
+    expect(ruleOf(".split")).toMatch(/display: grid;/);
+    expect(ruleOf(".split > .mini")).toMatch(/grid-area: 1 \/ 1;/);
+    expect(ruleOf('.split > .mini[data-mode="night"]')).toMatch(/clip-path: polygon\(100% 0, 100% 100%, 0 100%\);/);
+    expect(plain).not.toMatch(/data-mode="system"/);
   });
 
   it("引用的预览令牌都已在令牌文件里声明", () => {

@@ -18,7 +18,7 @@
         "width": 1120,
         "height": 720,
         "minWidth": 960,
-        "minHeight": 720,
+        "minHeight": 640,
         "decorations": false,
         "shadow": true,
         "transparent": false,
@@ -71,6 +71,7 @@
       "nsis": {
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "installer-header.bmp",
         "languages": ["English", "SimpChinese"],
         "installerHooks": "installer-hooks.nsh"
       },

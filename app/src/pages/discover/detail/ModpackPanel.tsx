@@ -190,6 +190,15 @@ export function DownloadingLine({ progress, track }: { progress: number; track: 
   );
 }
 
+/**
+ * 装好之后的启动胶囊。装好的那一块退场期间还挂着、照样订阅状态：新实例在这期间不在了（被删，或游戏目录因数据格式打不开、
+ * 列表被清空）时不画胶囊，胶囊按 id 取实例，取不到就抛错。
+ */
+function CreatedLaunch({ instanceId }: { instanceId: string }) {
+  const live = useLauncherSelector((s) => findInstance(s, instanceId) !== undefined);
+  return live ? <LaunchCapsule instanceId={instanceId} block /> : null;
+}
+
 export function ModpackPanel({ detail, origins, versions, pinned, onPin, online, showingPrevious, footerHost, onClose }: ModpackPanelProps) {
   const instances = useLauncherSelector((s) => s.instances);
   const actions = useLauncherActions();
@@ -224,6 +233,9 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
 
   // 装出新实例之后只订阅它的导入任务：进度随这个任务变，别的任务的进度不让面板重渲染
   const task = useLauncherSelector((s) => (createdId === null ? null : importTask(s.tasks, createdId)));
+  // 侧栏有没有它看派生出的固定列表：占位项是否排进侧栏按入队那一刻有没有空位定，之后腾出空位也不补进来。
+  // 不能按眼下的固定个数推：占位项自己就占着一格，入队时只剩一格的会被说成没排进去
+  const inSidebar = useLauncherSelector((s) => createdId !== null && s.sidebarPins.includes(createdId));
   const created = createdId === null ? undefined : findInstance({ instances }, createdId);
   const progress: Progress | null = (() => {
     if (createdId === null) return null;
@@ -397,13 +409,13 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
                 track={task === null ? undefined : progressTrack(task)}
                 label={MODPACK_COPY.title}
               />
-              <span className={styles.panelHint}>{MODPACK_COPY.background}</span>
+              <span className={styles.panelHint}>{inSidebar ? MODPACK_COPY.background : MODPACK_COPY.backgroundUnpinned}</span>
             </div>
           )}
           {progress !== null && progress.kind === "ready" && createdId !== null && created !== undefined && (
             <div key="ready" className={styles.result}>
               <Callout tone="ok">{MODPACK_COPY.ready(createdId)}</Callout>
-              <LaunchCapsule instanceId={createdId} block />
+              <CreatedLaunch instanceId={createdId} />
             </div>
           )}
           {progress !== null && progress.kind === "cancelled" && (

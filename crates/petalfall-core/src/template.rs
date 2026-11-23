@@ -80,7 +80,7 @@ impl TemplateSkip {
     /// 进度阶段里用的中文原因。
     pub fn describe(self) -> &'static str {
         match self {
-            TemplateSkip::Disabled => "新建实例时沿用默认设置已在配置里关闭",
+            TemplateSkip::Disabled => "新建实例时沿用默认设置已在设置的「游戏」分区关闭",
             TemplateSkip::Empty => "还没有默认设置",
             TemplateSkip::SharedWorkingDir => "这个实例与其他未隔离的实例共用 .minecraft 里的设置",
         }
@@ -101,9 +101,9 @@ pub enum TemplateOutcome {
 /// `template.json` 的内容。字段都可缺：手写或旧版本写的元数据缺哪项就当不知道。
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-struct TemplateMeta {
-    source_instance: Option<String>,
-    saved_at: Option<u64>,
+pub(crate) struct TemplateMeta {
+    pub(crate) source_instance: Option<String>,
+    pub(crate) saved_at: Option<u64>,
 }
 
 /// 进程内的模板目录锁表，写法与 mods 目录锁相同。保存要先挪走旧目录再换上新目录，两步之间模板目录
@@ -382,7 +382,7 @@ async fn recover_interrupted_swap(root: &Path, dir: &Path) -> Result<()> {
 }
 
 /// 建暂存目录，写进白名单文件与元数据。
-async fn fill_staging(
+pub(crate) async fn fill_staging(
     root: &Path,
     staging: &Path,
     source: &Path,

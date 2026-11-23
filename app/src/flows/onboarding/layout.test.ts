@@ -19,6 +19,17 @@ describe("步骤条", () => {
     expect(declarations('.railItem[data-status="current"] .railDot::before')).toMatch(/opacity:\s*1/);
     expect(declarations('.railItem[data-status="current"] .railDot')).not.toMatch(/background/);
   });
+
+  it("「已跳过」的进出全由 popMark 驱动：样式表里不再挂只管入场的关键帧，否则入场叠两遍、退场仍是一帧没了", () => {
+    expect(declarations(".railSkipped")).not.toMatch(/animation/);
+    expect(css).not.toMatch(/@keyframes\s+railTagIn/);
+  });
+});
+
+describe("收尾", () => {
+  it("向导根裁切溢出：收尾时放大的是根里面的晕染与面板，溢出被根裁掉，外壳的滚动容器不因此出滚动条", () => {
+    expect(declarations(".root")).toMatch(/overflow:\s*hidden/);
+  });
 });
 
 describe("步骤内容区", () => {
@@ -39,6 +50,10 @@ describe("步骤里出没的块", () => {
     const wrap = declarations(".useDefault");
     expect(wrap).toMatch(/display:\s*flex/);
     expect(wrap).toMatch(/align-self:\s*flex-start/);
+  });
+
+  it("Java 扫描中给读屏的说明交给 Loadable 的 busyLabel：向导样式表里不再自带一份视觉隐藏规则", () => {
+    expect(css).not.toMatch(/clip-path:\s*inset\(50%\)/);
   });
 });
 
@@ -61,12 +76,44 @@ describe("账户步", () => {
 });
 
 describe("底栏", () => {
-  it("主按钮与隐形的「开始使用 →」叠在同一格：格宽取最宽的那种，不在这里复写按钮的内边距与图标尺寸", () => {
-    expect(declarations(".primarySlot")).toMatch(/display:\s*inline-grid/);
-    expect(css).toMatch(/\n\.primaryAction,\s*\n\.primaryGhost\s*\{[^}]*grid-area:\s*1 \/ 1/);
-    // 单独的那条规则（前一行是上一条规则的结尾），不是和真按钮合写的那条
-    expect(/\}\s*\n\.primaryGhost\s*\{([^}]*)\}/.exec(css)?.[1]).toMatch(/visibility:\s*hidden/);
+  it("主按钮不垫隐形的整颗按钮、自己不缩：宽度由「开始使用」加后置箭头撑出，箭头与文字的间距同按钮 md 档", () => {
+    expect(css).not.toMatch(/primaryGhost|primarySlot/);
+    expect(declarations(".primaryAction")).toMatch(/flex:\s*none/);
     expect(css).not.toMatch(/\.primaryAction[^{]*\{[^}]*min-width/);
+    const finish = declarations(".primaryFinish");
+    expect(finish).toMatch(/display:\s*flex/);
+    expect(finish).toMatch(/align-items:\s*center/);
+    expect(finish).toMatch(/gap:\s*calc\(var\(--sk-space-8\) - 1px\)/);
+  });
+
+  it("两条文案各一层交叉淡化，只动透明度：换上来的淡入、换下去的淡出；「下一步」那层铺满按钮居中", () => {
+    const face = declarations(".primaryFace");
+    // 只认恰好为 0：半透明的旧文案会叠在新文案上
+    expect(face).toMatch(/(^|[\s;])opacity:\s*0\s*;/);
+    expect(face).toMatch(/transition:\s*opacity var\(--sk-dur-out\) var\(--sk-ease-in\)/);
+    const current = declarations(".primaryFace[data-current]");
+    expect(current).toMatch(/opacity:\s*1\s*;/);
+    expect(current).toMatch(/transition:\s*opacity var\(--sk-dur-in\) var\(--sk-ease-out\)/);
+    const next = declarations(".primaryNext");
+    expect(next).toMatch(/position:\s*absolute/);
+    expect(next).toMatch(/inset:\s*0/);
+    expect(next).toMatch(/align-items:\s*center/);
+    expect(next).toMatch(/justify-content:\s*center/);
+  });
+
+  it("后置箭头在「下一步」时透明并缩小，到第四步淡入并沿 pop 弹到原大；减少动画不缩放", () => {
+    const hiddenSelector = '.primaryAction[data-face="next"] .primaryArrow';
+    const hidden = declarations(hiddenSelector);
+    expect(hidden).toMatch(/(^|[\s;])opacity:\s*0\s*;/);
+    expect(hidden).toMatch(/scale:\s*0\.6/);
+    expect(hidden).toMatch(/opacity var\(--sk-dur-out\) var\(--sk-ease-in\)/);
+    const shown = declarations(".primaryArrow");
+    expect(shown).toMatch(/opacity var\(--sk-dur-in\) var\(--sk-ease-out\)/);
+    expect(shown).toMatch(/scale var\(--sk-spring-pop-dur\) var\(--sk-spring-pop\)/);
+    // 与上面那条同等特异度、写在它后面，才盖得住 scale: 0.6
+    const reducedSelector = ":global([data-sk-reduced]) .primaryAction .primaryArrow";
+    expect(declarations(reducedSelector)).toMatch(/scale:\s*none/);
+    expect(css.indexOf(reducedSelector)).toBeGreaterThan(css.indexOf(hiddenSelector));
   });
 
   it("出没的按钮退场时按整条底栏定位，原地淡出：右侧按钮组靠右、从左侧收窄，按它定位会落到主按钮上", () => {

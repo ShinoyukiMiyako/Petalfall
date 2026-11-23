@@ -10,6 +10,7 @@ use serde_json::Value;
 use tauri::{AppHandle, State};
 
 use crate::commands::instances::{ensure_saves_free_for_writing, InstanceActivity, InstanceLocks};
+use crate::commands::tasks::ensure_game_dir;
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
@@ -213,11 +214,15 @@ pub async fn project_detail(
 ///
 /// 安装全程以「改动 Mod 与资源」占住实例：路径在开始时按实例名算好，期间改名或删除会让落位按旧路径
 /// 把目录重新建出来，所以这两件事在安装结束前报 `instance_busy`。
+///
+/// `game_dir`（前端传 `gameDir`）是入队那一刻的游戏目录，当前目录已经不是它（切换目录后重试）就报
+/// `game_dir_changed`，什么都不动。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn install_mod(
     app: AppHandle,
     task_id: String,
+    game_dir: String,
     step: Option<u32>,
     version_id: String,
     platform: String,
@@ -235,6 +240,7 @@ pub async fn install_mod(
         &locks,
         &task_id,
         ModTarget {
+            game_dir: &game_dir,
             version_id: &version_id,
             platform: target_platform,
             project_id: &project_id,
@@ -247,8 +253,10 @@ pub async fn install_mod(
     outcome
 }
 
-/// [`install_mod`] 要装的是哪个实例、哪个平台上的哪个版本。
+/// [`install_mod`] 要装的是哪个游戏目录里的哪个实例、哪个平台上的哪个版本。
 pub(crate) struct ModTarget<'a> {
+    /// 入队那一刻的游戏目录，还没和当前目录比对。
+    pub game_dir: &'a str,
     pub version_id: &'a str,
     pub platform: Platform,
     pub project_id: &'a str,
@@ -263,9 +271,11 @@ pub(crate) async fn install_mod_with(
     target: ModTarget<'_>,
     events: &EventSink,
 ) -> Result<ModInstallOutcomeDto, CommandError> {
+    let snapshot = facade.snapshot().await;
+    ensure_game_dir(&snapshot, target.game_dir)?;
     let _guard = locks.acquire(target.version_id, InstanceActivity::Modifying)?;
     let task = tasks.register(task_id)?;
-    let petalfall = facade.snapshot().await.with_cancel(task.token().clone());
+    let petalfall = snapshot.with_cancel(task.token().clone());
     let outcome = task
         .run(async {
             Ok(petalfall
@@ -314,11 +324,15 @@ fn resource_outcome_dto(outcome: ResourceInstallOutcome) -> ResourceInstallOutco
 ///
 /// `world` 只对数据包有意义且必填（存档目录名）；`fileVersionId` 为 Modrinth 版本 id 或
 /// CurseForge 文件 id。与 [`install_mod`] 一样全程占住实例，改名与删除在安装结束前报 `instance_busy`。
+///
+/// `game_dir`（前端传 `gameDir`）是入队那一刻的游戏目录，当前目录已经不是它（切换目录后重试）就报
+/// `game_dir_changed`，什么都不动。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn install_resource(
     app: AppHandle,
     task_id: String,
+    game_dir: String,
     version_id: String,
     resource_type: String,
     world: Option<String>,
@@ -336,6 +350,7 @@ pub async fn install_resource(
         &locks,
         &task_id,
         InstallResourceArgs {
+            game_dir: &game_dir,
             version_id: &version_id,
             resource_type: &resource_type,
             world: world.as_deref(),
@@ -352,6 +367,8 @@ pub async fn install_resource(
 
 /// [`install_resource`] 的入参（字符串枚举尚未解析）。
 pub(crate) struct InstallResourceArgs<'a> {
+    /// 入队那一刻的游戏目录，还没和当前目录比对。
+    pub game_dir: &'a str,
     pub version_id: &'a str,
     pub resource_type: &'a str,
     pub world: Option<&'a str>,
@@ -385,8 +402,9 @@ pub(crate) async fn install_resource_with(
         ResourceType::ResourcePack | ResourceType::Shader | ResourceType::DataPack => {}
     }
     let platform = parse_platform(args.platform)?;
-    let _guard = locks.acquire(args.version_id, InstanceActivity::Modifying)?;
     let snapshot = facade.snapshot().await;
+    ensure_game_dir(&snapshot, args.game_dir)?;
+    let _guard = locks.acquire(args.version_id, InstanceActivity::Modifying)?;
     // 数据包写进存档目录，与备份、恢复、导出存档相交。先记下再查，与那几件事先占后查对称，两边同时发起时
     // 至少有一方会被挡住。被拒时记录随返回撤销。
     let _writing = if resource_type == ResourceType::DataPack {
@@ -475,6 +493,7 @@ fn parse_sort_field(name: &str) -> Result<SortField, CommandError> {
 mod tests {
     use super::*;
     use crate::commands::error::code;
+    use crate::commands::tasks::{assert_game_dir_changed, current_game_dir, disk_state};
 
     // 前端会把出参里的枚举值原样回传（搜索结果的平台、已装 Mod 的加载器），入参解析必须认得
     // 出参的序列化名，两边任何一处改名都要让这条测试挂掉。
@@ -589,6 +608,7 @@ mod tests {
             &locks,
             "rp#1",
             InstallResourceArgs {
+                game_dir: &current_game_dir(&facade).await,
                 version_id: "生存",
                 resource_type: "resource_pack",
                 world: None,
@@ -679,6 +699,7 @@ mod tests {
                 &locks,
                 "all#1",
                 ModTarget {
+                    game_dir: &current_game_dir(&facade).await,
                     version_id: "生存",
                     platform: Platform::Modrinth,
                     project_id: project,
@@ -765,6 +786,7 @@ mod tests {
                 &locks,
                 "mod#1",
                 ModTarget {
+                    game_dir: &current_game_dir(&facade).await,
                     version_id: "生存",
                     platform: Platform::Modrinth,
                     project_id: "sodium",
@@ -782,6 +804,7 @@ mod tests {
                 &locks,
                 "rp#2",
                 InstallResourceArgs {
+                    game_dir: &current_game_dir(&facade).await,
                     version_id: "生存",
                     resource_type: "shader",
                     world: None,
@@ -851,7 +874,9 @@ mod tests {
         let registry = std::sync::Arc::new(TaskRegistry::default());
         let locks = InstanceLocks::default();
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let game_dir = current_game_dir(&facade).await;
         let data_pack = || InstallResourceArgs {
+            game_dir: &game_dir,
             version_id: "生存",
             resource_type: "data_pack",
             world: Some("新的世界"),
@@ -884,6 +909,7 @@ mod tests {
             async move {
                 let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
                 let args = InstallResourceArgs {
+                    game_dir: &current_game_dir(&f).await,
                     version_id: "生存",
                     resource_type: "data_pack",
                     world: Some("新的世界"),
@@ -959,6 +985,7 @@ mod tests {
                     &l,
                     "rp#slow",
                     InstallResourceArgs {
+                        game_dir: &current_game_dir(&f).await,
                         version_id: "生存",
                         resource_type: "resource_pack",
                         world: None,
@@ -1018,6 +1045,7 @@ mod tests {
                 &InstanceLocks::default(),
                 "t",
                 InstallResourceArgs {
+                    game_dir: &current_game_dir(&facade).await,
                     version_id: "x",
                     resource_type,
                     world: None,
@@ -1161,5 +1189,143 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(reason).unwrap(), name);
         }
+    }
+
+    /// 当前目录 `root/.minecraft` 里放一个实例「生存」，门面的平台接口指向 `base`；另给一个别处的游戏目录，当作
+    /// 任务发起时的目录。返回门面、实例目录、别处目录的临时目录（随它删）与它的路径文本。
+    fn switched_away(
+        root: &std::path::Path,
+        base: &str,
+    ) -> (Facade, std::path::PathBuf, tempfile::TempDir, String) {
+        let version_dir = root.join(".minecraft").join("versions").join("生存");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(
+            version_dir.join("生存.json"),
+            r#"{"id":"生存","type":"release","mainClass":"m"}"#,
+        )
+        .unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let expected = elsewhere.path().join(".minecraft").display().to_string();
+        (facade_in(root, base), version_dir, elsewhere, expected)
+    }
+
+    /// 切换目录后重试装 Mod：报 game_dir_changed，当前目录里同名实例的 mods 目录都没建、盘上什么都没动，平台
+    /// 一次没问；实例与任务 id 随之放开。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_mod_retried_after_switching_directories_is_refused() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/version/s1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "s1", "project_id": "sodium", "name": "sodium", "version_number": "1.0",
+                "version_type": "release", "date_published": "2026-01-01T00:00:00Z",
+                "game_versions": ["1.21"], "loaders": [], "dependencies": [],
+                "files": [{"hashes": {}, "url": format!("{}/sodium-s1.jar", server.uri()),
+                           "filename": "sodium-s1.jar", "primary": true, "size": 4}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/sodium-s1.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"aaaa".to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "sodium", "title": "Sodium", "description": "d", "project_type": "mod", "downloads": 1}
+            ])))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let (facade, version_dir, _a, expected) = switched_away(dir.path(), &server.uri());
+        let before = disk_state(dir.path());
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let target = || ModTarget {
+            game_dir: &expected,
+            version_id: "生存",
+            platform: Platform::Modrinth,
+            project_id: "sodium",
+            mod_version_id: "s1",
+        };
+
+        let err = install_mod_with(&facade, &registry, &locks, "mod#1", target(), &sink)
+            .await
+            .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &dir.path().join(".minecraft"));
+        assert!(!version_dir.join("mods").exists());
+        assert_eq!(disk_state(dir.path()), before);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        // 同名实例此刻正被改名也先报目录换了：核对在占锁之前，不让新目录里的占用盖过它。
+        let renaming = locks.acquire("生存", InstanceActivity::Renaming).unwrap();
+        let err = install_mod_with(&facade, &registry, &locks, "mod#1", target(), &sink)
+            .await
+            .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &dir.path().join(".minecraft"));
+        drop(renaming);
+        drop(registry.register("mod#1").unwrap());
+        drop(locks.acquire("生存", InstanceActivity::Modifying).unwrap());
+    }
+
+    /// 切换目录后重试装资源包：报 game_dir_changed，当前目录里同名实例的 resourcepacks 目录都没建、盘上什么都没动，
+    /// 平台一次没问；实例与任务 id 随之放开。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_resource_retried_after_switching_directories_is_refused() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/version/rp1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "rp1", "project_id": "faithful", "name": "32x", "version_number": "1.0",
+                "version_type": "release", "date_published": "2026-01-01T00:00:00Z",
+                "files": [{"hashes": {}, "url": format!("{}/Faithful.zip", server.uri()),
+                           "filename": "Faithful.zip", "primary": true, "size": 4}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/Faithful.zip"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"pack".to_vec()))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let (facade, version_dir, _a, expected) = switched_away(dir.path(), &server.uri());
+        let before = disk_state(dir.path());
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let args = || InstallResourceArgs {
+            game_dir: &expected,
+            version_id: "生存",
+            resource_type: "resource_pack",
+            world: None,
+            platform: "modrinth",
+            project_id: "faithful",
+            file_version_id: "rp1",
+        };
+
+        let err = install_resource_with(&facade, &registry, &locks, "rp#1", args(), &sink)
+            .await
+            .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &dir.path().join(".minecraft"));
+        assert!(!version_dir.join("resourcepacks").exists());
+        assert_eq!(disk_state(dir.path()), before);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        // 同名实例此刻正被改名也先报目录换了：核对在占锁之前，不让新目录里的占用盖过它。
+        let renaming = locks.acquire("生存", InstanceActivity::Renaming).unwrap();
+        let err = install_resource_with(&facade, &registry, &locks, "rp#1", args(), &sink)
+            .await
+            .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &dir.path().join(".minecraft"));
+        drop(renaming);
+        drop(registry.register("rp#1").unwrap());
+        drop(locks.acquire("生存", InstanceActivity::Modifying).unwrap());
     }
 }

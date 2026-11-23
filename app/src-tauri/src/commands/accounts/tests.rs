@@ -481,4 +481,38 @@ mod microsoft {
         let accounts = facade.snapshot().await.accounts().unwrap();
         assert_eq!(accounts[0].status, AccountStatus::Expired);
     }
+
+    /// 后台提前续期续上了：经门面的变更通知转发出去的是这个账户的 uuid，前端据此重读账户、让皮肤重取。订阅在常驻
+    /// 门面上，续期跑在每次新取的快照上，与外壳开机时的接法一样。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn renewal_ahead_is_forwarded_as_an_account_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        mount_short_lived_login(&server).await;
+        let facade = facade_against(&server, dir.path());
+        facade
+            .snapshot()
+            .await
+            .microsoft_login(|_| {})
+            .await
+            .unwrap();
+        let (delivered, mut forwarded) = tokio::sync::mpsc::unbounded_channel();
+        crate::events::forward_account_changes(
+            facade.read().await.subscribe_account_changes(),
+            move |payload| delivered.send(payload).expect("用例还在等转发"),
+        );
+
+        assert!(matches!(
+            renew_ahead_once(&facade).await,
+            Some(AheadOutcome::Renewed(_))
+        ));
+        let payload = tokio::time::timeout(Duration::from_secs(15), forwarded.recv())
+            .await
+            .expect("15 秒内没转发出账户变更")
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap(),
+            json!({ "uuid": "0123456789abcdef0123456789abcdef" })
+        );
+    }
 }

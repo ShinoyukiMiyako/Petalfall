@@ -3,6 +3,7 @@ import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { keydown, render, setRect, stubResizeObserver, type Rendered } from "../test/dom";
+import { refuseHiddenFocus } from "../test/focus-fixup";
 import { Button } from "./Button";
 import { Menu, type MenuEntry } from "./Menu";
 import { MenuButton } from "./MenuButton";
@@ -107,6 +108,21 @@ describe("打开与高亮", () => {
     // 分组标题不可操作，第一项是「打开实例文件夹」
     expect(highlighted()).toBe("打开实例文件夹");
     expect(menu()?.getAttribute("aria-labelledby")).toBe(trigger().id);
+  });
+
+  // 面板定位前是隐藏的，浏览器不给隐藏的元素焦点：挂载时就聚焦的话焦点留在触发器上，之后的方向键全落在触发器上
+  it("键盘打开：面板可见之后才把焦点放进菜单，之后的 ↓ 与 Esc 由菜单处理", () => {
+    mount(<MoreMenu items={entries(() => undefined)} />);
+    act(() => trigger().focus());
+    const calls = refuseHiddenFocus();
+    press("ArrowDown");
+    expect(calls.map((c) => [c.target, c.hidden])).toEqual([[menu(), false]]);
+    expect(document.activeElement).toBe(menu());
+    press("ArrowDown");
+    expect(highlighted()).toBe("复制实例Ctrl D");
+    press("Escape");
+    expect(menu()).toBeNull();
+    expect(document.activeElement).toBe(trigger());
   });
 
   it("触发器上 ↓ 打开高亮第一项，↑ 打开高亮最后一项", () => {

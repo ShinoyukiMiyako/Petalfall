@@ -28,6 +28,8 @@ import {
   TEMPLATE_FILES,
   TEMPLATE_SOURCE_EMPTY_ERROR_CODE,
   INSTANCE_MOVE_BLOCKED_ERROR_CODE,
+  type DataFormatUnreadableDto,
+  type GameDirDataTooNewDto,
   type MoveBlockerDto,
   type MoveFollowUpDto,
   type MoveOutcomeDto,
@@ -42,12 +44,14 @@ import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
 import {
   addExtraDirectory,
+  ensureMockGameDir,
   followMockSelection,
   isKnownMockGameDirectory,
   isMockPathWithin,
   mockDirectoryVersions,
   mockGameDir,
   mockGameDirectoryName,
+  mockNewInstanceTemplate,
   mockWorldBackupSettings,
   recordMockMovedVersions,
   samePath,
@@ -114,6 +118,7 @@ type DerivedField =
   | "description"
   | "cover"
   | "cover_image"
+  | "cover_image_hue"
   | "background"
   | "background_image"
   | "memory_mb"
@@ -123,6 +128,7 @@ type DerivedField =
   | "dir_error"
   | "mod_count"
   | "world_count"
+  | "resource_pack_count"
   | "isolated"
   | "modpack"
   | "modpack_error"
@@ -749,12 +755,16 @@ function toDto(instance: MockInstance): InstanceDto {
     description: instance.settings.description,
     cover: instance.settings.cover,
     cover_image: coverImageKey(instance, instance.settings.cover_image),
+    // 假数据不解码图片，取不出主色调：卡面照旧按方块的色调画
+    cover_image_hue: null,
     background: instance.settings.background,
     background_image: coverImageKey(instance, instance.settings.background_image),
     memory_mb: instance.settings.memory_mb,
     // 与 list_mods 数的是同一份文件表，两边不会对不上。
     mod_count: ready ? mockModFileCount(instance.dto.id) : null,
     world_count: ready ? instance.content.worlds.length : null,
+    // 数的是 list_instance_content 给出的同一份资源包表，概览按它占位的行数与读到之后的行数对得上
+    resource_pack_count: ready ? instance.content.resource_packs.length : null,
     isolated: ready ? isolatedOf(instance) : null,
     modpack: instance.modpack,
     modpack_error: null,
@@ -1079,12 +1089,14 @@ function manifestDto(): ManifestDto {
 // ---------------------------------------------------------------- 默认设置
 
 function templateInfo(): TemplateInfoDto {
-  if (template === null) return { present: false, files: [], source_instance: null, saved_at: null, enabled: true };
-  return { present: template.files.length > 0, files: template.files, source_instance: template.source_instance, saved_at: template.saved_at, enabled: true };
+  const enabled = mockNewInstanceTemplate();
+  if (template === null) return { present: false, files: [], source_instance: null, saved_at: null, enabled };
+  return { present: template.files.length > 0, files: template.files, source_instance: template.source_instance, saved_at: template.saved_at, enabled };
 }
 
 /** 与后端同一个判断顺序：配置开关、模板是否为空、新实例是否隔离（不隔离的共用游戏目录根下的设置，一个文件都不碰）。 */
 function applyTemplate(instance: MockInstance): TemplateOutcomeDto {
+  if (!mockNewInstanceTemplate()) return { status: "skipped", reason: "disabled" };
   if (template === null || template.files.length === 0) return { status: "skipped", reason: "empty" };
   if (!isolatedOf(instance)) return { status: "skipped", reason: "shared_working_dir" };
   // 新建的实例目录里还没有任何设置文件：模板里的全都补上
@@ -1092,7 +1104,7 @@ function applyTemplate(instance: MockInstance): TemplateOutcomeDto {
 }
 
 const TEMPLATE_SKIP_STAGE: Record<Extract<TemplateOutcomeDto, { status: "skipped" }>["reason"], string> = {
-  disabled: "新建实例时沿用默认设置已在配置里关闭",
+  disabled: "新建实例时沿用默认设置已在设置的「游戏」分区关闭",
   empty: "还没有默认设置",
   shared_working_dir: "这个实例与其他未隔离的实例共用 .minecraft 里的设置",
 };
@@ -1121,6 +1133,7 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
   if ((loader === "forge" || loader === "neoforge") && loaderVersionArg === null) {
     throw new IpcError("loader_version_not_found", `${LOADER_NAMES[loader]} 没有适用于 ${mcVersion} 的可用 loader 版本`);
   }
+  ensureMockGameDir(args, "install_version");
   checkName(name, null);
   const release = acquire(name, "installing");
   try {
@@ -1212,6 +1225,10 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
   } catch (error) {
     if (error instanceof IpcError && error.code === "cancelled") {
       instances = instances.filter((i) => i !== instance);
+      // 与后端一样，目录删掉之后一并去掉配置里对这个名字的引用：新建入队时前端就把它设成了当前实例
+      pins = pins.filter((pin) => pin !== name);
+      forgetMockPinnedInstance(name);
+      followMockSelection(name, null);
     } else if (error instanceof IpcError) {
       instance.dto.incomplete = { ...incomplete, outcome: "failed", error: { code: error.code, message: error.message } };
     }
@@ -1257,6 +1274,7 @@ async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
   const taskId = str(args, "taskId");
   const id = str(args, "id");
   const reinstallLoader = reinstallLoaderArg(args);
+  ensureMockGameDir(args, "repair_instance");
   const instance = requireInstance(id);
   // 与后端一样，补全期间连同继承链上的基底一起占住：补全要读写基底里的客户端 jar 与 natives。
   const repairHold = acquireMockInstanceWithBases(id, "repairing", mockInheritanceChain(id));
@@ -1588,6 +1606,7 @@ async function backupWorld(args: MockArgs): Promise<BackupResultDto> {
   const taskId = str(args, "taskId");
   const id = str(args, "id");
   const world = worldArg(args);
+  ensureMockGameDir(args, "backup_world");
   return worldTask(taskId, id, false, async () => {
     const instance = requireInstance(id);
     const found = requireWorld(instance, world);
@@ -1623,6 +1642,7 @@ async function restoreWorldBackup(args: MockArgs): Promise<RestoreResultDto> {
   const id = str(args, "id");
   const world = worldArg(args);
   const file = str(args, "file");
+  ensureMockGameDir(args, "restore_world_backup");
   return worldTask(taskId, id, true, async () => {
     const instance = requireInstance(id);
     const entry = worldBackups(id, world).find((b) => b.file === file);
@@ -1654,6 +1674,7 @@ async function exportWorld(args: MockArgs): Promise<ExportResultDto> {
   const dest = str(args, "dest");
   if (!/^([A-Za-z]:[\\/]|\\\\)/.test(dest)) throw invalid("dest", "not_absolute", `导出位置须是绝对路径：${dest}`);
   if (!dest.toLowerCase().endsWith(".zip")) throw invalid("dest", "not_zip", `导出文件须是 .zip：${dest}`);
+  ensureMockGameDir(args, "export_world");
   const result = await worldTask(taskId, id, false, async () => {
     const instance = requireInstance(id);
     const found = requireWorld(instance, world);
@@ -1726,6 +1747,34 @@ function freeBytesOf(path: string): number {
   return listed === undefined ? MOCK_FREE_BYTES_ELSEWHERE : listed;
 }
 
+/** 这一版认得的数据格式号，与后端第一个带这套机制的版本相同。 */
+const MOCK_DATA_FORMAT = 1;
+
+/** 假游戏目录里数据格式记号的问题：比这一版新（supported 取这一版的号），或记号读不懂。其余字段同对应的拦截项。 */
+export type MockGameDirDataProblem =
+  | ({ kind: "data_too_new" } & Omit<GameDirDataTooNewDto, "path" | "supported">)
+  | ({ kind: "data_format_unreadable" } & Omit<DataFormatUnreadableDto, "path">);
+
+/** 登记过记号问题的假游戏目录；没登记的目录，记号与这一版相符或还没有记号。 */
+let gameDirDataProblems: { path: string; problem: MockGameDirDataProblem }[] = [];
+
+/**
+ * 让一个假游戏目录的数据格式记号出问题（模拟被更新的版本用过，或记号文件坏了）：以它为目标的移动预检列出对应的拦截项，
+ * 执行前的重新预检照样拦下。同一目录再登记一次换成新的问题。
+ */
+export function setMockGameDirDataProblem(path: string, problem: MockGameDirDataProblem): void {
+  if (problem.kind === "data_too_new" && problem.found <= MOCK_DATA_FORMAT) throw new Error(`登记的数据格式号 ${problem.found} 不比这一版的 ${MOCK_DATA_FORMAT} 新`);
+  gameDirDataProblems = [...gameDirDataProblems.filter((entry) => !samePath(entry.path, path)), { path, problem }];
+}
+
+/** 目标游戏目录的记号问题对应的拦截项；没登记过问题时为 null。 */
+function dataFormatBlocker(target: string): MoveBlockerDto | null {
+  const entry = gameDirDataProblems.find((e) => samePath(e.path, target));
+  if (entry === undefined) return null;
+  const { problem } = entry;
+  return problem.kind === "data_too_new" ? { ...problem, path: target, supported: MOCK_DATA_FORMAT } : { ...problem, path: target };
+}
+
 /** 随实例走的存档备份：备份区里按实例 id 分的那一层，与后端 instances/<id> 同一个口径。 */
 function movedBackups(id: string): { count: number; bytes: number } {
   const book = backups[id];
@@ -1760,6 +1809,8 @@ function previewMove(id: string, rawTarget: string): MovePreviewDto {
   if (samePath(target, source)) blockers.push({ kind: "same_directory" });
   else if (isMockPathWithin(target, `${source}\\versions\\${id}`)) blockers.push({ kind: "target_inside_source" });
   else {
+    const dataFormat = dataFormatBlocker(target);
+    if (dataFormat !== null) blockers.push(dataFormat);
     if (inTarget(id)) blockers.push({ kind: "name_taken" });
     const dependents = dependentsOf(id);
     if (dependents.length > 0) blockers.push({ kind: "has_dependents", dependents });
@@ -2135,6 +2186,7 @@ export function reset(): void {
   holds.clear();
   pendingBackupsMoveFailure = null;
   pendingMoveConfigFailure = null;
+  gameDirDataProblems = [];
   savesReaders.length = 0;
   savesWriters.length = 0;
   mockRevealedPaths.length = 0;

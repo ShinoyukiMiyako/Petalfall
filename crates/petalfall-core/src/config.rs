@@ -3,7 +3,8 @@
 //! 门面持有一份可读写的全局配置：下载源与版本列表源各自的三档策略（对应功能矩阵「文件下载源 /
 //! 版本列表源」两项独立三档设置）、下载并发、默认内存、版本隔离档位、微软 client_id、可选自定义
 //! 游戏/缓存目录，以及启动后窗口行为、默认 Java、主页固定的服务器、并存的游戏目录、首次启动
-//! 是否完成、启动器更新的检查偏好与界面语言。凭据不进这里（归 petalfall-auth 的加密存储）。
+//! 是否完成、启动器更新的检查偏好、更新通道与各通道见过的版本、界面语言、前端首帧占位用的界面形状缓存，以及用户确认过的使用须知。
+//! 凭据不进这里（归 petalfall-auth 的加密存储）。
 //!
 //! 配置以 JSON 落在数据目录（`%LOCALAPPDATA%\Petalfall\config.json`）。缺失时用全默认值；损坏时
 //! [`ConfigStore::load`] 冒泡报错，而不是静默用默认覆盖（避免用户改坏的配置被无声吞掉）。桌面应用启动
@@ -28,6 +29,8 @@ use serde_json::Value;
 use crate::appearance::Appearance;
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
+use crate::ui_shape::UiShape;
+use crate::usage_notice::UsageNoticeAcceptance;
 
 /// 下载源三档策略。对应功能矩阵的「文件下载源 / 版本列表源」三档设置。
 ///
@@ -216,6 +219,20 @@ pub struct PetalfallConfig {
     pub skipped_update_version: Option<String>,
     /// 自动检查已经弹过提示的启动器版本，同一版本只提示一次。
     pub notified_update_version: Option<String>,
+    /// 用户选的启动器更新通道（`dev`、`beta`、`stable`）；键不存在表示按安装包自带的通道。
+    ///
+    /// 按文件里原样的 JSON 值收下，由读它的更新代码自己解析：整份配置是按类型严格解析的，声明成有类型的
+    /// 字段的话，值写成数字、对象这类对不上的类型（手改坏了，或更新的版本换了写法），整份 config.json
+    /// 就会被改名重置，游戏目录登记和首次启动状态跟着丢。同样的原因不登记进 `ENUM_FIELDS`：那张表只救得回
+    /// 认不出的字符串。认不出的值留在这里，随整份配置原样写回。写成 `null` 与键不存在同义，读进来是 `None`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_channel: Option<Value>,
+    /// 各更新通道见过的最高版本，形如 `{通道: {version, signature}}`，没见过的通道不写。
+    ///
+    /// 与 [`PetalfallConfig::update_channel`] 同理按原样的值收下：读它的代码逐项解析、重验，某一项坏了
+    /// 只废那一项，不连累整份配置；不认识的通道键随整份配置原样写回。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seen_update_versions: Option<Value>,
     /// 界面语言。旧配置没有这一项时取默认的简体中文。
     pub language: UiLanguage,
     /// 手动添加的 java 可执行文件，一律存成规范化后的 java.exe 路径：启动链路拉起的是 java.exe，
@@ -231,6 +248,17 @@ pub struct PetalfallConfig {
     pub new_instance_template: bool,
     /// 存档备份。旧配置没有这一项时取默认值。
     pub world_backup: WorldBackupSettings,
+    /// 界面形状缓存：几处由异步数据决定的版面上次落定时的样子，前端首帧按它占位。旧配置没有这一项时取默认值；
+    /// 读不懂时只有这一段按默认读，不算配置损坏（见 [`crate::ui_shape`]）。
+    #[serde(deserialize_with = "crate::ui_shape::read_lenient")]
+    pub ui_shape: UiShape,
+    /// 用户确认过的使用须知（第几版、什么时候），没确认过为 `None`、不写出。旧配置没有这一项时按没确认过读入；
+    /// 读不懂时同样按没确认过，不算配置损坏（见 [`crate::usage_notice`]）。
+    #[serde(
+        deserialize_with = "crate::usage_notice::read_lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub usage_notice: Option<UsageNoticeAcceptance>,
     /// 这个版本不认识的顶层设置（多半是更新的版本写的），原样留着、落盘时原样写回。
     ///
     /// 配置整份按内存里的值落盘：不留着的话，降级之后随便改一项设置，新版本的设置就从文件里消失了，
@@ -266,12 +294,16 @@ impl Default for PetalfallConfig {
             first_run_completed: false,
             skipped_update_version: None,
             notified_update_version: None,
+            update_channel: None,
+            seen_update_versions: None,
             language: UiLanguage::default(),
             extra_java_paths: Vec::new(),
             prefer_dedicated_gpu: false,
             skip_accessibility_onboarding: true,
             new_instance_template: true,
             world_backup: WorldBackupSettings::default(),
+            ui_shape: UiShape::default(),
+            usage_notice: None,
             unrecognized: serde_json::Map::new(),
             carried_over: CarriedOver::default(),
         }
@@ -710,6 +742,11 @@ mod tests {
         assert!(c.extra_java_paths.is_empty());
         assert!(!c.prefer_dedicated_gpu, "独显偏好默认关");
         assert!(c.skip_accessibility_onboarding, "默认跳过无障碍引导");
+        assert_eq!(
+            (c.ui_shape.recent_cards, c.ui_shape.repair_banner),
+            (0, false),
+            "没记过形状时首帧不画最近游玩与修复横幅的占位"
+        );
     }
 
     /// 没有手动 Java 与独显偏好两项的旧配置照常读入：两项取默认，其余字段原样保留；写过之后原样读回。
@@ -1447,7 +1484,7 @@ mod tests {
                     "all",
                 ],
             ),
-            ("appearance.mode", &["day", "night"]),
+            ("appearance.mode", &["day", "night", "system"]),
             ("appearance.accent", &["sakura", "amethyst", "moss"]),
             ("appearance.cover_background", &["art", "texture"]),
             ("after_launch", &["keep", "minimize", "close"]),
@@ -2242,5 +2279,372 @@ mod tests {
         tokio::fs::write(&path, b"{ not json").await.unwrap();
         let err = ConfigStore::at(&path).load().await.unwrap_err();
         assert!(matches!(err, CoreError::ConfigParse { .. }));
+    }
+
+    /// 更新通道偏好与各通道见过的版本按原样的值收下：类型不对、取值认不出、某一项坏了、带不认识的通道键，
+    /// 都只关这两项自己的事。`load` 与 `load_or_preserve` 照常读出其余设置（含游戏目录登记与首次启动状态），
+    /// 文件不改名、不改写、不留存坏文件，两项也不进退回默认的上报；改别的设置整份落盘时两项原样写回。
+    /// 隔一个用例再带一个不认识的界面语言，走字段级退回之后的那条解析路径。
+    #[tokio::test]
+    async fn update_channel_keys_of_any_shape_leave_the_rest_of_the_config_alone() {
+        // (update_channel, seen_update_versions)。紧凑写法、对象键按字典序：写回的值按紧凑写法序列化后
+        // 应与这里逐字节相同。
+        let cases: &[(&str, &str)] = &[
+            ("3", r#""1.0.0-beta.4""#),
+            (
+                r#""nightly""#,
+                r#"{"beta":{"signature":"c2lnbmF0dXJl","version":"1.0.0-beta.4"},"dev":7}"#,
+            ),
+            (
+                r#""Beta""#,
+                r#"{"canary":{"signature":"Y2FuYXJ5","version":"2.0.0-canary.1"},"stable":{"signature":"c3RhYmxl","version":"1.0.0"}}"#,
+            ),
+            (
+                r#"{"name":"beta"}"#,
+                r#"{"beta":null,"dev":"0.1.0-dev.41"}"#,
+            ),
+            (r#"["dev"]"#, "[]"),
+            ("18446744073709551615", "true"),
+            (r#""""#, "-2"),
+            (r#""测试版""#, "1.5"),
+            (
+                r#""beta""#,
+                r#"{"beta":{"signature":"c2lnbmF0dXJl","version":"1.0.0-beta.4"}}"#,
+            ),
+        ];
+        for (index, (channel, seen)) in cases.iter().enumerate() {
+            let context = format!("update_channel={channel} seen_update_versions={seen}");
+            let unknown_language = index % 2 == 1;
+            let language = if unknown_language { "fr-FR" } else { "en-US" };
+            let original = format!(
+                r#"{{
+                    "download_concurrency": 16,
+                    "language": "{language}",
+                    "update_channel": {channel},
+                    "first_run_completed": true,
+                    "game_directory": "D:/Games/.minecraft",
+                    "extra_game_directories": [{{"name": "PCL", "path": "E:/PCL/.minecraft"}}],
+                    "seen_update_versions": {seen},
+                    "sync": {{"enabled": true}}
+                }}"#
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            tokio::fs::write(&path, &original).await.unwrap();
+            let store = ConfigStore::at(&path);
+
+            let loaded = store.load().await.unwrap();
+            let (mut config, recovery) = store.load_or_preserve().await.unwrap();
+            assert_eq!(loaded, config, "{context}");
+            if unknown_language {
+                assert_eq!(
+                    field_resets(recovery),
+                    vec![("language", "fr-FR".to_owned())],
+                    "{context}"
+                );
+                assert_eq!(config.language, UiLanguage::ZhCn, "{context}");
+            } else {
+                assert_eq!(recovery, None, "{context}");
+                assert_eq!(config.language, UiLanguage::EnUs, "{context}");
+            }
+            assert_eq!(config.download_concurrency, 16, "{context}");
+            assert!(config.first_run_completed, "{context}");
+            assert_eq!(
+                config.game_directory,
+                Some(PathBuf::from("D:/Games/.minecraft")),
+                "{context}"
+            );
+            assert_eq!(
+                config.extra_game_directories,
+                vec![NamedDirectory {
+                    name: "PCL".to_owned(),
+                    path: PathBuf::from("E:/PCL/.minecraft"),
+                }],
+                "{context}"
+            );
+            assert_eq!(
+                config.update_channel,
+                Some(serde_json::from_str::<Value>(channel).unwrap()),
+                "{context}"
+            );
+            assert_eq!(
+                config.seen_update_versions,
+                Some(serde_json::from_str::<Value>(seen).unwrap()),
+                "{context}"
+            );
+            assert_eq!(
+                config.unrecognized.keys().collect::<Vec<_>>(),
+                vec!["sync"],
+                "{context}"
+            );
+            assert_eq!(
+                tokio::fs::read(&path).await.unwrap(),
+                original.as_bytes(),
+                "{context}"
+            );
+            assert_eq!(
+                other_files(dir.path()).await,
+                Vec::<String>::new(),
+                "{context}"
+            );
+
+            config.check_updates = false;
+            store.save(&config).await.unwrap();
+            let raw: Value =
+                serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+            assert_eq!(
+                serde_json::to_string(&raw["update_channel"]).unwrap(),
+                *channel,
+                "{context}"
+            );
+            assert_eq!(
+                serde_json::to_string(&raw["seen_update_versions"]).unwrap(),
+                *seen,
+                "{context}"
+            );
+            assert_eq!(raw["check_updates"], false, "{context}");
+            assert_eq!(raw["language"], language, "{context}");
+            assert_eq!(raw["first_run_completed"], true, "{context}");
+            assert_eq!(
+                raw["sync"],
+                serde_json::json!({"enabled": true}),
+                "{context}"
+            );
+            assert_eq!(
+                other_files(dir.path()).await,
+                Vec::<String>::new(),
+                "{context}"
+            );
+            assert_eq!(store.load().await.unwrap(), config, "{context}");
+        }
+    }
+
+    /// 两项缺省时落盘不写出键：键不存在就是按安装包自带的通道、哪个通道都还没见过。写成 `null` 与缺省同义，
+    /// 读进来是 `None`，落盘时同样不写出。
+    #[tokio::test]
+    async fn update_channel_keys_are_not_written_when_absent_or_null() {
+        const KEYS: [&str; 2] = ["update_channel", "seen_update_versions"];
+        let default = serde_json::to_value(PetalfallConfig::default()).unwrap();
+        for key in KEYS {
+            assert!(!default.as_object().unwrap().contains_key(key), "{key}");
+        }
+        for original in [
+            r#"{"download_concurrency": 8}"#,
+            r#"{"download_concurrency": 8, "update_channel": null, "seen_update_versions": null}"#,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            tokio::fs::write(&path, original).await.unwrap();
+            let store = ConfigStore::at(&path);
+            let (config, recovery) = store.load_or_preserve().await.unwrap();
+            assert_eq!(recovery, None, "{original}");
+            assert_eq!(config.update_channel, None, "{original}");
+            assert_eq!(config.seen_update_versions, None, "{original}");
+            assert!(config.unrecognized.is_empty(), "{original}");
+
+            store.save(&config).await.unwrap();
+            let raw: Value =
+                serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+            assert_eq!(raw["download_concurrency"], 8, "{original}");
+            for key in KEYS {
+                assert!(
+                    !raw.as_object().unwrap().contains_key(key),
+                    "{original}：{key}"
+                );
+            }
+        }
+    }
+
+    /// 两项不登记进枚举字段表：它们按原样的值收下、由读它的代码解析，认不出的取值不该被当成退回默认的
+    /// 配置项报给界面。按登记表的源码文本核对。
+    #[test]
+    fn update_channel_keys_are_not_registered_as_enum_fields() {
+        let source = include_str!("config.rs");
+        // 拆开写，免得这条测试自己的文本也被当成登记表的开头。
+        let head = concat!("const ENUM_FIELDS", ": &[EnumField] = &[");
+        assert_eq!(source.matches(head).count(), 1);
+        let start = source.find(head).unwrap();
+        let end = start + source[start..].find("\n];").unwrap();
+        let table = &source[start..end];
+        assert!(table.contains(r#"("download_source")"#), "{table}");
+        for key in ["update_channel", "seen_update_versions"] {
+            assert!(!table.contains(key), "{key}：{table}");
+            assert!(ENUM_FIELDS.iter().all(|field| field.path != key), "{key}");
+        }
+    }
+
+    /// 界面形状是认识的顶层键：读进自己的字段而不是保留区，只写了一部分时缺的那项取默认，落盘写出完整的两项。
+    #[tokio::test]
+    async fn ui_shape_is_a_known_top_level_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"download_concurrency": 8, "ui_shape": {"recent_cards": 3}}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let (config, recovery) = store.load_or_preserve().await.unwrap();
+        assert_eq!(recovery, None);
+        assert!(
+            config.unrecognized.is_empty(),
+            "ui_shape 不该落进保留区：{:?}",
+            config.unrecognized
+        );
+        assert_eq!(
+            config.ui_shape,
+            UiShape {
+                recent_cards: 3,
+                repair_banner: false,
+            }
+        );
+        assert_eq!(config.download_concurrency, 8);
+
+        store.save(&config).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["ui_shape"],
+            serde_json::json!({ "recent_cards": 3, "repair_banner": false })
+        );
+    }
+
+    /// 旧配置没有 ui_shape 时取默认、不算任何处置；改过之后落盘再读回逐项相等。
+    #[tokio::test]
+    async fn ui_shape_defaults_for_old_config_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"download_concurrency": 12, "language": "en-US"}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let (mut config, recovery) = store.load_or_preserve().await.unwrap();
+        assert_eq!(recovery, None);
+        assert_eq!(config.ui_shape, UiShape::default());
+        assert_eq!(config.download_concurrency, 12);
+
+        config.ui_shape = UiShape {
+            recent_cards: 6,
+            repair_banner: true,
+        };
+        store.save(&config).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["ui_shape"],
+            serde_json::json!({ "recent_cards": 6, "repair_banner": true })
+        );
+        let reloaded = store.load().await.unwrap();
+        assert_eq!(reloaded.ui_shape, config.ui_shape);
+        assert_eq!(reloaded, config);
+    }
+
+    /// ui_shape 读不懂（越界、类型不对、更新的版本换了写法）时只有这一段按默认读：不改名、不重置、不报处置，
+    /// 文件原样不动，别的设置照常读入。之后落盘写出的是默认形状。
+    #[tokio::test]
+    async fn unreadable_ui_shape_falls_back_alone() {
+        for shape in [
+            r#"{"recent_cards": 7, "repair_banner": true}"#,
+            r#"{"recent_cards": 256}"#,
+            r#"{"recent_cards": -1}"#,
+            r#"{"recent_cards": 2.5}"#,
+            r#"{"recent_cards": "4"}"#,
+            r#"{"repair_banner": "yes"}"#,
+            r#"{"recent_cards": null}"#,
+            r#""wide""#,
+            r#"6"#,
+            r#"null"#,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            let original = format!(
+                r#"{{"download_concurrency": 8, "language": "en-US", "ui_shape": {shape}}}"#
+            );
+            tokio::fs::write(&path, &original).await.unwrap();
+            let store = ConfigStore::at(&path);
+            let (config, recovery) = store.load_or_preserve().await.unwrap();
+            assert_eq!(recovery, None, "{shape}");
+            assert_eq!(config.ui_shape, UiShape::default(), "{shape}");
+            assert_eq!(config.download_concurrency, 8, "{shape}");
+            assert_eq!(config.language, UiLanguage::EnUs, "{shape}");
+            assert!(config.unrecognized.is_empty(), "{shape}");
+            assert_eq!(
+                tokio::fs::read_to_string(&path).await.unwrap(),
+                original,
+                "{shape}：读的时候不改写文件"
+            );
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                1,
+                "{shape}：不该改名留存"
+            );
+
+            store.save(&config).await.unwrap();
+            let raw: Value =
+                serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+            assert_eq!(
+                raw["ui_shape"],
+                serde_json::json!({ "recent_cards": 0, "repair_banner": false }),
+                "{shape}"
+            );
+        }
+    }
+
+    /// 枚举退回默认走的是摘掉取值后再解析一遍的路径，读不懂的 ui_shape 在这条路径上同样只退回自己。
+    #[tokio::test]
+    async fn unreadable_ui_shape_alongside_an_unknown_enum_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"language": "fr-FR", "download_concurrency": 8, "ui_shape": {"recent_cards": 9}}"#,
+        )
+        .await
+        .unwrap();
+        let (config, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+        assert_eq!(
+            recovery,
+            Some(ConfigRecovery::FieldsReset(vec![ConfigFieldReset {
+                field: "language",
+                value: "fr-FR".into(),
+            }])),
+            "界面形状是缓存，不作为退回默认的配置项报给界面"
+        );
+        assert_eq!(config.ui_shape, UiShape::default());
+        assert_eq!(config.download_concurrency, 8);
+    }
+
+    /// ui_shape 段里不认识的键（更新的版本加的）不影响认识的两项；它是缓存，不认识的键不保留，落盘时丢掉。
+    #[tokio::test]
+    async fn unknown_keys_inside_ui_shape_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"ui_shape": {"recent_cards": 2, "repair_banner": true, "pack_rows": [{"instance": "a", "resource_packs": 3}]}}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let (config, recovery) = store.load_or_preserve().await.unwrap();
+        assert_eq!(recovery, None);
+        assert_eq!(
+            config.ui_shape,
+            UiShape {
+                recent_cards: 2,
+                repair_banner: true,
+            }
+        );
+        assert!(config.unrecognized.is_empty());
+        assert_eq!(config.carried_over, CarriedOver::default());
+
+        store.save(&config).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["ui_shape"],
+            serde_json::json!({ "recent_cards": 2, "repair_banner": true })
+        );
     }
 }

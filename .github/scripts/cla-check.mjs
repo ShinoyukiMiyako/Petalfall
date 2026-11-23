@@ -41,7 +41,7 @@ function isValidSignatureComment(comment) {
 
 // 列 PR 提交的接口最多给 250 个。超过时改用比较接口：带 page 参数可以分页取完，每页最多 100 个，
 // 总数在 total_commits。三点比较取的是 head 有、与 base 的合并基点之后的提交，和 PR 自己的提交列表一致；
-// base.sha 落后时只会多列，不会少列。晋级 PR（dev 到 beta 有几百个提交）就走这条路，照样逐个核对作者。
+// base.sha 落后时只会多列，不会少列。目标是 beta、来源却不在 dev 上的 PR 照普通 PR 核对，提交多时就走这条路。
 const LIST_COMMITS_LIMIT = 250;
 const PAGE_SIZE = 100;
 
@@ -109,6 +109,45 @@ function isExempt(user) {
 // 照旧认关联结果；fork 的提交要另外证明。fork 删掉后 head.repo 为 null，来源同样确认不了，按 fork 处理。
 function isFromFork(pr) {
   return pr.head.repo?.id !== pr.base.repo.id;
+}
+
+// 晋级 PR 的目标分支，和它认的来源分支。
+const PROMOTION_SOURCES = new Map([
+  ['beta', 'dev'],
+  ['main', 'beta'],
+]);
+
+// 每个提交进 dev 时都过了本检查（维护者直推的本就豁免），进 beta 的提交同样都经过检查，晋级时再逐个核作者是重复检查，
+// 还会卡住整班晋级：CLA 改版后老作者只签过旧版，注销了账号的作者也没法再签。所以目标是 beta 或 main、head 提交落在本仓库
+// 来源分支上的 PR 不列提交、不核作者。来源按 head 提交在不在来源分支上认，不按 head 的分支名：晋级常从来源分支上选定的
+// 提交另建分支开 PR，分支名说明不了什么，提交在来源分支上，PR 带进来的提交才一定都进过来源分支。fork 不是本仓库的分支，
+// 不按晋级认。来源不对的照普通 PR 逐个核作者：往 beta 摘修复的 PR 就是这样，摘出来的是不在 dev 上的新提交。
+async function promotionOf(github, repository, pr) {
+  const target = pr.base.ref;
+  const source = PROMOTION_SOURCES.get(target);
+  if (source === undefined) {
+    return null;
+  }
+  if (isFromFork(pr)) {
+    return { target, source, onSource: false };
+  }
+  // 按 head.sha 比、不按 PR 的分支比：状态写在这个 sha 上，PR 分支在这期间再有推送也对得上。
+  // head 是来源分支头的祖先时状态是 behind，就是来源分支的头时是 identical。
+  const { data } = await github.request('GET /repos/{owner}/{repo}/compare/{basehead}', {
+    ...repository,
+    basehead: `${source}...${pr.head.sha}`,
+  });
+  return { target, source, onSource: data.status === 'behind' || data.status === 'identical' };
+}
+
+// 晋级 PR 照旧要开启者签：PR 正文是开启者写的（测试版的更新说明就取自晋级 PR 的正文），开启者又是此刻在场的账号，
+// 签当前版本不会卡住晋级。维护者开的晋级 PR 本就豁免。
+function promotionContributors(pr) {
+  const required = new Map();
+  if (!isExempt(pr.user)) {
+    required.set(pr.user.id, pr.user.login);
+  }
+  return { required, unlinked: [], unverified: [], forkDeleted: false };
 }
 
 // GitHub 网页代签时的提交者账号，ID 由 gh api users/web-flow 查得。它的 type 是 User，按类型认不出来，只能按 ID 认。
@@ -294,7 +333,16 @@ function codeSpan(text) {
   return `\`${text.replace(/[`\r\n]/g, ' ')}\``;
 }
 
-function signedCommentBody(claUrl) {
+function signedCommentBody(claUrl, promotion) {
+  if (promotion?.onSource) {
+    const { target, source } = promotion;
+    return [
+      COMMENT_MARKER,
+      '**CLA 检查通过 / CLA check passed**',
+      `本 PR 带进 \`${target}\` 的提交都已在本仓库的 \`${source}\` 上，进 \`${source}\` 时已过 [CLA](${claUrl}) 检查，晋级时不再逐个核对提交作者。`,
+      `Every commit this PR brings into \`${target}\` is already on \`${source}\` in this repository and passed the [CLA](${claUrl}) check when it entered \`${source}\`, so commit authors are not checked again on promotion.`,
+    ].join('\n\n');
+  }
   return [
     COMMENT_MARKER,
     '**CLA 已签署 / CLA signed**',
@@ -303,7 +351,7 @@ function signedCommentBody(claUrl) {
   ].join('\n\n');
 }
 
-function pendingCommentBody(claUrl, missing, unlinked, unverified, forkDeleted) {
+function pendingCommentBody(claUrl, missing, unlinked, unverified, forkDeleted, promotion) {
   const sections = [COMMENT_MARKER, '**CLA 尚未完成 / CLA not complete**'];
 
   // 放在最前：签了也过不了，先说清出路。
@@ -311,6 +359,15 @@ function pendingCommentBody(claUrl, missing, unlinked, unverified, forkDeleted) 
     sections.push(
       '本 PR 来源的 fork 已被删除，无法确认分支归谁所有。来自 fork 的 PR 需要 fork 的主人签署，这个 PR 因此无法通过检查。请从仍然存在的 fork 重新开一个 PR。',
       "The fork this PR comes from has been deleted, so the owner of its branch cannot be confirmed. A PR from a fork needs the fork's owner to sign, so this PR cannot pass the check. Please open a new PR from a fork that still exists.",
+    );
+  }
+
+  // 目标是晋级分支的 PR 被逐个核作者时，先说明为什么没按晋级放行，不然维护者会以为晋级卡在了作者身上。
+  if (promotion !== null && !promotion.onSource) {
+    const { target, source } = promotion;
+    sections.push(
+      `本 PR 的目标是 \`${target}\`，来源却不是本仓库 \`${source}\` 上的提交（来自 fork，或者 head 提交不在 \`${source}\` 上），不按晋级处理，照普通 PR 逐个核对提交作者。晋级 PR 要从本仓库 \`${source}\` 上的提交开出。`,
+      `This PR targets \`${target}\`, but its source is not a commit on \`${source}\` in this repository (it comes from a fork, or its head commit is not on \`${source}\`), so it is not treated as a promotion and its commit authors are checked like any other PR. Promotion PRs must be opened from a commit on \`${source}\` in this repository.`,
     );
   }
 
@@ -399,7 +456,7 @@ export async function runClaCheck({ github, context, core }) {
     await markErrored({ github, repository, context, sha: pr.head.sha, error });
     throw error;
   }
-  const { comments, missing, unlinked, unverified, forkDeleted, passed } = verdict;
+  const { comments, missing, unlinked, unverified, forkDeleted, passed, promotion } = verdict;
   const state = passed ? 'success' : 'failure';
 
   // 未签署不让作业失败：结果全在提交状态上，签署后不会残留红色的失败运行，也就不需要重跑权限。
@@ -408,20 +465,40 @@ export async function runClaCheck({ github, context, core }) {
     sha: pr.head.sha,
     context: STATUS_CONTEXT,
     state,
-    description: passed ? 'CLA 已签署 / CLA signed' : 'CLA 尚未完成，见 PR 评论 / See the PR comment',
+    description: statusDescription(passed, promotion),
     target_url: claUrl,
   });
 
   const body = passed
-    ? signedCommentBody(claUrl)
-    : pendingCommentBody(claUrl, missing, unlinked, unverified, forkDeleted);
+    ? signedCommentBody(claUrl, promotion)
+    : pendingCommentBody(claUrl, missing, unlinked, unverified, forkDeleted, promotion);
   await syncBotComment(github, repository, number, comments, body, passed);
 
-  // 作者名不进日志：以 :: 开头的内容会被 runner 当成工作流命令。
+  // 作者名不进日志：以 :: 开头的内容会被 runner 当成工作流命令。日志里的分支名只会是 PROMOTION_SOURCES 里登记的。
   core.info(
-    `PR #${number}: ${state}，待签署 ${missing.length} 人，未关联提交 ${unlinked.length} 个，提交者担不了责的 fork 提交 ${unverified.length} 个${forkDeleted ? '，fork 已删除、无法确认主人' : ''}`,
+    `PR #${number}: ${state}，${promotionLog(promotion)}待签署 ${missing.length} 人，未关联提交 ${unlinked.length} 个，提交者担不了责的 fork 提交 ${unverified.length} 个${forkDeleted ? '，fork 已删除、无法确认主人' : ''}`,
   );
   return { state, missing, unlinked, unverified, forkDeleted };
+}
+
+function statusDescription(passed, promotion) {
+  if (!passed) {
+    return 'CLA 尚未完成，见 PR 评论 / See the PR comment';
+  }
+  if (promotion?.onSource) {
+    return `晋级自 ${promotion.source}，不再核作者 / Promoted from ${promotion.source}`;
+  }
+  return 'CLA 已签署 / CLA signed';
+}
+
+function promotionLog(promotion) {
+  if (promotion === null) {
+    return '';
+  }
+  if (promotion.onSource) {
+    return `晋级自 ${promotion.source}、只核开启者，`;
+  }
+  return `目标是 ${promotion.target} 但来源不是本仓库 ${promotion.source} 上的提交、逐个核作者，`;
 }
 
 // 查到一半出错时 head 上可能还留着上一次的结论：改了目标分支后重查，旧基分支下算出的 success 原样留着照样能合并。
@@ -443,12 +520,19 @@ async function markErrored({ github, repository, context, sha, error }) {
 
 async function judgePull({ github, repository, pr }) {
   const { number } = pr;
-  const commits = await listPullCommits(github, repository, pr);
-  // 列不全就确认不了所有作者，不能放行。
-  if (commits.length < pr.commits) {
-    throw new Error(`PR #${number} 有 ${pr.commits} 个提交，只取到 ${commits.length} 个，无法核对全部作者`);
+  const promotion = await promotionOf(github, repository, pr);
+  let contributors;
+  if (promotion?.onSource) {
+    contributors = promotionContributors(pr);
+  } else {
+    const commits = await listPullCommits(github, repository, pr);
+    // 列不全就确认不了所有作者，不能放行。
+    if (commits.length < pr.commits) {
+      throw new Error(`PR #${number} 有 ${pr.commits} 个提交，只取到 ${commits.length} 个，无法核对全部作者`);
+    }
+    assertCoversHead(pr, commits);
+    contributors = collectContributors(pr, commits);
   }
-  assertCoversHead(pr, commits);
   // 每次都扫整条评论而不是只看触发事件：运行被取消或重跑后，结果仍然一致。
   const comments = await github.paginate(github.rest.issues.listComments, {
     ...repository,
@@ -456,11 +540,11 @@ async function judgePull({ github, repository, pr }) {
     per_page: 100,
   });
 
-  const { required, unlinked, unverified, forkDeleted } = collectContributors(pr, commits);
+  const { required, unlinked, unverified, forkDeleted } = contributors;
   const candidates = signaturesFromComments(comments, required, number);
   const signed = await recordSignatures(github, repository, number, candidates);
 
   const missing = [...required].filter(([id]) => !signed.has(id)).map(([, login]) => login);
   const passed = missing.length === 0 && unlinked.length === 0 && unverified.length === 0 && !forkDeleted;
-  return { comments, missing, unlinked, unverified, forkDeleted, passed };
+  return { comments, missing, unlinked, unverified, forkDeleted, passed, promotion };
 }

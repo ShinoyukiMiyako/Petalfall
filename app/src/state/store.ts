@@ -63,6 +63,7 @@ import {
   DEVICE_CODE_FETCH_TIMEOUT_MS,
   TASK_JOURNAL_DEBOUNCE_MS,
 } from "../domain/limits";
+import { sameGameDir } from "../domain/paths";
 import { instanceNameError, validateOfflineName } from "../domain/rules";
 import type { FailureCode, LoaderKind, Platform, Task, TaskError, TaskKind } from "../domain/types";
 import * as accountsIpc from "../ipc/accounts";
@@ -92,7 +93,7 @@ import * as modsIpc from "../ipc/mods";
 import { completeFirstRun, isFirstRun, listPinnedServers, setPinnedServerInstance, setPinnedServers, type PinnedServerDto } from "../ipc/system";
 import * as tasksIpc from "../ipc/tasks";
 import type { CoreEvent } from "../ipc/tasks";
-import { describeError, errorRecord, itemFailureReason } from "./errors";
+import { describeError, errorRecord, gameDirDataRejectionOf, itemFailureReason } from "./errors";
 import { MANUAL_LOGIN, type DeviceLogin, type LoginIntent, type LoginKind, type LoginState } from "./login";
 import { network as appNetwork, type NetworkMonitor } from "./online";
 import { MODPACK_SUMMARY_RESOURCE } from "./queries/discover";
@@ -123,11 +124,15 @@ import {
   attemptTaskId,
   batchRetryable,
   clearFinished,
+  commandGameDir,
   completeCompositeStep,
   compositeProgress,
   dropSuperseded,
   exportDestination,
   findDuplicate,
+  followMove,
+  GAME_DIR_FREE_COMMANDS,
+  inGameDir,
   INSTANCE_TASK_COMMANDS,
   isActiveTask,
   markCancelled,
@@ -136,11 +141,14 @@ import {
   markRunning,
   modFilesBeingUpdated,
   MOVE_TASK_COMMAND,
+  movingKeys,
   newTask,
   restoreJournal,
+  retryBlockedReason,
   retryTask,
   sharedSavesKeys,
   startComposite,
+  strandedByMove,
   taskByAttempt,
   tasksToStart,
   trimHistory,
@@ -276,6 +284,11 @@ type TaskMeta =
       mcVersion: string | null;
       loader: LoaderKind;
       loaderVersion: string | null;
+      /**
+       * 与新建的同名字段同一个规则。导入还多一层：半成品目录建好后后端认这个名字，可导入失败或取消时后端会把目录删掉，
+       * 这期间写进固定列表就留下一条指向不存在实例的固定，所以同样只在派生状态里固定，装好后再写。
+       */
+      autoPin: boolean;
     }
   /** starter：失败的新建改排补全时接过来的开局 Mod，补全好了照样接着装，重启后从参数读回；别的补全为空。 */
   | { type: "repair"; launchAfter: boolean; starter: StarterPick[] }
@@ -320,8 +333,9 @@ interface RawState {
   tasks: Task[];
   taskMeta: Readonly<Record<string, TaskMeta>>;
   /**
-   * 已结束、但这次结束触发的那次重扫还没落定的新建与导入任务。它们的占位项留到重扫落定：否则实例先从列表里
-   * 消失，外壳随即把指向它的实例页路由剪掉，等重扫回来用户已经被送回了上一页。
+   * 已结束、但这次结束触发的那次重扫还没落定的任务：新建与导入（成功或失败），以及成功的补全。新建与导入的占位项留到
+   * 重扫落定：否则实例先从列表里消失，外壳随即把指向它的实例页路由剪掉，等重扫回来用户已经被送回了上一页。成功的
+   * 新建、导入与补全，实例在这一段里照旧按安装中派生：手里的列表是任务结束前扫的，原先损坏的会被说成损坏。
    */
   landing: readonly string[];
   /** 本次运行里失败、用户还没看过的尝试（attemptTaskId）。重试后再失败是新的一次尝试，重新算未看。 */
@@ -345,9 +359,19 @@ export interface LauncherState {
   selectedInstanceId: string | null;
   /** 侧栏固定的实例，按顺序；末尾含安装中、入队时侧栏还有空位而自动固定的新实例。 */
   sidebarPins: string[];
+  /**
+   * sidebarPins 里只在派生状态里固定、还没写进固定列表的那几项：末尾安装中自动固定的新实例，后端要等实例目录装好
+   * 才认它们，落地时才写进去。拖动排序只越过它们时，写下去的内容与现状一样。内容没变时沿用同一份数组。
+   */
+  readonly unsavedPins: readonly string[];
   firstRun: boolean | null;
   session: SessionState | null;
   tasks: Task[];
+  /**
+   * 已结束、但结束触发的那次重扫还没落定的任务 id（RawState.landing）：新建与导入不论成败，以及成功的补全。
+   * 「清除已结束」留着它们（tasks 的 clearFinished）。只在有任务进出这一段时换数组，别的变化沿用同一份。
+   */
+  readonly landingTaskIds: readonly string[];
   /**
    * 用户还没看过的失败任务个数：本次运行里失败、此刻仍是失败状态、还没打开过下载快览或进过下载任务页的。
    * 上次关闭时中断的不算，那是用户确认过的。
@@ -491,7 +515,7 @@ export interface LauncherActions {
   cancelTask(id: string): Promise<void>;
   cancelAllTasks(): Promise<void>;
   retryTask(id: string): void;
-  /** 把失败的任务重新排进队列（已有同一件事在队列里的跳过；移动与要手动下载的不收，见 batchRetryable），返回重新排进去的个数。 */
+  /** 把失败的任务重新排进队列（已有同一件事在队列里的跳过；移动、要手动下载的、游戏目录对不上的与实例正在移动的不收，见 batchRetryable），返回重新排进去的个数。 */
   retryFailedTasks(): number;
   clearFinishedTasks(): void;
   /** 打开下载快览或进入下载任务页时调用：此刻的失败都算看过了。 */
@@ -615,6 +639,19 @@ function initialRaw(): RawState {
   };
 }
 
+/** 两个错误是不是游戏目录的同一个数据格式拒绝：错误码相同，detail 也相同。 */
+function sameRejection(a: Error, b: Error): boolean {
+  const x = gameDirDataRejectionOf(a);
+  const y = gameDirDataRejectionOf(b);
+  // 同一种拒绝的 detail 由同一个解析函数按固定键序造出，序列化后可以直接比
+  return x !== null && y !== null && x.kind === y.kind && JSON.stringify(x.detail) === JSON.stringify(y.detail);
+}
+
+/** 读到列表时，出错的实例切片回到就绪（目录因数据格式打不开之后换了目录、或记号修好了）；加载中由 loadSlice 收尾，不动。 */
+function readyAgain(raw: RawState): Partial<RawState> {
+  return raw.status.instances.kind === "error" ? { status: { ...raw.status, instances: { kind: "ready" } } } : {};
+}
+
 /**
  * 任务失败记录：需要手动下载的文件清单随记录进任务日志，失败态据此列出清单、重新检查后重试；移动被拦下时拦着它的那一项
  * 也随记录存下，失败原因按它的种类写。
@@ -639,6 +676,12 @@ function journalTask(task: Task): Task {
       ...(error.move_blocker === undefined ? {} : { move_blocker: instancesIpc.parseMoveBlocker(error.move_blocker, `${where}.move_blocker`) }),
     },
   };
+}
+
+/** 组合任务的各项（装 Mod、更新 Mod）都按发起时的游戏目录核对，commandGameDir 不会给它们 null；给了就是那张表漏了它们。 */
+function requiredGameDir(gameDir: string | null, command: string): string {
+  if (gameDir === null) throw new Error(`组合任务 ${command} 没有带发起时的游戏目录`);
+  return gameDir;
 }
 
 function strArg(args: Record<string, unknown>, key: string, command: string): string {
@@ -676,7 +719,8 @@ function metaFromSpec(task: Task): TaskMeta | null {
         starter: starterPicksArg(args, command),
       };
     case "install_modpack":
-      return { type: "modpack", name: strArg(args, "name", command), cover: null, modCount: null, mcVersion: null, loader: "vanilla", loaderVersion: null };
+      // 与新建同理，按「有空位就固定」处理
+      return { type: "modpack", name: strArg(args, "name", command), cover: null, modCount: null, mcVersion: null, loader: "vanilla", loaderVersion: null, autoPin: true };
     case "repair_instance":
       return { type: "repair", launchAfter: false, starter: starterPicksArg(args, command) };
     case "install_java": {
@@ -1046,6 +1090,7 @@ function applyTaskEffect(base: InstanceSummary, pinned: boolean, effect: TaskEff
 interface InstancesView {
   instances: InstanceSummary[];
   sidebarPins: string[];
+  unsavedPins: string[];
 }
 
 function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, createdAt: number, pinned: boolean): InstanceSummary {
@@ -1062,6 +1107,7 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
     description: null,
     cover: meta.cover,
     coverImage: null,
+    coverImageHue: null,
     background: "follow",
     backgroundImage: null,
     pinned,
@@ -1074,6 +1120,7 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
     dirError: null,
     modCount: null,
     worldCount: null,
+    resourcePackCount: null,
     isolated: null,
     memoryMb: null,
     modpack: null,
@@ -1103,7 +1150,7 @@ class StateDeriver {
   private placeholderCache = new Map<string, { meta: TaskMeta; createdAt: number; pinned: boolean; value: InstanceSummary }>();
 
   derive(raw: RawState): LauncherState {
-    const { instances, sidebarPins } = this.instancesView(raw);
+    const { instances, sidebarPins, unsavedPins } = this.instancesView(raw);
     const selected = raw.settings === null ? null : raw.settings.selectedVersion;
     return {
       status: raw.status,
@@ -1113,9 +1160,11 @@ class StateDeriver {
       instances,
       selectedInstanceId: selected !== null && instances.some((i) => i.id === selected) ? selected : null,
       sidebarPins,
+      unsavedPins,
       firstRun: raw.firstRun,
       session: raw.session,
       tasks: raw.tasks,
+      landingTaskIds: raw.landing,
       unseenFailures: countUnseen(raw.tasks, raw.unseenFailures),
       toasts: raw.toasts.items,
       login: raw.login,
@@ -1145,11 +1194,12 @@ class StateDeriver {
     // 内容没变就连数组一起复用：例如一个下载任务结束、另一个开始，但它们挂的实例不变
     const prev = this.lastView;
     this.lastView =
-      prev !== null && sameItems(prev.instances, view.instances) && sameItems(prev.sidebarPins, view.sidebarPins)
+      prev !== null && sameItems(prev.instances, view.instances) && sameItems(prev.sidebarPins, view.sidebarPins) && sameItems(prev.unsavedPins, view.unsavedPins)
         ? prev
         : {
             instances: prev !== null && sameItems(prev.instances, view.instances) ? prev.instances : view.instances,
             sidebarPins: prev !== null && sameItems(prev.sidebarPins, view.sidebarPins) ? prev.sidebarPins : view.sidebarPins,
+            unsavedPins: prev !== null && sameItems(prev.unsavedPins, view.unsavedPins) ? prev.unsavedPins : view.unsavedPins,
           };
     return this.lastView;
   }
@@ -1167,11 +1217,39 @@ class StateDeriver {
       const meta = raw.taskMeta[t.id];
       if (meta !== undefined && (meta.type === "create" || meta.type === "modpack")) creating.set(meta.name.toLowerCase(), meta);
     }
+    // 成功的新建、导入与补全在落地重扫落定之前照旧算安装中（见 RawState.landing）；失败的不算：没装成就不再说在装
+    for (const id of raw.landing) {
+      const t = raw.tasks.find((task) => task.id === id);
+      if (t === undefined || t.status !== "done" || t.instanceId === null || !INSTANCE_TASK_COMMANDS.has(t.spec.command)) continue;
+      installing.add(t.instanceId.toLowerCase());
+      const meta = raw.taskMeta[t.id];
+      if (meta !== undefined && (meta.type === "create" || meta.type === "modpack")) creating.set(meta.name.toLowerCase(), meta);
+    }
+    // 新建与导入从入队起到结束触发的重扫落定（RawState.landing，不论成败）；同名的只认排在前面的那个任务
+    const sidebarPins = [...raw.pins];
+    const unsavedPins: string[] = [];
+    const landing = new Set(raw.landing);
+    const creations: { task: Task; meta: CreationMeta }[] = [];
+    const named = new Set<string>();
+    for (const task of raw.tasks) {
+      if (!isActiveTask(task) && !landing.has(task.id)) continue;
+      const meta = raw.taskMeta[task.id];
+      if (meta === undefined || (meta.type !== "create" && meta.type !== "modpack")) continue;
+      if (named.has(meta.name.toLowerCase())) continue;
+      named.add(meta.name.toLowerCase());
+      creations.push({ task, meta });
+      // 自动固定跟着任务走、不跟着占位项走：装到一半的目录被别的重扫扫到时扫描项接替了占位项，新实例照样排在侧栏末尾
+      if (meta.autoPin && sidebarPins.length < SIDEBAR_PIN_LIMIT && !sidebarPins.includes(meta.name)) {
+        sidebarPins.push(meta.name);
+        unsavedPins.push(meta.name);
+      }
+    }
+
     const scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; effect: TaskEffect; creation: CreationMeta | null; value: InstanceSummary }>();
     const instances: InstanceSummary[] = raw.scanned.map((base) => {
       const key = base.id.toLowerCase();
       const effect: TaskEffect = installing.has(key) ? "installing" : moving.has(key) ? "moving" : backingUp.has(key) ? "backing_up" : modifying.has(key) ? "modifying" : null;
-      const pinned = raw.pins.includes(base.id);
+      const pinned = sidebarPins.includes(base.id);
       const found = creating.get(key);
       const creation = found === undefined ? null : found;
       const cached = this.scannedCache.get(base.id);
@@ -1185,16 +1263,9 @@ class StateDeriver {
     this.scannedCache = scannedCache;
 
     const known = new Set(instances.map((i) => i.id.toLowerCase()));
-    const sidebarPins = [...raw.pins];
     const placeholderCache = new Map<string, { meta: TaskMeta; createdAt: number; pinned: boolean; value: InstanceSummary }>();
-    const landing = new Set(raw.landing);
-    for (const task of raw.tasks) {
-      if (!isActiveTask(task) && !landing.has(task.id)) continue;
-      const meta = raw.taskMeta[task.id];
-      if (meta === undefined || (meta.type !== "create" && meta.type !== "modpack")) continue;
+    for (const { task, meta } of creations) {
       if (known.has(meta.name.toLowerCase())) continue;
-      known.add(meta.name.toLowerCase());
-      if (meta.type === "create" && meta.autoPin && sidebarPins.length < SIDEBAR_PIN_LIMIT && !sidebarPins.includes(meta.name)) sidebarPins.push(meta.name);
       const pinned = sidebarPins.includes(meta.name);
       const cached = this.placeholderCache.get(task.id);
       const value =
@@ -1205,7 +1276,7 @@ class StateDeriver {
       instances.push(value);
     }
     this.placeholderCache = placeholderCache;
-    return { instances, sidebarPins };
+    return { instances, sidebarPins, unsavedPins };
   }
 }
 
@@ -1242,6 +1313,8 @@ export class LauncherStore {
   /** 实例重扫的发出序号与已采纳的最晚序号（见 fetchInstances）。 */
   private scanIssued = 0;
   private scanApplied = 0;
+  /** 重扫又撞上的、实例库已经原位说着的同一个数据格式拒绝（见 adoptScanRefusal）：report 不再为它们发通知。 */
+  private readonly repeatedRefusals = new WeakSet<IpcError>();
   /** 账户读取的发出序号与已采纳的最晚序号（见 fetchAccounts）。 */
   private accountsIssued = 0;
   private accountsApplied = 0;
@@ -1346,6 +1419,7 @@ export class LauncherStore {
     const subscriptions = [
       tasksIpc.onCoreEvent((e) => this.onCoreEvent(e)),
       accountsIpc.onDeviceCode((code) => this.onDeviceCode(code)),
+      accountsIpc.onAccountChanged((e) => this.onAccountChanged(e)),
       launchIpc.onLaunchPhase((e) => this.onLaunchPhase(e)),
       launchIpc.onGameLog((e) => this.onGameLog(e)),
       launchIpc.onGameExit((e) => this.onGameExit(e)),
@@ -1361,7 +1435,7 @@ export class LauncherStore {
       );
     }
     window.addEventListener("focus", this.onWindowFocus);
-    this.net.start({ onRecovered: () => this.announceRecovered(), onProbeError: (error) => this.report(ACTION_ERROR.probeNetwork, error) });
+    this.net.start({ onRecovered: () => this.onNetworkRecovered(), onProbeError: (error) => this.report(ACTION_ERROR.probeNetwork, error) });
     this.unobserveResources = resources.observeErrors((error) => this.net.reportFailure(error));
     void Promise.allSettled(subscriptions).then(() => {
       // 先订阅再首查：首查期间到达的事件不会漏掉
@@ -1513,18 +1587,40 @@ export class LauncherStore {
   /**
    * 重扫实例列表。几处会同时发起重扫（窗口获得焦点、游戏退出、任务落地、删除与改名），先发出的那次可能后回来：
    * 它读的是更早的盘面，照单采纳会让刚删掉的实例回到列表、刚改名的实例变回旧名。所以只采纳比已采纳的那次更晚发出的结果；
-   * 晚到的旧结果丢掉，但 extra（撤占位项）照样套在已采纳的那份更新的列表上。
+   * 晚到的旧结果丢掉，但 extra（撤占位项）照样套在已采纳的那份更新的列表上。被拒的结果同样参与排序（见 adoptScanRefusal）。
    */
   private async fetchInstances(extra?: (raw: RawState) => Partial<RawState>): Promise<void> {
     const seq = ++this.scanIssued;
-    const dtos: InstanceDto[] = await instancesIpc.listInstances();
+    const dtos: InstanceDto[] = await instancesIpc.listInstances().catch((error: unknown) => {
+      this.adoptScanRefusal(seq, error);
+      throw error;
+    });
     const fresh = seq > this.scanApplied;
     if (fresh) {
       this.scanApplied = seq;
       this.lastScanAt = Date.now();
     }
     const scanned = fresh ? { scanned: dtos.map((dto) => instanceFromDto(dto, { pins: [], busyTaskInstanceIds: new Set() })) } : {};
-    this.set((raw) => ({ ...scanned, ...(extra === undefined ? {} : extra(raw)) }));
+    this.set((raw) => ({ ...scanned, ...(fresh ? readyAgain(raw) : {}), ...(extra === undefined ? {} : extra(raw)) }));
+  }
+
+  /**
+   * 列实例因游戏目录的数据格式被拒（目录被更新的版本用过，或记号读不懂）：换目录或修好记号之前怎么重扫都一样，手里的旧列表
+   * 也不能留着给人操作，否则实例页上的改动照样发到后端、写进更新版本用过的目录。所以切片置为出错、列表清空：实例库换成
+   * 「打不开」，当前实例随之失效。与读到的列表一样按发出序号排先后，晚到的旧结果不盖过更新的那次。
+   * 已经停在同一个拒绝上时状态原样不动（获焦、游戏退出、任务落地都会重扫，界面不能跟着一遍遍重画），这次的错误记进
+   * repeatedRefusals，不再发通知。别的失败（网络盘一时连不上等）重试就可能好，留着旧列表，失败照常交给调用方。
+   */
+  private adoptScanRefusal(seq: number, error: unknown): void {
+    if (!isIpcError(error) || gameDirDataRejectionOf(error) === null) return;
+    const shown = this.raw.status.instances;
+    const repeated = shown.kind === "error" && sameRejection(shown.error, error);
+    if (repeated) this.repeatedRefusals.add(error);
+    if (seq <= this.scanApplied) return;
+    this.scanApplied = seq;
+    this.lastScanAt = Date.now();
+    if (repeated) return;
+    this.set((raw) => ({ scanned: [], status: { ...raw.status, instances: { kind: "error", error } } }));
   }
 
   /** 读侧栏固定。与 fetchSettings 同理，只采纳比已采纳的那次更晚发出的结果。 */
@@ -1585,7 +1681,9 @@ export class LauncherStore {
     // 玩家手动往 mods 文件夹里放了 jar：概览的数字和 Mod 页读的是同一份，都要重扫；自动内存按启用的 Mod 估算，也跟着重读
     invalidateResources("mods");
     invalidateResources("memory-advice");
-    if (this.raw.status.instances.kind !== "ready") return;
+    const slice = this.raw.status.instances;
+    // 目录因数据格式打不开时照样重扫：目录恢复能读（例如读不懂的记号修好了）就回到列表，还是同一个拒绝时不再发通知
+    if (slice.kind === "loading" || (slice.kind === "error" && gameDirDataRejectionOf(slice.error) === null)) return;
     if (Date.now() - this.lastScanAt < INSTANCE_RESCAN_MIN_MS) return;
     // 本机 Java 也可能被挪走：探测要起进程，跟着实例重扫一起节流
     invalidateResources("java");
@@ -1594,16 +1692,31 @@ export class LauncherStore {
 
   // ---------------------------------------------------------------- 错误与通知
 
-  /** 后台工作的失败：没有调用方可抛，写控制台并发 error 通知。 */
+  /** 后台工作的失败：没有调用方可抛，写控制台并发 error 通知。实例库已经原位说着的同一个拒绝只写控制台。 */
   private report(title: string, error: unknown): void {
+    if (isIpcError(error) && this.repeatedRefusals.has(error)) {
+      console.warn(title, error);
+      return;
+    }
     console.error(title, error);
     this.pushToast("error", title, describeError(error));
     this.net.reportFailure(error);
   }
 
-  /** 由离线转回在线：发「网络已恢复」；有失败的下载时正文写个数，操作为全部重试。 */
+  /**
+   * 由离线转回在线。正版与外置账户的皮肤断网时没下下来就画默认皮肤，后端不记这次失败，重查一次就再下：所以让皮肤查询全部失效。
+   * 后端按皮肤地址把下到的图缓存在本机，已经拿到真皮肤的账户重查只读本机缓存，不重新下载。
+   */
+  private onNetworkRecovered(): void {
+    invalidateResources("skin");
+    this.announceRecovered();
+  }
+
+  /** 发「网络已恢复」；有失败的下载时正文写个数，操作为全部重试。 */
   private announceRecovered(): void {
-    const failed = this.raw.tasks.filter(batchRetryable).length;
+    const current = this.currentGameDir();
+    const moving = this.movingInstances();
+    const failed = this.raw.tasks.filter((t) => batchRetryable(t, current, moving)).length;
     const copy = TOAST_COPY.networkRestored(failed);
     const action: ToastAction | undefined =
       failed === 0 ? undefined : { label: TOAST_COPY.retryAllAction, run: () => void this.actions.retryFailedTasks(), errorTitle: ACTION_ERROR.install };
@@ -1642,6 +1755,11 @@ export class LauncherStore {
 
   private instanceIds(): string[] {
     return this.getState().instances.map((i) => i.id);
+  }
+
+  /** 正在移到别的游戏目录的实例（见 movingKeys），按派生后的实例列表取：排着的移动任务也算。 */
+  private movingInstances(): Set<string> {
+    return movingKeys(this.getState().instances);
   }
 
   private currentAccount(): Account | null {
@@ -1760,6 +1878,15 @@ export class LauncherStore {
       intervalSec: code.interval,
     };
     this.set({ login: { ...login, device } });
+  }
+
+  /**
+   * 后端在后台改写了账户记录（提前续期、启动前的验证、外置角色档案的后台同步）：重读账户列表，名字、状态与验证时刻跟着换；
+   * 档案里的皮肤可能也换了，这个账户的皮肤重取。界面自己发起的刷新与登录做完就重读，后端不为它们推这个事件。
+   */
+  private onAccountChanged(event: accountsIpc.AccountChangedEvent): void {
+    invalidateResources(`skin:${event.uuid}`);
+    this.background(ACTION_ERROR.refreshAccounts, this.fetchAccounts());
   }
 
   private onLaunchPhase(event: launchIpc.LaunchPhaseEvent): void {
@@ -1898,14 +2025,18 @@ export class LauncherStore {
 
   // ---------------------------------------------------------------- 下载任务
 
-  private enqueue(draft: Omit<TaskDraft, "id">, meta: TaskMeta | null, subject: string): Task | null {
+  /** origin 是跟着别的任务排进来的后续任务继承的游戏目录；不给就记此刻的当前目录。 */
+  private enqueue(draft: Omit<TaskDraft, "id" | "gameDir">, meta: TaskMeta | null, subject: string, origin?: string | null): Task | null {
     const duplicate = findDuplicate(this.raw.tasks, draft.spec);
     if (duplicate !== undefined) {
       this.pushToast("info", TASK_TOAST.duplicate(subject).title);
       return null;
     }
     if (!TASK_COMMANDS.has(draft.spec.command)) throw new Error(`不是可排队的命令：${draft.spec.command}`);
-    const task = newTask({ ...draft, id: freshId("task") }, Date.now());
+    // 记下这一刻的游戏目录：重试前与当前的比对，命令也带上它供后端核对。不知道当前目录就排不出能重试的任务
+    const gameDir = origin === undefined ? this.currentGameDir() : origin;
+    if (gameDir === null && !GAME_DIR_FREE_COMMANDS.has(draft.spec.command)) throw new Error(`还没读到当前的游戏目录，不能排「${subject}」`);
+    const task = newTask({ ...draft, id: freshId("task"), gameDir }, Date.now());
     this.set((raw) => ({
       tasks: [...raw.tasks, task],
       taskMeta: meta === null ? raw.taskMeta : { ...raw.taskMeta, [task.id]: meta },
@@ -2014,17 +2145,19 @@ export class LauncherStore {
     const taskId = attemptTaskId(task);
     const { command, args } = task.spec;
     if (!TASK_COMMANDS.has(command)) throw new Error(`任务日志里有不可重放的命令：${command}`);
+    const gameDir = commandGameDir(task);
     // 组合任务逐个调后端命令，复用同一个 taskId
     if (command === "install_mods") {
       const versionId = strArg(args, "versionId", command);
       const skipped: string[] = [];
+      const dir = requiredGameDir(gameDir, command);
       try {
         await this.runSteps(
           taskId,
           modItems(args).map((item) => ({
             size: item.fileSize,
             run: async (step) => {
-              const outcome = await installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId, step);
+              const outcome = await installMod(taskId, dir, versionId, item.platform, item.projectId, item.modVersionId, step);
               skipped.push(...outcome.skipped);
             },
           })),
@@ -2038,7 +2171,8 @@ export class LauncherStore {
     }
     if (command === "update_mods") {
       const versionId = strArg(args, "versionId", command);
-      const items = task.attempt > 1 ? await this.pendingUpdates(versionId, updateItems(args)) : updateItems(args);
+      const dir = requiredGameDir(gameDir, command);
+      const items = task.attempt > 1 ? await this.pendingUpdates(versionId, dir, updateItems(args)) : updateItems(args);
       const updated: UpdateItem[] = [];
       const skipped: string[] = [];
       try {
@@ -2047,7 +2181,7 @@ export class LauncherStore {
           items.map((item) => ({
             size: item.fileSize,
             run: async (step) => {
-              const outcome = await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId, step);
+              const outcome = await modsIpc.updateMod(taskId, dir, versionId, item.fileName, item.modVersionId, step);
               updated.push(item);
               skipped.push(...outcome.skipped);
             },
@@ -2062,17 +2196,24 @@ export class LauncherStore {
       return outcome;
     }
     // starterMods 只供前端在重启后恢复「就绪后接着装」，后端的新建与补全命令没有这个参数，不往下传
-    const wire: Record<string, unknown> = { ...args, taskId };
+    const wire: Record<string, unknown> = { ...args, taskId, ...(gameDir === null ? {} : { gameDir }) };
     delete wire.starterMods;
     return invoke<unknown>(command, wire);
+  }
+
+  /** 此刻的当前游戏目录；设置还没读到时为 null。 */
+  private currentGameDir(): string | null {
+    return this.raw.settings === null ? null : this.raw.settings.gameDir;
   }
 
   /**
    * 重试「全部更新」时，上一次尝试里已经换过的不再更新：更新会把文件换成新版本的文件名，按原文件名再调一次只会失败。
    * 按工程重新对一遍：已经是目标版本的、或者 Mod 已被移除不再有更新的跳过，其余用它现在的文件名。
+   * 带上任务发起时的目录：之后的各项更新由后端核对，这一步按名字查的话，排队期间切了目录就读到新目录里的同名实例，
+   * 还会给它反查身份写卷宗；那边没有可更新的，组合任务就零项做完，原任务被误记为完成。
    */
-  private async pendingUpdates(versionId: string, items: UpdateItem[]): Promise<UpdateItem[]> {
-    const candidates = await modsIpc.checkUpdates(versionId);
+  private async pendingUpdates(versionId: string, gameDir: string, items: UpdateItem[]): Promise<UpdateItem[]> {
+    const candidates = await modsIpc.checkUpdates(versionId, gameDir);
     return items.flatMap((item) => {
       const current = candidates.find((c) => c.latest.platform === item.platform && c.latest.project_id === item.projectId);
       if (current === undefined || current.current_version_id === item.modVersionId) return [];
@@ -2117,19 +2258,37 @@ export class LauncherStore {
   private onTaskDone(id: string, attempt: number, result: unknown): void {
     const before = this.findTask(id);
     if (before.status !== "running" || before.attempt !== attempt) return;
-    const keep = this.keepsPlaceholder(before);
     const repaired = before.spec.command === "repair_instance" ? before.instanceId : null;
+    // 补全成功没有占位项，也一样记进 landing：落地重扫回来之前实例照旧按安装中派生
+    const keep = this.keepsPlaceholder(before) || (repaired !== null && !this.discardLanding.has(id));
+    const moved = before.spec.command === MOVE_TASK_COMMAND;
+    // 移走的实例上还排着的任务开始了也做不成（见 strandedByMove）：与完成记在同一次更新里取消，下面的调度才不会先把它们拉起来
+    const stranded = moved ? strandedByMove(this.raw.tasks, before) : [];
     this.set((raw) => {
-      const done = trimHistory(markDone(raw.tasks, id, attempt, Date.now()));
-      return { tasks: repaired === null ? done : dropSuperseded(done, repaired), ...(keep ? { landing: [...raw.landing, id] } : {}) };
+      const now = Date.now();
+      const settled = stranded.reduce((tasks, t) => markCancelled(tasks, t.id, now), markDone(raw.tasks, id, attempt, now));
+      // 随之取消的与之前失败、取消的一起跟着实例记到目标目录，切过去就能重试（见 followMove）
+      const done = trimHistory(moved ? followMove(settled, before) : settled);
+      return { tasks: repaired === null ? done : dropSuperseded(done, repaired, before.gameDir), ...(keep ? { landing: [...raw.landing, id] } : {}) };
     });
     this.tasksChanged();
     this.rescanHeld(before.instanceId);
     if (this.discardLanding.has(id)) return;
     this.background(
       ACTION_ERROR.landTask(before.title),
-      this.landTask(before, result).finally(() => this.endLanding(id)),
+      this.landTask(before, result).finally(() => {
+        this.endLanding(id);
+        // 排在完成通知与跟进提醒之后：先说移到了哪里，再说哪些任务因此取消；落地失败也照样说，任务已经取消了
+        if (stranded.length > 0) this.reportStranded(before, stranded);
+      }),
     );
+  }
+
+  /** 移动完成时随之取消的排队任务：补一条通知列出它们，「查看」去下载任务的失败与取消。 */
+  private reportStranded(move: Task, stranded: readonly Task[]): void {
+    if (move.instanceId === null) throw new Error(`移动任务 ${move.id} 没有挂在实例上`);
+    const copy = TASK_TOAST.moveQueueCancelled(move.instanceId, stranded.map((t) => t.title));
+    this.pushToast("warning", copy.title, copy.body, { label: TASK_TOAST.viewAction, to: { page: "tasks", filter: "failed" } });
   }
 
   /**
@@ -2186,12 +2345,21 @@ export class LauncherStore {
       this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
     }
     // 新建与导入取消后后端删除实例，修复失败或取消后实例带着未完成标记，都要重扫。占位项与重扫结果在同一次
-    // 更新里交接：盘上留了目录就由扫描项接替，没留就移除
+    // 更新里交接：盘上留了目录就由扫描项接替，没留就移除。固定列表一并重读：半成品目录在的时候后端认这个名字，
+    // 配置里留着同名的旧固定时它就在读到的固定列表里；目录删掉之后不重读，下一次固定或排序把整份列表写回去，
+    // 后端按找不到拒掉，那次操作整个落空
     if (INSTANCE_TASK_COMMANDS.has(before.spec.command)) {
       this.background(
         ACTION_ERROR.refreshInstances,
-        this.fetchInstances((raw) => this.withoutLanding(raw, id)).finally(() => this.endLanding(id)),
+        Promise.all([this.fetchInstances((raw) => this.withoutLanding(raw, id)).finally(() => this.endLanding(id)), this.fetchPins()]),
       );
+    }
+    // 整合包导入删掉半成品、新建被取消删掉目录时，后端连同固定一起去掉了配置里对这个名字的当前选中与固定服务器记住的实例
+    // （新建入队时就把它设成了当前实例）。手里的设置不重读，主页一直指着已删的名字；同一会话里再建同名实例后，选中它会因
+    // 与旧值相同而跳过写入，后端记下的当前实例一直是空的
+    if (before.spec.command === "install_modpack" || (before.spec.command === "install_version" && isCancelled(error))) {
+      this.background(BOOT_SLICE_ERROR.settings, this.fetchSettings());
+      invalidateResources("servers");
     }
     // 组合任务停下之前做完的那几项已经落盘，Mod 列表与数目不能停在任务开始前
     if (COMPOSITE_TASKS.has(before.spec.command) && before.instanceId !== null) {
@@ -2257,7 +2425,23 @@ export class LauncherStore {
     return instanceAction(instanceId, (id) => ({ label: TASK_TOAST.launchAction, run: () => this.actions.launch(id), errorTitle: ACTION_ERROR.launch(id) }));
   }
 
-  /** 新建、导入的实例：写封面；要固定且侧栏此刻没满时追加到固定列表末尾。重扫结果与撤下占位项在同一次更新里。 */
+  /**
+   * 新建、导入、补全落地时，发起它的游戏目录已经不是当前目录：返回那个目录；还是当前目录时为 null。跟着要做的事（写封面、
+   * 自动固定、接着启动、通知上的启动按钮）都按实例名作用在当前目录上，目录换了还照做就落到这边的同名实例上。
+   * 还没读到当前目录时同样不做：说不准是哪个目录。
+   */
+  private landedElsewhere(task: Task): string | null {
+    if (task.gameDir === null) throw new Error(`任务 ${task.id} 没有记下发起时的游戏目录`);
+    const current = this.currentGameDir();
+    return current !== null && sameGameDir(task.gameDir, current) ? null : task.gameDir;
+  }
+
+  /**
+   * 新建、导入的实例：写封面；固定列表按后端重读，要固定且侧栏此刻没满时追加到末尾。重扫结果与撤下占位项在同一次更新里。
+   *
+   * 后端在新建、导入结束时去掉了配置里与它同名的旧固定（在落樱之外删掉的同名实例留下的）。手里的固定列表可能还留着那一项：
+   * 按它判断，要固定的会当成已经固定、不再写入，之后一读就没了；不要固定的照样画成已固定。所以不论要不要固定都先重读。
+   */
   private async settleNewInstance(taskId: string, id: string, cover: string | null, pin: boolean): Promise<void> {
     if (cover !== null) {
       await this.queueInstanceSettings(id, async () => {
@@ -2265,12 +2449,12 @@ export class LauncherStore {
         await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, cover }));
       });
     }
-    if (pin) {
-      await this.queueSidebarPins(async () => {
-        const pins = this.raw.pins;
-        if (pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) await this.writePins([...pins, id]);
-      });
-    }
+    await this.queueSidebarPins(async () => {
+      await this.fetchPins();
+      if (!pin) return;
+      const pins = this.raw.pins;
+      if (pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) await this.writePins([...pins, id]);
+    });
     this.instanceIdTaken(id);
     await this.fetchInstances((raw) => this.withoutLanding(raw, taskId));
   }
@@ -2314,34 +2498,47 @@ export class LauncherStore {
    * 已经不在的旧名字）。实例列表里那一项就地改名、与 lastRename 在同一次更新里：外壳按 lastRename 改写历史、按实例列表
    * 剪路由，新 id 晚一帧进列表，实例页就被当成已删除剪掉。后端随改名迁了侧栏固定与当前实例，这里同样就地换掉；
    * 改名之前发出、还没回来的重扫与读取读的是改名前的盘面，晚到时不再采纳。
+   *
+   * dir 是发起改名那一刻的游戏目录：后端按那一刻的快照改名，等后端期间切换了目录，改的仍是那个目录里的实例。
    */
-  private migrateRenamed(from: string, to: string): void {
+  private migrateRenamed(from: string, to: string, dir: string | null): void {
     this.scanApplied = this.scanIssued;
     this.pinsApplied = this.pinsIssued;
     this.settingsApplied = this.settingsIssued;
     this.renameSeq += 1;
     const seq = this.renameSeq;
     this.renames.push({ from, to });
-    this.set((raw) => ({
-      lastRename: { from, to, seq },
-      scanned: raw.scanned.map((i) => (i.id === from ? { ...i, id: to, name: to } : i)),
-      pins: raw.pins.map((p) => (p === from ? to : p)),
-      settings: raw.settings === null || raw.settings.selectedVersion !== from ? raw.settings : { ...raw.settings, selectedVersion: to },
-      tasks: raw.tasks.map((t) => renamedTask(t, from, to)),
-      taskMeta: Object.fromEntries(Object.entries(raw.taskMeta).map(([taskId, meta]) => [taskId, renamedMeta(meta, from, to)])),
-      // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
-      session: raw.session !== null && raw.session.instanceId === from ? { ...raw.session, instanceId: to } : raw.session,
-      toasts: retargetToasts(raw.toasts, from, to),
-      login: renamedLogin(raw.login, from, to),
-      launchPrompt:
-        raw.launchPrompt === null
-          ? null
-          : {
-              ...raw.launchPrompt,
-              instanceId: raw.launchPrompt.instanceId === from ? to : raw.launchPrompt.instanceId,
-              occupantId: raw.launchPrompt.occupantId === from ? to : raw.launchPrompt.occupantId,
-            },
-    }));
+    this.set((raw) => {
+      // 别的目录里同名实例的任务不跟着改，否则切回去重试就落到那边另一个实例上
+      const elsewhere = new Set(raw.tasks.filter((t) => !inGameDir(t, dir)).map((t) => t.id));
+      const tasks = raw.tasks.map((t) => (elsewhere.has(t.id) ? t : renamedTask(t, from, to)));
+      const taskMeta = Object.fromEntries(Object.entries(raw.taskMeta).map(([taskId, meta]) => [taskId, elsewhere.has(taskId) ? meta : renamedMeta(meta, from, to)]));
+      // 等后端期间已经切到了别的目录：手里的列表、固定、设置与页面都是那个目录的，同名的是那边另一个实例，只迁任务
+      const current = raw.settings === null ? null : raw.settings.gameDir;
+      if (dir !== null && current !== null && !sameGameDir(dir, current)) return { tasks, taskMeta };
+      return {
+        lastRename: { from, to, seq },
+        scanned: raw.scanned.map((i) => (i.id === from ? { ...i, id: to, name: to } : i)),
+        // 与后端同一口径：与新名字同名（不分大小写）的别的固定是在落樱之外删掉的同名旧实例留下的，去掉，否则有两项新名字，
+        // 之后整组写回都按重复被拒
+        pins: raw.pins.filter((p) => p === from || p.toLowerCase() !== to.toLowerCase()).map((p) => (p === from ? to : p)),
+        settings: raw.settings === null || raw.settings.selectedVersion !== from ? raw.settings : { ...raw.settings, selectedVersion: to },
+        tasks,
+        taskMeta,
+        // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
+        session: raw.session !== null && raw.session.instanceId === from ? { ...raw.session, instanceId: to } : raw.session,
+        toasts: retargetToasts(raw.toasts, from, to),
+        login: renamedLogin(raw.login, from, to),
+        launchPrompt:
+          raw.launchPrompt === null
+            ? null
+            : {
+                ...raw.launchPrompt,
+                instanceId: raw.launchPrompt.instanceId === from ? to : raw.launchPrompt.instanceId,
+                occupantId: raw.launchPrompt.occupantId === from ? to : raw.launchPrompt.occupantId,
+              },
+      };
+    });
   }
 
   /** mark（当时的 renames.length）之后 id 改成了什么；没改过原样返回。 */
@@ -2349,15 +2546,22 @@ export class LauncherStore {
     return this.renames.slice(mark).reduce((cur, r) => (r.from === cur ? r.to : cur), id);
   }
 
-  /** 还在安装、实例目录还没装好的新建实例：它的任务与入队上下文；不是这种实例为 null。 */
-  private pendingCreate(id: string): { taskId: string; meta: Extract<TaskMeta, { type: "create" }> } | null {
-    if (this.raw.scanned.some((i) => i.id === id)) return null;
+  /** 还在新建或导入的实例：它的任务与入队上下文；没有为 null。装到一半被重扫扫到的半成品目录也算。 */
+  private creationOf(id: string): { taskId: string; meta: CreationMeta } | null {
     for (const task of this.raw.tasks) {
       if (!isActiveTask(task)) continue;
       const meta = this.raw.taskMeta[task.id];
-      if (meta !== undefined && meta.type === "create" && meta.name === id) return { taskId: task.id, meta };
+      if (meta !== undefined && (meta.type === "create" || meta.type === "modpack") && meta.name === id) return { taskId: task.id, meta };
     }
     return null;
+  }
+
+  /**
+   * 还在安装、还没写进固定列表的新建或导入实例：它的任务与入队上下文；不是这种实例为 null。装到一半被重扫扫到的半成品目录也算，
+   * 与派生里的自动固定一致：取消固定、拖动排序只改装好后的打算，不把半成品写进固定列表。已在固定列表里的照常经后端改。
+   */
+  private pendingCreate(id: string): { taskId: string; meta: CreationMeta } | null {
+    return this.raw.pins.includes(id) ? null : this.creationOf(id);
   }
 
   /** 任务完成后的落地与通知（任务完成一律弹，不论用户此时在哪一页）。 */
@@ -2378,9 +2582,16 @@ export class LauncherStore {
       case "create": {
         const outcome = result as InstallResultDto;
         const id = outcome.id;
-        await this.settleNewInstance(task.id, id, meta.cover, meta.autoPin);
-        const copy = TASK_TOAST.ready(id);
-        this.pushToast("success", copy.title, copy.body, this.launchAction(id));
+        const elsewhere = this.landedElsewhere(task);
+        if (elsewhere === null) {
+          await this.settleNewInstance(task.id, id, meta.cover, meta.autoPin);
+          const copy = TASK_TOAST.ready(id);
+          this.pushToast("success", copy.title, copy.body, this.launchAction(id));
+        } else {
+          await this.fetchInstances((raw) => this.withoutLanding(raw, task.id));
+          const copy = TASK_TOAST.readyElsewhere(id, elsewhere, meta.cover !== null, meta.autoPin);
+          this.pushToast("success", copy.title, copy.body);
+        }
         // 勾选与否以任务参数为准：重启后恢复的任务没有入队时的上下文，参数里仍记着
         if (task.spec.args.useTemplate === true) {
           const template = outcome.template;
@@ -2390,12 +2601,19 @@ export class LauncherStore {
             this.pushToast("info", skipped.title, skipped.body);
           }
         }
-        if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter);
+        if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter, task.gameDir);
         return;
       }
       case "modpack": {
         const id = (result as ModpackInstallOutcomeDto).version_id;
-        await this.settleNewInstance(task.id, id, meta.cover, true);
+        const elsewhere = this.landedElsewhere(task);
+        if (elsewhere !== null) {
+          await this.fetchInstances((raw) => this.withoutLanding(raw, task.id));
+          const copy = TASK_TOAST.importedElsewhere(id, elsewhere, meta.cover !== null, meta.autoPin);
+          this.pushToast("success", copy.title, copy.body);
+          return;
+        }
+        await this.settleNewInstance(task.id, id, meta.cover, meta.autoPin);
         // 重启后恢复的导入任务不知道 Mod 数，正文省略
         const copy = TASK_TOAST.imported(id, meta.modCount);
         this.pushToast("success", copy.title, "body" in copy ? copy.body : undefined, this.launchAction(id));
@@ -2403,11 +2621,18 @@ export class LauncherStore {
       }
       case "repair": {
         const mark = this.renames.length;
-        await this.fetchInstances();
+        // 撤下 landing 与新的列表在同一次更新里：分两次的话中间那一拍实例又按补全前扫的那份画成损坏
+        await this.fetchInstances((raw) => this.withoutLanding(raw, task.id));
         const id = this.renamedSince(strArg(task.spec.args, "id", command), mark);
         // 排在接着启动之前：启动可能停在登录弹窗上不换会话，失败卡留着的话入口只剩再修一次，和修好了对不上
         this.dismissRepairedFailure(id);
-        if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter);
+        if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter, task.gameDir);
+        const elsewhere = this.landedElsewhere(task);
+        if (elsewhere !== null) {
+          const copy = TASK_TOAST.repairedElsewhere(id, elsewhere, task.spec.args.reinstallLoader === true, meta.launchAfter);
+          this.pushToast("success", copy.title, copy.body);
+          return;
+        }
         if (meta.launchAfter && !isSessionActive(this.raw.session)) {
           await this.actions.launch(id);
           return;
@@ -2564,7 +2789,11 @@ export class LauncherStore {
    * 新实例就绪后接着装开局 Mod：排一个组合任务，在下载任务里只占一行。它是实例之外的一步，失败照任务失败呈现，
    * 实例本身照常可用；重试时前面已经装上的几项后端认出已装、直接跳过。
    */
-  private enqueueStarter(instanceId: string, starter: readonly StarterPick[]): void {
+  /**
+   * 开局 Mod 跟着新建、补全记下的游戏目录（gameDir），不按落地那一刻的当前目录记：落地前切了目录的话，后端按它核对拒绝，
+   * 任务落为失败并说明原因，切回去能重试，不会装进当前目录的同名实例。
+   */
+  private enqueueStarter(instanceId: string, starter: readonly StarterPick[], gameDir: string | null): void {
     const title = TASK_TEXT.starterTitle(starter.length);
     this.enqueue(
       {
@@ -2585,6 +2814,7 @@ export class LauncherStore {
       },
       { type: "starter", instanceId, count: starter.length },
       title,
+      gameDir,
     );
   }
 
@@ -2603,12 +2833,14 @@ export class LauncherStore {
   /**
    * 登录或添加账户成功后关掉对应弹窗并发通知；由启动拦截触发的，通知正文改为「正在启动」并继续这次启动。
    * 只关同一种登录的弹窗：从向导等别处直接添加账户时，不误关此刻开着的其他登录弹窗。
+   * 接着的启动不并进添加动作：添加在这里就已做完，调用方等启动回来的话，启动的失败会按「没能添加离线账户」这类标题报，
+   * 与账户已经加上的事实相反。所以启动转到后台，失败按启动自己的标题报。
    */
-  private async afterAccountAdded(kind: LoginState["kind"], intent: LoginIntent, toast: { title: string; body?: string }): Promise<void> {
+  private afterAccountAdded(kind: LoginState["kind"], intent: LoginIntent, toast: { title: string; body?: string }): void {
     if (this.raw.login !== null && this.raw.login.kind === kind) this.set({ login: null });
     if (intent.kind === "launch") {
       this.pushToast("success", toast.title, TOAST_COPY.continuingLaunch(intent.instanceId));
-      await this.requestLaunch(intent.instanceId, intent.quickPlay);
+      this.background(ACTION_ERROR.launch(intent.instanceId), this.requestLaunch(intent.instanceId, intent.quickPlay));
       return;
     }
     this.pushToast("success", toast.title, toast.body);
@@ -2852,7 +3084,7 @@ export class LauncherStore {
         if (check.level === "error") throw new Error(check.message);
         const account = accountFromDto(await accountsIpc.createOfflineAccount(name));
         await store.fetchAccounts();
-        await store.afterAccountAdded("offline", store.loginIntent("offline"), { title: TOAST_COPY.offlineAdded(account.name) });
+        store.afterAccountAdded("offline", store.loginIntent("offline"), { title: TOAST_COPY.offlineAdded(account.name) });
         return account;
       },
       async openLogin(kind, intent = MANUAL_LOGIN) {
@@ -2900,7 +3132,7 @@ export class LauncherStore {
             const login = store.raw.login;
             if (gen !== store.loginGen || login === null || login.kind !== "microsoft") return;
             if (login.intent.kind === "launch") {
-              await store.afterAccountAdded("microsoft", login.intent, { title: TOAST_COPY.loggedIn(account.name) });
+              store.afterAccountAdded("microsoft", login.intent, { title: TOAST_COPY.loggedIn(account.name) });
               return;
             }
             store.set({ login: { ...login, device: { status: "success", account, updated: existing.has(account.uuid) } } });
@@ -2940,13 +3172,13 @@ export class LauncherStore {
         }
         const account = accountFromDto(result.account);
         await store.fetchAccounts();
-        await store.afterAuthlib(account);
+        store.afterAuthlib(account);
         return { status: "logged_in", account };
       },
       async selectAuthlibProfile(pendingId, profileUuid) {
         const account = accountFromDto(await accountsIpc.selectAuthlibProfile(pendingId, profileUuid));
         await store.fetchAccounts();
-        await store.afterAuthlib(account);
+        store.afterAuthlib(account);
         return account;
       },
       async relogin(accountUuid, intent) {
@@ -2978,11 +3210,13 @@ export class LauncherStore {
             store.pushToast("warning", TOAST_COPY.pinLimit);
             return;
           }
-          const pending = store.pendingCreate(id);
-          if (pending !== null) {
+          const creation = store.creationOf(id);
+          if (creation !== null) {
             // 还在安装的新实例后端不认，只改它装好后要不要固定
-            store.set((raw) => ({ taskMeta: { ...raw.taskMeta, [pending.taskId]: { ...pending.meta, autoPin: !shown.includes(id) } } }));
-            return;
+            store.set((raw) => ({ taskMeta: { ...raw.taskMeta, [creation.taskId]: { ...creation.meta, autoPin: !shown.includes(id) } } }));
+            // 配置里留着同名的旧固定、半成品目录建好后又被读回固定列表：取消固定还得从列表里去掉，否则它照旧显示、装好后照旧固定。
+            // 先改打算再写：写入回来之前它靠固定列表留在原位，不会先跳到末尾
+            if (!store.raw.pins.includes(id)) return;
           }
           const pins = store.raw.pins;
           const next = pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id];
@@ -3030,6 +3264,7 @@ export class LauncherStore {
       async installModpack(spec) {
         const nameError = instanceNameError(spec.name, store.instanceIds());
         if (nameError !== null) throw new Error(nameError);
+        const autoPin = store.getState().sidebarPins.length < SIDEBAR_PIN_LIMIT;
         store.enqueue(
           {
             kind: "modpack",
@@ -3046,6 +3281,7 @@ export class LauncherStore {
             mcVersion: spec.mcVersion,
             loader: spec.loader,
             loaderVersion: spec.loaderVersion,
+            autoPin,
           },
           spec.packName,
         );
@@ -3122,6 +3358,8 @@ export class LauncherStore {
       async renameInstance(id, name) {
         const nameError = instanceNameError(name, store.instanceIds(), id);
         if (nameError !== null) throw new Error(nameError);
+        // 后端按此刻的快照改名：等它期间切换了目录，迁移也照这一刻的目录来
+        const dir = store.currentGameDir();
         const { newId, lagged } = await instancesIpc.renameInstance(id, name).then(
           (outcome): { newId: string; lagged: IpcError | null } => ({ newId: outcome.id, lagged: null }),
           (err: unknown) => {
@@ -3134,7 +3372,7 @@ export class LauncherStore {
         // 记住它的固定服务器也跟到了新名字下
         invalidateResources("play-stats");
         invalidateResources("servers");
-        store.migrateRenamed(id, newId);
+        store.migrateRenamed(id, newId, dir);
         store.scheduleJournal();
         if (lagged !== null && lagged.code === instancesIpc.WORLD_BACKUPS_NOT_MOVED_ERROR_CODE) store.backupsLagged(newId, lagged);
         else if (lagged !== null) store.playRecordsLagged(newId, lagged);
@@ -3546,6 +3784,9 @@ export class LauncherStore {
       },
       retryTask(id) {
         const task = store.findTask(id);
+        // 排在下面两个按实例名查当前目录扫描结果的判断前面：目录换过之后它们认出的是另一个目录里的同名实例
+        const blocked = retryBlockedReason(task, store.currentGameDir(), store.movingInstances());
+        if (blocked !== null) throw new Error(blocked);
         const leftover = store.leftoverOfFailedCreate(task);
         if (leftover !== null) {
           store.retryAsRepair(task, leftover);
@@ -3567,8 +3808,10 @@ export class LauncherStore {
       },
       retryFailedTasks() {
         let retried = 0;
+        const current = store.currentGameDir();
+        const moving = store.movingInstances();
         try {
-          for (const task of store.raw.tasks.filter(batchRetryable)) {
+          for (const task of store.raw.tasks.filter((t) => batchRetryable(t, current, moving))) {
             const leftover = store.leftoverOfFailedCreate(task);
             if (leftover !== null) {
               // 与下面一样，已在队列里的同一件事静默跳过，不逐条提示重复
@@ -3591,7 +3834,7 @@ export class LauncherStore {
         return retried;
       },
       clearFinishedTasks() {
-        store.set((raw) => ({ tasks: clearFinished(raw.tasks), unseenFailures: [] }));
+        store.set((raw) => ({ tasks: clearFinished(raw.tasks, raw.landing), unseenFailures: [] }));
         store.scheduleJournal();
       },
       markFailuresSeen() {
@@ -3607,6 +3850,8 @@ export class LauncherStore {
       // ---- 设置
       async updateSettings(patch) {
         await configIpc.updateConfig(settingsPatchToConfig(patch));
+        // 实例页与新建确认步经默认设置的查询读这一项（template_info 的 enabled），不读配置
+        if ("newInstanceTemplate" in patch) invalidateResources("template");
         await store.fetchSettings();
       },
       async addJavaPath(path) {
@@ -3680,11 +3925,11 @@ export class LauncherStore {
     await run;
   }
 
-  private async afterAuthlib(account: Account): Promise<void> {
+  private afterAuthlib(account: Account): void {
     if (account.authServer === null) throw new Error(`外置登录账户 ${account.name} 缺少服务器名`);
     invalidateResources(`skin:${account.uuid}`);
     const copy = TOAST_COPY.authlibAdded(account.name, account.authServer);
-    await this.afterAccountAdded("authlib", this.loginIntent("authlib"), copy);
+    this.afterAccountAdded("authlib", this.loginIntent("authlib"), copy);
   }
 
   /**

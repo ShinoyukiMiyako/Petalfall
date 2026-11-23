@@ -7,6 +7,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LOADING_DELAY_MS } from "../../domain/limits";
 import { APP_LICENSE, ASSET_LICENSE, REPO_URL, type ThirdPartyManifest } from "../../lib/app-info";
+import { BundledFileError } from "../../lib/bundled-file";
 import { render, stubResizeObserver, type Rendered } from "../../test/dom";
 import { COPY, type Lang } from "../copy";
 import { FrameChromeProvider, type FrameChrome } from "../Frame";
@@ -255,10 +256,11 @@ describe("协议全文", () => {
     expect(licenseRegion()?.textContent).toBe(LICENSE);
   });
 
-  it("读失败时说明并带上原文，清单、源代码和商标声明都还在", async () => {
+  it("读失败时说明并带上原因（标题已点名是哪份，原因里不再说一遍），清单、源代码和商标声明都还在", async () => {
     const onOpenExternal = vi.fn();
-    await show({ loadLicenseText: () => Promise.reject(new Error("协议全文读不出来：/LICENSE.txt 返回 404")), onOpenExternal });
-    expect(document.querySelector('[role="alert"]')?.textContent).toBe(`${COPY.zh.legal.licenseFailed}协议全文读不出来：/LICENSE.txt 返回 404`);
+    await show({ loadLicenseText: () => Promise.reject(new BundledFileError("协议全文", "/LICENSE.txt 返回 404")), onOpenExternal });
+    const alert = document.querySelector('[role="alert"]');
+    expect([...(alert?.children ?? [])].map((p) => p.textContent)).toEqual([COPY.zh.legal.licenseFailed, "/LICENSE.txt 返回 404"]);
     expect(licenseRegion()).toBeNull();
     expect(rows()).toHaveLength(3);
     expect(main()).toContain(COPY.zh.legal.trademark);
@@ -271,10 +273,11 @@ describe("协议全文", () => {
     expect(document.querySelector('[role="alert"]')?.textContent).toBe(`${COPY.zh.legal.licenseFailed}IPC 断了`);
   });
 
-  it("读失败记日志，不只是画在界面上", async () => {
-    const failure = new Error("读不出来");
+  it("读失败记日志，不只是画在界面上：记的是整个错误，message 里看得出是哪份没读到", async () => {
+    const failure = new BundledFileError("协议全文", "/LICENSE.txt 返回 503");
     await show({ loadLicenseText: () => Promise.reject(failure) });
     expect(console.error).toHaveBeenCalledWith("协议页读取失败", failure);
+    expect(failure.message).toBe("协议全文读不出来：/LICENSE.txt 返回 503");
   });
 });
 
@@ -309,12 +312,13 @@ describe.each([
 
   it("读失败时只在它自己的标签下说明并带上原文，协议全文、清单和声明都还在", async () => {
     const path = prop === "loadAdditionalTerms" ? "/LICENSE-ADDITIONAL-TERMS.md" : "/LICENSE-ASSETS.md";
-    await show({ [prop]: () => Promise.reject(new Error(`${name}读不出来：${path} 返回 404`)) });
+    await show({ [prop]: () => Promise.reject(new BundledFileError(name, `${path} 返回 404`)) });
     expect(document.querySelector('[role="alert"]')).toBeNull();
     expect(licenseRegion()?.textContent).toBe(LICENSE);
 
     await showTab(name);
-    expect(document.querySelector('[role="alert"]')?.textContent).toBe(`${failed}${name}读不出来：${path} 返回 404`);
+    const alert = document.querySelector('[role="alert"]');
+    expect([...(alert?.children ?? [])].map((p) => p.textContent)).toEqual([failed, `${path} 返回 404`]);
     expect(licenseRegion()).toBeNull();
     expect(rows()).toHaveLength(3);
     expect(main()).toContain(legal.assets);
@@ -371,7 +375,8 @@ describe("第三方许可清单", () => {
     expect(loadingNoteVisible()).toBe(false);
     expect(listBusy()).toBe(true);
     expect(listStatus().textContent).toBe("");
-    expect(listStatus().className).toBe(styles.status);
+    // 播报区紧挨在加载占位的根前面，是它的兄弟而不在带 aria-busy 的根里：忙碌区域里的变化读屏可以攒到忙完再报
+    expect(listStatus().nextElementSibling?.getAttribute("aria-busy")).toBe("true");
     expect(packageList()).toBeNull();
     expect(countText()).toBe(legal.thirdPartyHeading);
 
@@ -397,47 +402,37 @@ describe("第三方许可清单", () => {
   });
 
   it("超过加载延迟还没读到才说「读取中」（看得见的和读屏播报的同一刻），读到后至少再停一个延迟才换成清单", async () => {
+    // 换回真实计时器交给 test/setup 的统一收尾：它先卸载、把假时钟上排着的淡入帧排空再换，自己在这里换会把那些帧连同计时器一起丢掉
     vi.useFakeTimers();
-    try {
-      const manifest = deferred<ThirdPartyManifest>();
-      await show({ loadThirdParty: () => manifest.promise });
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS - 1);
-      });
-      expect(loadingNoteVisible()).toBe(false);
-      expect(listStatus().textContent).toBe("");
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1);
-      });
-      expect(loadingNoteVisible()).toBe(true);
-      expect(listStatus().textContent).toBe(legal.thirdPartyLoading);
+    const manifest = deferred<ThirdPartyManifest>();
+    await show({ loadThirdParty: () => manifest.promise });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS - 1);
+    });
+    expect(loadingNoteVisible()).toBe(false);
+    expect(listStatus().textContent).toBe("");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(loadingNoteVisible()).toBe(true);
+    expect(listStatus().textContent).toBe(legal.thirdPartyLoading);
 
-      await act(async () => manifest.resolve(MANIFEST));
-      expect(packageList()).toBeNull();
-      expect(listBusy()).toBe(true);
-      expect(listStatus().textContent).toBe(legal.thirdPartyLoading);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
-      });
-      expect(listBusy()).toBe(false);
-      expect(listStatus().textContent).toBe("");
-      expect(rows()).toHaveLength(3);
-    } finally {
-      vi.useRealTimers();
-    }
+    await act(async () => manifest.resolve(MANIFEST));
+    expect(packageList()).toBeNull();
+    expect(listBusy()).toBe(true);
+    expect(listStatus().textContent).toBe(legal.thirdPartyLoading);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
+    });
+    expect(listBusy()).toBe(false);
+    expect(listStatus().textContent).toBe("");
+    expect(rows()).toHaveLength(3);
   });
 
-  it("播报区只给读屏：脱离底块的布局、裁成看不见，填字时清单与骨架都不挪", () => {
+  it("播报区交给 Loadable 的 busyLabel：协议页样式表里不再自带一份视觉隐藏规则", () => {
     // jsdom 不做布局，直接读样式表
     const css = readFileSync(resolve(__dirname, "Legal.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
-    const rule = /(?:^|\n)\.status\s*\{([^}]*)\}/.exec(css)?.[1];
-    if (rule === undefined) throw new Error("样式表里没有 .status");
-    const decls = new Map(rule.split(";").flatMap((decl) => (decl.includes(":") ? [[decl.slice(0, decl.indexOf(":")).trim(), decl.slice(decl.indexOf(":") + 1).trim()] as const] : [])));
-    expect(decls.get("position")).toBe("absolute");
-    expect(decls.get("width")).toBe("1px");
-    expect(decls.get("height")).toBe("1px");
-    expect(decls.get("overflow")).toBe("hidden");
-    expect(decls.get("clip-path")).toBe("inset(50%)");
+    expect(css).not.toMatch(/clip-path:\s*inset\(50%\)/);
   });
 
   it("读失败时说明并带上原文，协议全文还在", async () => {

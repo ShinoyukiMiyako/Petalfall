@@ -19,6 +19,7 @@ use petalfall_instance::{
 use sha1::{Digest, Sha1};
 
 use crate::InstanceError;
+use crate::data_format::GuardMode;
 use crate::error::Result;
 use crate::facade::Petalfall;
 use crate::modfs::try_exists;
@@ -35,6 +36,15 @@ pub const BACKGROUND_MAX_SIDE: u32 = 2560;
 /// 封面方块的边长，与原版方块材质一致。
 pub const BLOCK_SIDE: u32 = 16;
 const JPEG_QUALITY: u8 = 90;
+/// 取主色调时色相直方图的格数：每格 10 度。
+const HUE_BINS: usize = 36;
+/// 主色调在峰两侧各取多少度求平均。HSL 色环六个扇区各 60 度（红、黄、绿、青、蓝、品红各占一个），两侧各 30 度
+/// 正好是以峰为中心的一个扇区：同一种颜色在明暗、反光下的色相起伏落在里面，隔壁扇区的另一种颜色平均不进来。
+const PEAK_SPREAD: f64 = 30.0;
+/// 判灰的门槛：图上看得见的部分平均彩度（通道最大值减最小值，按 0 到 1 计）不到它就不取色调。约合 8 位通道上
+/// 最大最小差 26：再低就是人眼里的灰、黑、白，直方图的峰由压缩噪点与相机偏色决定，两张看着一样的灰图能差出
+/// 半个色环；棕褐的旧照片、淡彩插画在它之上，照样取得到色调。
+const GRAY_CHROMA: f64 = 0.1;
 
 /// 设置的读改写与图片目录的清理排队。导入先写图片文件、再把文件名写进设置，中间若有别的保存在清理，
 /// 刚写下、还没被引用的图片会被当成旧图删掉；读改写交错还会让后写的盖掉先写的字段。
@@ -101,6 +111,8 @@ pub struct EncodedCover {
     /// 卡面图片目录下的文件名，见 [`CoverImageSlot::file_name`]。
     pub file_name: String,
     pub bytes: Vec<u8>,
+    /// 方块位的主色调（见 [`dominant_hue`]）；背景位不取，恒为 None。
+    pub hue: Option<u16>,
 }
 
 /// 读入、解码 `source`，按 `slot` 重新编码。全程同步且吃 CPU，异步调用方应放进 `spawn_blocking`。
@@ -111,13 +123,20 @@ pub fn encode_cover_image(
     let bytes = read_source(source)?;
     let image = decode(source, &bytes)?;
     drop(bytes);
-    let (bytes, extension) = match slot {
-        CoverImageSlot::Background => encode_background(&image)?,
-        CoverImageSlot::Block => (encode_block(&image)?, "png"),
+    let (bytes, extension, hue) = match slot {
+        CoverImageSlot::Background => {
+            let (bytes, extension) = encode_background(&image)?;
+            (bytes, extension, None)
+        }
+        CoverImageSlot::Block => {
+            let (bytes, hue) = encode_block(&image)?;
+            (bytes, "png", hue)
+        }
     };
     Ok(EncodedCover {
         file_name: content_name(slot, &bytes, extension),
         bytes,
+        hue,
     })
 }
 
@@ -236,15 +255,87 @@ fn encode_background(
     }
 }
 
-/// 封面方块：居中裁成正方形，按面积平均缩成 [`BLOCK_SIDE`] 见方，存 PNG。
-fn encode_block(image: &DynamicImage) -> std::result::Result<Vec<u8>, CoverImageError> {
+/// 封面方块：居中裁成正方形，按面积平均缩成 [`BLOCK_SIDE`] 见方，存 PNG。返回编码后的字节与这张方块面的主色调。
+fn encode_block(
+    image: &DynamicImage,
+) -> std::result::Result<(Vec<u8>, Option<u16>), CoverImageError> {
     let (width, height) = image.dimensions();
     let side = width.min(height);
     let square = image.view((width - side) / 2, (height - side) / 2, side, side);
     let block = box_average(&*square, BLOCK_SIDE, BLOCK_SIDE);
     let mut bytes = Vec::new();
     write_png(&block, &mut bytes)?;
-    Ok(bytes)
+    Ok((bytes, dominant_hue(&block)))
+}
+
+/// 方块面的主色调（HSL 色相 0-359）；整张图太灰（门槛见 [`GRAY_CHROMA`]）或全透明时为 None，卡面用封面方块的色调。
+///
+/// 每个像素按「不透明度 × 彩度」计权投进 [`HUE_BINS`] 格的色相直方图，相邻三格之和最大处为峰，再把离峰中心不超过
+/// [`PEAK_SPREAD`] 的像素按同样的权重求色相的圆周平均。按彩度计权，近黑、近白与灰的像素几乎不算数：它们的色相只是
+/// 噪点的方向，换成 HSL 饱和度的话近黑的像素也能满饱和。取峰而不取整张图的平均色：红花绿叶这样两种颜色分着占的图，
+/// 平均色是图上没有的橙褐。三格找峰、峰旁按角度求圆周平均，图稍有出入时结果连续地动，不卡在格子边上来回跳，
+/// 跨 0 度的一片红也不会平均成对面的青。取的是缩好的方块面：方块画的就是它，取一次色只要 256 次累加。
+fn dominant_hue(image: &RgbaImage) -> Option<u16> {
+    let bin_degrees = 360.0 / HUE_BINS as f64;
+    let mut bins = [0.0f64; HUE_BINS];
+    // 每个有颜色的像素：色相（度）与权重
+    let mut colored = Vec::with_capacity(image.pixels().len());
+    let (mut visible, mut colorful) = (0.0f64, 0.0f64);
+    for &Rgba([r, g, b, a]) in image.pixels() {
+        let alpha = f64::from(a) / 255.0;
+        let [r, g, b] = [r, g, b].map(|channel| f64::from(channel) / 255.0);
+        let max = r.max(g).max(b);
+        let chroma = max - r.min(g).min(b);
+        visible += alpha;
+        let weight = alpha * chroma;
+        if weight <= 0.0 {
+            continue;
+        }
+        colorful += weight;
+        let hue = hue_degrees([r, g, b], max, chroma);
+        // 浮点误差算出的 360 度归最后一格
+        bins[((hue / bin_degrees) as usize).min(HUE_BINS - 1)] += weight;
+        colored.push((hue, weight));
+    }
+    if visible <= 0.0 || colorful / visible < GRAY_CHROMA {
+        return None;
+    }
+    let window =
+        |bin: usize| bins[(bin + HUE_BINS - 1) % HUE_BINS] + bins[bin] + bins[(bin + 1) % HUE_BINS];
+    // 并列时取色相小的那一处，同一张图总是同一个结果
+    let peak = (1..HUE_BINS).fold(0, |best, bin| {
+        if window(bin) > window(best) {
+            bin
+        } else {
+            best
+        }
+    });
+    let center = (peak as f64 + 0.5) * bin_degrees;
+    let (mut x, mut y) = (0.0f64, 0.0f64);
+    for &(hue, weight) in &colored {
+        // 到峰中心的角距，落在 -180 到 180 度之间
+        let offset = (hue - center + 180.0).rem_euclid(360.0) - 180.0;
+        if offset.abs() <= PEAK_SPREAD {
+            let radians = hue.to_radians();
+            x += weight * radians.cos();
+            y += weight * radians.sin();
+        }
+    }
+    // 峰所在的三格有权重，它们都离峰中心不到 15 度，一定被算进来；参与平均的只跨 60 度，向量不会互相抵消
+    let mean = y.atan2(x).to_degrees().rem_euclid(360.0);
+    Some(mean.round() as u16 % 360)
+}
+
+/// HSL 色相（度，0 到 360）。`max` 是三个通道里最大的，`chroma` 是最大减最小，须大于 0。
+fn hue_degrees([r, g, b]: [f64; 3], max: f64, chroma: f64) -> f64 {
+    let sector = if max == r {
+        ((g - b) / chroma).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / chroma + 2.0
+    } else {
+        (r - g) / chroma + 4.0
+    };
+    sector * 60.0
 }
 
 fn write_png(image: &RgbaImage, out: &mut Vec<u8>) -> std::result::Result<(), CoverImageError> {
@@ -366,30 +457,49 @@ async fn prune_cover_images(version_dir: &Path, settings: &VersionSettings) {
 }
 
 /// 在设置写入排队中保存设置，随后清掉不再引用的卡面图片。`settings` 须已校验过。
+///
+/// 封面方块图片的色调不由调用方给，只在导入时算出：方块图片还是盘上那张时沿用盘上记的，换掉或清掉时一起没有。
+/// 界面写设置是读改写整份，形状里没有色调这一项，照调用方给的写就会把它冲掉。
 pub(crate) async fn save_settings_and_prune(
     version_dir: &Path,
     settings: &VersionSettings,
 ) -> Result<()> {
     let _write = SETTINGS_WRITE.lock().await;
-    VersionSettingsStore::for_version_dir(version_dir)
-        .save(settings)
-        .await?;
-    prune_cover_images(version_dir, settings).await;
+    let store = VersionSettingsStore::for_version_dir(version_dir);
+    let settings = VersionSettings {
+        cover_image_hue: carried_hue(&store, settings.cover_image.as_deref()).await?,
+        ..settings.clone()
+    };
+    store.save(&settings).await?;
+    prune_cover_images(version_dir, &settings).await;
     Ok(())
+}
+
+/// 要写下的方块图片 `image` 在盘上记着的色调；没有方块图片时不读盘。
+async fn carried_hue(store: &VersionSettingsStore, image: Option<&str>) -> Result<Option<u16>> {
+    let Some(image) = image else {
+        return Ok(None);
+    };
+    let current = store.load().await?;
+    Ok(current
+        .cover_image_hue
+        .filter(|_| current.cover_image.as_deref() == Some(image)))
 }
 
 impl Petalfall {
     /// 把本机图片 `source` 导入成实例 `id` 的卡面背景或封面方块，返回写下的设置。
     ///
-    /// 背景位同时把 `background` 设为图片；方块位只写 `cover_image`，`cover` 留作图片读不到时的兜底。
+    /// 背景位同时把 `background` 设为图片；方块位写 `cover_image` 与它的主色调，`cover` 留作图片读不到时的兜底。
     /// 被换下的旧图随之删掉。图片的问题报 [`CoverImageError`]（经 [`crate::CoreError::CoverImage`]），
-    /// 实例不存在报 [`crate::CoreError::VersionNotInstalled`]；失败时设置不变。
+    /// 实例不存在报 [`crate::CoreError::VersionNotInstalled`]；失败时设置不变。先核对游戏目录的数据格式记号，
+    /// 规则同 [`Petalfall::set_instance_settings`]。
     pub async fn import_cover_image(
         &self,
         id: &str,
         slot: CoverImageSlot,
         source: &Path,
     ) -> Result<VersionSettings> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dir = self.existing_instance_dir(id).await?;
         let owned = source.to_path_buf();
         let encoded =
@@ -403,7 +513,10 @@ impl Petalfall {
                 settings.background = CoverBackground::Image;
                 settings.background_image = Some(encoded.file_name.clone());
             }
-            CoverImageSlot::Block => settings.cover_image = Some(encoded.file_name.clone()),
+            CoverImageSlot::Block => {
+                settings.cover_image = Some(encoded.file_name.clone());
+                settings.cover_image_hue = encoded.hue;
+            }
         }
         settings
             .validate()
@@ -426,7 +539,10 @@ impl Petalfall {
 mod tests {
     use super::*;
     use crate::CoreError;
-    use crate::instances::tests::{petalfall_at, vanilla_json, write_version};
+    use crate::instances::tests::{
+        current_format_stamp, disk_state, petalfall_at, refusing_stamps, vanilla_json, write_stamp,
+        write_version,
+    };
     use image::RgbImage;
     use image::codecs::webp::WebPEncoder;
 
@@ -909,6 +1025,194 @@ mod tests {
         assert_eq!(block.get_pixel(5, 5), &Rgba([0, 0, 0, 255]));
     }
 
+    fn solid(rgba: [u8; 4]) -> RgbaImage {
+        RgbaImage::from_pixel(BLOCK_SIDE, BLOCK_SIDE, Rgba(rgba))
+    }
+
+    /// 前 `rows` 行涂 `top`，其余涂 `bottom`。
+    fn split(rows: u32, top: [u8; 4], bottom: [u8; 4]) -> RgbaImage {
+        RgbaImage::from_fn(BLOCK_SIDE, BLOCK_SIDE, |_, y| {
+            Rgba(if y < rows { top } else { bottom })
+        })
+    }
+
+    /// 两个色相在色环上差几度。
+    fn hue_gap(a: u16, b: u16) -> u16 {
+        let d = a.abs_diff(b);
+        d.min(360 - d)
+    }
+
+    /// 纯色取的就是它的 HSL 色相，与方块目录、平台图标的取法同一个定义。
+    #[test]
+    fn dominant_hue_of_a_solid_colour_is_its_hsl_hue() {
+        for (rgba, hue) in [
+            ([255, 0, 0, 255], 0),
+            ([0, 255, 0, 255], 120),
+            ([0, 0, 255, 255], 240),
+            // (1, 0.502, 0)：30.1 度
+            ([255, 128, 0, 255], 30),
+            // 樱粉 (200, 80, 120)：(80 - 120) / 120 = -1/3，折回 5.667 × 60 = 340
+            ([200, 80, 120, 255], 340),
+            // rgb_png 的蓝 (90, 140, 200)：(90 - 140) / 110 + 4 = 3.545，即 212.7
+            ([90, 140, 200, 255], 213),
+        ] {
+            assert_eq!(dominant_hue(&solid(rgba)), Some(hue), "{rgba:?}");
+        }
+    }
+
+    /// 灰、黑、白、黑白棋盘与全透明都不取色调；平均彩度正好跨过 0.1（通道差 26 / 255）时才取。
+    #[test]
+    fn grey_or_invisible_images_have_no_hue() {
+        let checker = RgbaImage::from_fn(BLOCK_SIDE, BLOCK_SIDE, |x, y| {
+            Rgba(if (x + y) % 2 == 0 {
+                [0, 0, 0, 255]
+            } else {
+                [255, 255, 255, 255]
+            })
+        });
+        for image in [
+            solid([128, 128, 128, 255]),
+            solid([0, 0, 0, 255]),
+            solid([255, 255, 255, 255]),
+            checker,
+            solid([255, 0, 0, 0]),
+            // 差 25：0.098，算灰
+            solid([153, 128, 128, 255]),
+            solid([128, 128, 153, 255]),
+        ] {
+            assert_eq!(dominant_hue(&image), None, "{:?}", image.get_pixel(0, 0));
+        }
+        // 差 26：0.102，取得到
+        assert_eq!(dominant_hue(&solid([154, 128, 128, 255])), Some(0));
+        assert_eq!(dominant_hue(&solid([128, 128, 154, 255])), Some(240));
+    }
+
+    /// 门槛按看得见的部分算：一半全透明不把彩度摊薄，全透明那一半的颜色也不算数。
+    #[test]
+    fn transparent_pixels_neither_dilute_nor_colour_the_hue() {
+        let half = split(8, [0, 0, 255, 0], [154, 128, 128, 255]);
+        assert_eq!(dominant_hue(&half), Some(0));
+    }
+
+    /// 两种颜色分着占的图取占得多的那种：10 行红、6 行绿取红（0 度）。按平均色取会是 (0.625, 0.375, 0) 的 36 度，
+    /// 图上并没有这种橙色。
+    #[test]
+    fn the_larger_of_two_colours_wins_instead_of_their_average() {
+        let image = split(10, [255, 0, 0, 255], [0, 255, 0, 255]);
+        assert_eq!(dominant_hue(&image), Some(0));
+        let image = split(6, [255, 0, 0, 255], [0, 255, 0, 255]);
+        assert_eq!(dominant_hue(&image), Some(120));
+    }
+
+    /// 大片近白的底不抢主体的色调：七成偏蓝的近白 (230, 230, 240)、三成橙 (255, 128, 0)，取橙。
+    #[test]
+    fn faint_backgrounds_do_not_outweigh_a_vivid_subject() {
+        let image = RgbaImage::from_fn(BLOCK_SIDE, BLOCK_SIDE, |x, y| {
+            Rgba(if (y * BLOCK_SIDE + x) % 10 < 3 {
+                [255, 128, 0, 255]
+            } else {
+                [230, 230, 240, 255]
+            })
+        });
+        assert_eq!(dominant_hue(&image), Some(30));
+    }
+
+    /// 色环在 0 度接上：一半 10 度、一半 350 度的红取 0 度，不是两个数直接平均出的 180 度（青）。
+    #[test]
+    fn hues_around_zero_wrap_instead_of_averaging_to_cyan() {
+        // (255, 43, 0) 是 10.1 度，(255, 0, 43) 是 349.9 度
+        let image = split(8, [255, 43, 0, 255], [255, 0, 43, 255]);
+        assert_eq!(dominant_hue(&image), Some(0));
+    }
+
+    /// 稳：像素换个位置结果分毫不差；每个通道加上 ±3 的随机噪点，色调与原色差不过 2 度；灰图加上同样的噪点仍是灰。
+    #[test]
+    fn dominant_hue_is_order_independent_and_tolerates_noise() {
+        let seed = fastrand::u64(..);
+        let mut rng = fastrand::Rng::with_seed(seed);
+        let noisy = |rng: &mut fastrand::Rng, base: [u8; 3]| {
+            RgbaImage::from_fn(BLOCK_SIDE, BLOCK_SIDE, |_, _| {
+                let [r, g, b] = base.map(|c| (i16::from(c) + rng.i16(-3..=3)).clamp(0, 255) as u8);
+                Rgba([r, g, b, 255])
+            })
+        };
+        for (base, hue) in [
+            ([200, 80, 120], 340),
+            ([90, 140, 200], 213),
+            ([255, 128, 0], 30),
+        ] {
+            let image = noisy(&mut rng, base);
+            let found = dominant_hue(&image)
+                .unwrap_or_else(|| panic!("种子 {seed}：{base:?} 加噪后不该算灰"));
+            assert!(
+                hue_gap(found, hue) <= 2,
+                "种子 {seed}：{base:?} 加噪后取到 {found}，原色 {hue}"
+            );
+
+            let mut pixels: Vec<Rgba<u8>> = image.pixels().copied().collect();
+            rng.shuffle(&mut pixels);
+            let shuffled = RgbaImage::from_fn(BLOCK_SIDE, BLOCK_SIDE, |x, y| {
+                pixels[(y * BLOCK_SIDE + x) as usize]
+            });
+            assert_eq!(
+                dominant_hue(&shuffled),
+                Some(found),
+                "种子 {seed}：{base:?}"
+            );
+        }
+        let grey = noisy(&mut rng, [128, 128, 128]);
+        assert_eq!(dominant_hue(&grey), None, "种子 {seed}：灰图加噪");
+    }
+
+    /// 方块位随图算出主色调，按缩好的方块面算；背景位不取。
+    #[test]
+    fn only_block_images_carry_a_hue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pink = source(
+            tmp.path(),
+            "pink.png",
+            &png(&RgbaImage::from_pixel(40, 30, Rgba([200, 80, 120, 255]))),
+        );
+        let grey = source(
+            tmp.path(),
+            "grey.png",
+            &png(&RgbaImage::from_pixel(40, 30, Rgba([128, 128, 128, 255]))),
+        );
+        assert_eq!(
+            encode_cover_image(&pink, CoverImageSlot::Block)
+                .unwrap()
+                .hue,
+            Some(340)
+        );
+        assert_eq!(
+            encode_cover_image(&grey, CoverImageSlot::Block)
+                .unwrap()
+                .hue,
+            None
+        );
+        assert_eq!(
+            encode_cover_image(&pink, CoverImageSlot::Background)
+                .unwrap()
+                .hue,
+            None
+        );
+        // 裁掉的两边不算：50 × 32 中间是红、两边是蓝，取红
+        let wide = RgbaImage::from_fn(50, 32, |x, _| {
+            Rgba(if (9..41).contains(&x) {
+                [255, 0, 0, 255]
+            } else {
+                [0, 0, 255, 255]
+            })
+        });
+        let wide = source(tmp.path(), "wide.png", &png(&wide));
+        assert_eq!(
+            encode_cover_image(&wide, CoverImageSlot::Block)
+                .unwrap()
+                .hue,
+            Some(0)
+        );
+    }
+
     /// 文件名是编码后字节 SHA-1 的前 16 位：同一张图两次导入同名，内容不同就换名。
     #[test]
     fn file_names_carry_the_content_hash() {
@@ -1010,6 +1314,11 @@ mod tests {
             settings.cover.as_deref(),
             Some("cherry_planks"),
             "方块 id 留作兜底"
+        );
+        assert_eq!(
+            settings.cover_image_hue,
+            Some(213),
+            "随图记下方块面的主色调"
         );
         assert_eq!(settings.background, CoverBackground::Image);
         let mut expected = vec![background.file_name.clone(), block.file_name.clone()];
@@ -1116,10 +1425,137 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cover_files(&dir), ["keep-me"]);
+        // 方块图片的色调随图片一起清掉
+        assert_eq!(imported.cover_image_hue, Some(213));
         assert_eq!(
             petalfall.instance_settings("1.21.1").await.unwrap(),
-            cleared
+            VersionSettings {
+                cover_image_hue: None,
+                ..cleared
+            }
         );
+    }
+
+    /// 色调只由导入写：整份写设置时方块图片没换就沿用盘上记的（调用方不带色调、或带了别的值都一样），清掉图片时
+    /// 一起清空；换背景图不碰它；再导入一张灰图，色调换成没有。
+    #[tokio::test]
+    async fn saving_settings_carries_the_hue_with_its_image() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        write_version(petalfall.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
+        let pink = source(
+            tmp.path(),
+            "pink.png",
+            &png(&RgbaImage::from_pixel(24, 24, Rgba([200, 80, 120, 255]))),
+        );
+        let imported = petalfall
+            .import_cover_image("1.21.1", CoverImageSlot::Block, &pink)
+            .await
+            .unwrap();
+        assert_eq!(imported.cover_image_hue, Some(340));
+
+        // 界面的读改写：形状里没有色调，传下来是 None
+        let edited = VersionSettings {
+            memory_mb: Some(4096),
+            cover_image_hue: None,
+            ..imported.clone()
+        };
+        petalfall
+            .set_instance_settings("1.21.1", &edited)
+            .await
+            .unwrap();
+        let saved = petalfall.instance_settings("1.21.1").await.unwrap();
+        assert_eq!(saved.memory_mb, Some(4096));
+        assert_eq!(saved.cover_image_hue, Some(340));
+
+        let forged = VersionSettings {
+            cover_image_hue: Some(5),
+            ..saved.clone()
+        };
+        petalfall
+            .set_instance_settings("1.21.1", &forged)
+            .await
+            .unwrap();
+        assert_eq!(
+            petalfall
+                .instance_settings("1.21.1")
+                .await
+                .unwrap()
+                .cover_image_hue,
+            Some(340)
+        );
+
+        let photo = source(tmp.path(), "photo.png", &rgb_png(30, 20));
+        let with_background = petalfall
+            .import_cover_image("1.21.1", CoverImageSlot::Background, &photo)
+            .await
+            .unwrap();
+        assert_eq!(with_background.cover_image_hue, Some(340));
+
+        // 清掉方块图片：调用方还带着旧色调也照常保存，色调一起没有
+        let cleared = VersionSettings {
+            cover_image: None,
+            ..with_background.clone()
+        };
+        petalfall
+            .set_instance_settings("1.21.1", &cleared)
+            .await
+            .unwrap();
+        let after = petalfall.instance_settings("1.21.1").await.unwrap();
+        assert_eq!((after.cover_image, after.cover_image_hue), (None, None));
+
+        let grey = source(
+            tmp.path(),
+            "grey.png",
+            &png(&RgbaImage::from_pixel(24, 24, Rgba([128, 128, 128, 255]))),
+        );
+        petalfall
+            .import_cover_image("1.21.1", CoverImageSlot::Block, &pink)
+            .await
+            .unwrap();
+        let regrey = petalfall
+            .import_cover_image("1.21.1", CoverImageSlot::Block, &grey)
+            .await
+            .unwrap();
+        assert!(regrey.cover_image.is_some());
+        assert_eq!(
+            regrey.cover_image_hue, None,
+            "灰图不取色调，换下的那张的色调也不留"
+        );
+    }
+
+    /// 任务重试与列实例被拒后留下的旧列表都不经过列实例：导入自己在读图、写图片与设置之前核对游戏目录的记号。
+    #[tokio::test]
+    async fn import_refuses_a_newer_or_unreadable_game_dir_and_touches_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        let dir = write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        let photo = source(tmp.path(), "photo.png", &rgb_png(30, 20));
+
+        for (stamp, assert_refused) in refusing_stamps() {
+            write_stamp(&game, &stamp);
+            let before = disk_state(tmp.path());
+            let err = petalfall
+                .import_cover_image("1.21.1", CoverImageSlot::Background, &photo)
+                .await
+                .unwrap_err();
+            assert_refused(err, &game);
+            assert_eq!(disk_state(tmp.path()), before, "记号 {stamp} 拦下后动了盘");
+        }
+
+        // 对照：号等于这一版时放行，图片与设置照常落盘。
+        write_stamp(&game, &current_format_stamp());
+        let settings = petalfall
+            .import_cover_image("1.21.1", CoverImageSlot::Background, &photo)
+            .await
+            .unwrap();
+        let encoded = encode_cover_image(&photo, CoverImageSlot::Background).unwrap();
+        assert_eq!(
+            settings.background_image.as_deref(),
+            Some(encoded.file_name.as_str())
+        );
+        assert_eq!(cover_files(&dir), vec![encoded.file_name]);
     }
 
     #[tokio::test]

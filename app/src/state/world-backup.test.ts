@@ -80,7 +80,7 @@ describe("备份、导出与恢复入队", () => {
     const [task] = store.getState().tasks;
     expect(task).toMatchObject({ kind: "world_backup", title: "备份「旧世界」", detail: "「生存」", instanceId: "生存", status: "running" });
     expect(task.spec).toEqual({ command: "backup_world", args: { id: "生存", world: "w1" } });
-    expect(callsOf(ipc, "backup_world")).toEqual([{ id: "生存", world: "w1", taskId: `${task.id}#1` }]);
+    expect(callsOf(ipc, "backup_world")).toEqual([{ gameDir: "D:/Games/.minecraft", id: "生存", world: "w1", taskId: `${task.id}#1` }]);
     expect(toasts()).toContainEqual(["info", "已开始备份「旧世界」", "进度见下载任务"]);
     // 后端还没报之前就按备份算，不画成安装中：导出整合包与改名的禁用原因都认这个活动
     const inst = store.getState().instances.find((i) => i.id === "生存");
@@ -203,7 +203,7 @@ describe("备份、导出与恢复入队", () => {
     await settle();
     const [task] = store.getState().tasks;
     expect(task).toMatchObject({ kind: "world_backup", title: "导出「旧世界」" });
-    expect(callsOf(ipc, "export_world")).toEqual([{ id: "生存", world: "w1", dest: "D:\\导出\\w1.zip", taskId: `${task.id}#1` }]);
+    expect(callsOf(ipc, "export_world")).toEqual([{ gameDir: "D:/Games/.minecraft", id: "生存", world: "w1", dest: "D:\\导出\\w1.zip", taskId: `${task.id}#1` }]);
     // 导出不弹「已开始备份」
     expect(toasts().map(([, title]) => title)).not.toContain("已开始备份「旧世界」");
     exported.resolve({ path: "D:\\导出\\w1.zip", size_bytes: 3 * MB });
@@ -224,7 +224,7 @@ describe("备份、导出与恢复入队", () => {
     await settle();
     const [task] = store.getState().tasks;
     expect(task).toMatchObject({ kind: "world_restore", title: "恢复「旧世界」", detail: "「生存」" });
-    expect(callsOf(ipc, "restore_world_backup")).toEqual([{ id: "生存", world: "w1", file: "1700000000000-auto.zip", taskId: `${task.id}#1` }]);
+    expect(callsOf(ipc, "restore_world_backup")).toEqual([{ gameDir: "D:/Games/.minecraft", id: "生存", world: "w1", file: "1700000000000-auto.zip", taskId: `${task.id}#1` }]);
     restored[0].resolve({ world: "w1", previous_in_recycle_bin: true });
     await settle();
     expect(toasts()).toContainEqual(["success", "已恢复「旧世界」", "原来的存档已移入回收站"]);
@@ -398,7 +398,7 @@ describe("改名时备份没跟上", () => {
     ipc.overrides.set("backup_world", () => backupResult(0));
     store.actions.retryTask(task.id);
     await settle();
-    expect(callsOf(ipc, "backup_world").at(-1)).toEqual({ id: "生存二", world: "w1", taskId: `${task.id}#2` });
+    expect(callsOf(ipc, "backup_world").at(-1)).toEqual({ gameDir: "D:/Games/.minecraft", id: "生存二", world: "w1", taskId: `${task.id}#2` });
     expect(toasts()).toContainEqual(["success", "已备份「旧世界」", "3.0 MB"]);
     expect(toast("已备份「旧世界」").action).toEqual({ label: "查看备份", to: { page: "instance", id: "生存二", tab: "overview" } });
   });
@@ -424,6 +424,7 @@ describe("重启后恢复的存档任务", () => {
       error: { code: "io", message: "拒绝访问" },
       created_at: 1,
       finished_at: 2,
+      game_dir: "D:/Games/.minecraft",
       spec: { command: "backup_world", args: { id: "生存", world: "w1" } },
     };
     bootOverrides(ipc, { journal: [record] });
@@ -433,7 +434,7 @@ describe("重启后恢复的存档任务", () => {
     expect(store.getState().tasks.map((t) => [t.kind, t.status])).toEqual([["world_backup", "failed"]]);
     store.actions.retryTask("task-old");
     await settle();
-    expect(callsOf(ipc, "backup_world")).toEqual([{ id: "生存", world: "w1", taskId: "task-old#2" }]);
+    expect(callsOf(ipc, "backup_world")).toEqual([{ gameDir: "D:/Games/.minecraft", id: "生存", world: "w1", taskId: "task-old#2" }]);
     expect(toasts()).toContainEqual(["success", "已备份「w1」", "3.0 MB · 清理了 1 份旧的自动备份"]);
   });
 });

@@ -4,11 +4,10 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { act, useState, type ReactNode } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LOADING_DELAY_MS } from "../domain/limits";
-import { REFLOW_SKIP_ATTR } from "../lib/reflow";
 import { FOCUS_FALLBACK_ATTR, OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { keydown, render, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
+import { drainFrames, keydown, render, stepFrames, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import { Button } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import confirmStyles from "./ConfirmDialog.module.css";
@@ -42,10 +41,18 @@ beforeEach(() => {
   stubResizeObserver();
 });
 
-afterEach(() => {
-  view?.unmount();
-  view = undefined;
-});
+/**
+ * 断言动画在某一刻的值（提交那一刻的起点、途中逐帧的值）的用例让帧跟着假时钟走，用 stepFrames 逐帧推进。
+ * 按真实时间走的话，机器满载时 await act 让出的那一下就可能先跑掉几帧，量到的已经不是起点，甚至整段形变已经播完。
+ * 换之前先在真实计时器上把帧循环排空（见 test/dom 的 drainFrames）。
+ */
+async function startFrameClock() {
+  await drainFrames();
+  vi.useFakeTimers();
+}
+
+/** 弹窗的入场与 morph 形变（时长约 350 ms 的弹簧）在这么多帧（约 1 秒）之内都落定。 */
+const SETTLE_FRAMES = 60;
 
 function mount(ui: ReactNode) {
   view = render(
@@ -444,23 +451,25 @@ describe("ConfirmDialog", () => {
     expect(body?.style.opacity).toMatch(FADING);
   });
 
-  // 「切换并重下」换成「删除实例」：确认键变窄，底栏右对齐，左边的「取消」一帧横移
-  it("开着时被顶替：确认键的新文案淡入；「取消」所在的按钮行撑满底栏、挂着让位，确认键自己不参与让位", () => {
+  // 「切换并重下」换成「删除实例」：确认键变窄，底栏右对齐，左边的「取消」随之横移
+  it("开着时被顶替：确认键的新文案淡入；两个按钮各在按钮行的一层布局节点里，「取消」随布局动画横移，按钮行不挂 DOM 让位", () => {
     mount(<Commanded />);
     const cancel = byText("取消");
-    const row = cancel.closest("[data-tooltip-host]")?.parentElement as HTMLElement;
-    expect(reflowed.has(row)).toBe(true);
-    expect(row.contains(byText("切换并重下"))).toBe(true);
+    const row = cancel.closest("[data-tooltip-host]")?.parentElement?.parentElement as HTMLElement;
     expect(row.className).toBe(confirmStyles.actions);
-    expect(cancel.hasAttribute(REFLOW_SKIP_ATTR)).toBe(false);
-    expect(byText("切换并重下").hasAttribute(REFLOW_SKIP_ATTR)).toBe(true);
+    expect(reflowed.has(row)).toBe(false);
+    // 按钮行的直接子项是两个按钮各自的形变层
+    const itemOf = (text: string) => [...row.children].find((child) => child.contains(byText(text))) as HTMLElement;
+    expect(itemOf("取消").className).toBe(confirmStyles.cancel);
+    expect(itemOf("切换并重下").className).toBe(confirmStyles.confirm);
+    expect(visualElementStore.get(itemOf("取消"))?.projection?.options.layout).toBe(true);
     const labelOf = (text: string) => [...byText(text).querySelectorAll<HTMLElement>("span")].find((s) => s.textContent === text && s.children.length === 0);
     // 打开时就在的文案跟着弹窗入场，自己不淡入
     expect(labelOf("切换并重下")?.style.opacity).toBe("1");
 
     act(() => confirmHandles.set?.(REMOVE));
     expect(labelOf("删除实例")?.style.opacity).toMatch(/^0(\.\d+)?$/);
-    expect(byText("删除实例").hasAttribute(REFLOW_SKIP_ATTR)).toBe(true);
+    expect(itemOf("删除实例").className).toBe(confirmStyles.confirm);
   });
 
   it("按钮行撑满底栏、靠右排：行宽不随确认键的文案变", () => {
@@ -479,7 +488,7 @@ describe("ConfirmDialog", () => {
     expect(live()?.textContent).toBe("删除「生存」？ 第 2 个请求");
     act(() => confirmHandles.set?.(ENDGAME));
     expect(live()?.textContent).toBe("结束游戏？ 第 3 个请求");
-    expect(live()?.className).toBe(confirmStyles.announce);
+    expect(live()?.className).toBe("sk-sr-only");
   });
 
   it("关上之后再来的请求：换一层新的框，标题随弹窗入场、不单独淡入", async () => {
@@ -518,6 +527,7 @@ describe("弹窗随内容改变尺寸", () => {
         </Modal>
       );
     }
+    await startFrameClock();
     mount(<Growing />);
     const dialog = dialogs()[0];
     // jsdom 不做布局：面板高度按正文段落数给（60 + 50 × 段数），在 720 高的层里垂直居中
@@ -528,15 +538,30 @@ describe("弹窗随内容改变尺寸", () => {
       return { left: 200, top, width: 560, height, x: 200, y: top, right: 760, bottom: top + height, toJSON: () => ({}) } as DOMRect;
     };
     // 等入场播完，免得入场自己的缩放混进来
-    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.transform).toBe("none");
+    // 假时钟不推进，提交之后一帧也没走：下面量到的是形变的起点
     await act(async () => handles.grow?.());
-    const scale = /scale\(([\d.]+), ([\d.]+)\)/.exec(dialog.style.transform);
-    if (scale === null) throw new Error(`面板没有形变：${dialog.style.transform}`);
+    const scaleOf = () => {
+      const scale = /scale\(([\d.]+), ([\d.]+)\)/.exec(dialog.style.transform);
+      if (scale === null) throw new Error(`面板没有形变：${dialog.style.transform}`);
+      return { x: Number(scale[1]), y: Number(scale[2]) };
+    };
     // 起点就是原来的高度：110 / 260
-    expect(Number(scale[1])).toBeCloseTo(1, 2);
-    expect(Number(scale[2])).toBeGreaterThan(0.4);
-    expect(Number(scale[2])).toBeLessThan(0.6);
-    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    expect(scaleOf().x).toBeCloseTo(1, 6);
+    expect(scaleOf().y).toBeCloseTo(110 / 260, 6);
+    // 途中逐帧往新高度长，不是一帧跳过去：前几帧纵向缩放一帧比一帧大、还没到 1，横向不动
+    let previous = scaleOf().y;
+    for (let i = 0; i < 4; i++) {
+      await stepFrames(1);
+      const { x, y } = scaleOf();
+      expect(x).toBeCloseTo(1, 6);
+      expect(y).toBeGreaterThan(previous);
+      expect(y).toBeLessThan(1);
+      previous = y;
+    }
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.transform).toBe("none");
   });
 
   it("传了 layoutKey：只在它变的那次重渲染量布局、播形变", async () => {
@@ -552,6 +577,7 @@ describe("弹窗随内容改变尺寸", () => {
         </Modal>
       );
     }
+    await startFrameClock();
     mount(<Stepped />);
     const dialog = dialogs()[0];
     dialog.getBoundingClientRect = () => {
@@ -559,12 +585,21 @@ describe("弹窗随内容改变尺寸", () => {
       const top = (720 - height) / 2;
       return { left: 200, top, width: 560, height, x: 200, y: top, right: 760, bottom: top + height, toJSON: () => ({}) } as DOMRect;
     };
-    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.transform).toBe("none");
+    // layoutKey 没变：不量布局，这一次变高一帧到位，之后几帧也没有形变
     await act(async () => handles.set?.(2, "a"));
     expect(dialog.style.transform).toBe("none");
+    await stepFrames(2);
+    expect(dialog.style.transform).toBe("none");
+    // 变了：提交之前取的快照就是此刻两行的高度，起点是 160 / 260
     await act(async () => handles.set?.(4, "b"));
-    expect(dialog.style.transform).toMatch(/scale\(1, 0\.\d+\)/);
-    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    const scale = /scale\(([\d.]+), ([\d.]+)\)/.exec(dialog.style.transform);
+    if (scale === null) throw new Error(`面板没有形变：${dialog.style.transform}`);
+    expect(Number(scale[1])).toBeCloseTo(1, 6);
+    expect(Number(scale[2])).toBeCloseTo(160 / 260, 6);
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.transform).toBe("none");
   });
 
   // 变矮时被让位的兄弟从旧位置滑过来，越出主体的新底边：主体照常滚动的话途中冒出一下滚动条、挤窄内容
@@ -581,6 +616,7 @@ describe("弹窗随内容改变尺寸", () => {
         </Modal>
       );
     }
+    await startFrameClock();
     mount(<Growing />);
     const dialog = dialogs()[0];
     const body = dialog.querySelector<HTMLElement>("[data-padded]") as HTMLElement;
@@ -589,16 +625,24 @@ describe("弹窗随内容改变尺寸", () => {
       const top = (720 - height) / 2;
       return { left: 200, top, width: 560, height, x: 200, y: top, right: 760, bottom: top + height, toJSON: () => ({}) } as DOMRect;
     };
-    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.transform).toBe("none");
     expect(body.hasAttribute("data-morphing")).toBe(false);
     await act(async () => handles.grow?.());
     expect(dialog.style.transform).toMatch(/scale\(/);
     expect(body.hasAttribute("data-morphing")).toBe(true);
-    await waitForFrames(() => expect(body.hasAttribute("data-morphing")).toBe(false));
+    // 途中每一帧都带着：标记跟的是整段形变，不是只在起步那一下
+    for (let i = 0; i < 4; i++) {
+      await stepFrames(1);
+      expect(dialog.style.transform).toMatch(/scale\(/);
+      expect(body.hasAttribute("data-morphing")).toBe(true);
+    }
+    await stepFrames(SETTLE_FRAMES);
+    expect(body.hasAttribute("data-morphing")).toBe(false);
     expect(dialog.style.transform).toBe("none");
   });
 
-  // 资源详情这类满版主体默认不留槽位：正显示着滚动条时藏起它，内容横移 10px，比途中冒出滚动条更糟
+  // 满版主体默认不留槽位（资讯这类头图贴着右边的弹窗）：正显示着滚动条时藏起它，内容横移 10px，比途中冒出滚动条更糟
   it("没留槽位的满版主体：正显示着滚动条时形变不打标记，没有滚动条时照打；跟的是面板投影节点的开始与结束", () => {
     mount(
       <Modal open onClose={() => undefined} ariaLabel="资源详情" padded={false}>
@@ -936,6 +980,156 @@ describe("Modal 随父级退场", () => {
     await vi.waitFor(() => expect(dialogs()).toHaveLength(0), { timeout: 3000, interval: 20 });
     act(() => handles.swap?.());
     await vi.waitFor(() => expect(document.body.textContent).toContain("向导"), { timeout: 3000, interval: 20 });
+  });
+});
+
+/**
+ * 按浏览器的样子在焦点所在处按一次回车或空格。jsdom 只派发事件，下面两样都不做（无头 Edge 里用真实按键核对过）：
+ * - 焦点所在的子树带上 inert 后，浏览器在下一个输入事件到来之前把焦点挪回 body，按键落在 body 上；
+ * - 聚焦着的按钮收到没被取消的回车或空格时触发一次 click。
+ */
+function press(key: "Enter" | " ") {
+  const focused = document.activeElement;
+  if (focused instanceof HTMLElement && focused.closest("[inert]") !== null) act(() => focused.blur());
+  const target = document.activeElement ?? document.body;
+  const down = keydown(target, key);
+  if (key === " ") act(() => void target.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true, cancelable: true })));
+  if (target instanceof HTMLButtonElement && !target.disabled && !down.defaultPrevented) act(() => target.click());
+}
+
+// 退场中的面板画的是关上那一刻的样子，处理函数也停在那一刻：「复制并打开网页」这类没有自带判断的按钮在退场的
+// 一百多毫秒里接得住回车或空格的话，动作会再跑一次（再写一次剪贴板、再开一次网页）
+describe("退场中的弹窗", () => {
+  it("父级开始退场：整层带 inert，焦点当场还给打开它的按钮，回车与空格到不了退场中的面板；退场播完焦点仍在那里", async () => {
+    const opened: string[] = [];
+    const handles: { show?: () => void; hide?: () => void } = {};
+    function Host() {
+      const [shown, setShown] = useState(false);
+      handles.show = () => setShown(true);
+      handles.hide = () => setShown(false);
+      return (
+        <>
+          <Button>添加账户</Button>
+          <AnimatePresence>
+            {shown && (
+              <Modal
+                key="login"
+                open
+                title="微软登录"
+                closeOnScrim={false}
+                onClose={() => setShown(false)}
+                footer={
+                  <Button data-autofocus="" onClick={() => opened.push("网页")}>
+                    复制并打开网页
+                  </Button>
+                }
+              >
+                正文
+              </Modal>
+            )}
+          </AnimatePresence>
+        </>
+      );
+    }
+    mount(<Host />);
+    const trigger = byText("添加账户");
+    act(() => trigger.focus());
+    act(() => handles.show?.());
+    const key = byText("复制并打开网页");
+    expect(document.activeElement).toBe(key);
+    // 开着时按得到：按键替身确实会触发按钮
+    press("Enter");
+    expect(opened).toEqual(["网页"]);
+
+    act(() => handles.hide?.());
+    expect(document.activeElement).toBe(trigger);
+    press("Enter");
+    press(" ");
+    expect(opened).toEqual(["网页"]);
+    // 读屏也不再读到它
+    const layer = key.closest("[data-sk-modal-layer]");
+    expect(layer?.hasAttribute("data-exiting")).toBe(true);
+    expect(layer?.hasAttribute("inert")).toBe(true);
+
+    await vi.waitFor(() => expect(dialogs()).toHaveLength(0), { timeout: 3000, interval: 20 });
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  // 由启动拦截、快捷键这类没有触发按钮的途径打开时，关上的那一刻焦点没有着落，一直停在退场面板里
+  it("关上时打开前的焦点接不住（打开时焦点在 body 上）：整层带 inert，回车与空格同样到不了退场中的面板", () => {
+    const pressed: string[] = [];
+    const handles: { open?: () => void; close?: () => void } = {};
+    function Host() {
+      const [open, setOpen] = useState(false);
+      handles.open = () => setOpen(true);
+      handles.close = () => setOpen(false);
+      return (
+        <Modal
+          open={open}
+          onClose={() => setOpen(false)}
+          title="还没有账户"
+          footer={
+            <Button data-autofocus="" onClick={() => pressed.push("微软")}>
+              添加微软账户
+            </Button>
+          }
+        >
+          正文
+        </Modal>
+      );
+    }
+    mount(<Host />);
+    expect(document.activeElement).toBe(document.body);
+    act(() => handles.open?.());
+    const key = byText("添加微软账户");
+    expect(document.activeElement).toBe(key);
+    press("Enter");
+    expect(pressed).toEqual(["微软"]);
+
+    act(() => handles.close?.());
+    press("Enter");
+    press(" ");
+    expect(pressed).toEqual(["微软"]);
+    expect(key.closest("[data-sk-modal-layer]")?.hasAttribute("inert")).toBe(true);
+  });
+
+  it("退场途中父级又把它接回来（同一个 key）：去掉 inert，焦点回到面板里带 data-autofocus 的按钮；再关上时照样还给打开它的按钮", () => {
+    const handles: { show?: () => void; hide?: () => void } = {};
+    function Host() {
+      const [shown, setShown] = useState(false);
+      handles.show = () => setShown(true);
+      handles.hide = () => setShown(false);
+      return (
+        <>
+          <Button>添加账户</Button>
+          <AnimatePresence>
+            {shown && (
+              <Modal key="login" open title="微软登录" onClose={() => setShown(false)} footer={<Button data-autofocus="">复制并打开网页</Button>}>
+                正文
+              </Modal>
+            )}
+          </AnimatePresence>
+        </>
+      );
+    }
+    mount(<Host />);
+    const trigger = byText("添加账户");
+    act(() => trigger.focus());
+    act(() => handles.show?.());
+    const key = byText("复制并打开网页");
+    const layer = key.closest("[data-sk-modal-layer]");
+    act(() => handles.hide?.());
+    expect(layer?.hasAttribute("inert")).toBe(true);
+
+    act(() => handles.show?.());
+    expect(document.querySelectorAll("[data-sk-modal-layer]")).toHaveLength(1);
+    expect(key.closest("[data-sk-modal-layer]")).toBe(layer);
+    expect(layer?.hasAttribute("inert")).toBe(false);
+    expect(layer?.hasAttribute("data-exiting")).toBe(false);
+    expect(document.activeElement).toBe(key);
+
+    act(() => handles.hide?.());
+    expect(document.activeElement).toBe(trigger);
   });
 });
 

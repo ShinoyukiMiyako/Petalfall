@@ -198,13 +198,18 @@ describe("启动提醒", () => {
       action: { kind: "change_game_dir", label: "更换游戏目录" },
     });
     expect(LAUNCH_WARNING.long_player_name.action).toEqual({ kind: "manage_accounts", label: "管理账户" });
+    expect(LAUNCH_WARNING.player_name_chars).toEqual({
+      title: "角色名含空格或非 ASCII 字符",
+      body: "Minecraft 1.20.2 与 1.20.3 进不了存档与服务器。可以换一个只用英文字母、数字与下划线的角色名：离线账户新建一个，皮肤站的到皮肤站改。",
+      action: { kind: "manage_accounts", label: "管理账户" },
+    });
     expect(LAUNCH_WARNING.jvm_min_over_max.body).toBe("JVM 参数里 -Xms 比 -Xmx 大，Java 会拒绝启动。");
     // 单位与后端的判定一致：HotSpot 认 k、m、g、t 四种。
     expect(LAUNCH_WARNING.jvm_memory_unit.body).toBe("-Xmx、-Xms 的数字后面只能跟 k、m、g、t，例如 -Xmx4g。");
     const byAction = (kind: string) => LAUNCH_WARNING_CODES.filter((c) => LAUNCH_WARNING[c].action.kind === kind);
     expect(byAction("change_game_dir")).toEqual(["game_path", "onedrive_folder", "icloud_folder"]);
     expect(byAction("rename_instance")).toEqual(["instance_name"]);
-    expect(byAction("manage_accounts")).toEqual(["long_player_name"]);
+    expect(byAction("manage_accounts")).toEqual(["long_player_name", "player_name_chars"]);
     expect(byAction("instance_settings")).toEqual(["jvm_memory_unit", "jvm_min_over_max", "jvm_max_too_low"]);
     expect(LAUNCH_WARNING.jvm_max_too_low.action.label).toBe("打开实例设置");
   });

@@ -2,10 +2,12 @@ import type { AccountDto, AccountStatus, AuthlibLoginResult, AuthServerDto, Devi
 import { IpcError } from "../../errors";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
+import { fallbackSkin } from "./art";
 
 // ipc/ 只能以类型方式引用别的模块，事件名在这里按后端各写一份。
 const DEVICE_CODE_EVENT = "petalfall://device-code";
 const CORE_EVENT = "petalfall://core-event";
+const ACCOUNT_CHANGED_EVENT = "petalfall://account-changed";
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
@@ -130,7 +132,9 @@ function validateUsername(name: string): string[] {
   if (name === "") throw reject("用户名不能为空");
   if (name.includes('"')) throw reject("用户名不能包含双引号");
   if ([...name].length > 16) throw reject("用户名不能超过 16 个字符（1.20.3 及以上版本限制）");
-  return /^[A-Za-z0-9_]+$/.test(name) ? [] : ["用户名包含非标准字符，可能无法进入 1.18+ 世界"];
+  // 与后端 player_name_has_rejected_char 同一条线：码元在 ! 到 ~ 之外（含代理对）
+  if (/[^!-~]/.test(name)) return ["用户名含空格或非 ASCII 字符，Minecraft 1.20.2 与 1.20.3 进不了存档与服务器"];
+  return /^[A-Za-z0-9_]+$/.test(name) ? [] : ["用户名含英文字母、数字与下划线以外的符号，部分服务器可能不接受"];
 }
 
 /** 与后端同一套规整：去空白、缺协议头补 https://、只认 http 与 https。 */
@@ -265,7 +269,7 @@ export const handlers: MockHandlers = {
         status: "select_profile",
         pending_id: pending.id,
         server_name: pending.serverName,
-        profiles: pending.profiles.map((p) => ({ ...p, skin: null })),
+        profiles: pending.profiles.map((p) => ({ ...p, skin: fallbackSkin(p.uuid) })),
       };
     }
     const now = Date.now();
@@ -343,13 +347,22 @@ export const handlers: MockHandlers = {
   },
 };
 
+/**
+ * 模拟后端在后台改写了一个凭据账户（提前续期、启动前的验证、外置角色档案的后台同步）：按 patch 改记录，再与后端一样推
+ * account-changed。给测试与浏览器预览用，mock 的启动与定时器不会自己这样做。后台只碰凭据账户，传离线或不存在的账户直接报错。
+ */
+export function changeMockAccountInBackground(uuid: string, patch: Partial<Pick<AccountDto, "name" | "status" | "last_verified_at">>): AccountDto {
+  const account = store.credential.find((a) => a.uuid === uuid);
+  if (account === undefined) throw new Error(`mock 里没有凭据账户 ${uuid}`);
+  const changed = { ...account, ...patch };
+  store.credential = store.credential.map((a) => (a.uuid === uuid ? changed : a));
+  emitMockEvent(ACCOUNT_CHANGED_EVENT, { uuid });
+  return changed;
+}
+
 /** 给材质 mock 用：账户是否存在。 */
 export function hasMockAccount(uuid: string): boolean {
   return store.credential.some((a) => a.uuid === uuid) || store.offline.some((a) => a.uuid === uuid);
-}
-
-export function isMockOfflineAccount(uuid: string): boolean {
-  return store.offline.some((a) => a.uuid === uuid);
 }
 
 /** 给启动 mock 判定能否以离线方式进单人：账户名、是不是离线账户、登录是否已被判定失效。 */

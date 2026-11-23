@@ -168,15 +168,16 @@ export function Toolbar({ tabsId, filters, onKind, onFit, onFilters, fitCandidat
         items={DISCOVER_KINDS.map((k) => ({ value: k, label: KIND_LABEL[k] }))}
       />
       <div className={styles.toolbarRight}>
-        {/* 两个下拉的宽度随选中项的文字走：按最长的选项预留，换选中项时同排靠右的筛选按钮不被挤动 */}
+        {/* 适配下拉由 .fitSelect 定宽：选项来自实例列表，按最长的实例名预留的话，列表晚到或有实例装好时触发器会跟着变宽、挤动同排。
+            排序下拉的选项固定，按最长的那条预留，换选中项时同排靠右的筛选按钮不被挤动 */}
         <Select<string>
           size="sm"
           ariaLabel={SEARCH_COPY.fitLabel}
           value={filters.fitInstance === null ? FIT_ANY : filters.fitInstance}
           options={fitOptions}
           onChange={(v) => onFit(v === FIT_ANY ? null : v)}
-          reserveWidth
           className={styles.fitSelect}
+          listMaxWidth="window"
         />
         <Button
           size="sm"
@@ -199,7 +200,8 @@ export function Toolbar({ tabsId, filters, onKind, onFit, onFilters, fitCandidat
           reserveWidth
         />
       </div>
-      <Popover open={anchor !== null} anchor={anchor} onClose={() => setAnchor(null)} placement="bottom-end" aria-label={SEARCH_COPY.filterPanel} className={styles.filterPanel}>
+      {/* 面板 portal 在文档末尾：焦点不进来的话 Tab 从筛选按钮走到排序下拉，面板一直开着，键盘到不了里面的条件 */}
+      <Popover open={anchor !== null} anchor={anchor} onClose={() => setAnchor(null)} placement="bottom-end" autoFocus aria-label={SEARCH_COPY.filterPanel} className={styles.filterPanel}>
         <FilterPanel filters={filters} onFilters={onFilters} />
       </Popover>
     </div>

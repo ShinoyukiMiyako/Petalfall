@@ -282,6 +282,89 @@ describe("实例设置：外观卡的卡面背景", () => {
     expect(callsOf(ipc, "import_cover_image")).toEqual([]);
   });
 
+  it("连点三次切背景：前几次保存的回包先到也不把分段与预览拉回旧选择，最终存下最后一次", async () => {
+    // 已经有背景图：「我的图片」直接写设置，三次点击是三种不同的背景
+    settings = { ...settings, background_image: BG_FILE };
+    patchInstance({ background_image: BG_KEY });
+    // 每次写设置挂到放行为止：保存排成一条链，前一次落定、重读回来时后一次还在路上
+    const gates = [deferred<void>(), deferred<void>(), deferred<void>()];
+    let call = 0;
+    ipc.overrides.set("set_instance_settings", async (args) => {
+      const gate = gates[call++];
+      await gate.promise;
+      settings = args.settings as InstanceSettingsDto;
+      return settings;
+    });
+    await openSettings();
+    act(() => radio("渐变花瓣").click());
+    act(() => radio("方块平铺").click());
+    act(() => radio("我的图片").click());
+    await flush();
+    expect(checked()).toEqual(["我的图片"]);
+    const fromRender = vi.mocked(useCoverBackdrop).mock.calls.length;
+    const shown: string[][] = [];
+    for (const gate of gates) {
+      await act(async () => {
+        gate.resolve();
+        await settle(20);
+      });
+      shown.push(checked());
+    }
+    expect(shown).toEqual([["我的图片"], ["我的图片"], ["我的图片"]]);
+    // 页头的卡面按列表画，列表这里一直是跟随；按编辑器画的预览在回包陆续到来时只出现最后一次的选择
+    const previewedSince = previewed().slice(fromRender);
+    expect(previewedSince).toContain("image");
+    expect(previewedSince.filter((background) => background !== "follow" && background !== "image")).toEqual([]);
+    expect(written().map((s) => s.background)).toEqual(["art", "texture", "image"]);
+    expect(settings.background).toBe("image");
+    expect(textOf(row("卡面背景"))).toContain("用你自己的图片铺满卡面");
+  });
+
+  it("连点时中间一次保存被拒：照常报错，分段停在还在路上的最后一次选择，它落定后存下的就是它", async () => {
+    settings = { ...settings, background_image: BG_FILE };
+    patchInstance({ background_image: BG_KEY });
+    const gates = [deferred<void>(), deferred<void>(), deferred<void>()];
+    let call = 0;
+    ipc.overrides.set("set_instance_settings", async (args) => {
+      const gate = gates[call++];
+      await gate.promise;
+      settings = args.settings as InstanceSettingsDto;
+      return settings;
+    });
+    await openSettings();
+    act(() => radio("渐变花瓣").click());
+    act(() => radio("方块平铺").click());
+    act(() => radio("我的图片").click());
+    await flush();
+    await act(async () => {
+      gates[0].resolve();
+      await settle(20);
+    });
+    await act(async () => {
+      gates[1].reject(new IpcError("io", "磁盘写满了"));
+      await settle(20);
+    });
+    expect(toastTitles()).toEqual(["实例设置没有保存"]);
+    expect(checked()).toEqual(["我的图片"]);
+    await act(async () => {
+      gates[2].resolve();
+      await settle(20);
+    });
+    expect(checked()).toEqual(["我的图片"]);
+    expect(settings.background).toBe("image");
+  });
+
+  it("保存被拒且没有别的保存在路上：分段回到磁盘上的值", async () => {
+    ipc.overrides.set("set_instance_settings", () => {
+      throw new IpcError("io", "磁盘写满了");
+    });
+    await openSettings();
+    await click(radio("渐变花瓣"));
+    expect(toastTitles()).toEqual(["实例设置没有保存"]);
+    expect(checked()).toEqual(["跟随默认"]);
+    expect(settings.background).toBe("follow");
+  });
+
   it("还没有图片时点「我的图片」：先弹选图（只列 PNG、JPEG、WebP），选好经背景位导入才切过去，不另写设置", async () => {
     const picking = deferred<string | null>();
     vi.mocked(pickFile).mockReturnValueOnce(picking.promise);
@@ -423,7 +506,7 @@ describe("实例设置：外观卡的封面方块", () => {
     patchInstance({ cover, cover_image: withImage ? BLOCK_KEY : null });
     // 外壳的材质绑定开机就按材质状态载入目录：有材质源才有目录
     if (withCatalog) {
-      ipc.overrides.set("art_status", () => ({ source: { version_id: "1.21.1" }, panorama: false }));
+      ipc.overrides.set("art_status", () => ({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false }));
       ipc.overrides.set("art_blocks", () => OAK_CATALOG);
     }
     await openSettings();
@@ -489,6 +572,21 @@ describe("实例设置：外观卡的封面方块", () => {
     expect(() => row("背景图片")).toThrow("外观卡里没有「背景图片」这一行");
   });
 
+  it("方块用着图片：预览的渐变花瓣取图片的主色调；移除图片后立即回到方块的色调", async () => {
+    settings = { ...settings, cover_image: BLOCK_FILE, background: "art" };
+    patchInstance({ cover: "grass_block", cover_image: BLOCK_KEY, cover_image_hue: 200, background: "art" });
+    await openSettings();
+    /** 预览卡面最上面那层渐变花瓣的色相。 */
+    const previewHue = () => {
+      const faces = [...card().querySelectorAll<HTMLElement>('[class*="preview"] [class*="art"][style*="--hue"]:not([data-conceal])')];
+      return faces.at(-1)?.style.getPropertyValue("--hue");
+    };
+    expect(previewHue()).toBe("200");
+    await click(button("移除图片", row("封面方块")));
+    // 草方块预设的色相
+    expect(previewHue()).toBe("118");
+  });
+
   it("有方块图片时「移除图片」只清 cover_image，方块不动", async () => {
     settings = { ...settings, cover_image: BLOCK_FILE };
     patchInstance({ cover: "grass_block", cover_image: BLOCK_KEY });
@@ -513,15 +611,24 @@ describe("实例设置：外观卡的动效与占位", () => {
     return layer;
   };
 
-  it("卡面背景的说明槽：跟随时只有跟随说明，平铺说明占位；切到渐变花瓣没有说明，两条都占位，这一行不变高", async () => {
+  it("卡面背景的说明槽：四种背景各写一条说明；跟随与平铺两条不是当前这条时始终在槽里占位，这一行不变高", async () => {
+    // 已经有背景图：点「我的图片」直接切过去，不弹选图
+    settings = { ...settings, background_image: BG_FILE };
+    patchInstance({ background_image: BG_KEY });
     await openSettings();
     const follow = "跟随设置里「外观」选的默认背景，现在是「方块平铺」。";
     const texture = "平铺封面方块的侧面材质，本机读不到材质时画渐变花瓣。";
-    expect(textOf(noteSlot())).toBe(follow);
-    expect([noteSlot().dataset.reserveA, noteSlot().dataset.reserveB]).toEqual([texture, undefined]);
+    /** 当前显示的说明与两条备用占位。 */
+    const slotState = () => [textOf(noteSlot()), noteSlot().dataset.reserveA, noteSlot().dataset.reserveB];
+    expect(slotState()).toEqual([follow, texture, undefined]);
     await click(radio("渐变花瓣"));
-    expect(textOf(noteSlot())).toBe("");
-    expect([noteSlot().dataset.reserveA, noteSlot().dataset.reserveB]).toEqual([follow, texture]);
+    expect(slotState()).toEqual(["按封面方块的色调画丘陵，花瓣位置每个实例各不相同。", follow, texture]);
+    await click(radio("方块平铺"));
+    expect(slotState()).toEqual([texture, follow, undefined]);
+    await click(radio("我的图片"));
+    expect(slotState()).toEqual(["用你自己的图片铺满卡面，读不出来时先画渐变花瓣。", follow, texture]);
+    expect(vi.mocked(pickFile)).not.toHaveBeenCalled();
+    expect(written().map((s) => s.background)).toEqual(["art", "texture", "image"]);
   });
 
   it("背景图片一行：导入成功后淡入落位；移除后原地淡出、不可交互；它与方块行都自己画分隔线", async () => {

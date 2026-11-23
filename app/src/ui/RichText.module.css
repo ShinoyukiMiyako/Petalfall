@@ -1,4 +1,4 @@
-/* 受限富文本：资源介绍正文与更新说明。正文可选中复制。 */
+/* 受限富文本：资源介绍正文、Mod 更新日志、启动器更新说明、使用须知与隐私说明。正文可选中复制。 */
 .body {
   display: flex;
   flex-direction: column;
@@ -75,12 +75,22 @@
   box-shadow: var(--sk-focus);
 }
 
+/*
+ * Tailwind 预检把 ol、ul 的 list-style 清成 none，界面里拿列表当容器的地方都靠它不画符号，全局不动；
+ * 正文里的列表要符号，在这里退回浏览器默认：无序实心圆点、嵌套一层空心圆、再一层方块，有序为数字。
+ */
 .list {
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-4);
   margin: 0;
   padding-left: var(--sk-space-20);
+  list-style-type: revert;
+}
+
+/* 序号画在缩进里、右缘贴着正文：两位数的「10. 」按等宽数字约 23.4px，20px 的缩进放不下，会伸出正文左缘 */
+ol.list {
+  padding-left: var(--sk-space-24);
 }
 
 /* 代码底用更深一档的凹陷色：更新说明本身就放在凹陷底的内容块里，同色会看不出代码块 */

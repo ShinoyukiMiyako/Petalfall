@@ -159,18 +159,26 @@ export function useWindowPort(): WindowPort {
  *
  * 页面 hidden 时这一帧不来，这里不另开出路：宿主只在最小化时把 WebView2 设为不可见，能最小化的窗口已经显示过，
  * 晚到的 show() 是空操作；启动期 WebView2 在不可见的窗口里照常出帧，这一帧才等得到，宿主不能在显示前把它设为不可见。
+ *
+ * 返回显示这一步落定了没有：show() 应答（显示了，或失败已进控制台）之后为真。要等窗口显示出来再做的后台工作
+ * （外壳预载其余页面）看它，免得和显示窗口抢宿主的 UI 线程；显示失败也照常放行，那些工作不靠窗口显示。
  */
-export function useRevealWindow(ready: boolean): void {
+export function useRevealWindow(ready: boolean): boolean {
   const port = useWindowPort();
   const shown = useRef(false);
+  const [settled, setSettled] = useState(false);
   useLayoutEffect(() => {
     if (!ready || shown.current) return;
     const frame = requestAnimationFrame(() => {
       shown.current = true;
-      port.show().catch((error: unknown) => console.error("窗口没能显示", error));
+      port
+        .show()
+        .catch((error: unknown) => console.error("窗口没能显示", error))
+        .then(() => setSettled(true));
     });
     return () => cancelAnimationFrame(frame);
   }, [port, ready]);
+  return settled;
 }
 
 /** 只为在 JSX 里包一层「首帧后显示窗口」：启动失败页与外壳错误页用。 */

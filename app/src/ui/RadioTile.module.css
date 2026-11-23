@@ -176,13 +176,14 @@
   line-height: 1.5;
 }
 
+/* 附注放路径与地址，路径里可能有中文目录名，取 12px 的 mono，不用 11px 的 mono-sm */
 .note {
   overflow: hidden;
   color: var(--sk-text-2);
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
+  font-size: var(--sk-fs-mono);
   font-weight: var(--sk-w-mono);
-  line-height: var(--sk-lh-mono-sm);
+  line-height: var(--sk-lh-mono);
   font-variant-ligatures: no-contextual;
   text-overflow: ellipsis;
   white-space: nowrap;

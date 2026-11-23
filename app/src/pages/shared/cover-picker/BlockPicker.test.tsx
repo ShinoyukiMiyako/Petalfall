@@ -8,6 +8,7 @@ import { stubCanvas } from "../../../art/illustrations/test-canvas";
 import { COVER_PRESETS } from "../../../art/iso/covers";
 import { coverLabel } from "../../../copy/flows";
 import type { ArtDownloadProgressDto, ArtStatusDto, CatalogBlockDto } from "../../../ipc/art";
+import { NO_ART, setArtStatus } from "../../../mc/art";
 import { catalogFromDto, setBlockCatalog } from "../../../mc/catalog";
 import { OverlayProvider, OverlayRoot } from "../../../shell/overlay";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
@@ -140,46 +141,62 @@ function scrollGrid(top: number) {
 
 describe("网格导航（纯函数）", () => {
   it("←→ 逐格且到边就停，↑↓ 隔一行，下面一行不满时 ↓ 落到最后一格", () => {
-    expect(gridMove(0, 20, "ArrowLeft", false)).toBe(0);
-    expect(gridMove(8, 20, "ArrowRight", false)).toBe(9);
-    expect(gridMove(19, 20, "ArrowRight", false)).toBe(19);
-    expect(gridMove(3, 20, "ArrowUp", false)).toBe(3);
-    expect(gridMove(12, 20, "ArrowUp", false)).toBe(3);
-    expect(gridMove(3, 20, "ArrowDown", false)).toBe(12);
-    expect(gridMove(10, 20, "ArrowDown", false)).toBe(19);
-    expect(gridMove(8, 15, "ArrowDown", false)).toBe(14);
-    expect(gridMove(19, 20, "ArrowDown", false)).toBe(19);
+    expect(gridMove(0, 20, "ArrowLeft", false, 6)).toBe(0);
+    expect(gridMove(8, 20, "ArrowRight", false, 6)).toBe(9);
+    expect(gridMove(19, 20, "ArrowRight", false, 6)).toBe(19);
+    expect(gridMove(3, 20, "ArrowUp", false, 6)).toBe(3);
+    expect(gridMove(12, 20, "ArrowUp", false, 6)).toBe(3);
+    expect(gridMove(3, 20, "ArrowDown", false, 6)).toBe(12);
+    expect(gridMove(10, 20, "ArrowDown", false, 6)).toBe(19);
+    expect(gridMove(8, 15, "ArrowDown", false, 6)).toBe(14);
+    expect(gridMove(19, 20, "ArrowDown", false, 6)).toBe(19);
   });
 
   it("Home / End 到本行首尾，带 Ctrl 到全部首尾；最后一行不满时 End 停在最后一格", () => {
-    expect(gridMove(13, 20, "Home", false)).toBe(9);
-    expect(gridMove(13, 20, "End", false)).toBe(17);
-    expect(gridMove(19, 20, "Home", false)).toBe(18);
-    expect(gridMove(18, 20, "End", false)).toBe(19);
-    expect(gridMove(13, 20, "Home", true)).toBe(0);
-    expect(gridMove(3, 20, "End", true)).toBe(19);
+    expect(gridMove(13, 20, "Home", false, 6)).toBe(9);
+    expect(gridMove(13, 20, "End", false, 6)).toBe(17);
+    expect(gridMove(19, 20, "Home", false, 6)).toBe(18);
+    expect(gridMove(18, 20, "End", false, 6)).toBe(19);
+    expect(gridMove(13, 20, "Home", true, 6)).toBe(0);
+    expect(gridMove(3, 20, "End", true, 6)).toBe(19);
   });
 
   it("PageUp / PageDown 翻 6 行，不满一屏时停在首行或末行的同一列", () => {
-    expect(gridMove(60, 400, "PageUp", false)).toBe(6);
-    expect(gridMove(40, 400, "PageUp", false)).toBe(4);
-    expect(gridMove(4, 400, "PageDown", false)).toBe(58);
-    expect(gridMove(380, 400, "PageDown", false)).toBe(398);
-    expect(gridMove(372, 400, "PageDown", false)).toBe(399);
-    expect(gridMove(360, 400, "PageDown", false)).toBe(396);
+    expect(gridMove(60, 400, "PageUp", false, 6)).toBe(6);
+    expect(gridMove(40, 400, "PageUp", false, 6)).toBe(4);
+    expect(gridMove(4, 400, "PageDown", false, 6)).toBe(58);
+    expect(gridMove(380, 400, "PageDown", false, 6)).toBe(398);
+    expect(gridMove(372, 400, "PageDown", false, 6)).toBe(399);
+    expect(gridMove(360, 400, "PageDown", false, 6)).toBe(396);
+  });
+
+  it("可见 5 行时 PageUp / PageDown 翻 5 行", () => {
+    expect(gridMove(60, 400, "PageUp", false, 5)).toBe(15);
+    expect(gridMove(40, 400, "PageUp", false, 5)).toBe(4);
+    expect(gridMove(4, 400, "PageDown", false, 5)).toBe(49);
+    // 6 行时这一步翻不满一屏、停在末行的 399；5 行时还翻得满
+    expect(gridMove(350, 400, "PageDown", false, 5)).toBe(395);
+    expect(gridMove(350, 400, "PageDown", false, 6)).toBe(399);
+    expect(gridMove(380, 400, "PageDown", false, 5)).toBe(398);
   });
 
   it("不是导航键、或网格是空的，返回 null", () => {
-    expect(gridMove(0, 20, "a", false)).toBeNull();
-    expect(gridMove(0, 0, "ArrowRight", false)).toBeNull();
+    expect(gridMove(0, 20, "a", false, 6)).toBeNull();
+    expect(gridMove(0, 0, "ArrowRight", false, 6)).toBeNull();
   });
 
   it("渲染可见的 6 行与上下各 2 行余量，当前格所在的行即使滚出去也渲染", () => {
-    expect(renderedRows(0, 45, 0)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
-    expect(renderedRows(52 * 30, 45, 31)).toEqual([27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38]);
-    expect(renderedRows(52 * 30, 45, 2)).toEqual([2, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38]);
-    expect(renderedRows(52 * 39, 45, 44)).toEqual([36, 37, 38, 39, 40, 41, 42, 43, 44]);
-    expect(renderedRows(0, 6, 0)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(renderedRows(0, 45, 0, 6)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(renderedRows(52 * 30, 45, 31, 6)).toEqual([27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38]);
+    expect(renderedRows(52 * 30, 45, 2, 6)).toEqual([2, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38]);
+    expect(renderedRows(52 * 39, 45, 44, 6)).toEqual([36, 37, 38, 39, 40, 41, 42, 43, 44]);
+    expect(renderedRows(0, 6, 0, 6)).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+
+  it("可见 5 行时少渲染一行", () => {
+    expect(renderedRows(0, 45, 0, 5)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(renderedRows(52 * 30, 45, 31, 5)).toEqual([27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37]);
+    expect(renderedRows(0, 5, 0, 5)).toEqual([0, 1, 2, 3, 4]);
   });
 });
 
@@ -196,6 +213,10 @@ describe("有材质源", () => {
     expect(activeBlock()).toBe("white_wool");
     // 不满一屏时补空槽位：6 行 × 9 格
     expect(grid().querySelectorAll('[role="presentation"] > [aria-hidden="true"]').length).toBe(6 * 9 - 3);
+    // 顶部没有下载部件：可见 6 行。外框连上下各 1px 描边是 318，内容区 316 正好放下 6 行网格，不多出一截滚动
+    expect(grid().style.height).toBe("318px");
+    expect(grid().style.getPropertyValue("--picker-frame")).toBe("1px");
+    expect(grid().querySelector<HTMLElement>(":scope > div")?.style.height).toBe("316px");
   });
 
   it("有正面的熔炉在功能页，草方块在自然页", () => {
@@ -354,6 +375,17 @@ describe("没有材质源", () => {
     expect(text.indexOf("本机还没有原版材质")).toBeLessThan(text.indexOf("推荐"));
     expect(blocksShown()).toEqual(COVER_PRESETS.map((p) => p.block));
     expect([...grid().querySelectorAll<HTMLElement>("[data-sk-art='iso']")].every((b) => b.dataset.art === "emblem")).toBe(true);
+    // 下载部件占掉的高度由网格让出一行：可见 5 行，外框 266（内容区 264 加上下描边），空槽位只补到 5 行
+    expect(grid().style.height).toBe("266px");
+    expect(grid().querySelector<HTMLElement>(":scope > div")?.style.height).toBe("264px");
+    expect(grid().querySelectorAll('[role="presentation"] > [aria-hidden="true"]').length).toBe(5 * 9 - COVER_PRESETS.length);
+  });
+
+  it("我的图片页与 5 行的网格视口同高，换页签时弹窗不跳动", () => {
+    mount({ block: "cherry_planks", image: false });
+    act(() => tab("我的图片").click());
+    const page = [...dialog().querySelectorAll<HTMLElement>("div")].find((d) => d.style.minHeight !== "");
+    expect(page?.style.minHeight).toBe("266px");
   });
 
   it("打字不跳搜索：没有搜索框可跳", () => {
@@ -374,10 +406,10 @@ describe("没有材质源", () => {
     mount({ block: "cherry_planks", image: false });
     // 挂载时就在的下载部件跟着弹窗出现，不另外播入场
     expect(dialog().querySelector("[inert]")).toBeNull();
-    expect(modal.layoutKeys.at(-1)).toBe(pickerLayoutKey(null));
+    expect(modal.layoutKeys.at(-1)).toBe(pickerLayoutKey(null, true));
     act(() => setBlockCatalog(catalog()));
     // 目录载入的那次渲染里弹窗就拿到新的版式键：面板在这一次量布局、形变过去
-    expect(modal.layoutKeys.at(-1)).toBe(pickerLayoutKey(catalog()));
+    expect(modal.layoutKeys.at(-1)).toBe(pickerLayoutKey(catalog(), false));
     expect(tabs()).toEqual(["推荐", "建筑", "彩色", "自然", "功能", "搜索", "我的图片"]);
     expect(search()).not.toBeNull();
     // 退场中的部件留着最后一帧淡出：它在不可交互的退场层里，框里其余部分已经没有它
@@ -390,7 +422,93 @@ describe("没有材质源", () => {
     // 之后才出现的搜索框淡入并从略小处落到位
     const searchItem = search()?.closest<HTMLElement>('[style*="opacity"]');
     expect(searchItem?.style.opacity).toBe("0");
-    expect(pickerLayoutKey(null)).not.toBe(pickerLayoutKey(catalog()));
+    expect(pickerLayoutKey(null, true)).not.toBe(pickerLayoutKey(catalog(), false));
+    // 部件一走网格就恢复 6 行，与版式键同一次渲染：面板形变的终点已经是 6 行的高
+    expect(grid().style.height).toBe("318px");
+    expect(grid().querySelectorAll('[role="presentation"] > [aria-hidden="true"]').length).toBe(6 * 9 - COVER_PRESETS.length);
+  });
+});
+
+describe("材质源是 1.20 之前的降级集", () => {
+  /** 1.16.5 的目录：有羊毛与草方块，没有樱花木板这些较新的方块。 */
+  function oldCatalog() {
+    return catalogFromDto({
+      version_id: "1.16.5",
+      blocks: [dto("red_wool", "Red Wool", "红色羊毛"), dto("grass_block", "Grass Block", "草方块"), dto("stone", "Stone", "石头")],
+    });
+  }
+  const downloadPart = () => [...dialog().querySelectorAll<HTMLElement>("p")].find((p) => p.textContent === "本机的原版材质不全") ?? null;
+
+  beforeEach(() => {
+    setArtStatus({ source: { versionId: "1.16.5", degraded: true, legacySkins: true }, panorama: false });
+    setBlockCatalog(oldCatalog());
+  });
+  afterEach(() => setArtStatus(NO_ART));
+
+  it("七个页签与搜索框照常，顶部照样有下载部件：说明写不全、大小照已有入口，按钮在", () => {
+    mount({ block: "cherry_planks", image: false });
+    expect(tabs()).toEqual(["推荐", "建筑", "彩色", "自然", "功能", "搜索", "我的图片"]);
+    expect(search()).not.toBeNull();
+    const text = dialog().textContent ?? "";
+    expect(text).toContain("本机最新的原版早于 1.20");
+    expect(text).toContain("整包约 20 到 40 MB，下完只留方块相关的部分，不到 1 MB");
+    expect(text).not.toContain("本机还没有原版材质");
+    expect(text.indexOf("本机的原版材质不全")).toBeLessThan(text.indexOf("推荐"));
+    expect([...dialog().querySelectorAll("button")].some((b) => b.textContent === "下载原版材质")).toBe(true);
+    // 推荐页仍是 16 种预设，本机版本没有的那些由方块自己画成徽记
+    expect(blocksShown()).toEqual(COVER_PRESETS.map((p) => p.block));
+    expect(modal.layoutKeys.at(-1)).toBe(pickerLayoutKey(oldCatalog(), true));
+  });
+
+  it("下完换成完整的材质源：下载部件原地淡出、不再可交互，版式键跟着变，网格换成新目录", () => {
+    mount({ block: "cherry_planks", image: false });
+    expect(downloadPart()).not.toBeNull();
+    act(() => {
+      setArtStatus({ source: { versionId: "1.21.4", degraded: false, legacySkins: false }, panorama: false });
+      setBlockCatalog(catalog());
+    });
+    const leaving = [...dialog().querySelectorAll<HTMLElement>("[inert]")];
+    expect(leaving).toHaveLength(1);
+    expect(leaving[0].textContent).toContain("本机的原版材质不全");
+    const live = dialog().cloneNode(true) as HTMLElement;
+    for (const node of live.querySelectorAll("[inert]")) node.remove();
+    expect(live.textContent).not.toContain("下载原版材质");
+    expect(modal.layoutKeys.at(-1)).toBe(pickerLayoutKey(catalog(), false));
+    expect(pickerLayoutKey(oldCatalog(), true)).not.toBe(pickerLayoutKey(catalog(), false));
+    act(() => tab("彩色").click());
+    expect(blocksShown()).toContain("red_concrete");
+  });
+
+  it("顶部有下载部件时网格可见 5 行：第 6 行才要滚、翻页翻 5 行；换成完整源、部件一走就恢复 6 行", () => {
+    act(() => setBlockCatalog(catalog()));
+    mount({ block: "filler_000", image: false });
+    expect(downloadPart()).not.toBeNull();
+    expect(selectedTab()).toBe("建筑");
+    const g = grid();
+    expect(g.style.height).toBe("266px");
+    expect(renderedRowIndexes()).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    for (let i = 0; i < 4; i++) keydown(g, "ArrowDown");
+    expect(activeBlock()).toBe("filler_036");
+    expect(g.scrollTop).toBe(0);
+    // 6 行时第 6 行（filler_045 所在）整行可见、不用滚；5 行时要滚一行
+    keydown(g, "ArrowDown");
+    expect(activeBlock()).toBe("filler_045");
+    expect(g.scrollTop).toBe(52);
+    keydown(g, "PageDown");
+    expect(activeBlock()).toBe("filler_090");
+
+    act(() => setArtStatus({ source: { versionId: "1.21.4", degraded: false, legacySkins: false }, panorama: false }));
+    expect(grid()).toBe(g);
+    expect(g.style.height).toBe("318px");
+    keydown(g, "PageDown");
+    expect(activeBlock()).toBe("filler_144");
+  });
+
+  it("完整的材质源不给下载部件", () => {
+    act(() => setArtStatus({ source: { versionId: "1.21.4", degraded: false, legacySkins: false }, panorama: false }));
+    mount({ block: "cherry_planks", image: false });
+    expect(downloadPart()).toBeNull();
+    expect(dialog().textContent).not.toContain("下载原版材质");
   });
 });
 
@@ -438,6 +556,14 @@ describe("下载部件退场的定位基准（读样式表）", () => {
   });
 });
 
+describe("网格视口的描边（读样式表）", () => {
+  it("描边宽取脚本给的 --picker-frame：视口外框高按同一个值把上下描边算进去", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "BlockPicker.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const viewport = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].find((m) => m[1].trim() === ".viewport");
+    expect(viewport?.[2]).toMatch(/border:\s*var\(--picker-frame\) solid var\(--sk-line\);/);
+  });
+});
+
 describe("方块格的按压反馈（读样式表）", () => {
   const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "BlockPicker.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   const rule = (selector: string) => {
@@ -456,5 +582,24 @@ describe("方块格的按压反馈（读样式表）", () => {
     expect(reduced).toMatch(/scale:\s*none/);
     expect(reduced).toMatch(/opacity:\s*0\.85/);
     expect(reduced).toMatch(/transition:\s*none/);
+  });
+
+  it("选中框画在常驻的 ::after 叠层上，与描边、底色同一时长同一曲线淡入淡出；选中规则本身不加 outline 与阴影", () => {
+    const selected = rule('.cell[aria-selected="true"]');
+    expect(selected).not.toMatch(/outline|box-shadow/);
+    expect(selected).toMatch(/border-color:\s*var\(--sk-accent\)/);
+    // 叠层盖住整个边框盒、圆角随格子，内收 2px 的主色线压在 1px 描边上读作 2px 的框
+    expect(rule(".cell")).toMatch(/--cell-selected-ring:\s*inset 0 0 0 2px var\(--sk-accent\);/);
+    const ring = rule(".cell::after");
+    expect(ring).toMatch(/position:\s*absolute;/);
+    expect(ring).toMatch(/inset:\s*-1px;/);
+    expect(ring).toMatch(/border-radius:\s*inherit;/);
+    expect(ring).toMatch(/box-shadow:\s*var\(--cell-selected-ring\);/);
+    expect(ring).toMatch(/opacity:\s*0;/);
+    expect(ring).toMatch(/pointer-events:\s*none;/);
+    expect(ring).toMatch(/transition:\s*opacity var\(--sk-dur-hover\) var\(--sk-ease\);/);
+    expect(rule('.cell[aria-selected="true"]::after')).toMatch(/opacity:\s*1;/);
+    expect(rule(".cell")).toMatch(/border-color var\(--sk-dur-hover\) var\(--sk-ease\)/);
+    expect(rule(".cell")).toMatch(/background-color var\(--sk-dur-hover\) var\(--sk-ease\)/);
   });
 });

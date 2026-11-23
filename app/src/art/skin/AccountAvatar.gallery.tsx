@@ -14,14 +14,14 @@ export const gallery: GalleryEntry = {
   order: 5,
   render: () => (
     <>
-      <GalleryRow label="剪影头像（浏览器里没有皮肤）">
+      <GalleryRow label="人偶头像（浏览器里没有皮肤）">
         {SIZES.map((size) => (
           <AccountAvatar key={size} uuid={UUIDS[0]} skin={null} size={size} />
         ))}
         <AccountAvatar uuid={UUIDS[1]} skin={null} size={40} current label="当前账户的头像" />
         <AccountAvatar uuid={UUIDS[2]} skin={{ kind: "default", path: "entity/player/slim/alex", model: "slim" }} size={40} />
       </GalleryRow>
-      <GalleryRow label="剪影立绘 4 / 5 / 6，宽体型与细体型">
+      <GalleryRow label="人偶立绘 4 / 5 / 6，宽体型与细体型">
         {SCALES.map((scale) => (
           <AccountFigure key={scale} uuid={UUIDS[0]} skin={null} scale={scale} />
         ))}

@@ -236,7 +236,7 @@ describe("PanoramaBackdrop", () => {
       expect(canvas.draws.at(-1)?.source).toBe(bitmaps[0]);
 
       const release = holdNextFetch({ ok: true, status: 200 });
-      act(() => setArtStatus({ source: { versionId: "1.21.4" }, panorama: true }));
+      act(() => setArtStatus({ source: { versionId: "1.21.4", degraded: false, legacySkins: false }, panorama: true }));
       await settle();
       expect(fetchMock).toHaveBeenCalledTimes(2);
       await staysFor(6, shown);
@@ -256,7 +256,7 @@ describe("PanoramaBackdrop", () => {
       if (!shown) throw new Error("全景背景没有渲染");
 
       const release = holdNextFetch({ ok: false, status: 404 });
-      act(() => setArtStatus({ source: { versionId: "1.21.4" }, panorama: true }));
+      act(() => setArtStatus({ source: { versionId: "1.21.4", degraded: false, legacySkins: false }, panorama: true }));
       await settle();
       await staysFor(3, shown);
       await release();

@@ -32,8 +32,51 @@ env:
   TAG: dev-build
 
 jobs:
+  # 编译之前先读出各通道已发布的最高版本，过版本先后检查与数据格式号不倒退的检查：不过时不用先白编十几分钟。
+  # 只采信用各通道公钥验得过签名的清单与 Release 附件，tag 名只用来定位，伪造的 tag、乱写的清单都抬不高也压不低结果。
+  # 跑在一次性托管机上，不放在内网自托管机：那台机器不该多一条外网依赖。读的都是公开的清单、Release 附件与 tag，
+  # 所以只读、不挂环境、不引用任何机密与仓库令牌。dev 的版本号也在这里算，build 原样写进安装包：
+  # 发出去的必须就是过了检查的那一个版本号。
+  release-heads:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      # 数据格式号的检查要读 HEAD 里的源码，并从 origin 取滚动预发布 tag 所指的提交，所以完整检出，不做稀疏检出。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 公式与原先在 build 里算的相同：tauri.conf.json 的基础号加运行序号。基础号的形状由版本先后检查去查。
+      - name: 算出 dev 版本号
+        id: version
+        working-directory: app
+        run: |
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")-dev.$GITHUB_RUN_NUMBER"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # 香港清单回 404、Release 上没有附件算这一处没有；其余取不到、验不过的情形都让构建失败，跳过会让结果偏低。
+      - name: 读出各通道已发布的版本
+        run: node .github/scripts/release-heads.mjs read "$GITHUB_REPOSITORY" "$RUNNER_TEMP/release-heads.json"
+
+      # 基础号形如 X.Y.0、主版本至少为 1；本包高于已发布的测试版与正式版；基础号一次只能抬一格。
+      # dev 每次推送都发布，没有只打 notice 的演练模式，恒传 release。
+      - name: 版本先后检查
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: node .github/scripts/release-heads.mjs gate dev release "$VERSION" "$RUNNER_TEMP/release-heads.json"
+
+      # 本提交的数据格式号不能小于滚动预发布 tag 所指提交里的号：只有把加号的提交回退掉，号才会倒退，这里挡的就是这种情形。
+      # tag 不存在（别的运行正在重建预发布）或那个提交里还没有这个常量时跳过，打 notice。
+      - name: 检查数据格式号没有倒退
+        run: node .github/scripts/release-heads.mjs data-format dev release "$RUNNER_TEMP/release-heads.json" "$GITHUB_REPOSITORY"
+
   # 自托管机只构建、不碰更新签名私钥：它跨任务常驻，私钥落在这里，一旦机器被污染就能给后门包签上合法签名。
   build:
+    needs: release-heads
     runs-on: [self-hosted, Linux, X64, petalfall]
     timeout-minutes: 30
     # 新推送只取消还在构建的旧运行：滚动预发布只留最新一个包，旧构建做完也会被覆盖，不如直接取消。
@@ -106,22 +149,28 @@ jobs:
       - name: 下载 Rust 依赖
         run: cargo fetch --locked
 
-      # 安装包和前端显示的版本号都以 tauri.conf.json 为准，只改这一处两边才一致。
+      # 安装包和前端显示的版本号都以 tauri.conf.json 为准，只改这一处两边才一致。版本号由 release-heads 算好、查过，
+      # 这里原样写入，不再自己算：写进包里的必须就是过了版本先后检查的那一个。
       # 签名在另一台机器上做，用的 CLI 版本要和这里锁定的一致，一并传出去。
       # 锁定的 CLI 必须支持 signer sign --app-version；正式版、测试版流水线同样要带它并注入 requireSignedVersion。
       - name: 写入 dev 版本号
         id: version
         working-directory: app
+        env:
+          VERSION: ${{ needs.release-heads.outputs.version }}
         run: |
-          version="$(node -p "require('./src-tauri/tauri.conf.json').version")-dev.$GITHUB_RUN_NUMBER"
+          if [ -z "$VERSION" ]; then
+            echo "::error::release-heads 作业没有交出版本号"
+            exit 1
+          fi
           node -e "
             const fs = require('fs');
             const path = 'src-tauri/tauri.conf.json';
             const conf = JSON.parse(fs.readFileSync(path, 'utf8'));
             conf.version = process.argv[1];
             fs.writeFileSync(path, JSON.stringify(conf, null, 2));
-          " "$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          " "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "cli-version=$(node -p "require('@tauri-apps/cli/package.json').version")" >> "$GITHUB_OUTPUT"
 
       # 写进公钥插件才会注册，dev 包才能自更新。只写公钥、不开 createUpdaterArtifacts，打包就不要私钥；
@@ -176,7 +225,7 @@ jobs:
           # 壳的版本号指向启动器的配置，构建脚本却只盯自己这份，不碰一下 exe 的版本资源会停在上一次。
           touch src-tauri-setup/tauri.conf.json
           TAURI_APP_PATH=src-tauri-setup pnpm tauri build --no-bundle --runner cargo-xwin --target x86_64-pc-windows-msvc
-          cargo test --release --locked -p petalfall-setup-payload
+          cargo test --release --locked -p petalfall-setup-payload -p petalfall-release
           release_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release"
           bootstrap_dir="$release_dir/bundle/installer"
           bootstrap="$bootstrap_dir/Petalfall-Installer-${VERSION}-x64.exe"
@@ -187,6 +236,36 @@ jobs:
           echo "bootstrap=$bootstrap" >> "$GITHUB_OUTPUT"
           echo "bootstrap-name=$(basename "$bootstrap")" >> "$GITHUB_OUTPUT"
           du -sh "$CARGO_TARGET_DIR"
+
+      # 启动器下载验签之后读引导程序的载荷头，按它判断这个包能不能装、认不认得换通道安装，所以从产物里读回来核对：
+      # magic 是 PFSETUP2，版本等于本包，数据格式号等于源码里的常量，能力位第 0 位为 1。
+      - name: 核对载荷头
+        id: payload
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BOOTSTRAP: ${{ steps.bootstrap.outputs.bootstrap }}
+        run: |
+          header="$(cargo run --release --locked -p petalfall-setup-payload --bin inspect-setup -- "$BOOTSTRAP")"
+          IFS=$'\t' read -r magic header_version data_format caps <<< "$header"
+          node .github/scripts/release-heads.mjs payload "$VERSION" "$magic" "$header_version" "$data_format" "$caps"
+
+      # 启动器按偏好的通道挑公钥验包，两把都编进 Petalfall.exe；构建缓存里旧的编译产物要是没随 .pub 文件重编，
+      # 包里缺了哪一把，偏好那个通道的用户就收不到更新。按注入公钥时同样的读法去掉首尾空白，在 exe 里逐把找。
+      - name: 核对内嵌的更新公钥
+        run: |
+          exe="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"
+          for pub in .github/dev-updater.pub .github/release-updater.pub; do
+            key="$(node -p "require('fs').readFileSync(process.argv[1], 'utf8').trim()" "$pub")"
+            # 空串对 grep -F 来说处处都匹配，核对就形同虚设
+            if [ -z "$key" ]; then
+              echo "::error::$pub 是空的"
+              exit 1
+            fi
+            if ! grep -qF -e "$key" -- "$exe"; then
+              echo "::error::Petalfall.exe 里没有内嵌 $pub 的更新公钥"
+              exit 1
+            fi
+          done
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -206,7 +285,7 @@ jobs:
           retention-days: 14
 
   # 签名与发布在 GitHub 托管的一次性机器上做，私钥只在这里出现，而且只给签名那一步。
-  # 存储桶凭据和香港推送私钥同理，各自只进用到它的那一步。它们放在 GitHub 环境 updates-dev 里，作业声明了环境才拿得到。
+  # 存储桶凭据和香港推送私钥同理，各自只进用到它的那一步。签名私钥与它们都放在 GitHub 环境 updates-dev 里，作业声明了环境才拿得到。
   publish:
     needs: build
     # 上传用的是镜像预装的 aws-cli，publish-hk 推送用的是镜像里的 OpenSSH；固定镜像版本，免得 ubuntu-latest 换代时跟着悄悄变
@@ -228,10 +307,20 @@ jobs:
       BOOTSTRAP: ${{ github.workspace }}/dist/${{ needs.build.outputs.bootstrap-name }}
       HK_MANIFEST_URL: https://petalfall.org/updates/dev/latest.json
     steps:
+      # 持钥的机器上只放用得到的文件：验签、分发与读锁文件的脚本，开发版公钥，锁定签名 CLI 的锁文件。非 cone 模式才能按文件取。
+      # upload-to-mirrors.sh 按自己所在的目录调用 dev-distribution.mjs 与 check-download.sh，这三个缺一不可。
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          sparse-checkout: .github
+          sparse-checkout: |
+            /.github/dev-updater.pub
+            /.github/scripts/check-download.sh
+            /.github/scripts/dev-distribution.mjs
+            /.github/scripts/locked-cli.mjs
+            /.github/scripts/upload-to-mirrors.sh
+            /.github/scripts/verify-update-signature.mjs
+            /app/pnpm-lock.yaml
+          sparse-checkout-cone-mode: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -313,6 +402,33 @@ jobs:
             }
           " "$VERSION" "$GITHUB_RUN_ATTEMPT" "${previous[@]}"
 
+      # 持钥的作业里不跑包管理器：npm exec、pnpm install 按 registry 当下给的元数据取包，还会跑安装脚本，
+      # 拿到的不一定是锁文件里那一份。这里只取 CLI 本体和 Linux x64 的原生绑定两个 tarball，按锁文件记的 integrity
+      # 核对后直接解开，不执行任何脚本；绑定由 CLI 自己按 node_modules 的解析找到。这一步不拿私钥。
+      - name: 按锁文件取签名 CLI
+        id: cli
+        env:
+          CLI_VERSION: ${{ needs.build.outputs.cli-version }}
+        run: |
+          node .github/scripts/locked-cli.mjs app/pnpm-lock.yaml "$CLI_VERSION" > "$RUNNER_TEMP/tauri-cli.tsv"
+          cli_root="$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps"
+          while IFS=$'\t' read -r name integrity; do
+            tarball="$RUNNER_TEMP/$name-$CLI_VERSION.tgz"
+            curl --fail --silent --show-error --location --retry 3 --max-time 300 --output "$tarball" \
+              "https://registry.npmjs.org/@tauri-apps/$name/-/$name-$CLI_VERSION.tgz" < /dev/null
+            actual="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)"
+            if [ "$actual" != "$integrity" ]; then
+              echo "::error::@tauri-apps/$name@$CLI_VERSION 的 integrity 是 $actual，锁文件里记的是 $integrity"
+              exit 1
+            fi
+            mkdir -p "$cli_root/$name"
+            tar -xzf "$tarball" -C "$cli_root/$name" --strip-components=1
+            echo "@tauri-apps/$name@$CLI_VERSION 与锁文件一致：$integrity"
+          done < "$RUNNER_TEMP/tauri-cli.tsv"
+          test -f "$cli_root/cli/tauri.js"
+          test -f "$cli_root/cli-linux-x64-gnu/cli.linux-x64-gnu.node"
+          echo "tauri=$cli_root/cli/tauri.js" >> "$GITHUB_OUTPUT"
+
       # 更新包是引导程序，不是 NSIS 包。更新插件把下载到的任何 PE 都当 NSIS 包，按默认的 passive 模式和
       # restart_after_install（默认 true）拼成 /P /UPDATE /R /ARGS <启动器参数> 拉起，配置了 installerArgs 才会再往后接；
       # 引导程序认得 /UPDATE，现有安装判定为升级时直接升级到登记目录，
@@ -323,15 +439,15 @@ jobs:
       # version 比，伪造清单给旧包配上更高的版本号也骗不到降级。漏传时 CLI 只打警告照样签，靠下一步验签挡下。
       - name: 给更新包签名
         env:
-          CLI_VERSION: ${{ needs.build.outputs.cli-version }}
+          TAURI_CLI: ${{ steps.cli.outputs.tauri }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.DEV_UPDATER_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.DEV_UPDATER_KEY_PASSWORD }}
         run: |
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "仓库密钥 DEV_UPDATER_PRIVATE_KEY 没有配置，dev 包签不了名" >&2
+            echo "::error::环境 updates-dev 里没有配置 DEV_UPDATER_PRIVATE_KEY" >&2
             exit 1
           fi
-          npm exec --yes --package="@tauri-apps/cli@$CLI_VERSION" -- tauri signer sign --app-version "$VERSION" "$BOOTSTRAP"
+          node "$TAURI_CLI" signer sign --app-version "$VERSION" "$BOOTSTRAP"
           test -s "$BOOTSTRAP.sig"
 
       # 私钥和仓库里的公钥不是一对时 CLI 只打警告照样签，发出去的包所有 dev 用户都会拒收。

@@ -1,15 +1,18 @@
-//! 读现有安装：卸载项登记的位置和版本，核对程序文件后和载荷版本比较，给界面四种情况。
+//! 读现有安装：卸载项登记的位置和版本、程序文件在不在。
 //!
-//! 静默安装不比版本也不拦降级，这里的判定是降级保护的唯一依据。
+//! [`read_installation`] 只交出这些事实，种类由 `petalfall_release::install_policy::judge_kind` 拿事实连同
+//! 载荷版本、发起方式去判。静默安装不比版本也不拦降级，降级保护全靠探测时的判定。
 
 use std::cmp::Ordering;
 use std::fs;
 use std::io;
 use std::path::Path;
 
-use semver::Version;
+use petalfall_release::install_policy::{Installed, channel_of, compare_lenient};
+use petalfall_release::order;
+use petalfall_setup_payload::overlay_start;
 
-use crate::contract::{Existing, ExistingKind};
+use crate::contract::{Channel, Existing, ExistingKind};
 
 /// 安装后的主程序文件名。
 pub const APP_EXE: &str = "Petalfall.exe";
@@ -63,40 +66,85 @@ fn last_dir(registry: &dyn Registry) -> io::Result<Option<String>> {
     }
 }
 
-/// 程序文件是否还在。0 字节算不在：覆盖安装中途断电时旧 exe 已被截断，文件还在但打不开。
+/// 程序文件是否完好。PE 头读不懂、或文件短于节表声明的末端（各节 `PointerToRawData + SizeOfRawData` 的最大值）
+/// 都算不在：覆盖安装中途断电时旧 exe 可能已被截成 0 字节，也可能只写了一半，文件还在却打不开，探测不能为它给出
+/// 「打开」。节表末端之后多出的字节（签名补的证书表）不影响结论。只读头和节表，不读整个文件。
 fn app_exe_present(dir: &str) -> io::Result<bool> {
-    match fs::metadata(Path::new(dir).join(APP_EXE)) {
-        Ok(meta) => Ok(meta.is_file() && meta.len() > 0),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(err),
+    let path = Path::new(dir).join(APP_EXE);
+    // 同名的目录用 File::open 打不开，报的是拒绝访问而不是不在，先按元数据挡掉
+    match fs::metadata(&path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Ok(false),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
     }
+    let mut file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    let sections_end = match overlay_start(&mut file) {
+        Ok(end) => end,
+        Err(petalfall_setup_payload::Error::NotPe(_)) => return Ok(false),
+        Err(petalfall_setup_payload::Error::Io(err)) => return Err(err),
+        // overlay_start 只报上面两种；载荷库改了才会走到这里，照读取失败往上报，不猜成在或不在
+        Err(other) => return Err(io::Error::other(other)),
+    };
+    Ok(file.metadata()?.len() >= sections_end)
 }
 
-/// 比较两个版本。容错和 NSIS 的 SemverCompare 一致：一侧非法时合法的更大，两侧都非法算相等。
-/// 构建元数据不参与比较：只差元数据的两个包是同一版本。
-fn compare(left: &str, right: &str) -> Ordering {
-    match (Version::parse(left), Version::parse(right)) {
-        (Ok(left), Ok(right)) => left.cmp_precedence(&right),
-        (Ok(_), Err(_)) => Ordering::Greater,
-        (Err(_), Ok(_)) => Ordering::Less,
-        (Err(_), Err(_)) => Ordering::Equal,
-    }
-}
-
-/// 程序文件完好时，已装版本相对载荷版本的三种情况。
+/// 程序文件完好时，已装版本相对载荷版本的三种情况，只看版本先后。先后与容错都按共用包的
+/// [`compare_lenient`]：判定表也用它，两处不会比出不同的先后。
 pub fn classify(installed: &str, payload: &str) -> ExistingKind {
-    match compare(installed, payload) {
+    match compare_lenient(installed, payload) {
         Ordering::Less => ExistingKind::Upgrade,
         Ordering::Equal => ExistingKind::Same,
         Ordering::Greater => ExistingKind::Newer,
     }
 }
 
+/// 这台电脑上的一份现有安装，只有查到的事实，不带种类。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Installation {
+    /// 卸载项登记的目录，已去引号；卸载项没写时取 NSIS 记下的上次安装目录。
+    pub dir: String,
+    /// 卸载项里的 DisplayVersion，已去引号；没写或为空时是 `None`。
+    pub version: Option<String>,
+    /// 程序文件在、是文件，PE 头读得懂，长度也不短于节表声明的末端。
+    pub program_intact: bool,
+}
+
+impl Installation {
+    /// 已装的通道，由版本推出：没有版本、版本解析不了或预发布标识认不出时是 `None`。与判定表认通道是同一份
+    /// 规则，界面显示的通道才与判出的种类对得上。
+    pub fn channel(&self) -> Option<order::Channel> {
+        self.version.as_deref().and_then(channel_of)
+    }
+
+    /// 交给 `install_policy::judge_kind` 的已装事实。
+    pub fn as_installed(&self) -> Installed<'_> {
+        Installed {
+            version: self.version.as_deref(),
+            program_intact: self.program_intact,
+        }
+    }
+
+    /// 带上判出的种类，折成交给界面的现有安装。没有版本时 `version` 是空串：契约里它不可缺，
+    /// 界面的 broken 文案不用它。
+    pub fn into_existing(self, kind: ExistingKind) -> Existing {
+        Existing {
+            kind,
+            channel: self.channel().map(Channel::from),
+            version: self.version.unwrap_or_default(),
+            dir: self.dir,
+        }
+    }
+}
+
 /// 这台电脑上的现有安装。没有安装、或只是卸载后留下的目录记录时是 `None`。
 ///
-/// 有卸载项但程序文件不在是 broken：修复装回这里探测到的目录，界面只需要显示。broken 的
-/// `version` 可能是空串，界面的 broken 文案不用它。
-pub fn detect(registry: &dyn Registry, payload_version: &str) -> io::Result<Option<Existing>> {
+/// 有卸载项但程序文件不在也算一份安装（`program_intact` 为假）：修复要装回这里查到的目录。
+pub fn read_installation(registry: &dyn Registry) -> io::Result<Option<Installation>> {
     let location = read_value(registry, UNINSTALL_KEY, Some(INSTALL_LOCATION))?;
     let version = read_value(registry, UNINSTALL_KEY, Some(DISPLAY_VERSION))?;
     let has_record = location.is_some() || version.is_some();
@@ -110,19 +158,15 @@ pub fn detect(registry: &dyn Registry, payload_version: &str) -> io::Result<Opti
         return Ok(None);
     };
 
-    let exe_present = app_exe_present(&dir)?;
+    let program_intact = app_exe_present(&dir)?;
     // 卸载后备选键还留着，目录里可能只剩用户数据：这不是一份安装
-    if !has_record && !exe_present {
+    if !has_record && !program_intact {
         return Ok(None);
     }
-    let kind = match &version {
-        Some(version) if exe_present => classify(version, payload_version),
-        _ => ExistingKind::Broken,
-    };
-    Ok(Some(Existing {
-        kind,
-        version: version.unwrap_or_default(),
+    Ok(Some(Installation {
         dir,
+        version,
+        program_intact,
     }))
 }
 
@@ -213,8 +257,10 @@ mod tests {
     use std::collections::HashMap;
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
+    use std::io::Cursor;
 
     use super::*;
+    use crate::overlay::test_support::{random_bytes, stub_image};
 
     const PAYLOAD: &str = "0.2.0";
 
@@ -255,12 +301,41 @@ mod tests {
         RandomState::new().build_hasher().finish() % bound
     }
 
-    /// 带一份非空 exe 的临时安装目录。
+    /// 带一份完好程序文件的临时安装目录：最小的 PE，正好结束在节末端。
     fn installed_dir() -> (tempfile::TempDir, String) {
+        exe_dir(&stub_image())
+    }
+
+    /// 程序文件写成 `exe` 的临时安装目录。
+    fn exe_dir(exe: &[u8]) -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join(APP_EXE), b"MZ").unwrap();
+        fs::write(dir.path().join(APP_EXE), exe).unwrap();
         let text = dir.path().to_str().unwrap().to_owned();
         (dir, text)
+    }
+
+    /// 卸载项登记着 `exe` 所在的目录时，探测认不认它是完好的程序文件。
+    fn intact_with(exe: &[u8]) -> bool {
+        let (_guard, dir) = exe_dir(exe);
+        let registry = FakeRegistry::uninstall(&quoted(&dir), PAYLOAD);
+        read_installation(&registry)
+            .unwrap()
+            .unwrap()
+            .program_intact
+    }
+
+    /// 夹具 PE 的节表末端，也是它的文件长度。
+    fn stub_sections_end() -> usize {
+        let image = stub_image();
+        let end = overlay_start(&mut Cursor::new(&image)).unwrap();
+        assert_eq!(end, image.len() as u64, "夹具应当正好结束在节末端");
+        image.len()
+    }
+
+    /// 夹具 PE 头里 `e_lfanew` 指向的 PE 签名位置。
+    fn stub_pe_at() -> usize {
+        let image = stub_image();
+        u32::from_le_bytes(image[0x3C..0x40].try_into().unwrap()) as usize
     }
 
     fn quoted(dir: &str) -> String {
@@ -300,116 +375,28 @@ mod tests {
     }
 
     #[test]
-    fn prerelease_numbers_compare_as_numbers() {
-        assert_eq!(
-            classify("0.2.0-dev.9", "0.2.0-dev.12"),
-            ExistingKind::Upgrade
-        );
-        assert_eq!(classify("0.2.0-dev.12", "0.2.0-dev.9"), ExistingKind::Newer);
-        assert_eq!(classify("0.2.0-dev.12", "0.2.0-dev.12"), ExistingKind::Same);
-    }
-
-    #[test]
-    fn a_release_outranks_its_own_prerelease() {
-        assert_eq!(classify("0.2.0-dev.12", "0.2.0"), ExistingKind::Upgrade);
-        assert_eq!(classify("0.2.0", "0.2.0-dev.12"), ExistingKind::Newer);
-    }
-
-    #[test]
-    fn build_metadata_does_not_make_a_version_newer() {
-        assert_eq!(classify("0.2.0+b", "0.2.0+a"), ExistingKind::Same);
-    }
-
-    #[test]
-    fn illegal_versions_follow_the_template_tolerance() {
-        assert_eq!(classify("not-a-version", "0.2.0"), ExistingKind::Upgrade);
-        assert_eq!(classify("0.2.0", "not-a-version"), ExistingKind::Newer);
-        assert_eq!(classify("garbage", "not-a-version"), ExistingKind::Same);
-        assert_eq!(classify("", "0.2.0"), ExistingKind::Upgrade);
-        assert_eq!(classify("1.2", "0.0.1"), ExistingKind::Upgrade);
-    }
-
-    #[test]
-    fn random_versions_order_like_their_numbers() {
-        for _ in 0..200 {
-            let installed = (random_below(3), random_below(3), random_below(3));
-            let payload = (random_below(3), random_below(3), random_below(3));
-            let expected = match installed.cmp(&payload) {
-                Ordering::Less => ExistingKind::Upgrade,
-                Ordering::Equal => ExistingKind::Same,
-                Ordering::Greater => ExistingKind::Newer,
-            };
-            let text = |(major, minor, patch): (u64, u64, u64)| format!("{major}.{minor}.{patch}");
-            assert_eq!(
-                classify(&text(installed), &text(payload)),
-                expected,
-                "{installed:?} 对 {payload:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn older_install_is_an_upgrade_and_keeps_the_unquoted_dir() {
-        let (_guard, dir) = installed_dir();
-        let registry = FakeRegistry::uninstall(&quoted(&dir), "0.1.0");
-        assert_eq!(
-            detect(&registry, PAYLOAD).unwrap(),
-            Some(Existing {
-                kind: ExistingKind::Upgrade,
-                version: "0.1.0".into(),
-                dir,
-            })
-        );
-    }
-
-    #[test]
-    fn same_version_install_is_same() {
-        let (_guard, dir) = installed_dir();
-        let registry = FakeRegistry::uninstall(&quoted(&dir), PAYLOAD);
-        let existing = detect(&registry, PAYLOAD).unwrap().unwrap();
-        assert_eq!(existing.kind, ExistingKind::Same);
-    }
-
-    #[test]
-    fn newer_install_is_newer() {
-        let (_guard, dir) = installed_dir();
-        let registry = FakeRegistry::uninstall(&quoted(&dir), "0.3.0-dev.1");
-        let existing = detect(&registry, PAYLOAD).unwrap().unwrap();
-        assert_eq!(existing.kind, ExistingKind::Newer);
-        assert_eq!(existing.version, "0.3.0-dev.1");
-    }
-
-    #[test]
-    fn installed_version_that_does_not_parse_can_still_be_upgraded() {
-        let (_guard, dir) = installed_dir();
-        let registry = FakeRegistry::uninstall(&quoted(&dir), "不是版本");
-        let existing = detect(&registry, PAYLOAD).unwrap().unwrap();
-        assert_eq!(existing.kind, ExistingKind::Upgrade);
-        assert_eq!(existing.version, "不是版本");
-    }
-
-    #[test]
-    fn missing_exe_is_broken_even_when_the_version_would_be_newer() {
-        let dir = tempfile::tempdir().unwrap();
-        let text = dir.path().to_str().unwrap().to_owned();
-        let registry = FakeRegistry::uninstall(&quoted(&text), "9.9.9");
-        assert_eq!(
-            detect(&registry, PAYLOAD).unwrap(),
-            Some(Existing {
-                kind: ExistingKind::Broken,
-                version: "9.9.9".into(),
-                dir: text,
-            })
-        );
-    }
-
-    #[test]
     fn empty_exe_counts_as_missing() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(APP_EXE), b"").unwrap();
-        let registry = FakeRegistry::uninstall(dir.path().to_str().unwrap(), PAYLOAD);
-        let existing = detect(&registry, PAYLOAD).unwrap().unwrap();
-        assert_eq!(existing.kind, ExistingKind::Broken);
+        let text = dir.path().to_str().unwrap().to_owned();
+        let registry = FakeRegistry::uninstall(&text, "1.0.0-dev.7");
+        let found = read_installation(&registry).unwrap().unwrap();
+        assert_eq!(
+            found,
+            Installation {
+                dir: text,
+                version: Some("1.0.0-dev.7".into()),
+                program_intact: false,
+            }
+        );
+        assert_eq!(found.channel(), Some(order::Channel::Dev));
+        assert_eq!(
+            found.as_installed(),
+            Installed {
+                version: Some("1.0.0-dev.7"),
+                program_intact: false,
+            }
+        );
     }
 
     #[test]
@@ -417,28 +404,99 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join(APP_EXE)).unwrap();
         let registry = FakeRegistry::uninstall(dir.path().to_str().unwrap(), PAYLOAD);
-        let existing = detect(&registry, PAYLOAD).unwrap().unwrap();
-        assert_eq!(existing.kind, ExistingKind::Broken);
+        let found = read_installation(&registry).unwrap().unwrap();
+        assert!(!found.program_intact);
     }
 
     #[test]
-    fn record_without_a_version_is_broken() {
-        let (_guard, dir) = installed_dir();
-        let registry =
-            FakeRegistry::default().with(UNINSTALL_KEY, Some(INSTALL_LOCATION), &quoted(&dir));
+    fn an_exe_ending_exactly_at_its_sections_is_intact() {
+        assert!(intact_with(&stub_image()));
+    }
+
+    /// 签名会在节末端之后补零和证书表：比节表长不算坏。
+    #[test]
+    fn bytes_past_the_section_end_keep_the_exe_intact() {
+        let mut image = stub_image();
+        image.extend_from_slice(&random_bytes(1 + random_below(4096) as usize));
+        assert!(intact_with(&image));
+    }
+
+    /// 覆盖安装写到一半：开头已经落下，节的内容只写进去一部分。
+    #[test]
+    fn a_half_written_exe_counts_as_missing() {
+        let image = stub_image();
+        let end = stub_sections_end();
+        let random_cut = 1 + random_below(end as u64 - 1) as usize;
+        for cut in [1, random_cut, end - 1] {
+            assert!(
+                !intact_with(&image[..cut]),
+                "截在第 {cut} 字节，节末端 {end}"
+            );
+        }
+        // 只差最后一个字节时 PE 头整个读得出：挡下它的是长度，不是头读不懂
         assert_eq!(
-            detect(&registry, PAYLOAD).unwrap(),
-            Some(Existing {
-                kind: ExistingKind::Broken,
-                version: String::new(),
-                dir,
-            })
+            overlay_start(&mut Cursor::new(&image[..end - 1])).unwrap(),
+            end as u64
         );
+    }
+
+    fn patched(patch: impl FnOnce(&mut [u8])) -> Vec<u8> {
+        let mut image = stub_image();
+        patch(&mut image);
+        image
+    }
+
+    /// 每种都和完好的夹具一样长，挡下它们的只能是头读不懂。
+    #[test]
+    fn a_corrupt_pe_header_counts_as_missing() {
+        let pe_at = stub_pe_at();
+        let len = stub_image().len();
+        let mut noise = random_bytes(len);
+        noise[0] = b'X';
+        let cases = [
+            (
+                "没有 MZ",
+                patched(|image| image[..2].copy_from_slice(b"ZM")),
+            ),
+            ("PE 签名不对", patched(|image| image[pe_at + 1] = b'X')),
+            (
+                "e_lfanew 指到文件之外",
+                patched(|image| image[0x3C..0x40].copy_from_slice(&(len as u32).to_le_bytes())),
+            ),
+            (
+                "节表为空",
+                patched(|image| image[pe_at + 6..pe_at + 8].copy_from_slice(&0u16.to_le_bytes())),
+            ),
+            ("随机字节", noise),
+        ];
+        for (what, image) in cases {
+            assert_eq!(image.len(), len, "{what}");
+            assert!(!intact_with(&image), "{what}");
+        }
+        // 只有 MZ 两个字节的文件以前算完好
+        assert!(!intact_with(b"MZ"));
+    }
+
+    /// 读不了说明不了程序文件坏没坏，报给调用方，不当成不在。
+    #[test]
+    fn an_exe_that_cannot_be_read_reaches_the_caller() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        let (_guard, dir) = installed_dir();
+        let _lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(Path::new(&dir).join(APP_EXE))
+            .unwrap();
+        let registry = FakeRegistry::uninstall(&quoted(&dir), PAYLOAD);
+        let err = read_installation(&registry).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(ERROR_SHARING_VIOLATION));
     }
 
     #[test]
     fn nothing_in_the_registry_means_no_install() {
-        assert_eq!(detect(&FakeRegistry::default(), PAYLOAD).unwrap(), None);
+        assert_eq!(read_installation(&FakeRegistry::default()).unwrap(), None);
     }
 
     #[test]
@@ -447,20 +505,29 @@ mod tests {
         fs::write(dir.path().join("config.json"), b"{}").unwrap();
         let registry =
             FakeRegistry::default().with(LAST_DIR_KEY, None, dir.path().to_str().unwrap());
-        assert_eq!(detect(&registry, PAYLOAD).unwrap(), None);
+        assert_eq!(read_installation(&registry).unwrap(), None);
     }
 
     #[test]
-    fn last_dir_with_exe_but_no_uninstall_record_is_broken() {
+    fn last_dir_with_exe_but_no_uninstall_record_is_an_install_without_a_version() {
         let (_guard, dir) = installed_dir();
         let registry = FakeRegistry::default().with(LAST_DIR_KEY, None, &dir);
+        let found = read_installation(&registry).unwrap().unwrap();
         assert_eq!(
-            detect(&registry, PAYLOAD).unwrap(),
-            Some(Existing {
-                kind: ExistingKind::Broken,
-                version: String::new(),
+            found,
+            Installation {
                 dir,
-            })
+                version: None,
+                program_intact: true,
+            }
+        );
+        assert_eq!(found.channel(), None);
+        assert_eq!(
+            found.as_installed(),
+            Installed {
+                version: None,
+                program_intact: true,
+            }
         );
     }
 
@@ -471,11 +538,11 @@ mod tests {
             .with(UNINSTALL_KEY, Some(DISPLAY_VERSION), "0.1.0")
             .with(LAST_DIR_KEY, None, &dir);
         assert_eq!(
-            detect(&registry, PAYLOAD).unwrap(),
-            Some(Existing {
-                kind: ExistingKind::Upgrade,
-                version: "0.1.0".into(),
+            read_installation(&registry).unwrap(),
+            Some(Installation {
                 dir,
+                version: Some("0.1.0".into()),
+                program_intact: true,
             })
         );
     }
@@ -488,19 +555,19 @@ mod tests {
             None,
             r"Z:\别处\Petalfall",
         );
-        assert_eq!(detect(&registry, PAYLOAD).unwrap().unwrap().dir, dir);
+        assert_eq!(read_installation(&registry).unwrap().unwrap().dir, dir);
     }
 
     #[test]
     fn version_without_any_known_dir_means_no_install() {
         let registry = FakeRegistry::default().with(UNINSTALL_KEY, Some(DISPLAY_VERSION), "0.1.0");
-        assert_eq!(detect(&registry, PAYLOAD).unwrap(), None);
+        assert_eq!(read_installation(&registry).unwrap(), None);
     }
 
     #[test]
     fn blank_values_count_as_missing() {
         let registry = FakeRegistry::uninstall(r#""""#, "   ");
-        assert_eq!(detect(&registry, PAYLOAD).unwrap(), None);
+        assert_eq!(read_installation(&registry).unwrap(), None);
     }
 
     #[test]
@@ -509,7 +576,7 @@ mod tests {
             failure: Some(io::ErrorKind::PermissionDenied),
             ..FakeRegistry::default()
         };
-        let err = detect(&registry, PAYLOAD).unwrap_err();
+        let err = read_installation(&registry).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
     }
 
@@ -519,8 +586,127 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bad = format!(r"{}\bad|name", dir.path().to_str().unwrap());
         let registry = FakeRegistry::uninstall(&bad, PAYLOAD);
-        let err = detect(&registry, PAYLOAD).unwrap_err();
+        let err = read_installation(&registry).unwrap_err();
         assert_eq!(err.raw_os_error(), Some(ERROR_INVALID_NAME));
+    }
+
+    #[test]
+    fn an_intact_install_hands_over_every_fact() {
+        let (_guard, dir) = installed_dir();
+        let registry = FakeRegistry::uninstall(&quoted(&dir), "1.0.0-beta.3");
+        let found = read_installation(&registry).unwrap().unwrap();
+        assert_eq!(
+            found,
+            Installation {
+                dir,
+                version: Some("1.0.0-beta.3".into()),
+                program_intact: true,
+            }
+        );
+        assert_eq!(found.channel(), Some(order::Channel::Beta));
+        assert_eq!(
+            found.as_installed(),
+            Installed {
+                version: Some("1.0.0-beta.3"),
+                program_intact: true,
+            }
+        );
+    }
+
+    #[test]
+    fn an_installed_version_that_does_not_parse_is_kept_as_written_without_a_channel() {
+        let (_guard, dir) = installed_dir();
+        let registry = FakeRegistry::uninstall(&quoted(&dir), "不是版本");
+        let found = read_installation(&registry).unwrap().unwrap();
+        assert_eq!(
+            found,
+            Installation {
+                dir,
+                version: Some("不是版本".into()),
+                program_intact: true,
+            }
+        );
+        assert_eq!(found.channel(), None);
+        assert_eq!(
+            found.as_installed(),
+            Installed {
+                version: Some("不是版本"),
+                program_intact: true,
+            }
+        );
+    }
+
+    /// 通道只由去掉引号的版本文本推出：认得的三种、认不出的预发布标识、解析不了的文本、没写版本。
+    #[test]
+    fn the_installed_channel_follows_the_version_text() {
+        let (_guard, dir) = installed_dir();
+        let cases = [
+            (
+                Some("1.0.0-dev.42"),
+                Some("1.0.0-dev.42"),
+                Some(order::Channel::Dev),
+            ),
+            (
+                Some("1.0.0-beta.3"),
+                Some("1.0.0-beta.3"),
+                Some(order::Channel::Beta),
+            ),
+            (Some("1.0.0"), Some("1.0.0"), Some(order::Channel::Stable)),
+            (Some("0.2.0"), Some("0.2.0"), Some(order::Channel::Stable)),
+            (
+                Some(r#" "1.0.0-dev.5" "#),
+                Some("1.0.0-dev.5"),
+                Some(order::Channel::Dev),
+            ),
+            (Some("1.0.0-rc.1"), Some("1.0.0-rc.1"), None),
+            (Some("v1.0.0"), Some("v1.0.0"), None),
+            (Some("   "), None, None),
+            (None, None, None),
+        ];
+        for (written, version, channel) in cases {
+            let mut registry =
+                FakeRegistry::default().with(UNINSTALL_KEY, Some(INSTALL_LOCATION), &dir);
+            if let Some(text) = written {
+                registry = registry.with(UNINSTALL_KEY, Some(DISPLAY_VERSION), text);
+            }
+            let found = read_installation(&registry).unwrap().unwrap();
+            assert_eq!(found.version.as_deref(), version, "{written:?}");
+            assert_eq!(found.channel(), channel, "{written:?}");
+            assert_eq!(found.as_installed().version, version, "{written:?}");
+        }
+    }
+
+    #[test]
+    fn facts_fold_into_the_existing_install_shown_to_the_page() {
+        let dev = Installation {
+            dir: r"D:\游戏\Petalfall".into(),
+            version: Some("1.0.0-dev.5".into()),
+            program_intact: true,
+        };
+        assert_eq!(
+            dev.into_existing(ExistingKind::Switch),
+            Existing {
+                kind: ExistingKind::Switch,
+                version: "1.0.0-dev.5".into(),
+                dir: r"D:\游戏\Petalfall".into(),
+                channel: Some(Channel::Dev),
+            }
+        );
+
+        let unversioned = Installation {
+            dir: r"E:\Petalfall".into(),
+            version: None,
+            program_intact: false,
+        };
+        assert_eq!(
+            unversioned.into_existing(ExistingKind::Broken),
+            Existing {
+                kind: ExistingKind::Broken,
+                version: String::new(),
+                dir: r"E:\Petalfall".into(),
+                channel: None,
+            }
+        );
     }
 
     #[test]
@@ -558,11 +744,11 @@ mod tests {
             .with(UNINSTALL_KEY, Some(DISPLAY_VERSION), "0.1.0")
             .with(LEGACY_LAST_DIR_KEY, None, &dir);
         assert_eq!(
-            detect(&registry, PAYLOAD).unwrap(),
-            Some(Existing {
-                kind: ExistingKind::Upgrade,
-                version: "0.1.0".into(),
+            read_installation(&registry).unwrap(),
+            Some(Installation {
                 dir,
+                version: Some("0.1.0".into()),
+                program_intact: true,
             })
         );
     }
@@ -577,7 +763,7 @@ mod tests {
             .with(LAST_DIR_KEY, None, &current)
             .with(LEGACY_LAST_DIR_KEY, None, &legacy);
 
-        assert_eq!(detect(&registry, PAYLOAD).unwrap().unwrap().dir, current);
+        assert_eq!(read_installation(&registry).unwrap().unwrap().dir, current);
         assert_eq!(leftover_dir(&registry).unwrap(), Some(current));
     }
 
@@ -588,7 +774,7 @@ mod tests {
         let text = dir.path().to_str().unwrap();
         let registry = FakeRegistry::default().with(LEGACY_LAST_DIR_KEY, None, text);
 
-        assert_eq!(detect(&registry, PAYLOAD).unwrap(), None);
+        assert_eq!(read_installation(&registry).unwrap(), None);
         assert_eq!(leftover_dir(&registry).unwrap().as_deref(), Some(text));
     }
 
@@ -619,8 +805,8 @@ mod tests {
             let expected = current_dir.or(legacy_dir);
             let context = format!("现在的键 {current_text:?}，老键 {legacy_text:?}");
 
-            let detected = detect(&registry, PAYLOAD).unwrap();
-            assert_eq!(detected.map(|existing| existing.dir), expected, "{context}");
+            let found = read_installation(&registry).unwrap();
+            assert_eq!(found.map(|found| found.dir), expected, "{context}");
             assert_eq!(leftover_dir(&registry).unwrap(), expected, "{context}");
         }
     }

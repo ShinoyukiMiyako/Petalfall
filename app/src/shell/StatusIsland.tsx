@@ -7,8 +7,8 @@
 // 游戏日志每 100 ms 一批。状态岛按会话除日志以外的字段订阅，收起时日志怎么来都不重渲染；
 // 展开后的最近几行由 LatestLogs 自己订阅，只有它跟着换。
 
-import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig, useTransform, type Variants } from "framer-motion";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig, useTransform, type MotionValue, type Variants } from "framer-motion";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "../art/Icon";
 import { InstanceBlock } from "../art/iso/InstanceBlock";
 import { ACTION_ERROR, CONFIRM_COPY, LAUNCH_COPY, LAUNCH_STAGES, PHASE_LABEL, SESSION_COPY, STOPPED_LABEL, failureCopy, type FailureFixKind } from "../copy/flows";
@@ -22,15 +22,17 @@ import { sessionDetail, sessionPhaseLabel } from "../launch/launchView";
 import { fade, faceSwap, lineSwap, lineSwapFade, popMark, shake, springs } from "../lib/motion";
 import { useReflow } from "../lib/reflow";
 import { useCompletionHold, useDisplaySpeed, useFinishing, type FinishedItem } from "../lib/progress-display";
+import { playTween } from "../lib/slide";
+import { usePaintedOnce } from "../lib/usePaintedOnce";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { findInstance } from "../state/selectors";
 import { DOWNLOAD_STAGE, isLoadingPhase, type SessionState } from "../state/session";
 import { Appear } from "../ui/Appear";
 import { Button } from "../ui/Button";
 import { Popover } from "../ui/Popover";
-import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
+import { fillOffset, MIN_VISIBLE_PROGRESS, useSmoothProgress } from "../ui/ProgressBar";
 import { ProgressRing } from "../ui/ProgressRing";
-import { SmoothPercent } from "../ui/SmoothPercent";
+import { PercentOf } from "../ui/SmoothPercent";
 import { ISLAND_COPY } from "../copy/shell";
 import { useShell } from "./shell";
 import styles from "./StatusIsland.module.css";
@@ -168,6 +170,13 @@ const shakeVariants: Variants = {
 /** 减少动画时的退场：位移与缩放在那时瞬时到位，留在退场里会先瞬缩、瞬移一下再淡出，所以只留透明度。 */
 const FADE_OUT = { opacity: 0, transition: fade.out };
 
+/**
+ * 岛的入场起点，也是画出第一帧之前停着的目标：两处是同一个对象，挂载时 framer-motion 不建一段原地不动的动画。
+ * 减少动画时缩放一步到位，停着时透明度为 0，跳的那一下看不见，不另备一份。
+ */
+const ISLAND_FROM = { opacity: 0, scale: 0.92 } as const;
+const ISLAND_SHOW = { opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } } as const;
+
 function Island({ session }: { session: SessionState }) {
   const actions = useLauncherActions();
   const instance = useLauncherSelector((s) => findInstance(s, session.instanceId));
@@ -177,6 +186,9 @@ function Island({ session }: { session: SessionState }) {
   const now = useRunningNow(session.phase === "running");
   const present = useIsPresent();
   const reduced = useReducedMotionConfig() === true;
+  // 入场等挂载后的第一帧画出来才起步：点击启动那次提交之后同一个任务里还有几十毫秒的工作，入场从提交就计时的话，
+  // 第一帧画出来时淡入已走掉大半。键与 hold 都不变，一座岛只入场一次：换阶段、换一局都不重播
+  const painted = usePaintedOnce("island", true);
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
   // 「正在结束」是纯界面态：确认结束或点了取消、IPC 还没返回的这段时间；超时由动作本身以错误结束
@@ -188,14 +200,14 @@ function Island({ session }: { session: SessionState }) {
   const slot = islandSlot(session, tier, now, stopping);
   const loading = isLoadingPhase(session.phase);
   const layoutKey = islandLayoutKey(session, tier, name, slot);
-  // 详情头与阶段清单写的下载速度：平滑过、每秒最多换两次字。只在下载阶段喂真实速度：别的阶段没有数据在流，下载记录里留着的是最后一次的速度
-  const speed = useDisplaySpeed(session.phase === "downloading" && session.download !== null ? session.download.speedBps : 0);
-  const shown = withShownSpeed(session, speed);
   // 这座岛上画过加载的那一局。它进入运行时底边进度条与详情里的进度环先推满、留一拍再退场
   const [loadedTask, setLoadedTask] = useState(loading ? session.taskId : null);
   if (loading && loadedTask !== session.taskId) setLoadedTask(session.taskId);
   const finishing = useFinishing(loadingFinished(session, loadedTask), useCompletionHold()).has(session.taskId);
   const progressShown = loading || finishing;
+  // 底边进度条的平滑放在不随阶段换行的这一层，胶囊上的百分数直接读它：字与条是同一个值，按构造同数，换行时新行不另起弹簧。
+  // 换了一局时平滑直接跳到新一局的进度，字与条一起跳，不从上一局停下的位置往回走
+  const bar = useIslandProgress(session.progress, session.taskId);
   // 详情在加载期间开着：加载结束（进入运行、失败、取消）后阶段清单留到浮层关闭，停在最终状态。
   // 清单连间距两百多像素，加载一结束就抽走会让日志与动作行上跳、浮层底边骤缩；关掉再打开时不在加载期就不画
   const [stagesHeld, setStagesHeld] = useState(false);
@@ -203,7 +215,9 @@ function Island({ session }: { session: SessionState }) {
   if (!open && stagesHeld) setStagesHeld(false);
   const stages = loading || stagesHeld;
   const detailKey = detailLayoutKey(session, stages);
-  // 清单出没时外框沿 morph 形变，被挤开的日志区要走同一条弹簧，否则先于外框下沿到位、与它分开动
+  // 清单出没时外框沿 morph 形变，被挤开的日志区要走同一条弹簧，否则先于外框下沿到位、与它分开动。
+  // 这里的位移只来自清单的增删（Appear 的进出，正文里没有自己变尺寸的布局节点），增删观察报在提交后的微任务里，
+  // 与外框的形变同一刻起步，不用在形变节点上补跑（sync）
   const detailReflow = useReflow<HTMLDivElement>("morph");
   const dotRef = useRef<HTMLSpanElement>(null);
   useBreathPhase(dotRef, tone === "running");
@@ -247,8 +261,8 @@ function Island({ session }: { session: SessionState }) {
           aria-expanded={open}
           aria-haspopup="dialog"
           style={{ borderRadius: ISLAND_RADIUS }}
-          initial={{ opacity: 0, scale: 0.92 }}
-          animate={{ opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } }}
+          initial={ISLAND_FROM}
+          animate={painted ? ISLAND_SHOW : ISLAND_FROM}
           exit={reduced ? FADE_OUT : { opacity: 0, scale: 0.96, transition: fade.out }}
           transition={{ layout: springs.morph }}
           onClick={() => setOpen((v) => !v)}
@@ -277,7 +291,7 @@ function Island({ session }: { session: SessionState }) {
                   animate="show"
                   exit="leave"
                 >
-                  <SecondText second={second} progress={loading ? { value: session.progress, track: session.taskId } : null} />
+                  <SecondText second={second} progress={loading ? bar.smooth : null} />
                 </motion.span>
               </AnimatePresence>
               {slot.map((candidate) => (
@@ -299,10 +313,10 @@ function Island({ session }: { session: SessionState }) {
               {session.phase === "crashed" && <motion.span key="danger" className={styles.dangerDot} {...(reduced ? popMark.reduced : popMark.dot)} aria-hidden="true" />}
             </AnimatePresence>
           </motion.span>
-          <AnimatePresence>{progressShown && <IslandBar key="bar" session={session} />}</AnimatePresence>
+          <AnimatePresence>{progressShown && <IslandBar key="bar" fill={bar.fill} />}</AnimatePresence>
         </motion.button>
       </motion.span>
-      <span className={styles.srOnly} aria-live="polite">
+      <span className="sk-sr-only" aria-live="polite">
         {ISLAND_COPY.announce(name, sessionPhaseLabel(session))}
       </span>
       {/* 内容结构变了（清单出没、动作行换一套按钮）时外框沿 morph 形变到新高度；动作行在底部那一层，跟着外框下沿走 */}
@@ -318,9 +332,9 @@ function Island({ session }: { session: SessionState }) {
         footer={<DetailActions session={session} controls={controls} onClose={close} />}
       >
         <div ref={detailReflow} className={styles.detail}>
-          <DetailHead session={shown} instance={instance} name={name} now={now} ring={progressShown} />
+          <DetailHead session={session} instance={instance} name={name} now={now} ring={progressShown} />
           {/* 换了一次启动（taskId 变）时清单重新挂载，勾号按新的这次启动算 */}
-          <Appear>{stages && <StageList key={session.taskId} session={shown} />}</Appear>
+          <Appear>{stages && <StageList key={session.taskId} session={session} />}</Appear>
           <LatestLogs instanceId={session.instanceId} />
         </div>
       </Popover>
@@ -330,24 +344,36 @@ function Island({ session }: { session: SessionState }) {
 
 /**
  * 第二段一行的内容：显示的那一行与占宽的候选同一结构，候选量出来的宽度才和显示时一致。
- * 显示的那一行在加载中传 progress：百分数取底边进度条那一种平滑（同一个 track），字与条一起走，不随每次上报跳字；
- * 候选只写占位的数字。
+ * 显示的那一行在加载中传 progress：底边进度条的那个平滑值本身，百分数直接读它，字与条逐帧同数，不随每次上报跳字。
+ * 不各行另起一条平滑：新行的弹簧从零速起步，换行时条正带着速度走，字会一路落后几个百分点。
+ * 退场中的旧行留着它最后一次渲染时的 progress，照样逐帧读这个值：交叉淡化的那一百多毫秒里两行写同一个数，只有标签不同。
+ * 旧行要是停在换行那一刻的数，条正带着速度走时同屏会有两个相差十几点的百分数。候选只写占位的数字。
  */
-function SecondText({ second, progress }: { second: IslandSecond; progress: { value: number; track: string } | null }) {
+function SecondText({ second, progress }: { second: IslandSecond; progress: MotionValue<number> | null }) {
   return (
     <>
       {second.label !== null && <span>{second.label}</span>}
-      {second.value !== null &&
-        (progress === null ? <span className={styles.value}>{second.value}</span> : <SmoothPercent className={styles.value} value={progress.value} track={progress.track} />)}
+      {second.value !== null && (progress === null ? <span className={styles.value}>{second.value}</span> : <PercentOf className={styles.value} value={progress} />)}
     </>
   );
 }
 
-/** 显示用的会话：下载中的速度换成平滑过的那个，详情头与阶段清单写的是同一个数；别的不动。 */
+/** 显示用的会话：下载中的速度换成平滑过的那个；别的不动。 */
 function withShownSpeed(session: SessionState, speedBps: number): SessionState {
   const d = session.download;
   if (session.phase !== "downloading" || d === null || d.speedBps === speedBps) return session;
   return { ...session, download: { ...d, speedBps } };
+}
+
+/**
+ * 写速度的那几行字用的会话：下载速度平滑过、每秒最多换两次字。只在下载阶段喂真实速度：别的阶段没有数据在流，下载记录里留着的是最后一次的速度。
+ * 节拍放在只画这一行字的小段里（与下载任务页的 TaskMeta 同一做法）：到点补字时只重画这一行，胶囊与详情的其余部分不跟着重渲染，
+ * 详情收起时也就没有节拍。详情头与下载那一行各取一份：喂的是同一串速度，下载阶段之外都喂 0，进下载时同一刻从头起步
+ * （在下载中打开详情时两份也是同一次挂载），写出来是同一个数。代价是在下载中途打开详情时，第一拍写的是此刻的速度，之后才接着平滑。
+ */
+function useShownSpeedSession(session: SessionState): SessionState {
+  const speed = useDisplaySpeed(session.phase === "downloading" && session.download !== null ? session.download.speedBps : 0);
+  return withShownSpeed(session, speed);
 }
 
 /**
@@ -360,20 +386,30 @@ export function loadingFinished(session: SessionState, loadedTask: string | null
   return [{ id: session.taskId, finishedAt: session.runningSince }];
 }
 
-function IslandBar({ session }: { session: SessionState }) {
-  const { smooth } = useSmoothProgress(session.progress, session.taskId);
-  const x = useTransform(smooth, fillOffset);
+/**
+ * 状态岛的进度：胶囊上的百分数读 smooth，底边进度条的填充位移读 fill。
+ * 字从 0% 起、照真实进度写，smooth 不带最少显示长度；条在进度大于 0 时不短于 MIN_VISIBLE_PROGRESS。
+ * 下限不能加在逐帧平滑之后（离开 0 的第一帧一下冒出那一截），也不能放进 smooth 的终点（字会从 2% 起跳），
+ * 所以下限自己是一条同样平滑的值：目标大于 0 时从 0 弹到 MIN_VISIBLE_PROGRESS，换一局时与 smooth 按同一规则跳，条取两者的较大者。
+ * 下限的终点就是 MIN_VISIBLE_PROGRESS，smooth 过了它之后条取的就是 smooth 本身，字与条按构造同数。
+ */
+export function useIslandProgress(progress: number, track: string): { smooth: MotionValue<number>; fill: MotionValue<string> } {
+  const bar = useSmoothProgress(progress, track);
+  const floor = useSmoothProgress(bar.target > 0 ? MIN_VISIBLE_PROGRESS : 0, track);
+  const fill = useTransform([bar.smooth, floor.smooth], ([p, min]: number[]) => fillOffset(Math.max(p, min)));
+  return { smooth: bar.smooth, fill };
+}
+
+function IslandBar({ fill }: { fill: MotionValue<string> }) {
   return (
     <motion.span className={styles.barTrack} aria-hidden="true" exit={{ opacity: 0, transition: fade.out }}>
-      <motion.span className={styles.barFill} style={{ x }} />
+      <motion.span className={styles.barFill} style={{ x: fill }} />
     </motion.span>
   );
 }
 
 /** ring：进度环在不在。加载中，以及加载刚走完、环正推到满格的那一拍（这时已在运行，按 100% 算，不再封顶 99%）。 */
 function DetailHead({ session, instance, name, now, ring }: { session: SessionState; instance: InstanceSummary | undefined; name: string; now: number; ring: boolean }) {
-  const detail = sessionDetail(session, now);
-  const phase = sessionPhaseLabel(session);
   const catalog = useBlockCatalog();
   const loading = isLoadingPhase(session.phase);
   return (
@@ -383,7 +419,7 @@ function DetailHead({ session, instance, name, now, ring }: { session: SessionSt
       </span>
       <div className={styles.headText}>
         <p className={styles.headName}>{name}</p>
-        <p className={styles.headPhase}>{detail === null ? phase : `${phase} · ${detail}`}</p>
+        <HeadPhase session={session} now={now} />
       </div>
       {/* 进度环比头部文字两行矮，撤掉不改头部高度；加载结束时淡出而不是瞬没 */}
       <Appear itemClassName={styles.headRing}>
@@ -391,6 +427,14 @@ function DetailHead({ session, instance, name, now, ring }: { session: SessionSt
       </Appear>
     </div>
   );
+}
+
+/** 详情头的副行：阶段，加上下载进度与速度、计时这类说明。 */
+function HeadPhase({ session, now }: { session: SessionState; now: number }) {
+  const shown = useShownSpeedSession(session);
+  const detail = sessionDetail(shown, now);
+  const phase = sessionPhaseLabel(shown);
+  return <p className={styles.headPhase}>{detail === null ? phase : `${phase} · ${detail}`}</p>;
 }
 
 /** halted：加载已经结束（失败或取消）时停下的那一步，外观同未开始，不再画成进行中。 */
@@ -445,7 +489,6 @@ function StageList({ session }: { session: SessionState }) {
     <ol className={styles.stages} aria-label={ISLAND_COPY.stagesLabel}>
       {LOADING_STAGES.map((label, i) => {
         const st = stageState(session.stageIndex, i, loading);
-        const note = stageNote(session, i);
         return (
           <li key={label} className={styles.stage} data-state={st}>
             <span className={styles.stageDot} aria-hidden="true">
@@ -456,12 +499,22 @@ function StageList({ session }: { session: SessionState }) {
               )}
             </span>
             <span className={styles.stageLabel}>{label}</span>
-            {note !== null && <span className={styles.stageNote}>{note}</span>}
+            {i === DOWNLOAD_STAGE ? <DownloadStageNote session={session} /> : <StageNoteText note={stageNote(session, i)} />}
           </li>
         );
       })}
     </ol>
   );
+}
+
+function StageNoteText({ note }: { note: string | null }) {
+  return note === null ? null : <span className={styles.stageNote}>{note}</span>;
+}
+
+/** 下载那一行的右侧：写着速度，换字节拍在这一小段里，补字时清单的其余各行不跟着重渲染。 */
+function DownloadStageNote({ session }: { session: SessionState }) {
+  const shown = useShownSpeedSession(session);
+  return <StageNoteText note={stageNote(shown, DOWNLOAD_STAGE)} />;
 }
 
 /** 详情里日志区的行数；样式里日志区的固定高度按它算。 */
@@ -524,6 +577,136 @@ function liveEndAction(phase: SessionState["phase"]): EndAction | null {
   return phase === "running" ? "stop" : null;
 }
 
+/** 动作行里一项的布局矩形（px），相对动作行，不含 transform 与 translate。 */
+interface ActionBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** 让位交给 Web Animations 的一段位移：box 是这一项终点处的布局矩形，keys 是各关键帧距起步的毫秒数与那一刻的 translate。 */
+interface ActionPassage {
+  box: ActionBox;
+  start: number;
+  keys: readonly { at: number; x: number; y: number }[];
+}
+
+/** 两个矩形有没有叠在一起；只贴着边不算。 */
+function overlaps(a: ActionBox, b: ActionBox): boolean {
+  return a.left < b.left + b.width && b.left < a.left + a.width && a.top < b.top + b.height && b.top < a.top + a.height;
+}
+
+/**
+ * passages 里的兄弟途经 target 时，最后一次压在它上面之后的那个关键帧的时刻（文档时间轴）；都没压上时为 null。
+ * 关键帧之间线性相连，相邻两帧只隔 1/120 秒（lib/slide），按关键帧比就够；取压着的最后一帧的下一帧，宁晚不早。
+ */
+function passedAt(target: ActionBox, passages: readonly ActionPassage[]): number | null {
+  let clear: number | null = null;
+  for (const { box, start, keys } of passages) {
+    for (let i = keys.length - 1; i >= 0; i--) {
+      const { x, y } = keys[i];
+      if (!overlaps({ ...box, left: box.left + x, top: box.top + y }, target)) continue;
+      const at = start + keys[Math.min(i + 1, keys.length - 1)].at;
+      if (clear === null || at > clear) clear = at;
+      break;
+    }
+  }
+  return clear;
+}
+
+/** 这一项的布局矩形：动作行是定位祖先，量到的就是相对它的位置。 */
+function actionBox(el: HTMLElement): ActionBox {
+  return { left: el.offsetLeft, top: el.offsetTop, width: el.offsetWidth, height: el.offsetHeight };
+}
+
+/** 关键帧里的 translate；只写了一个值时纵向是 0（CSS 的 translate 就是这么解释的）。 */
+function translateOf(value: string): { x: number; y: number } {
+  const [x, y = "0px"] = value.trim().split(/\s+/);
+  const parsed = { x: parseFloat(x), y: parseFloat(y) };
+  if (!Number.isFinite(parsed.x) || !Number.isFinite(parsed.y)) throw new Error(`读不懂让位关键帧的 translate：${value}`);
+  return parsed;
+}
+
+/** 让位此刻挂在这一项上的那一段；没有、或起步时刻还没定（不是走 morph 的让位）时为 null。 */
+function passageOf(el: HTMLElement): ActionPassage | null {
+  for (const animation of el.getAnimations()) {
+    const effect = animation.effect;
+    const start = animation.startTime;
+    if (!(effect instanceof KeyframeEffect) || typeof start !== "number") continue;
+    const frames = effect.getKeyframes();
+    if (frames.length < 2 || !frames.every((frame) => typeof frame.translate === "string")) continue;
+    const duration = effect.getTiming().duration;
+    if (typeof duration !== "number") throw new Error(`让位的时长应是毫秒数，实为 ${String(duration)}`);
+    return { box: actionBox(el), start, keys: frames.map((frame) => ({ at: frame.computedOffset * duration, ...translateOf(String(frame.translate)) })) };
+  }
+  return null;
+}
+
+function buttonIn(item: HTMLElement): HTMLButtonElement {
+  const button = item.querySelector("button");
+  if (button === null) throw new Error("动作行里的一项没有按钮");
+  return button;
+}
+
+/**
+ * 原地退场的这一项压着新按钮：它的按钮自己先淡到全透明并停在那里，返回淡完的时刻（文档时间轴）。之前已经挂过的沿用那一段。
+ * 外面那层（Appear）的退场由 framer-motion 起步，起点随提交到下一帧隔多久而定（不超过 40 ms 取提交那一刻，超过取那一帧），
+ * 淡完的时刻在这里拿不准；按钮上这一段淡完的时刻是定的，新按钮按它起步就不会与它叠着画。
+ * 起点钉在提交后的第一帧动笔的那一刻（now）：钉在提交那一刻的话，那一帧来得晚时第一帧画出来已淡掉大半，甚至直接没了。
+ * 用 fade.quick：先出后入，新按钮少等一些。
+ */
+function vacate(item: HTMLElement, now: number, vacating: WeakMap<Element, Animation>): number {
+  let away = vacating.get(item);
+  if (away === undefined) {
+    away = playTween(buttonIn(item), [{}, { opacity: 0 }], fade.quick);
+    if (away.effect === null) throw new Error("淡出的动画没有效果对象");
+    away.effect.updateTiming({ fill: "forwards" });
+    away.startTime = now;
+    vacating.set(item, away);
+  }
+  const start = away.startTime;
+  if (typeof start !== "number") throw new Error(`退场项淡出的起步时刻应是毫秒数，实为 ${String(start)}`);
+  return start + fade.quick.duration * 1000;
+}
+
+/**
+ * 新插入的按钮先停在全透明，等压着它的都让开再淡入，两者不叠着画：
+ * - 滑过来的兄弟：右对齐的一行在「完整日志」右边插进两颗（加载转失败、运行转崩溃）时，「完整日志」左移一百来像素，正好横穿原位淡入的「收起」。
+ *   兄弟的轨迹取让位挂在它身上的那一段：lib/reflow 走 morph 时起步时刻已钉下，关键帧就是整条弹簧轨迹。
+ * - 原地退场的项：popLayout 把它钉在原处淡出，新按钮常落在同一处（「取消启动」「结束游戏」的位置上换上「收起」或修复、诊断按钮），
+ *   它先淡掉（vacate），新按钮等它淡完。
+ * 淡入挂在按钮本身、淡到按钮自己的透明度：外面那层（Appear）的入场照常，退场时外层淡出照样盖住它。
+ * 新插入的项自己至多在新开的一行里从上一行下沿滑下来（lib/reflow），压不到别的行上，按它的终点比。
+ * 让位没起动画（减少动画，或这次没有兄弟被挪动）、也没有退场项压着时没有可等的，照常淡入。
+ * now 是提交后的第一帧跑 rAF 回调的那一刻，这一帧画出来之前两者都已挂上。不取 rAF 的时间戳：那是这一帧开始排的时刻，
+ * 主线程前面压着长任务时会早于提交（开发构建里启动失败那次提交后的第一帧早了六十多毫秒，下一帧的时间戳一下追回一百多毫秒），
+ * 钉在它上面的淡出在第二帧就走完了。
+ */
+function holdUntilClear(entering: readonly HTMLElement[], staying: readonly HTMLElement[], leaving: readonly HTMLElement[], vacating: WeakMap<Element, Animation>, now: number): void {
+  // 组件测试的 jsdom 没有 getAnimations：那里不播动画，也就没有可等的让位
+  const passages = staying.some((item) => typeof item.getAnimations !== "function") ? [] : staying.map(passageOf).filter((passage): passage is ActionPassage => passage !== null);
+  // 提交之后、这一帧之前又换过一次时，已经原地回来的退场项不再淡出：那次提交没有它的淡出可撤，挂上就停在全透明
+  const exiting = leaving.filter((item) => item.hasAttribute("inert"));
+  if (passages.length === 0 && exiting.length === 0) return;
+  const boxes = entering.map(actionBox);
+  const vacated = exiting.flatMap((item) => {
+    const box = actionBox(item);
+    return boxes.some((target) => overlaps(box, target)) ? [{ box, at: vacate(item, now, vacating) }] : [];
+  });
+  entering.forEach((item, i) => {
+    let at = passedAt(boxes[i], passages);
+    for (const spot of vacated) {
+      if (overlaps(spot.box, boxes[i]) && (at === null || spot.at > at)) at = spot.at;
+    }
+    if (at === null || at <= now) return;
+    const fadeIn = playTween(buttonIn(item), [{ opacity: 0 }, {}], fade.in);
+    if (fadeIn.effect === null) throw new Error("淡入的动画没有效果对象");
+    fadeIn.effect.updateTiming({ fill: "backwards" });
+    fadeIn.startTime = at;
+  });
+}
+
 function DetailActions({ session, controls, onClose }: { session: SessionState; controls: IslandControls; onClose: () => void }) {
   const phase = session.phase;
   // 「完整日志」「查看诊断」与修复动作先关浮层再执行
@@ -542,10 +725,51 @@ function DetailActions({ session, controls, onClose }: { session: SessionState; 
   const [shownEnd, setShownEnd] = useState(live);
   if (live !== null && live !== shownEnd) setShownEnd(live);
   const end = live !== null ? live : phase === "stopped" ? shownEnd : null;
-  // 其余的增删（加载转运行、失败或崩溃）都有新按钮插入：退场的淡出并立即脱离布局，右对齐的其余按钮滑到新位置
-  const reflow = useReflow<HTMLDivElement>();
+  // 其余的增删（加载转运行、失败或崩溃）都有新按钮插入：退场的淡出并立即脱离布局，右对齐的其余按钮滑到新位置。
+  // 动作行所在的底部那一层随外框沿 morph 形变，按钮的位移（换组、修复文案变长折行）走同一条弹簧才与外框下沿同拍到位。
+  // 这些位移都来自按钮的增删（折行也是换上的那一套更宽），由增删观察在提交后的微任务里接住，与形变同一刻起步，不用补跑（sync）
+  const reflow = useReflow<HTMLDivElement>("morph");
+  const row = useRef<HTMLDivElement | null>(null);
+  const attach = useCallback(
+    (el: HTMLDivElement | null) => {
+      if (el === null) return;
+      row.current = el;
+      const stop = reflow(el);
+      return () => {
+        row.current = null;
+        if (typeof stop === "function") stop();
+      };
+    },
+    [reflow],
+  );
+  // 上一次提交时在场的各项：换一套按钮时据此认出新插入的。每次提交都比一遍（只走 DOM、不读布局），
+  // 按钮的集合由阶段、失败修复、结束按钮的去留拼成，按依赖写容易漏
+  const present = useRef<ReadonlySet<Element> | null>(null);
+  // 按钮上挂了淡出（vacate）的退场项。退场没播完又回来时 framer-motion 让同一个节点原地回来，那段淡出要撤掉，否则按钮停在全透明
+  const [vacating] = useState(() => new WeakMap<Element, Animation>());
+  useLayoutEffect(() => {
+    const el = row.current;
+    if (el === null) throw new Error("动作行没有挂上");
+    const children = [...el.children].filter((child): child is HTMLElement => child instanceof HTMLElement);
+    const items = children.filter((child) => !child.hasAttribute("inert"));
+    const before = present.current;
+    present.current = new Set(items);
+    if (before === null) return;
+    const entering = items.filter((item) => !before.has(item));
+    if (entering.length === 0) return;
+    for (const item of entering) {
+      const away = vacating.get(item);
+      if (away === undefined) continue;
+      away.cancel();
+      vacating.delete(item);
+    }
+    const staying = items.filter((item) => before.has(item));
+    const leaving = children.filter((child) => child.hasAttribute("inert"));
+    // 让位在增删观察的回调里起（提交后的微任务），到下一帧的 rAF 时已经建好；淡出与停住都在这一帧画出来之前挂上
+    requestAnimationFrame(() => holdUntilClear(entering, staying, leaving, vacating, performance.now()));
+  });
   return (
-    <div ref={reflow} className={styles.actions}>
+    <div ref={attach} className={styles.actions}>
       <Appear itemClassName={styles.action}>
         {showLogs && (
           <Button key="logs" variant="ghost" size="sm" onClick={leave(controls.openLogs)}>

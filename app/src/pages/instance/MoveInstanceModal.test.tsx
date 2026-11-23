@@ -10,7 +10,8 @@ import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { formatBytes } from "../../domain/format";
 import type { GameDirectoryDto } from "../../ipc/config";
 import { IpcError } from "../../ipc/errors";
-import type { InstanceDto, MoveOutcomeDto, MovePreviewDto } from "../../ipc/instances";
+import type { InstanceDto, MoveBlockerDto, MoveOutcomeDto, MovePreviewDto } from "../../ipc/instances";
+import { APP_NAME } from "../../lib/app-info";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
@@ -23,7 +24,6 @@ import { RemoteImageProvider } from "../../ui/remote-image";
 import { PickFolderProvider, type PickFolder } from "../discover/platform";
 import InstancePage from "./index";
 import { moveCheckView, moveSubmitReason } from "./MoveInstanceModal";
-import moveStyles from "./move.module.css";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -199,9 +199,9 @@ function previewSkeleton(): HTMLElement | null {
   return layer === undefined ? null : layer;
 }
 
-/** 「正在检查」的读屏播报区：随预检区预先挂着，不在骨架那层对读屏隐藏的子树里。 */
+/** 「正在检查」的读屏播报区：随预检区预先挂着、套全局的视觉隐藏类，不在骨架那层对读屏隐藏的子树里。 */
 function checkStatus(): HTMLElement {
-  const found = dialog().querySelector<HTMLElement>(`.${moveStyles.status}`);
+  const found = dialog().querySelector<HTMLElement>('section[aria-live] > .sk-sr-only[role="status"]');
   if (found === null) throw new Error("预检区没有播报区");
   expect(found.getAttribute("role")).toBe("status");
   expect(found.closest('[aria-hidden="true"]')).toBeNull();
@@ -392,6 +392,15 @@ describe("移到其他游戏目录：弹窗", () => {
     expect(body).toContain("目标在另一个盘上：先把实例与存档备份复制过去，逐个文件校验无误后，再永久删除原来的文件，不进回收站。");
     expect(body).toContain("这个实例没开版本隔离，存档、Mod 和游戏设置放在原游戏目录根下、和别的实例共用，不会跟着移走。");
     expect(body).toContain("原游戏目录里也缺 12 个共用文件，移过去后第一次启动时会下载补上。");
+    // 不跟着走的那条排在摘要之前（矮窗口里主体不滚动也先看得到），说明块与其余提醒行仍在摘要之后
+    const order = [...previewBlock().querySelectorAll<HTMLElement>(":scope > :not([inert])")].map((el) => (el.querySelector("dl") === null ? textOf(el) : "摘要"));
+    expect(order).toEqual([
+      "这个实例没开版本隔离，存档、Mod 和游戏设置放在原游戏目录根下、和别的实例共用，不会跟着移走。",
+      "摘要",
+      "目标在另一个盘上：先把实例与存档备份复制过去，逐个文件校验无误后，再永久删除原来的文件，不进回收站。",
+      "原游戏目录里也缺 12 个共用文件，移过去后第一次启动时会下载补上。",
+      "移走后它会从侧栏固定里去掉。",
+    ]);
     expect(kv("一起带过去的版本")).toBe("1.21.1");
     expect(kv("目标里已有的版本")).toBe("1.20.1");
     expect(kv("要写入目标盘")).toBe(formatBytes(1100 * MB));
@@ -420,6 +429,33 @@ describe("移到其他游戏目录：弹窗", () => {
     });
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(document.querySelector('input[aria-label="实例名称"]')).not.toBeNull();
+  });
+
+  it.each<[string, MoveBlockerDto, string]>([
+    [
+      "被更新的版本用过（知道是哪一版）",
+      { kind: "data_too_new", path: HMCL, found: 2, supported: 1, written_by: "1.1.0-dev.57", written_by_channel: "dev" },
+      "目标游戏目录已经被预览版 1.1.0-dev.57 用过，这个版本不能往里移",
+    ],
+    ["被更新的版本用过（版本不可信为空）", { kind: "data_too_new", path: HMCL, found: 2, supported: 1, written_by: null, written_by_channel: null }, `目标游戏目录已经被更新的${APP_NAME}用过，这个版本不能往里移`],
+    ["记号读不懂", { kind: "data_format_unreadable", path: HMCL, reason: "expected value at line 1 column 1" }, "目标游戏目录里的格式记录读不懂（expected value at line 1 column 1），为了不弄坏里面的实例，不往里移"],
+  ])("目标的数据格式%s：列在拦截项里、主按钮禁用；预检区照常写出摘要，红色提示只有「现在还不能移」，不是预检失败", async (_case, blocker, reason) => {
+    await openPage();
+    await openMove();
+    click(option("HMCL"));
+    await flush();
+    await answer(HMCL, previewDto(HMCL, { blockers: [blocker] }));
+    expect([...dialog().querySelectorAll('ul[aria-label="现在还不能移"] li')].map(textOf)).toEqual([reason]);
+    // 预检本身成功：摘要照常摆出，预检失败那条「没能检查目标位置」与它的「重试」都不出现
+    expect(kv("目标盘剩余")).toBe(formatBytes(120 * GIB));
+    expect([...dialog().querySelectorAll('[data-tone="danger"]')].map(textOf)).toEqual(["现在还不能移"]);
+    expect(textOf(dialog())).not.toContain("没能检查目标位置");
+    expect([...dialog().querySelectorAll("button")].map(textOf)).not.toContain("重试");
+    const confirm = button("移动实例", dialog());
+    expect(confirm.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(confirm)).toBe("先解决上面列出的问题");
+    // 没有同名拦截项，不给「去重命名」
+    expect([...dialog().querySelectorAll("button")].map(textOf)).not.toContain("去重命名");
   });
 
   it("选择其他文件夹：从当前游戏目录打开对话框；选的不在列表里就加一行并选中、按它预检，选的就是列表里的目录（大小写不同）则选中那一行", async () => {

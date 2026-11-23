@@ -23,6 +23,7 @@ import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, memoryAdviceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
+import styles from "./instance.module.css";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -313,6 +314,8 @@ describe("日志控制台：加载占位", () => {
     await open();
     const headings = () => [...consoleCard().querySelectorAll("h3")].filter((h) => h.closest('[aria-hidden="true"]') === null && h.closest("[inert]") === null).map(textOf);
     expect(headings()).toEqual(["启动日志"]);
+    // 占位外面的那个只给读屏：套全局的视觉隐藏类，不占卡头的位置
+    expect([...consoleCard().querySelectorAll("h3")].filter((h) => h.closest('[aria-hidden="true"]') === null).map((h) => h.className)).toEqual(["sk-sr-only"]);
     await pass(300);
     expect(headings()).toEqual(["启动日志"]);
 
@@ -357,6 +360,38 @@ describe("日志控制台：加载占位", () => {
     };
     expect(group("按级别筛选").style.getPropertyValue("--segment-count-digits")).toBe("4");
     expect(group("按来源筛选").style.getPropertyValue("--segment-count-digits")).toBe("2");
+  });
+});
+
+describe("日志控制台：日志区的下角", () => {
+  it("控制台贴着卡片下沿：日志区的下角圆角取卡片内沿的半径（卡片圆角扣掉 1px 描边），不越出卡片的圆角", async () => {
+    await open();
+    const area = logArea();
+    if (area === null) throw new Error("控制台没有画出来");
+    // 日志区自己读 --log-corner、不给时是直角（LogConsole 的用例钉着），这里钉住实例页给的值与挂的位置
+    expect(area.closest(`.${styles.consoleBody}`)).not.toBeNull();
+    expect(rule(".consoleBody")).toMatch(/--log-corner:\s*calc\(var\(--sk-r-lg\) - 1px\);/);
+  });
+});
+
+describe("日志控制台：首屏高度", () => {
+  const conf = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../../src-tauri/tauri.conf.json"), "utf8")) as {
+    app: { windows: { label: string; minHeight: number }[] };
+  };
+
+  /** `name: max(下限px, 100vh - 偏移px)` 拆成下限与偏移。 */
+  function byWindowHeight(decl: string, name: string): { floor: number; offset: number } {
+    const found = new RegExp(`(?:^|[\\s;])${name}:\\s*max\\((\\d+)px,\\s*100vh - (\\d+)px\\);`).exec(decl);
+    if (found === null) throw new Error(`没有按窗口高度给的 ${name}`);
+    return { floor: Number(found[1]), offset: Number(found[2]) };
+  }
+
+  it("最小窗口高度下首屏也露出完整控制台：高度下限不超过最小窗口高减去偏移，两列时历史卡与它等高", () => {
+    const main = conf.app.windows.find((w) => w.label === "main");
+    if (main === undefined) throw new Error("tauri.conf.json 里没有主窗口");
+    const card = byWindowHeight(rule(".console"), "height");
+    expect(card.floor).toBeLessThanOrEqual(main.minHeight - card.offset);
+    expect(byWindowHeight(rule(".historyCard"), "max-height")).toEqual(card);
   });
 });
 
@@ -449,6 +484,14 @@ describe("变更历史：「显示更早」与滚动区", () => {
     expect(decl).toMatch(/overflow:\s*auto;/);
     expect(decl).toMatch(/scrollbar-gutter:\s*stable;/);
     expect(decl).toMatch(/margin-right:\s*calc\(-1 \* var\(--sk-scrollbar-size\)\);/);
+  });
+});
+
+describe("变更历史：时间的聚焦环", () => {
+  it("可聚焦的时间画 box-shadow 聚焦环并关掉兜底 outline：--sk-focus 是阴影列表，代进 outline 整条声明作废，键盘聚焦时什么都不画", () => {
+    const decl = rule(".tlTime:focus-visible");
+    expect(decl).toMatch(/box-shadow:\s*var\(--sk-focus\);/);
+    expect(decl).toMatch(/outline:\s*none;/);
   });
 });
 

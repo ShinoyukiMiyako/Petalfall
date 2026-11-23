@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mockGameDir } from "./mock/handlers/config";
 import { installMod, installResource, projectDetail, searchResources, type SearchArgs } from "./discover";
 import { IpcError } from "./errors";
 import { listInstanceContent } from "./instances";
@@ -43,6 +44,7 @@ describe("Tauri 里参数键与 Rust 形参一致", () => {
     await searchResources({ ...base, resourceTypes: ["shader"], category: "realistic", platform: "modrinth" });
     await projectDetail("curseforge", "238222");
     await installResource({
+      gameDir: "D:\\Games\\.minecraft",
       taskId: "t-rp",
       versionId: "生存",
       resourceType: "data_pack",
@@ -69,7 +71,7 @@ describe("Tauri 里参数键与 Rust 形参一致", () => {
       ["project_detail", { platform: "curseforge", projectId: "238222" }],
       [
         "install_resource",
-        { taskId: "t-rp", versionId: "生存", resourceType: "data_pack", world: "新的世界", platform: "modrinth", projectId: "8oi3bsk5", fileVersionId: "v1" },
+        { taskId: "t-rp", gameDir: "D:\\Games\\.minecraft", versionId: "生存", resourceType: "data_pack", world: "新的世界", platform: "modrinth", projectId: "8oi3bsk5", fileVersionId: "v1" },
       ],
     ]);
   });
@@ -166,6 +168,7 @@ describe("发现 mock", () => {
     const events: CoreEvent[] = [];
     const off = await listen<CoreEvent>(CORE_EVENT, (e) => events.push(e));
     const shader = await installResource({
+      gameDir: mockGameDir(),
       taskId: "t-sh",
       versionId: "1.21.1-Fabric",
       resourceType: "shader",
@@ -182,6 +185,7 @@ describe("发现 mock", () => {
       world: null,
     });
     const datapack = await installResource({
+      gameDir: mockGameDir(),
       taskId: "t-dp",
       versionId: "1.21.1-Fabric",
       resourceType: "data_pack",
@@ -193,6 +197,7 @@ describe("发现 mock", () => {
     expect(datapack.path).toBe("D:/Games/.minecraft/versions/1.21.1-Fabric/saves/新的世界/datapacks/8oi3bsk5-2.5.4.zip");
     expect(datapack.world).toBe("新的世界");
     const pack = await installResource({
+      gameDir: mockGameDir(),
       taskId: "t-rp",
       versionId: "1.21.1-Fabric",
       resourceType: "resource_pack",
@@ -214,24 +219,24 @@ describe("发现 mock", () => {
 
   it("安装目标不成立时报对应的码", async () => {
     const args = { taskId: "t", versionId: "1.21.1-Fabric", platform: "modrinth" as const, projectId: "8oi3bsk5", fileVersionId: "v" };
-    const noWorld = await installResource({ ...args, resourceType: "data_pack", world: null }).catch((e: unknown) => e);
+    const noWorld = await installResource({ gameDir: mockGameDir(), ...args, resourceType: "data_pack", world: null }).catch((e: unknown) => e);
     expect(noWorld).toMatchObject({ code: "invalid_argument" });
-    const strayWorld = await installResource({ ...args, resourceType: "shader", world: "生存" }).catch((e: unknown) => e);
+    const strayWorld = await installResource({ gameDir: mockGameDir(), ...args, resourceType: "shader", world: "生存" }).catch((e: unknown) => e);
     expect(strayWorld).toMatchObject({ code: "invalid_argument" });
-    const unknownWorld = await installResource({ ...args, resourceType: "data_pack", world: "不存在" }).catch((e: unknown) => e);
+    const unknownWorld = await installResource({ gameDir: mockGameDir(), ...args, resourceType: "data_pack", world: "不存在" }).catch((e: unknown) => e);
     expect(unknownWorld).toMatchObject({ code: "world_not_found", detail: { version_id: "1.21.1-Fabric", world: "不存在" } });
-    const modpack = await installResource({ ...args, resourceType: "modpack" as never, world: null }).catch((e: unknown) => e);
+    const modpack = await installResource({ gameDir: mockGameDir(), ...args, resourceType: "modpack" as never, world: null }).catch((e: unknown) => e);
     expect(modpack).toMatchObject({ code: "invalid_argument" });
     // Mod 只能经 install_mod：直接下进 mods/ 会绕过卷宗、历史与占用探测。
-    const mod = await installResource({ ...args, resourceType: "mod", world: null }).catch((e: unknown) => e);
+    const mod = await installResource({ gameDir: mockGameDir(), ...args, resourceType: "mod", world: null }).catch((e: unknown) => e);
     expect(mod).toMatchObject({ code: "invalid_argument" });
     // 实例以实例 mock 为准：不存在与损坏的实例都报未安装。
-    const ghost = await installResource({ ...args, versionId: "ghost", resourceType: "shader", world: null }).catch((e: unknown) => e);
+    const ghost = await installResource({ gameDir: mockGameDir(), ...args, versionId: "ghost", resourceType: "shader", world: null }).catch((e: unknown) => e);
     expect(ghost).toMatchObject({ code: "version_not_installed", detail: { id: "ghost" } });
-    const broken = await installMod("t-b", "没装完", "modrinth", "AANobbMI", "v").catch((e: unknown) => e);
+    const broken = await installMod("t-b", mockGameDir(), "没装完", "modrinth", "AANobbMI", "v").catch((e: unknown) => e);
     expect(broken).toMatchObject({ code: "version_not_installed", detail: { id: "没装完" } });
     // 平台上没有这个版本：与后端解析文件时一样报 mod_version_not_found
-    const noVersion = await installResource({ ...args, resourceType: "data_pack", world: "新的世界", fileVersionId: "nope" }).catch((e: unknown) => e);
+    const noVersion = await installResource({ gameDir: mockGameDir(), ...args, resourceType: "data_pack", world: "新的世界", fileVersionId: "nope" }).catch((e: unknown) => e);
     expect(noVersion).toMatchObject({ code: "mod_version_not_found" });
   });
 
@@ -239,9 +244,9 @@ describe("发现 mock", () => {
     const events: CoreEvent[] = [];
     const off = await listen<CoreEvent>(CORE_EVENT, (e) => events.push(e));
     // 两项先后共用一个 taskId，第 0 项也照写
-    await installMod("t-all", "1.21.1-Fabric", "modrinth", "gvQqBUqZ", "lith-0143", 0);
-    await installMod("t-all", "1.21.1-Fabric", "modrinth", "mOgUt4GM", "mm-11", 1);
-    await installMod("t-one", "1.21.1-Fabric", "modrinth", "P7dR8mSH", "fapi-0115");
+    await installMod("t-all", mockGameDir(), "1.21.1-Fabric", "modrinth", "gvQqBUqZ", "lith-0143", 0);
+    await installMod("t-all", mockGameDir(), "1.21.1-Fabric", "modrinth", "mOgUt4GM", "mm-11", 1);
+    await installMod("t-one", mockGameDir(), "1.21.1-Fabric", "modrinth", "P7dR8mSH", "fapi-0115");
     off();
     const all = events.filter((e) => e.task_id === "t-all");
     const steps = all.map((e) => e.step);
@@ -257,16 +262,17 @@ describe("发现 mock", () => {
 
   it("step 不是 u32 时按 Tauri 的参数错误整条拒绝", async () => {
     for (const step of [-1, 1.5, 2 ** 32]) {
-      const err = await installMod("t-bad", "1.21.1-Fabric", "modrinth", "gvQqBUqZ", "lith-0143", step).catch((e: unknown) => e);
+      const err = await installMod("t-bad", mockGameDir(), "1.21.1-Fabric", "modrinth", "gvQqBUqZ", "lith-0143", step).catch((e: unknown) => e);
       expect(err).toMatchObject({ code: "unknown", message: "invalid args `step` for command `install_mod`: expected u32" });
     }
     // 边界：u32 的最大值照收
-    expect((await installMod("t-max", "1.21.1-Fabric", "modrinth", "gvQqBUqZ", "lith-0143", 2 ** 32 - 1)).file_name).toBe("gvQqBUqZ-0.14.3.jar");
+    expect((await installMod("t-max", mockGameDir(), "1.21.1-Fabric", "modrinth", "gvQqBUqZ", "lith-0143", 2 ** 32 - 1)).file_name).toBe("gvQqBUqZ-0.14.3.jar");
   });
 
   it("下载途中取消以 cancelled 结束，任务随之注销", async () => {
     const args = {
       taskId: "t-cancel",
+      gameDir: mockGameDir(),
       versionId: "1.21.1-Fabric",
       resourceType: "resource_pack" as const,
       world: null,

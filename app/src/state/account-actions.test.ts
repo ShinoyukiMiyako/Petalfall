@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AccountDto } from "../ipc/accounts";
+import { ACCOUNT_CHANGED_EVENT, type AccountDto } from "../ipc/accounts";
 import { IpcError } from "../ipc/errors";
+import { emitMockEvent } from "../ipc/mock/events";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { accountDto, bootOverrides, callsOf, resetRecorder, startedStore } from "../test/launcher";
+import { accountDto, bootOverrides, callsOf, resetRecorder, settle, startedStore } from "../test/launcher";
 import { resources } from "./resource";
 import type { LauncherStore } from "./store";
 
@@ -112,6 +113,37 @@ describe("登录成功后皮肤缓存作废", () => {
     const skin = await cacheSkin("ms-1");
     await store.actions.startMicrosoftLogin();
     expect(await skin()).toBe(2);
+  });
+});
+
+describe("后端在后台改写了账户记录", () => {
+  it("续期换了名字与皮肤：账户重读、名字换上，有人在看的皮肤立即重取，别的账户的皮肤不动", async () => {
+    const fetchSkin = vi.fn(() => Promise.resolve({ kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true }));
+    const unsubscribe = resources.subscribe("skin:ms-1", fetchSkin, () => undefined);
+    await settle();
+    expect(fetchSkin).toHaveBeenCalledTimes(1);
+    const other = await cacheSkin("ys-1");
+    const listed = callsOf(ipc, "list_accounts").length;
+
+    accounts = [{ ...MS, name: "Renamed_Player", last_verified_at: 2 }, SKIN];
+    emitMockEvent(ACCOUNT_CHANGED_EVENT, { uuid: "ms-1" });
+    await settle();
+    expect(store.getState().accounts.find((a) => a.uuid === "ms-1")).toMatchObject({ name: "Renamed_Player", lastVerifiedAt: 2 });
+    expect(callsOf(ipc, "list_accounts")).toHaveLength(listed + 1);
+    expect(fetchSkin).toHaveBeenCalledTimes(2);
+    expect(await other()).toBe(1);
+    unsubscribe();
+  });
+
+  it("没人在看的皮肤缓存作废，下次要时重取；重读账户失败发通知，不往外抛", async () => {
+    const skin = await cacheSkin("ys-1");
+    ipc.overrides.set("list_accounts", () => {
+      throw new IpcError("Dpapi", "凭据库解不开");
+    });
+    emitMockEvent(ACCOUNT_CHANGED_EVENT, { uuid: "ys-1" });
+    await settle();
+    expect(await skin()).toBe(2);
+    expect(store.getState().toasts).toMatchObject([{ tone: "error", title: "账户列表没能刷新" }]);
   });
 });
 

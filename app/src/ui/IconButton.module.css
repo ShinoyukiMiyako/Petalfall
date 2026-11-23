@@ -1,6 +1,8 @@
 .button {
   --icon-button-size: 36px;
   position: relative;
+  /* 悬停叠层用 z-index: -1 垫在图标之下、底色之上，需要按钮自成层叠上下文 */
+  isolation: isolate;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -11,7 +13,11 @@
   padding: 0;
   border: 1px solid transparent;
   border-radius: var(--sk-r-sm);
-  background: transparent;
+  /*
+   * 压在卡面图片或材质平铺上时，卡面下发 --icon-button-base（表面色），静止、悬停、按下都垫着它：没有底的幽灵按钮
+   * 图标是 text-2，直接落在压暗层或材质上几乎看不见，半透明的悬停叠层落在图片上同样读不清。不在卡面上时是透明
+   */
+  background: var(--icon-button-base, transparent);
   color: var(--sk-text-2);
   cursor: pointer;
   outline: none;
@@ -33,10 +39,41 @@
   border-radius: var(--sk-r);
 }
 
+/*
+ * 悬停与按下叠一层，叠层做透明度过渡，与 Button 同一写法。幽灵变体没有底，叠层就是它的悬停底；
+ * 每个变体都挂着这一层（只有幽灵会显出来），切到「开」态时叠层淡出，而不是随伪元素消失在一帧里跳掉。
+ */
+.button::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--sk-fill-hover);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
 /* ---- 幽灵（默认） ---- */
-.button[data-variant="ghost"]:hover:not(:disabled, [data-disabled]) {
-  background: var(--sk-bg-2);
+
+/*
+ * 悬停与按下的底是叠层：实色 bg-2 在夜樱的卡片、浮层与弹窗上只差 1.01-1.04:1，落在凹陷区与行悬停（本身就是 bg-2）上完全看不出。
+ * text-2 留在叠层上悬停最低 3.68:1、按下最低 3.02:1，图标提到 text；按下也要提，键盘按住空格时只有 :active、没有 :hover。
+ * 「开」与菜单展开中的底是 accent-soft，悬停不变，不铺叠层。卡面图片与材质上叠层铺在静止时就垫着的表面色上
+ */
+.button[data-variant="ghost"]:hover:not(:disabled, [data-disabled], [aria-pressed="true"], [data-open]),
+.button[data-variant="ghost"]:active:not(:disabled, [data-disabled], [aria-pressed="true"], [data-open]) {
   color: var(--sk-text);
+}
+
+.button[data-variant="ghost"]:hover:not(:disabled, [data-disabled], [aria-pressed="true"], [data-open])::before {
+  opacity: 1;
+}
+
+.button[data-variant="ghost"]:active:not(:disabled, [data-disabled], [aria-pressed="true"], [data-open])::before {
+  background: var(--sk-fill-press);
+  opacity: 1;
 }
 
 /* ---- 次 ---- */
@@ -57,16 +94,21 @@
   color: var(--sk-danger);
 }
 
-/* ---- 开（切换型按下）与菜单展开中 ---- */
+/*
+ * ---- 开（切换型按下）与菜单展开中 ----
+ * 底是 accent-soft 叠在 --icon-button-base 上。accent-soft 是强调色 11% 混透明，半透明，压在卡面图片上会透出底图；
+ * 两层色叠不出来（背景色总在背景图之下，渐变又不随开关过渡），这里按同一比例直接与垫底色混：不在卡面上时垫底是透明，
+ * 结果与 accent-soft 完全相同；在卡面上是先垫表面色再叠 accent-soft 的不透明色。比例与令牌一致由样式守卫核对
+ */
 .button[aria-pressed="true"],
 .button[data-open] {
-  background: var(--sk-accent-soft);
+  background: color-mix(in srgb, var(--sk-accent) 11%, var(--icon-button-base, transparent));
   color: var(--sk-accent-strong);
 }
 
 .button[aria-pressed="true"]:hover:not(:disabled),
 .button[data-open]:hover:not(:disabled) {
-  background: var(--sk-accent-soft);
+  background: color-mix(in srgb, var(--sk-accent) 11%, var(--icon-button-base, transparent));
   color: var(--sk-accent-strong);
 }
 

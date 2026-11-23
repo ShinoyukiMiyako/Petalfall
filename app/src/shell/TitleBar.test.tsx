@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { ACTION_ERROR, INSTANCE_TAB_LABEL, NEXT_LAUNCH_SUFFIX, PAGE_LABEL, TOAST_COPY, accountKindLabel } from "../copy/flows";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { refuseHiddenFocus } from "../test/focus-fixup";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, deferred, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { ACCOUNT_COPY, PEEK_COPY, TITLEBAR_COPY } from "../copy/shell";
@@ -146,6 +147,21 @@ describe("账户胶囊", () => {
     expect(toast?.body).toBe(accountKindLabel("microsoft", null));
   });
 
+  // 面板定位前是隐藏的，浏览器不给隐藏的元素焦点：挂载时就聚焦的话焦点留在胶囊上，↑↓ 到不了菜单
+  it("打开切换菜单：面板可见之后才把焦点放到当前账户上，↓ 移到下一个账户", async () => {
+    await mount();
+    const capsule = byLabel(ACCOUNT_COPY.current("Steve", accountKindLabel("offline", null)));
+    act(() => capsule.focus());
+    const calls = refuseHiddenFocus();
+    act(() => capsule.click());
+    await flush();
+    const rows = [...document.querySelectorAll<HTMLElement>("[role='menuitemradio']")];
+    expect(calls.map((c) => [c.target, c.hidden])).toEqual([[rows[0], false]]);
+    expect(document.activeElement).toBe(rows[0]);
+    keydown(rows[0], "ArrowDown");
+    expect(document.activeElement).toBe(rows[1]);
+  });
+
   it("游戏占着进程时换账户：通知说明下次启动生效", async () => {
     ipc.overrides.set("launch_game", () => deferred<never>().promise);
     await mount();
@@ -257,5 +273,22 @@ describe("下载入口", () => {
     act(() => all.click());
     expect(nav.route).toEqual({ page: "tasks" });
     expect(document.querySelector("header")?.textContent).toContain(PAGE_LABEL.tasks);
+  });
+
+  // 面板 portal 在文档末尾：焦点不进面板的话 Tab 从入口走到账户胶囊，面板一直开着，键盘到不了快览里的按钮
+  it("打开快览：面板可见之后焦点进入面板容器，隐藏时一次也不聚焦；Esc 关闭后焦点回到入口", async () => {
+    await mount();
+    const entry = byLabel(PEEK_COPY.button(0, 0));
+    act(() => entry.focus());
+    const calls = refuseHiddenFocus();
+    act(() => entry.click());
+    await flush();
+    const panel = document.querySelector<HTMLElement>(`[role="dialog"][aria-label="${PEEK_COPY.title}"]`);
+    if (panel === null) throw new Error("快览没有打开");
+    expect(calls.map((c) => [c.target, c.hidden])).toEqual([[panel, false]]);
+    expect(document.activeElement).toBe(panel);
+    keydown(panel, "Escape");
+    expect(entry.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(entry);
   });
 });

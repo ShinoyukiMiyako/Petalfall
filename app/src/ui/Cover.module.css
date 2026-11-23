@@ -131,6 +131,7 @@
   --tag-ink: var(--sk-on-media-2);
   --tag-ink-strong: var(--sk-on-media);
   --tag-line: var(--sk-on-media-2);
+  --icon-button-base: var(--sk-surface);
   background: var(--sk-bg-2);
   color: var(--sk-on-media);
   text-shadow: var(--sk-media-text-shadow);

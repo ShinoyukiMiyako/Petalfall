@@ -45,7 +45,7 @@ function block(id: string, extra: Partial<CatalogBlockDto> = {}): CatalogBlockDt
 const catalogDto = (versionId: string, ...ids: string[]): BlockCatalogDto => ({ version_id: versionId, blocks: ids.map((id) => block(id)) });
 
 /** 目录载入结果的回报与重查入口：不关心它们的用例用这份。 */
-const hooks = () => ({ onCatalog: vi.fn(), reloadRequests: vi.fn(() => () => undefined) });
+const hooks = () => ({ onCatalog: vi.fn(), onDefaultSkinsChanged: vi.fn(), reloadRequests: vi.fn(() => () => undefined) });
 
 /** 目录查询恒为 null：只关心材质状态的用例用它。 */
 const noCatalog = () => vi.fn(async (): Promise<BlockCatalogDto | null> => null);
@@ -61,7 +61,7 @@ describe("bindArtStatus", () => {
     });
     const load = vi.fn(async (): Promise<ArtStatusDto> => {
       order.push("load");
-      return { source: { version_id: "1.21.1" }, panorama: false };
+      return { source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false };
     });
     const loadCatalog = vi.fn(async () => {
       order.push("catalog");
@@ -70,7 +70,7 @@ describe("bindArtStatus", () => {
     const dispose = await bindArtStatus({ ...hooks(),  load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
     await flush();
     expect(order).toEqual(["listen", "load", "catalog"]);
-    expect(getArtStatus()).toEqual({ source: { versionId: "1.21.1" }, panorama: false });
+    expect(getArtStatus()).toEqual({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
     const urls = fetchMock.mock.calls.map((c) => String(c[0]));
     expect(urls).toHaveLength(17);
     expect(urls).toContain("http://petalfall-tex.localhost/art/block/grass_block_top.png?v=1.21.1");
@@ -85,7 +85,7 @@ describe("bindArtStatus", () => {
       version_id: "1.21.1",
       blocks: [block("furnace", { top: "block/furnace_top", side: "block/furnace_side", front: "block/furnace_front", hue: 0, name_zh: "熔炉" }), block("oak_log", { top: "block/oak_log_top" })],
     }));
-    await bindArtStatus({ ...hooks(),  load: async () => ({ source: { version_id: "1.21.1" }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
+    await bindArtStatus({ ...hooks(),  load: async () => ({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
     await flush();
     const catalog = getBlockCatalog();
     expect(catalog?.versionId).toBe("1.21.1");
@@ -111,7 +111,7 @@ describe("bindArtStatus", () => {
     const load = vi
       .fn<() => Promise<ArtStatusDto>>()
       .mockResolvedValueOnce({ source: null, panorama: false })
-      .mockResolvedValueOnce({ source: { version_id: "1.20.1" }, panorama: true });
+      .mockResolvedValueOnce({ source: { version_id: "1.20.1", degraded: false, legacy_skins: false }, panorama: true });
     const loadCatalog = vi.fn(async () => catalogDto("1.20.1", "oak_log"));
     await bindArtStatus({ ...hooks(),  load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
     expect(getArtStatus().source).toBeNull();
@@ -119,16 +119,49 @@ describe("bindArtStatus", () => {
     events.fire();
     await flush();
     expect(load).toHaveBeenCalledTimes(2);
-    expect(getArtStatus()).toEqual({ source: { versionId: "1.20.1" }, panorama: true });
+    expect(getArtStatus()).toEqual({ source: { versionId: "1.20.1", degraded: false, legacySkins: false }, panorama: true });
     expect(loadCatalog).toHaveBeenCalledTimes(1);
     expect(getBlockCatalog()?.versionId).toBe("1.20.1");
+  });
+
+  it("默认皮肤跨过 1.19.3 换了一套才通知重取皮肤信息：没有材质源与 18 款算同一套", async () => {
+    const events = eventSource();
+    const onDefaultSkinsChanged = vi.fn();
+    const source = (version_id: string, legacy_skins: boolean) => ({ source: { version_id, degraded: true, legacy_skins }, panorama: false });
+    const load = vi
+      .fn<() => Promise<ArtStatusDto>>()
+      .mockResolvedValueOnce({ source: null, panorama: false })
+      .mockResolvedValueOnce(source("1.19.4", false))
+      .mockResolvedValueOnce(source("1.19.2", true))
+      .mockResolvedValueOnce(source("1.16.5", true))
+      .mockResolvedValueOnce({ source: { version_id: "1.21.4", degraded: false, legacy_skins: false }, panorama: false })
+      .mockResolvedValueOnce(source("1.19.2", true))
+      .mockResolvedValueOnce({ source: null, panorama: false });
+    await bindArtStatus({ ...hooks(), onDefaultSkinsChanged, load, loadCatalog: noCatalog(), listenChanged: events.listenChanged, onError: vi.fn() });
+    const calls: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      events.fire();
+      await flush();
+      calls.push(onDefaultSkinsChanged.mock.calls.length);
+    }
+    expect(load).toHaveBeenCalledTimes(7);
+    // null -> 1.19.4（18 款）不算换；-> 1.19.2 换成旧版；-> 1.16.5 仍是旧版；-> 1.21.4 换回；-> 1.19.2 换成旧版；-> null 换回
+    expect(calls).toEqual([0, 1, 1, 2, 3, 4]);
+    expect(getArtStatus().source).toBeNull();
+  });
+
+  it("首查就是旧版材质源时也通知：之前取到的皮肤信息是后端还没选好材质源时按 18 款给的", async () => {
+    const onDefaultSkinsChanged = vi.fn();
+    await bindArtStatus({ ...hooks(), onDefaultSkinsChanged, load: async () => ({ source: { version_id: "1.19.2", degraded: true, legacy_skins: true }, panorama: false }), loadCatalog: noCatalog(), listenChanged: eventSource().listenChanged, onError: vi.fn() });
+    expect(onDefaultSkinsChanged).toHaveBeenCalledTimes(1);
+    expect(getArtStatus().source).toEqual({ versionId: "1.19.2", degraded: true, legacySkins: true });
   });
 
   it("材质源变为 null 时清空目录", async () => {
     const events = eventSource();
     const load = vi
       .fn<() => Promise<ArtStatusDto>>()
-      .mockResolvedValueOnce({ source: { version_id: "1.21.1" }, panorama: false })
+      .mockResolvedValueOnce({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false })
       .mockResolvedValueOnce({ source: null, panorama: false });
     const loadCatalog = vi.fn(async () => catalogDto("1.21.1", "oak_log"));
     await bindArtStatus({ ...hooks(),  load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
@@ -145,8 +178,8 @@ describe("bindArtStatus", () => {
     const events = eventSource();
     const load = vi
       .fn<() => Promise<ArtStatusDto>>()
-      .mockResolvedValueOnce({ source: { version_id: "1.20.1" }, panorama: false })
-      .mockResolvedValueOnce({ source: { version_id: "1.21.4" }, panorama: false });
+      .mockResolvedValueOnce({ source: { version_id: "1.20.1", degraded: false, legacy_skins: false }, panorama: false })
+      .mockResolvedValueOnce({ source: { version_id: "1.21.4", degraded: false, legacy_skins: false }, panorama: false });
     const loadCatalog = vi.fn<() => Promise<BlockCatalogDto | null>>().mockResolvedValueOnce(catalogDto("1.20.1", "oak_log")).mockResolvedValueOnce(catalogDto("1.21.4", "pale_oak_log"));
     await bindArtStatus({ ...hooks(),  load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
     await flush();
@@ -163,12 +196,12 @@ describe("bindArtStatus", () => {
     const events = eventSource();
     const onError = vi.fn();
     const failure = new Error("目录不可用");
-    const load = vi.fn(async (): Promise<ArtStatusDto> => ({ source: { version_id: "1.21.1" }, panorama: false }));
+    const load = vi.fn(async (): Promise<ArtStatusDto> => ({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false }));
     const loadCatalog = vi.fn<() => Promise<BlockCatalogDto | null>>().mockRejectedValueOnce(failure).mockResolvedValueOnce(catalogDto("1.21.1", "oak_log"));
     await bindArtStatus({ ...hooks(),  load, loadCatalog, listenChanged: events.listenChanged, onError });
     await flush();
     expect(onError).toHaveBeenCalledWith(failure);
-    expect(getArtStatus().source).toEqual({ versionId: "1.21.1" });
+    expect(getArtStatus().source).toEqual({ versionId: "1.21.1", degraded: false, legacySkins: false });
     expect(getBlockCatalog()).toBeNull();
     expect(events.unlisten).not.toHaveBeenCalled();
     // 下次变化事件重新查到目录
@@ -185,7 +218,7 @@ describe("bindArtStatus", () => {
       .fn<() => Promise<BlockCatalogDto | null>>()
       .mockResolvedValueOnce(catalogDto("1.21.1", "oak_log"))
       .mockResolvedValueOnce({ version_id: "1.21.1", blocks: [block("oak_log", { side: "item/apple" })] });
-    await bindArtStatus({ ...hooks(),  load: async () => ({ source: { version_id: "1.21.1" }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError });
+    await bindArtStatus({ ...hooks(),  load: async () => ({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError });
     await flush();
     const before = getBlockCatalog();
     events.fire();
@@ -198,7 +231,7 @@ describe("bindArtStatus", () => {
   it("目录与材质源版本对不上时照实放进去并记 warn", async () => {
     const events = eventSource();
     await bindArtStatus({ ...hooks(), 
-      load: async () => ({ source: { version_id: "1.21.1" }, panorama: false }),
+      load: async () => ({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false }),
       loadCatalog: async () => catalogDto("1.21.4", "oak_log"),
       listenChanged: events.listenChanged,
       onError: vi.fn(),
@@ -214,8 +247,8 @@ describe("bindArtStatus", () => {
     const events = eventSource();
     const load = vi
       .fn<() => Promise<ArtStatusDto>>()
-      .mockResolvedValueOnce({ source: { version_id: "1.20.1" }, panorama: false })
-      .mockResolvedValueOnce({ source: { version_id: "1.21.4" }, panorama: false });
+      .mockResolvedValueOnce({ source: { version_id: "1.20.1", degraded: false, legacy_skins: false }, panorama: false })
+      .mockResolvedValueOnce({ source: { version_id: "1.21.4", degraded: false, legacy_skins: false }, panorama: false });
     let releaseOld: ((dto: BlockCatalogDto) => void) | undefined;
     const loadCatalog = vi
       .fn<() => Promise<BlockCatalogDto | null>>()
@@ -235,7 +268,7 @@ describe("bindArtStatus", () => {
     const events = eventSource();
     const load = vi
       .fn<() => Promise<ArtStatusDto>>()
-      .mockResolvedValueOnce({ source: { version_id: "1.21.1" }, panorama: false })
+      .mockResolvedValueOnce({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false })
       .mockResolvedValueOnce({ source: null, panorama: false });
     let release: ((dto: BlockCatalogDto) => void) | undefined;
     const loadCatalog = vi.fn(() => new Promise<BlockCatalogDto | null>((resolve) => (release = resolve)));
@@ -251,12 +284,12 @@ describe("bindArtStatus", () => {
     const events = eventSource();
     const onError = vi.fn();
     const failure = new Error("后端不可用");
-    const load = vi.fn<() => Promise<ArtStatusDto>>().mockResolvedValueOnce({ source: { version_id: "1.21.1" }, panorama: false }).mockRejectedValueOnce(failure);
+    const load = vi.fn<() => Promise<ArtStatusDto>>().mockResolvedValueOnce({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false }).mockRejectedValueOnce(failure);
     await bindArtStatus({ ...hooks(),  load, loadCatalog: noCatalog(), listenChanged: events.listenChanged, onError });
     events.fire();
     await flush();
     expect(onError).toHaveBeenCalledWith(failure);
-    expect(getArtStatus().source).toEqual({ versionId: "1.21.1" });
+    expect(getArtStatus().source).toEqual({ versionId: "1.21.1", degraded: false, legacySkins: false });
   });
 
   it("首查失败撤销订阅并抛出；返回值形状不对同样抛出", async () => {
@@ -279,7 +312,7 @@ describe("bindArtStatus", () => {
     const dispose = await bindArtStatus({ ...hooks(),  load, loadCatalog: noCatalog(), listenChanged: events.listenChanged, onError: vi.fn() });
     events.fire();
     dispose();
-    release?.({ source: { version_id: "1.21.1" }, panorama: true });
+    release?.({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: true });
     await flush();
     expect(getArtStatus()).toEqual(NO_ART);
   });
@@ -290,9 +323,9 @@ describe("bindArtStatus", () => {
     const onError = vi.fn();
     const load = vi
       .fn<() => Promise<ArtStatusDto>>()
-      .mockResolvedValueOnce({ source: { version_id: "1.21.1" }, panorama: false })
+      .mockResolvedValueOnce({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false })
       .mockResolvedValueOnce({ source: null, panorama: false })
-      .mockResolvedValueOnce({ source: { version_id: "1.21.1" }, panorama: false })
+      .mockResolvedValueOnce({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false })
       .mockRejectedValueOnce(new Error("后端不可用"));
     const loadCatalog = vi
       .fn<() => Promise<BlockCatalogDto | null>>()
@@ -327,7 +360,7 @@ describe("bindArtStatus", () => {
       .fn<() => Promise<BlockCatalogDto | null>>()
       .mockImplementationOnce(() => new Promise((resolve) => (releaseFirst = resolve)))
       .mockResolvedValueOnce(catalogDto("1.21.1", "oak_log"));
-    await bindArtStatus({ ...hooks(), load: async () => ({ source: { version_id: "1.21.1" }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError: vi.fn(), onCatalog });
+    await bindArtStatus({ ...hooks(), load: async () => ({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError: vi.fn(), onCatalog });
     events.fire();
     await vi.waitFor(() => expect(onCatalog).toHaveBeenCalledTimes(1));
     releaseFirst?.(catalogDto("1.21.1", "stone"));
@@ -363,7 +396,7 @@ describe("bindArtStatus", () => {
     const events = eventSource();
     let release: ((dto: BlockCatalogDto) => void) | undefined;
     const loadCatalog = vi.fn(() => new Promise<BlockCatalogDto | null>((resolve) => (release = resolve)));
-    const dispose = await bindArtStatus({ ...hooks(),  load: async () => ({ source: { version_id: "1.21.1" }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
+    const dispose = await bindArtStatus({ ...hooks(),  load: async () => ({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
     dispose();
     release?.(catalogDto("1.21.1", "oak_log"));
     await flush();

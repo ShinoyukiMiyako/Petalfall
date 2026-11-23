@@ -47,6 +47,7 @@
   border-radius: var(--sk-r-pill);
   box-shadow: 0 0 0 2.5px var(--instance-badge-cutout, var(--sk-surface));
   font-family: var(--sk-font);
+  /* sk-guard-allow T2: 「!」画在直径 13 的圆点里，字号跟圆点走、不是正文；换成字阶最小的 micro 11，笔画上下几乎顶到圆边 */
   font-size: 9px;
   font-weight: 800;
   line-height: 1;

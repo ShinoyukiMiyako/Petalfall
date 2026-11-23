@@ -2,8 +2,9 @@
 // @module-tag heavy-page
 // 外壳常驻部件的重渲染次数：下载进度每个任务约 100 ms 一次、游戏日志每 100 ms 一批，侧栏、标题栏、通知栈这些
 // 一直挂着的部件要是随它们重渲染，带布局动画的指示条与状态岛每次都得重新量一遍布局。
+// 开关弹窗同理：弹窗的入场与退场动画在第一遍提交里就创建了，之后再整页重渲染一遍，被堵住的那一段会记进动画时长。
 // 各部件换成计数外壳：外壳直接调用原组件函数，它自己的订阅与父级带来的重渲染都记在外壳上。
-import { act } from "react";
+import { act, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { GAME_LOG_EVENT } from "../ipc/launch";
@@ -15,10 +16,13 @@ import { PAGE_IDS, type Route } from "../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { CONFIRM_CANCEL_LABEL } from "../ui/ConfirmDialog";
+import { Popover } from "../ui/Popover";
 import { AppShell } from "./AppShell";
 import type { PageTable } from "./nav";
+import { useOverlayState, type OverlaySnapshot } from "./overlay";
 import { createPageRegistry, type PageRegistry } from "./pages";
-import { ShellProvider } from "./shell";
+import { ShellProvider, useShell, type ShellApi } from "./shell";
 import { WindowPortProvider, browserWindowPort } from "./window";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -76,6 +80,14 @@ vi.mock("./DropHint", async (orig) => {
     },
   };
 });
+/** 花瓣层每次渲染收到的 paused（只记显示着的时候）；画布本身不画，这里只看外壳交给它的暂停状态。 */
+const petals = vi.hoisted(() => ({ paused: [] as boolean[] }));
+vi.mock("../art/petals/PetalCanvas", () => ({
+  PetalCanvas: ({ show, paused }: { show: boolean; paused: boolean }) => {
+    if (show) petals.paused.push(paused);
+    return null;
+  },
+}));
 vi.mock("./UpdatePanel", async (orig) => {
   const mod = await orig<typeof import("./UpdatePanel")>();
   return {
@@ -89,12 +101,38 @@ vi.mock("./UpdatePanel", async (orig) => {
 
 let view: Rendered | undefined;
 let launcher: LauncherApi;
+let shell: ShellApi;
 let registry: PageRegistry;
 let warn: MockInstance<typeof console.warn>;
 
 function Probe() {
   launcher = useLauncher();
+  shell = useShell();
   return null;
+}
+
+let overlay: OverlaySnapshot | undefined;
+let setPopoverOpen: (open: boolean) => void = () => {
+  throw new Error("浮层探针还没挂上");
+};
+const POPOVER_LABEL = "探针浮层";
+
+/** 一个不带遮罩的浮层（与下载快览、下拉菜单同一种）：开合只改浮层深度，不改有没有遮罩。 */
+function PopoverProbe() {
+  const [open, setOpen] = useState(false);
+  const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
+  setPopoverOpen = setOpen;
+  overlay = useOverlayState();
+  return (
+    <>
+      <button ref={setAnchor} type="button">
+        锚点
+      </button>
+      <Popover open={open} anchor={anchor} onClose={() => setOpen(false)} aria-label={POPOVER_LABEL}>
+        <p>浮层内容</p>
+      </Popover>
+    </>
+  );
 }
 
 /** 页面换成不订阅状态的桩：这里只数外壳自己的重渲染。 */
@@ -182,5 +220,94 @@ describe("外壳常驻部件按片订阅", () => {
     expect(launcher.state.tasks[0].progress).toBe(1);
     expect(launcher.state.session?.logs).toHaveLength(20);
     expect(renders).toEqual(before);
+  });
+
+  it("主页开着花瓣、窗口在前台：开关确认框时侧栏、标题栏、命令面板、通知栈、放置提示、更新面板一次都不重渲染，花瓣框开着时暂停、关上后恢复", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    petals.paused = [];
+    view = render(
+      <WindowPortProvider port={browserWindowPort()}>
+        <AppearanceProvider initial={{ ...DEFAULT_APPEARANCE, petals: true }}>
+          <LauncherProvider>
+            <ShellProvider>
+              <Probe />
+              <AppShell pages={registry} flows={{ login: LoginStub, onboarding: null, createInstance: null }} />
+            </ShellProvider>
+          </LauncherProvider>
+        </AppearanceProvider>
+      </WindowPortProvider>,
+    );
+    await flush();
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await flush();
+    expect(document.querySelector("[data-page]")?.getAttribute("data-page")).toBe("home");
+    expect(petals.paused.at(-1)).toBe(false);
+    for (const count of Object.values(renders)) expect(count).toBeGreaterThan(0);
+
+    const before = { ...renders };
+    const dialogTitle = () => document.querySelector('[role="dialog"]:not([inert]) h2')?.textContent;
+    const cancel = () => {
+      const el = [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((b) => b.textContent === CONFIRM_CANCEL_LABEL);
+      if (el === undefined) throw new Error("确认框里找不到「取消」");
+      return el;
+    };
+    const rounds = 2 + Math.floor(Math.random() * 4);
+    for (let i = 0; i < rounds; i++) {
+      let answer: Promise<boolean> | undefined;
+      act(() => {
+        answer = shell.confirm({ title: "删除「生存」？", confirmLabel: "删除实例", tone: "danger" });
+      });
+      await flush();
+      expect(dialogTitle()).toBe("删除「生存」？");
+      expect(petals.paused.at(-1)).toBe(true);
+      act(() => cancel().click());
+      await expect(answer).resolves.toBe(false);
+      await flush();
+      expect(petals.paused.at(-1)).toBe(false);
+    }
+    expect(renders).toEqual(before);
+  });
+
+  it("主页开着花瓣、窗口在前台：不带遮罩的浮层开合只改浮层深度，花瓣层一次都不重渲染，也不暂停", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    petals.paused = [];
+    view = render(
+      <WindowPortProvider port={browserWindowPort()}>
+        <AppearanceProvider initial={{ ...DEFAULT_APPEARANCE, petals: true }}>
+          <LauncherProvider>
+            <ShellProvider>
+              <Probe />
+              <PopoverProbe />
+              <AppShell pages={registry} flows={{ login: LoginStub, onboarding: null, createInstance: null }} />
+            </ShellProvider>
+          </LauncherProvider>
+        </AppearanceProvider>
+      </WindowPortProvider>,
+    );
+    await flush();
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await flush();
+    expect(document.querySelector("[data-page]")?.getAttribute("data-page")).toBe("home");
+    expect(petals.paused.at(-1)).toBe(false);
+    expect(overlay).toEqual({ depth: 0, scrimOpen: false });
+
+    const before = petals.paused.length;
+    const panel = () => document.querySelector(`[role="dialog"][aria-label="${POPOVER_LABEL}"]:not([inert])`);
+    const rounds = 1 + Math.floor(Math.random() * 4);
+    for (let i = 0; i < rounds; i++) {
+      act(() => setPopoverOpen(true));
+      await flush();
+      expect(panel()).not.toBeNull();
+      expect(overlay).toEqual({ depth: 1, scrimOpen: false });
+      act(() => setPopoverOpen(false));
+      await flush();
+      expect(overlay).toEqual({ depth: 0, scrimOpen: false });
+    }
+    expect(petals.paused.length).toBe(before);
+    expect(petals.paused.at(-1)).toBe(false);
   });
 });

@@ -19,7 +19,7 @@ const ENTRIES: GalleryEntry[] = Object.entries(modules)
   })
   .sort((a, b) => a.group.localeCompare(b.group, "zh-CN") || a.order - b.order || a.title.localeCompare(b.title));
 
-const MODE_LABEL: Record<AppearanceMode, string> = { day: "日樱", night: "夜樱" };
+const MODE_LABEL: Record<AppearanceMode, string> = { day: "日樱", night: "夜樱", system: "跟随系统" };
 const ACCENT_LABEL: Record<AccentName, string> = { sakura: "樱粉", amethyst: "紫水晶", moss: "青苔" };
 
 /** 画框宽度：auto 跟随窗口，其余为三档的代表宽度（compact 下限、默认窗口、wide 常见）。 */

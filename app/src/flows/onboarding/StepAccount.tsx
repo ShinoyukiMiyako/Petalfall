@@ -2,20 +2,23 @@
 // 添加成功后在上方列出已添加的账户，三张选项卡收成一行按钮，「继续添加」再展开。
 // 不能用的方式在这一步就置灰并写原因：向导期间主界面没挂上，登录失败卡里「打开设置」去不了设置页。
 // 「已添加」区出现、选项卡与按钮行互换都经 Appear 交叉淡入，竖排的兄弟由 useReflow 滑开，不整块硬跳。
+// 本机还没有原版材质时，已添加账户的默认皮肤画不出来：「已添加」区下面顺带一行下载入口，与账户页同一个部件。
 
 import { motion } from "framer-motion";
 import { useState } from "react";
 import { Icon } from "../../art/Icon";
 import { AccountAvatar } from "../../art/skin/AccountAvatar";
+import { ART_DOWNLOAD_COPY } from "../../copy/cover";
 import { accountKindLabel, MSA_CLIENT_ID_MISSING } from "../../copy/flows";
 import type { Account } from "../../domain/adapt";
 import { useReflow } from "../../lib/reflow";
 import { useMounted } from "../../lib/useMounted";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
-import { useSkinInfo } from "../../state/queries/home";
+import { skinSource, useSkinInfo } from "../../state/queries/home";
 import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
+import { ArtDownload, useSkinArtMissing } from "../../pages/shared/cover-picker/ArtDownload";
 import { ACCOUNT_STEP_COPY, LOGIN_OPTIONS } from "./copy";
 import { useInsertItem } from "../../lib/useInsertItem";
 import s from "./onboarding.module.css";
@@ -43,7 +46,7 @@ function AccountChip({ account, enter }: { account: Account; enter: boolean }) {
   const item = useInsertItem();
   return (
     <motion.li className={s.accountChip} initial={enter ? item.initial : false} animate={item.animate}>
-      <AccountAvatar uuid={account.uuid} skin={skin.status === "ready" ? skin.data : null} size={32} />
+      <AccountAvatar uuid={account.uuid} skin={skinSource(skin)} size={32} />
       <span className={s.accountText}>
         <span className={s.accountName}>{account.name}</span>
         <span className={s.caption}>{accountKindLabel(account.kind, account.authServer)}</span>
@@ -129,11 +132,14 @@ export function StepAccount() {
   const microsoftUnavailable = useLauncherSelector(microsoftLoginUnavailable);
   const availability: Availability = { online, microsoftUnavailable };
   const [expanded, setExpanded] = useState(false);
+  const artMissing = useSkinArtMissing();
   // 「已添加」区出现、选项换形态时，下面的块从旧位置滑过去
   const reflow = useReflow<HTMLDivElement>();
   return (
     <div ref={reflow} className={s.stepBody}>
       <Appear>{accounts.length > 0 && <AddedSection key="added" accounts={accounts} expanded={expanded} onExpand={() => setExpanded(true)} />}</Appear>
+      {/* 向导里主按钮在底栏，这里只用幽灵按钮顺带一提；下完后头像就地换上皮肤，这一行原地淡出 */}
+      <Appear>{accounts.length > 0 && artMissing && <ArtDownload key="art" compact quiet note={ART_DOWNLOAD_COPY.skinNoteShort} />}</Appear>
       {/* 两种形态叠在同一处交叉淡入：离开的那一种脱离布局原地淡出，新的一种淡入落位 */}
       <Appear>{accounts.length === 0 || expanded ? <OptionCards key="cards" availability={availability} /> : <OptionButtons key="buttons" availability={availability} />}</Appear>
     </div>

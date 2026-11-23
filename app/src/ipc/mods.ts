@@ -175,8 +175,12 @@ export const removeMod = (versionId: string, fileName: string): Promise<void> =>
 /**
  * 忽略更新的 Mod 不出现；锁定版本的不报晚于锁定版本的候选；按当前版本的发布通道过滤：
  * 正式版只报正式版，测试版报正式版或测试版，预览版三种都报。
+ *
+ * gameDir 只有重试「全部更新」前的预检传，是那个任务入队时的游戏目录：当前目录已经不是它时后端报 game_dir_changed，
+ * 不去查新目录里的同名实例。Mod 页的检查更新不传，查当前目录。
  */
-export const checkUpdates = (versionId: string): Promise<UpdateCandidate[]> => invoke<UpdateCandidate[]>("check_updates", { versionId });
+export const checkUpdates = (versionId: string, gameDir?: string): Promise<UpdateCandidate[]> =>
+  invoke<UpdateCandidate[]>("check_updates", gameDir === undefined ? { versionId } : { versionId, gameDir });
 
 /** 批量启停里一个文件的结果：成功给改名后的路径，失败给这一项的命令错误，其余文件不受影响。 */
 export type ModToggleResult =
@@ -218,10 +222,11 @@ export const modUpdateChangelog = (versionId: string, fileName: string, modVersi
 
 /**
  * 长任务：进度经 core-event 推送并带 task_id，可用 cancelTask(taskId) 取消。旧文件留作 `.old` 备份，可在变更历史里回滚。
+ * gameDir 是入队那一刻的游戏目录，当前目录已经不是它时以 game_dir_changed 拒绝、什么都不动。
  * 作为组合任务的一项调用时 step 给第几项（从 0 计），后端把它标在这次调用的每条事件上；单独调用不给。
  */
-export const updateMod = (taskId: string, versionId: string, fileName: string, modVersionId: string, step?: number): Promise<ModUpdateOutcomeDto> =>
-  invoke<ModUpdateOutcomeDto>("update_mod", { taskId, versionId, fileName, modVersionId, step });
+export const updateMod = (taskId: string, gameDir: string, versionId: string, fileName: string, modVersionId: string, step?: number): Promise<ModUpdateOutcomeDto> =>
+  invoke<ModUpdateOutcomeDto>("update_mod", { taskId, gameDir, versionId, fileName, modVersionId, step });
 
 /** 某工程的版本列表。 */
 export interface ModVersionList {

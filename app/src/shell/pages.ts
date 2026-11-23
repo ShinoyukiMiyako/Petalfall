@@ -2,7 +2,8 @@
 //
 // 已经加载过的页面直接渲染组件本身，不经 React.lazy：lazy 包装在首次渲染时总要挂起一拍（原生 Promise 没有同步可读的状态），
 // 换页时会闪一帧空白。还没加载过的页面经 lazy 挂起，由内容区的 Suspense 接住。
-// 应用启动前预载主页（首帧就有内容），挂载后在空闲时预载其余页面。
+// 应用启动前预载主页（App 的 prepareApp，首帧就有内容）；其余页面由外壳等显示窗口的命令应答之后登记空闲回调预载，
+// 空闲时段迟迟不来时到 PAGE_PRELOAD_IDLE_TIMEOUT_MS 也照常开始，时机的取舍见 AppShell。
 
 import { lazy, type ComponentType, type LazyExoticComponent } from "react";
 import { PAGE_IDS, type PageId, type Route } from "../state/route";

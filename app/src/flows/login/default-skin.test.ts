@@ -1,5 +1,6 @@
 // 默认皮肤的选取结果用 JDK 的 java.util.UUID 独立算出：hashCode() 加 Math.floorMod(hash, 18)，
-// 下标按原版客户端的数组顺序（先 9 套细臂、后 9 套宽臂，各自按名字字母序）换成皮肤路径。
+// 下标按原版客户端的数组顺序（先 9 套细臂、后 9 套宽臂，各自按名字字母序）换成皮肤路径；
+// 1.19.3 以前的材质源看 hashCode() & 1，为 1 时艾利克斯（反汇编 1.13、1.16.5、1.19.2 的客户端核对过）。
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SKIN_PATHS } from "../../mc/whitelist";
 import { DEFAULT_SKINS, defaultSkin, javaUuidHash, STARTER_SKINS } from "./default-skin";
@@ -35,7 +36,7 @@ describe("Java 的 UUID.hashCode", () => {
 
 describe("默认皮肤的选取", () => {
   it("哈希 0 到 17 依次落在细臂 alex…zuri、宽臂 alex…zuri", () => {
-    const picks = Array.from({ length: 18 }, (_, k) => defaultSkin(`00000000000000000000000000000${k.toString(16).padStart(3, "0")}`).path);
+    const picks = Array.from({ length: 18 }, (_, k) => defaultSkin(`00000000000000000000000000000${k.toString(16).padStart(3, "0")}`, "modern").path);
     expect(picks).toEqual([
       "entity/player/slim/alex",
       "entity/player/slim/ari",
@@ -65,7 +66,7 @@ describe("默认皮肤的选取", () => {
     ["853c80ef-3c37-49fd-aa49-938b674adae6", "entity/player/slim/ari", "slim"],
     ["6a1f0c0e-4b5d-4c3e-9f2a-7b8c9d0e1f20", "entity/player/wide/noor", "wide"],
   ])("负哈希按非负余数取下标：%s -> %s", (uuid, path, model) => {
-    expect(defaultSkin(uuid)).toEqual({ kind: "default", path, model });
+    expect(defaultSkin(uuid, "modern")).toEqual({ kind: "default", path, model });
   });
 
   // 原版客户端 1.20.1 的 DefaultPlayerSkin 对固定种子随机 UUID 的实际输出：每个下标一条，哈希正负交替。
@@ -90,7 +91,7 @@ describe("默认皮肤的选取", () => {
     ["dd65f65c-9448-2c9f-1c44-7d2ed65c3369", "entity/player/wide/sunny", "wide"],
     ["06f83a78-c14d-33c9-b17e-1bef3f6e7275", "entity/player/wide/zuri", "wide"],
   ])("与原版客户端的实际输出一致：%s -> %s", (uuid, path, model) => {
-    expect(defaultSkin(uuid)).toEqual({ kind: "default", path, model });
+    expect(defaultSkin(uuid, "modern")).toEqual({ kind: "default", path, model });
   });
 
   it.each([
@@ -104,23 +105,65 @@ describe("默认皮肤的选取", () => {
   ])("离线玩家 %s（%s）：%s", (name, uuid, path) => {
     const simple = offlineUuid(name);
     expect(hyphenateUuid(simple)).toBe(uuid);
-    expect(defaultSkin(simple).path).toBe(path);
+    expect(defaultSkin(simple, "modern").path).toBe(path);
   });
 
   it("预取用的全集：18 套各不相同，顺序同原版数组，任何 UUID 选出的都在里面，开局并排的两位也在里面", () => {
-    const paths = DEFAULT_SKINS.map((s) => s.path);
+    const modern = DEFAULT_SKINS.modern;
+    const paths = modern.map((s) => s.path);
     expect(new Set(paths).size).toBe(18);
-    expect(DEFAULT_SKINS.slice(0, 9).every((s) => s.model === "slim" && s.path.startsWith("entity/player/slim/"))).toBe(true);
-    expect(DEFAULT_SKINS.slice(9).every((s) => s.model === "wide" && s.path.startsWith("entity/player/wide/"))).toBe(true);
-    for (let k = 0; k < 18; k++) expect(DEFAULT_SKINS[k]).toEqual(defaultSkin(`00000000000000000000000000000${k.toString(16).padStart(3, "0")}`));
-    for (const name of ["Steve", "Alex", "樱花", "Hanami"]) expect(DEFAULT_SKINS).toContainEqual(defaultSkin(offlineUuid(name)));
-    for (const starter of STARTER_SKINS) expect(DEFAULT_SKINS).toContainEqual(starter.skin);
+    expect(modern.slice(0, 9).every((s) => s.model === "slim" && s.path.startsWith("entity/player/slim/"))).toBe(true);
+    expect(modern.slice(9).every((s) => s.model === "wide" && s.path.startsWith("entity/player/wide/"))).toBe(true);
+    for (let k = 0; k < 18; k++) expect(modern[k]).toEqual(defaultSkin(`00000000000000000000000000000${k.toString(16).padStart(3, "0")}`, "modern"));
+    for (const name of ["Steve", "Alex", "樱花", "Hanami"]) expect(modern).toContainEqual(defaultSkin(offlineUuid(name), "modern"));
+    for (const starter of STARTER_SKINS.modern) expect(modern).toContainEqual(starter.skin);
   });
 
   it("选出的路径都在材质协议允许读取的默认皮肤名单里", () => {
     for (let k = 0; k < 18; k++) {
-      const { path } = defaultSkin(`0000000000000000000000000000${k.toString(16).padStart(4, "0")}`);
-      expect(DEFAULT_SKIN_PATHS).toContain(path);
+      const uuid = `0000000000000000000000000000${k.toString(16).padStart(4, "0")}`;
+      expect(DEFAULT_SKIN_PATHS).toContain(defaultSkin(uuid, "modern").path);
+      expect(DEFAULT_SKIN_PATHS).toContain(defaultSkin(uuid, "legacy").path);
     }
+  });
+});
+
+describe("1.19.3 以前的材质源", () => {
+  const STEVE = { kind: "default", path: "entity/steve", model: "wide" };
+  const ALEX = { kind: "default", path: "entity/alex", model: "slim" };
+
+  it.each([
+    ["00000000-0000-0000-0000-000000000000", STEVE],
+    ["00000000-0000-0000-0000-000000000001", ALEX],
+    ["00000000-0000-0000-0000-000000000011", ALEX],
+    ["00000000-0000-0000-0000-00000000ffff", ALEX],
+    // 负哈希按补码取最低位：-1 是奇数，-2 与 -2147483648 是偶数
+    ["00000000-0000-0000-0000-0000ffffffff", ALEX],
+    ["00000000-0000-0000-0000-0000fffffffe", STEVE],
+    ["80000000-0000-0000-0000-000000000000", STEVE],
+    ["069a79f4-44e9-4726-a5be-fca90e38aaf5", STEVE],
+    ["853c80ef-3c37-49fd-aa49-938b674adae6", ALEX],
+  ])("哈希为奇数是细臂艾利克斯，偶数是宽臂史蒂夫：%s", (uuid, skin) => {
+    expect(defaultSkin(uuid, "legacy")).toEqual(skin);
+  });
+
+  it.each([
+    ["Steve", ALEX],
+    ["Alex", STEVE],
+    ["Notch", STEVE],
+    ["jeb_", ALEX],
+    ["Hanami", STEVE],
+    ["樱花", ALEX],
+    ["Sakura_2026", ALEX],
+  ])("离线玩家 %s 在旧版里的样子", (name, skin) => {
+    expect(defaultSkin(offlineUuid(name), "legacy")).toEqual(skin);
+  });
+
+  it("预取的全集与开局并排的两位都是这两张：读不到 18 款的图，不预取它们", () => {
+    expect(DEFAULT_SKINS.legacy).toEqual([STEVE, ALEX]);
+    expect(STARTER_SKINS.legacy).toEqual([
+      { name: "Steve", skin: STEVE },
+      { name: "Alex", skin: ALEX },
+    ]);
   });
 });

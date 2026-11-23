@@ -20,6 +20,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use petalfall_base::error_with_causes;
+use petalfall_core::data_format::GuardMode;
 use petalfall_core::{
     game_line_level, AccountType, AutoBackupOutcome, DownloadProgress, Finished, GameExit, GameRun,
     GameSlot, LaunchAccount, LaunchEvent, LaunchFailed, LaunchPhase, LaunchRequest, LaunchStage,
@@ -461,10 +462,13 @@ async fn settle(finish: impl Future<Output = Finished>) -> GameExitDto {
     exit.into()
 }
 
-/// 被监控的一局游戏：哪个实例、会话从何时算起（自动备份只挑这之后写过 level.dat 的存档）、它连同基底的占用。
+/// 被监控的一局游戏：哪个实例、会话从何时算起（自动备份只挑这之后写过 level.dat 的存档）、启动时的游戏目录、
+/// 它连同基底的占用。
 struct Watched {
     version_id: String,
     session_started: SystemTime,
+    /// 自动备份认它：游戏运行期间可以切换当前目录，切走之后按实例名解析到的是新目录里另一个同名实例。
+    game_dir: PathBuf,
     instance: ChainGuard,
 }
 
@@ -484,6 +488,7 @@ async fn watch(
     let Watched {
         version_id,
         session_started,
+        game_dir,
         instance,
     } = watched;
     let exit = settle(finish).await;
@@ -502,10 +507,13 @@ async fn watch(
     let instance = instance.into_backup();
     release_slot();
     emit_exit(exit);
-    // 不挂取消令牌：自动备份不是前端发起的任务，没有能取消它的入口。
-    let outcome = facade
-        .snapshot()
-        .await
+    // 不挂取消令牌：自动备份不是前端发起的任务，没有能取消它的入口。设置照此刻的，目录照这一局的：
+    // 存档与备份都按游戏目录放，指回这一局的目录就是备份它玩过的那个实例。
+    let mut petalfall = facade.snapshot().await;
+    if !petalfall_core::folders::same_path(petalfall.game_dir(), &game_dir) {
+        petalfall.set_game_dir(game_dir);
+    }
+    let outcome = petalfall
         .auto_backup_after_session(&version_id, session_started)
         .await;
     drop(instance);
@@ -522,6 +530,7 @@ fn spawn_watch(
     session_started: SystemTime,
 ) {
     let version_id = run.version_id().to_owned();
+    let game_dir = run.game_dir().to_path_buf();
     tauri::async_runtime::spawn(async move {
         let facade = app.state::<Facade>();
         watch(
@@ -529,6 +538,7 @@ fn spawn_watch(
             Watched {
                 version_id,
                 session_started,
+                game_dir,
                 instance,
             },
             run.finish(),
@@ -544,6 +554,12 @@ fn spawn_watch(
 /// 它继承链上的基底版本也没有在做这几件事（`instance_busy`）。加载器实例的客户端 jar 与 natives 在
 /// 基底的目录里，基底跟着实例一直占到游戏退出。后一道失败时前一道的预留随返回值一起丢弃，不会把
 /// 占用槽留在加载中。
+///
+/// 两道占用都只看内存；占住实例自己之后、读它的继承链之前，先以「使用」方式核对游戏目录的数据格式记号
+/// （[`Petalfall::guard_game_dir`]），这是启动碰游戏目录的第一下。核对有时限，游戏目录在断开的网络共享上时
+/// 在时限内报暂时连不上；之后的读取（这里的继承链版本 JSON，`launch_game` 接着查共用存档时的实例设置）都没有
+/// 时限，排在它前面就会一直挂着，记号比这一版新或读不懂时也不该先去读这个目录。core 的启动在写游戏目录之前
+/// 还会再核对一次。
 async fn reserve_launch<'a>(
     running: &'a RunningGame,
     locks: &InstanceLocks,
@@ -553,6 +569,7 @@ async fn reserve_launch<'a>(
     let reservation = running.slot.reserve(version_id).map_err(busy)?;
     let instance = locks
         .acquire_with_chain(version_id, InstanceActivity::Launching, async {
+            petalfall.guard_game_dir(GuardMode::Use).await?;
             Ok(petalfall.inheritance_chain(version_id).await?)
         })
         .await?;
@@ -814,9 +831,10 @@ async fn reattach_recorded(app: &AppHandle) -> petalfall_core::Result<()> {
     Ok(())
 }
 
-/// 接回的那一局占住实例与基底，与启动时一样防它在运行期间被改名、删除、补全。基底按当前游戏目录读继承链：
-/// 记录里的游戏目录不是当前的、或继承链读不出（实例的版本 JSON 已经不在）时只占实例自己。连实例自己都占不住
-/// 时为 `None`。
+/// 接回的那一局占住实例与基底，与启动时一样防它在运行期间被改名、删除、补全、移走。基底按当前游戏目录读继承链：
+/// 记录里的游戏目录不是当前的、读链报错（读文件本身出错、id 不能拼进路径）或基底此刻占不住时只占实例自己。
+/// 实例的版本 JSON 已经不在或某一环读不懂时读链照样成功，只是停在那一环，读到的基底照占（实例自己的版本 JSON
+/// 不在时链为空）。连实例自己都占不住时为 `None`。
 async fn hold_reattached(
     locks: &InstanceLocks,
     petalfall: &Petalfall,
@@ -943,6 +961,7 @@ pub async fn play_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::tasks::current_game_dir;
     use petalfall_core::{FailureCode, LaunchFailure, LogStream};
     use std::collections::BTreeMap;
 
@@ -1246,6 +1265,64 @@ mod tests {
             .is_ok());
     }
 
+    /// 游戏目录的数据格式关卡排在读继承链之前：关卡不放行时报它的错，版本 JSON 碰都不碰，占用槽与实例占用一并
+    /// 放开；关卡放行了才读。版本 JSON 的位置被一个目录占着，读了必出 IO 错误，报的是哪个错就说明读没读。
+    #[tokio::test]
+    async fn the_data_format_gate_runs_before_the_chain_is_read() {
+        use crate::commands::error::code;
+        use petalfall_core::data_format::{DATA_FORMAT, STAMP_FILE};
+
+        let dir = tempfile::tempdir().unwrap();
+        let game_dir = dir.path().join(".minecraft");
+        std::fs::create_dir_all(game_dir.join("versions").join("生存").join("生存.json")).unwrap();
+        let facade = facade_with(dir.path(), &[]);
+        let petalfall = facade.snapshot().await;
+        let running = RunningGame::default();
+        let locks = InstanceLocks::default();
+        let stamp = game_dir
+            .join(concat!(".", petalfall_base::app_slug!()))
+            .join(STAMP_FILE);
+        std::fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+
+        for (contents, expected) in [
+            (
+                json!({ "data_format": DATA_FORMAT + 1 }).to_string(),
+                code::GAME_DIR_DATA_TOO_NEW,
+            ),
+            (
+                json!({ "data_format": u32::MAX }).to_string(),
+                code::GAME_DIR_DATA_TOO_NEW,
+            ),
+            ("[2]".to_owned(), code::DATA_FORMAT_UNREADABLE),
+        ] {
+            std::fs::write(&stamp, &contents).unwrap();
+            let err = reserve_launch(&running, &locks, &petalfall, "生存")
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(err.code, expected, "{contents}：{err:?}");
+            assert_eq!(
+                err.detail.unwrap()["path"],
+                json!(game_dir.display().to_string()),
+                "{contents}"
+            );
+            assert_eq!(locks.activity("生存"), None, "{contents}：实例占用随之放开");
+            drop(
+                running
+                    .slot
+                    .reserve("创造")
+                    .unwrap_or_else(|_| panic!("{contents}：占用槽没被留下")),
+            );
+        }
+
+        std::fs::remove_file(&stamp).unwrap();
+        let err = reserve_launch(&running, &locks, &petalfall, "生存")
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code, code::IO, "关卡放行之后才读版本 JSON：{err:?}");
+    }
+
     #[test]
     fn service_down_failure_carries_account_status_and_causes() {
         let mut params = BTreeMap::new();
@@ -1401,9 +1478,17 @@ mod tests {
         instance.set_activity(InstanceActivity::Running);
         assert_eq!(locks.activity("1.20.1"), Some(InstanceActivity::Inherited));
         let in_use = json!({ "id": "1.20.1", "activity": "inherited", "used_by": "Fabric 生存" });
-        let err = repair_instance_with(&facade, &tasks, &locks, "r", "1.20.1", &sink)
-            .await
-            .unwrap_err();
+        let err = repair_instance_with(
+            &facade,
+            &tasks,
+            &locks,
+            "r",
+            &current_game_dir(&facade).await,
+            "1.20.1",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, crate::commands::error::code::INSTANCE_BUSY);
         assert_eq!(err.detail.unwrap(), in_use);
         assert!(!tasks.is_running("r"), "被拒的补全不占任务 id");
@@ -1421,9 +1506,17 @@ mod tests {
         drop(instance);
         assert_eq!(locks.activity("1.20.1"), None);
         assert_eq!(locks.activity("Fabric 生存"), None);
-        let repaired = repair_instance_with(&facade, &tasks, &locks, "r", "1.20.1", &sink)
-            .await
-            .unwrap();
+        let repaired = repair_instance_with(
+            &facade,
+            &tasks,
+            &locks,
+            "r",
+            &current_game_dir(&facade).await,
+            "1.20.1",
+            &sink,
+        )
+        .await
+        .unwrap();
         assert!(!repaired.reinstalled);
 
         // 原版正在补全：启动以它为基底的实例被拒，detail 说的是原版在做什么，占用槽没被留下。
@@ -1468,9 +1561,17 @@ mod tests {
         let (reservation, game) = reserve_launch(&running, &locks, &petalfall, "1.20.1")
             .await
             .unwrap();
-        let err = repair_instance_with(&facade, &tasks, &locks, "r", "Fabric 生存", &sink)
-            .await
-            .unwrap_err();
+        let err = repair_instance_with(
+            &facade,
+            &tasks,
+            &locks,
+            "r",
+            &current_game_dir(&facade).await,
+            "Fabric 生存",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, crate::commands::error::code::INSTANCE_BUSY);
         assert_eq!(
             err.detail.unwrap(),
@@ -1483,9 +1584,17 @@ mod tests {
             "实例自己的占用随之放开"
         );
         game.set_activity(InstanceActivity::Running);
-        let err = repair_instance_with(&facade, &tasks, &locks, "r", "Fabric 生存", &sink)
-            .await
-            .unwrap_err();
+        let err = repair_instance_with(
+            &facade,
+            &tasks,
+            &locks,
+            "r",
+            &current_game_dir(&facade).await,
+            "Fabric 生存",
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             err.detail.unwrap(),
             json!({ "id": "1.20.1", "activity": "running" })
@@ -1743,6 +1852,7 @@ mod tests {
             Watched {
                 version_id: "1.21".into(),
                 session_started: started,
+                game_dir: dir.path().join(".minecraft"),
                 instance: guard,
             },
             async { finished("1.21") },
@@ -1792,6 +1902,7 @@ mod tests {
             Watched {
                 version_id: "1.21".into(),
                 session_started: started,
+                game_dir: dir.path().join(".minecraft"),
                 instance: guard,
             },
             async { finished("1.21") },
@@ -1863,6 +1974,7 @@ mod tests {
             Watched {
                 version_id: "1.21".into(),
                 session_started: started,
+                game_dir: dir.path().join(".minecraft"),
                 instance: guard,
             },
             async { finished("1.21") },
@@ -1916,6 +2028,7 @@ mod tests {
             Watched {
                 version_id: "Fabric 生存".into(),
                 session_started: started,
+                game_dir: dir.path().join(".minecraft"),
                 instance: guard,
             },
             async { finished("Fabric 生存") },
@@ -1943,6 +2056,74 @@ mod tests {
             backed_up.into_inner(),
             Some(vec!["这局玩的".to_owned()]),
             "备份事件要推出来"
+        );
+    }
+
+    /// 游戏运行期间切换了当前目录：退出后的自动备份照这一局启动时的目录来，备份那边这局玩过的存档；新目录里
+    /// 同名实例是另一个实例，这局也写过的存档不碰。
+    #[tokio::test]
+    async fn auto_backup_follows_the_directory_the_session_ran_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), true);
+        let started = SystemTime::now();
+        let hour = std::time::Duration::from_secs(3600);
+        let home = dir.path().join(".minecraft");
+        let elsewhere = dir.path().join("另一个");
+        world(dir.path(), "1.21", "这局玩的", started + hour);
+        world(&elsewhere, "1.21", "那边的", started + hour);
+        let locks = InstanceLocks::default();
+        let guard = locks
+            .acquire_with_bases("1.21", InstanceActivity::Running, &[])
+            .unwrap();
+        let delivered = std::cell::RefCell::new(None);
+        watch(
+            &facade,
+            Watched {
+                version_id: "1.21".into(),
+                session_started: started,
+                game_dir: home.clone(),
+                instance: guard,
+            },
+            async {
+                facade
+                    .update(|petalfall| {
+                        petalfall.set_game_directory(elsewhere.join(".minecraft"));
+                        Ok::<_, CommandError>(())
+                    })
+                    .await
+                    .unwrap();
+                finished("1.21")
+            },
+            || {},
+            |_| {},
+            |backup| *delivered.borrow_mut() = Some(backup),
+        )
+        .await;
+        let payload = delivered.into_inner().unwrap();
+        assert_eq!(payload.backed_up, vec!["这局玩的".to_owned()]);
+        assert!(payload.failed.is_empty(), "{:?}", payload.failed);
+        let mut launched = facade.snapshot().await;
+        launched.set_game_dir(home);
+        let list = launched
+            .list_world_backups("1.21", "这局玩的")
+            .await
+            .unwrap();
+        assert_eq!(list.backups.len(), 1);
+        assert_eq!(list.backups[0].kind, petalfall_core::BackupKind::Auto);
+        let current = facade.snapshot().await;
+        assert!(current
+            .list_world_backups("1.21", "那边的")
+            .await
+            .unwrap()
+            .backups
+            .is_empty());
+        assert!(
+            !elsewhere
+                .join(".minecraft")
+                .join(concat!(".", petalfall_base::app_slug!()))
+                .join("backups")
+                .exists(),
+            "新目录里什么都不该备份"
         );
     }
 

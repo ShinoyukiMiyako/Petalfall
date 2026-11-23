@@ -642,6 +642,13 @@ describe("图标位与加载态的样式", () => {
     expect(css.indexOf("\n.centerSpinner {")).toBeGreaterThan(css.indexOf("\n.glyphSlot {"));
   });
 
+  it("宽窄不同的两层交接（序号换勾号）：各层按自身尺寸居中在格里，格子随较宽的一层撑开缩回时谁都不横移", () => {
+    // 格子的默认对齐是拉伸：窄的那层被拉到格宽、内容靠左，宽的那层一挂上或一移除，窄层里的内容就横移半个宽度差
+    expect(ruleOf(".glyphSlot")).toMatch(/place-items: center;/);
+    const glyphRules = [...css.matchAll(/\n[^\n{}]*\.glyph\b[^\n{]*\{([^}]*)\}/g)].map((m) => m[1]);
+    for (const body of glyphRules) expect(body).not.toMatch(/(justify|align|place)-self/);
+  });
+
   it("无前置图标的加载态：文字淡去而不是 visibility 隐藏，保留占位，名称仍在可访问性树里", () => {
     const hidden = ruleOf(".button[data-loading]:not([data-has-icon]) .label");
     expect(hidden).toMatch(/opacity: 0;/);
@@ -827,13 +834,18 @@ describe("IconButton", () => {
     expect(document.querySelector('[role="tooltip"]')?.lastElementChild?.textContent).toBe("安装进行中，暂时不能打开");
   });
 
-  it("没有 disabledReason 时照常点击，调用方自己给的 aria-disabled 原样保留", () => {
+  it("调用方自己给的 aria-disabled 原样保留、外观同禁用（带 data-disabled，样式据此不铺悬停叠层、不缩、变淡），点击照常交给调用方", () => {
     const onClick = vi.fn();
     const button = mount(<IconButton icon="pin" label="固定" aria-disabled onClick={onClick} />);
     expect(button.getAttribute("aria-disabled")).toBe("true");
-    expect(button.dataset.disabled).toBeUndefined();
+    expect(button.dataset.disabled).toBe("true");
     click(button);
     expect(onClick).toHaveBeenCalledTimes(1);
+    view?.unmount();
+
+    const open = mount(<IconButton icon="pin" label="固定" aria-disabled={false} />);
+    expect(open.getAttribute("aria-disabled")).toBe("false");
+    expect(open.dataset.disabled).toBeUndefined();
   });
 
   it("空 label 与带切换态的危险按钮直接抛错", () => {

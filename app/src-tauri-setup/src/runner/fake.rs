@@ -90,7 +90,8 @@ pub struct Fake {
 impl Fake {
     pub fn new(outcome: Outcome, work_time: Duration) -> Self {
         let payload = vec![0x5A; PAYLOAD_LEN];
-        let exe = vec![0xA5; EXE_LEN];
+        let exe = program_image(EXE_LEN);
+        // 载入时要核对头里的数据格式号与能力位，只有 `Header::new` 填的本版本的值过得去
         let header =
             Header::new(&payload, &exe, env!("CARGO_PKG_VERSION")).expect("版本号来自 Cargo.toml");
         Self {
@@ -123,6 +124,31 @@ impl Fake {
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
+}
+
+/// 假的程序文件：一个节、没有可选头的最小 PE，节一直铺到 `len`。探测按 PE 节表认程序文件完不完好，
+/// 装完后再探测得是完好的那一种，[`Outcome::Verify`] 少写的那一个字节又正好让它短于节末端。
+fn program_image(len: usize) -> Vec<u8> {
+    const DOS_LFANEW_AT: usize = 0x3C;
+    const PE_AT: usize = 0x40;
+    const COFF_LEN: usize = 20;
+    const SECTION_COUNT_AT: usize = PE_AT + 6;
+    const SECTION_LEN: usize = 40;
+    const TABLE_AT: usize = PE_AT + 4 + COFF_LEN;
+    const RAW_SIZE_AT: usize = TABLE_AT + 16;
+    const RAW_POINTER_AT: usize = TABLE_AT + 20;
+    const RAW_AT: usize = TABLE_AT + SECTION_LEN;
+
+    let mut image = vec![0xA5; len];
+    image[..RAW_AT].fill(0);
+    image[..2].copy_from_slice(b"MZ");
+    image[DOS_LFANEW_AT..DOS_LFANEW_AT + 4].copy_from_slice(&(PE_AT as u32).to_le_bytes());
+    image[PE_AT..PE_AT + 4].copy_from_slice(b"PE\0\0");
+    image[SECTION_COUNT_AT..SECTION_COUNT_AT + 2].copy_from_slice(&1u16.to_le_bytes());
+    let raw_len = u32::try_from(len - RAW_AT).expect("假程序文件不到 4 GiB");
+    image[RAW_SIZE_AT..RAW_SIZE_AT + 4].copy_from_slice(&raw_len.to_le_bytes());
+    image[RAW_POINTER_AT..RAW_POINTER_AT + 4].copy_from_slice(&(RAW_AT as u32).to_le_bytes());
+    image
 }
 
 #[derive(Default)]
@@ -288,6 +314,9 @@ pub fn session(fake: Fake, sandbox: &Path) -> io::Result<Session> {
 
 #[cfg(test)]
 mod tests {
+    use petalfall_release::data_format::DATA_FORMAT;
+    use petalfall_setup_payload::SHIPPED_CAPS;
+
     use super::*;
     use crate::contract::{FailureCode, InstallMode, Phase};
     use crate::journal::Recovery;
@@ -341,6 +370,14 @@ mod tests {
         );
         assert_eq!(fake.header().exe_len, EXE_LEN as u64);
         assert_eq!(fake.header().version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn the_fake_header_carries_this_builds_data_format_and_caps() {
+        let fake = Fake::new(Outcome::Ok, Duration::ZERO);
+
+        assert_eq!(fake.header().data_format, Some(DATA_FORMAT));
+        assert_eq!(fake.header().caps, Some(SHIPPED_CAPS));
     }
 
     #[test]
@@ -461,7 +498,7 @@ mod tests {
         let session = session_for(Outcome::Ok, sandbox.path());
 
         assert_eq!(
-            crate::existing::detect(session.registry(), "0.1.0").unwrap(),
+            crate::existing::read_installation(session.registry()).unwrap(),
             None
         );
 
@@ -472,13 +509,32 @@ mod tests {
             )
             .unwrap();
 
-        let existing = crate::existing::detect(session.registry(), "0.1.0")
+        let existing = crate::existing::read_installation(session.registry())
             .unwrap()
             .unwrap();
         assert_eq!(
             existing.dir,
             sandbox.path().join("instdir").display().to_string()
         );
+    }
+
+    /// 装完再探测：写全了的假程序文件是完好的，verify 少写一个字节的那份按写了一半算不在。
+    #[test]
+    fn the_probe_judges_the_fake_program_like_a_real_one() {
+        for (outcome, intact) in [(Outcome::Ok, true), (Outcome::Verify, false)] {
+            let sandbox = tempfile::tempdir().unwrap();
+            let session = session_for(outcome, sandbox.path());
+            let installed = session.install(
+                &target(Path::new(r"D:\Petalfall"), true),
+                &Recording::default(),
+            );
+            assert_eq!(installed.is_ok(), intact, "{outcome:?}");
+
+            let existing = crate::existing::read_installation(session.registry())
+                .unwrap()
+                .unwrap();
+            assert_eq!(existing.program_intact, intact, "{outcome:?}");
+        }
     }
 
     fn recorded_session(sandbox: &Path) -> (Session, Arc<Mutex<Received>>) {

@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use petalfall_core::config::UiLanguage;
+use petalfall_core::data_format::GuardMode;
 use petalfall_core::folders::{
     default_game_dir, inspect_game_directory as inspect_dir, probe_dir, validate_game_dir,
 };
@@ -82,6 +83,8 @@ pub struct ConfigDto {
     pub prefer_dedicated_gpu: bool,
     /// 启动前是否跳过游戏的首次无障碍引导。
     pub skip_accessibility_onboarding: bool,
+    /// 新建实例与导入整合包时是否沿用默认设置（数据目录里的模板）。
+    pub new_instance_template: bool,
     /// 存档自动备份：`{ auto, keep_per_world, max_total_gb }`。
     pub world_backup: WorldBackupSettings,
 }
@@ -121,6 +124,7 @@ pub(crate) fn config_dto(petalfall: &Petalfall) -> ConfigDto {
             .collect(),
         prefer_dedicated_gpu: config.prefer_dedicated_gpu,
         skip_accessibility_onboarding: config.skip_accessibility_onboarding,
+        new_instance_template: config.new_instance_template,
         world_backup: config.world_backup,
     }
 }
@@ -177,6 +181,7 @@ pub(crate) struct ConfigPatch {
     language: Option<UiLanguage>,
     prefer_dedicated_gpu: Option<bool>,
     skip_accessibility_onboarding: Option<bool>,
+    new_instance_template: Option<bool>,
     world_backup: Option<WorldBackupSettings>,
 }
 
@@ -201,6 +206,7 @@ pub(crate) struct RawConfigPatch {
     pub language: Option<String>,
     pub prefer_dedicated_gpu: Option<bool>,
     pub skip_accessibility_onboarding: Option<bool>,
+    pub new_instance_template: Option<bool>,
     pub world_backup: Option<WorldBackupInput>,
 }
 
@@ -227,6 +233,7 @@ pub async fn update_config(
     language: Option<String>,
     prefer_dedicated_gpu: Option<bool>,
     skip_accessibility_onboarding: Option<bool>,
+    new_instance_template: Option<bool>,
     world_backup: Option<WorldBackupInput>,
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
@@ -249,6 +256,7 @@ pub async fn update_config(
         language,
         prefer_dedicated_gpu,
         skip_accessibility_onboarding,
+        new_instance_template,
         world_backup,
     };
     update_config_with(&facade, raw).await
@@ -306,6 +314,7 @@ async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
         language: raw.language.as_deref().map(parse_language).transpose()?,
         prefer_dedicated_gpu: raw.prefer_dedicated_gpu,
         skip_accessibility_onboarding: raw.skip_accessibility_onboarding,
+        new_instance_template: raw.new_instance_template,
         world_backup: raw.world_backup.map(validate_world_backup).transpose()?,
     })
 }
@@ -363,6 +372,9 @@ fn apply_patch(petalfall: &mut Petalfall, patch: ConfigPatch) -> Result<(), Comm
     }
     if let Some(enabled) = patch.skip_accessibility_onboarding {
         petalfall.set_skip_accessibility_onboarding(enabled);
+    }
+    if let Some(enabled) = patch.new_instance_template {
+        petalfall.set_new_instance_template(enabled);
     }
     if let Some(settings) = patch.world_backup {
         petalfall.set_world_backup(settings);
@@ -687,7 +699,11 @@ pub(crate) async fn set_game_directory_with(
         }
         .into());
     }
-    let current = facade.snapshot().await.probe_current_game_dir().await;
+    // 目标可能被更新的落樱用过、或记号读不懂：这一版换过去就会读写里面的实例，核对不过就不换，配置不动。
+    // 关卡要读写记号，与探测一样在写锁之外的快照上做。
+    let snapshot = facade.snapshot().await;
+    snapshot.guard_game_dir_at(&target, GuardMode::Use).await?;
+    let current = snapshot.probe_current_game_dir().await;
     facade
         .update(|petalfall| {
             petalfall.switch_game_directory(target, &current);
@@ -1268,6 +1284,73 @@ mod tests {
         assert_eq!(raw["skip_accessibility_onboarding"], true);
     }
 
+    /// 新实例沿用默认设置默认开；update_config 带 newInstanceTemplate 关掉后 get_config 与 template_info
+    /// 都回读为关，并落了盘；不带这一项的补丁不动它，再打开两处一起回到开。
+    #[tokio::test]
+    async fn new_instance_template_patch_reads_back_in_config_and_template_info() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let initial = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(initial["new_instance_template"], true);
+        assert!(
+            crate::commands::instances::template_info_with(&facade)
+                .await
+                .unwrap()
+                .enabled
+        );
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                new_instance_template: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        let dto = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(dto["new_instance_template"], false);
+        assert!(
+            !crate::commands::instances::template_info_with(&facade)
+                .await
+                .unwrap()
+                .enabled
+        );
+        let reloaded = petalfall_core::ConfigStore::at(dir.path().join("config.json"))
+            .load()
+            .await
+            .unwrap();
+        assert!(!reloaded.new_instance_template);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                check_updates: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!read_config(&facade).await.new_instance_template);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                new_instance_template: Some(true),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(read_config(&facade).await.new_instance_template);
+        assert!(
+            crate::commands::instances::template_info_with(&facade)
+                .await
+                .unwrap()
+                .enabled
+        );
+    }
+
     /// 任一字段非法整体拒绝：前面合法的字段也不生效，配置文件不写。
     #[tokio::test]
     async fn invalid_field_rejects_whole_patch_without_saving() {
@@ -1448,6 +1531,95 @@ mod tests {
             read_config(&facade).await.game_dir,
             target.display().to_string()
         );
+    }
+
+    /// 在游戏目录根下写数据格式记号，交回记号文件的路径。
+    fn write_stamp(game_dir: &Path, contents: &str) -> PathBuf {
+        let stamp = game_dir.join(".petalfall").join("data-format.json");
+        std::fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+        std::fs::write(&stamp, contents).unwrap();
+        stamp
+    }
+
+    /// 目标被更新的落樱用过、或记号读不懂：不换过去，配置文件一个字节不变，当前目录与目录列表照旧，目标里的记号
+    /// 也不动；detail 的 path 是要换到的游戏目录。记号等于这一版的目录照常换过去，记号不被改写。
+    #[tokio::test(start_paused = true)]
+    async fn set_game_directory_refuses_a_target_whose_data_format_it_cannot_use() {
+        use petalfall_core::data_format::DATA_FORMAT;
+
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let home = dir.path().join("Home").join(".minecraft");
+        std::fs::create_dir_all(&home).unwrap();
+        set_game_directory_with(&facade, &home.display().to_string())
+            .await
+            .unwrap();
+        let config_path = dir.path().join("config.json");
+        let saved = std::fs::read(&config_path).unwrap();
+        let listed = facade.snapshot().await.game_directories().await;
+
+        let newer = dir.path().join("Newer").join(".minecraft");
+        let newer_stamp = write_stamp(
+            &newer,
+            &format!(
+                r#"{{"data_format":{},"written_by":"1.1.0-dev.57"}}"#,
+                DATA_FORMAT + 1
+            ),
+        );
+        let broken = dir.path().join("Broken").join(".minecraft");
+        let broken_stamp = write_stamp(&broken, r#"{"written_by":"1.0.0"}"#);
+
+        for (target, stamp, expected_code, detail) in [
+            (
+                &newer,
+                &newer_stamp,
+                code::GAME_DIR_DATA_TOO_NEW,
+                serde_json::json!({
+                    "path": newer.display().to_string(),
+                    "found": DATA_FORMAT + 1,
+                    "supported": DATA_FORMAT,
+                    "written_by": "1.1.0-dev.57",
+                    "written_by_channel": "dev",
+                }),
+            ),
+            (
+                &broken,
+                &broken_stamp,
+                code::DATA_FORMAT_UNREADABLE,
+                serde_json::json!({
+                    "path": broken.display().to_string(),
+                    "reason": "缺 data_format",
+                }),
+            ),
+        ] {
+            let stamp_before = std::fs::read(stamp).unwrap();
+
+            let err = set_game_directory_with(&facade, &target.display().to_string())
+                .await
+                .unwrap_err();
+
+            assert_eq!(err.code, expected_code, "{}", target.display());
+            assert_eq!(err.detail, Some(detail), "{}", target.display());
+            assert_eq!(std::fs::read(&config_path).unwrap(), saved);
+            assert_eq!(
+                read_config(&facade).await.game_dir,
+                home.display().to_string()
+            );
+            assert_eq!(facade.snapshot().await.game_directories().await, listed);
+            assert_eq!(std::fs::read(stamp).unwrap(), stamp_before);
+        }
+
+        let same = dir.path().join("Same").join(".minecraft");
+        let same_contents = format!(r#"{{"data_format":{DATA_FORMAT}}}"#);
+        let same_stamp = write_stamp(&same, &same_contents);
+        set_game_directory_with(&facade, &same.display().to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            read_config(&facade).await.game_dir,
+            same.display().to_string()
+        );
+        assert_eq!(std::fs::read_to_string(same_stamp).unwrap(), same_contents);
     }
 
     /// 版本数过 IPC 时 0 和 null 要分得开：null 是「不知道」，字段也得在，前端按 `number | null` 读。

@@ -5,7 +5,7 @@
 //!
 //! - [`whitelist`]：允许读取的文件：`block/` 下的方块面（实例方块与卡面的材质平铺，可以是材质源里
 //!   任意完整方块）与 20 张默认皮肤；预设的 17 张方块面是必抽名单。
-//! - [`default_skin`]：没有自定义皮肤的玩家（离线账户）在原版里显示哪一套默认皮肤。
+//! - [`default_skin`]：没有自定义皮肤的玩家（离线账户，以及拿不到远程皮肤的正版与外置账户）在原版里显示哪一套默认皮肤。
 //! - 材质源：按「本机完整集 > 下载缓存 > 本机降级集」取第一个可用的。本机的是候选游戏目录里最新的可信
 //!   原版客户端 jar（选择规则见 `source`），下载缓存是玩家手动下载、抽完即删 jar 的那一份。
 //! - 方块目录：从材质源的方块状态与模型推出全部完整立方体方块的各面、染色、色相与名称（见 `catalog`）。
@@ -31,9 +31,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use petalfall_auth::{SkinModel, SkinRef};
+use petalfall_instance::official_minecraft_dir;
 
 pub use catalog::{BlockCatalog, CatalogBlock};
-pub use default_skin::{DefaultSkin, default_skin};
+pub use default_skin::{DefaultSkin, DefaultSkinSet, default_skin};
 pub use download::{ArtDownloadProgress, ArtDownloadStage};
 pub use remote::{THUMB_HOSTS, ThumbError};
 pub use source::{JarOpener, default_opener};
@@ -81,6 +82,12 @@ impl PanoramaSpec {
 pub struct ArtStatus {
     /// 材质源版本 id；没有可用材质源时为 None，前端不发任何材质请求、全部画回落件。
     pub source: Option<String>,
+    /// 材质源是本机的降级集（1.13 到 1.19，没有 1.20 的材质标志）：预设里较新的方块缺材质，前端画徽记并给下载入口，
+    /// 下载来的最新正式版会盖过它（见 [`TextureService::refresh`] 的选源顺序）。没有材质源时为 false。
+    pub degraded: bool,
+    /// 材质源里是哪一套默认皮肤，拿不到远程皮肤的账户（离线账户总是如此）按它的规则选（见 [`default_skin`]）。
+    /// 降级集里 1.19.3、1.19.4 已是 18 款，所以不能由 `degraded` 推出。没有材质源时为 [`DefaultSkinSet::Modern`]。
+    pub default_skins: DefaultSkinSet,
     /// 标题全景对象是否在某个候选目录里且哈希正确。
     pub panorama: bool,
 }
@@ -137,6 +144,9 @@ struct Active {
     dir: PathBuf,
     files: BTreeSet<String>,
     catalog: BlockCatalog,
+    /// 本机降级集（见 [`ArtStatus::degraded`]）；下载来的总是某个时点最新的正式版，不算。
+    degraded: bool,
+    skins: DefaultSkinSet,
 }
 
 struct State {
@@ -186,12 +196,6 @@ impl Petalfall {
         }
         dirs
     }
-}
-
-/// 官方启动器的默认游戏目录 `%APPDATA%\.minecraft`；没有 APPDATA（非 Windows）时为 None。
-fn official_minecraft_dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
-        .map(|appdata| PathBuf::from(appdata).join(petalfall_instance::MINECRAFT_DIR_NAME))
 }
 
 /// 状态锁只护着内存里的几张表，持锁期间不做 IO 也不 await；中毒不携带需要放弃的状态。
@@ -251,11 +255,7 @@ impl TextureService {
 
     /// 当前状态（只读内存）。
     pub fn status(&self) -> ArtStatus {
-        let state = lock(&self.inner.state);
-        ArtStatus {
-            source: state.active.as_ref().map(|a| a.catalog.version_id.clone()),
-            panorama: state.panorama.is_some(),
-        }
+        status_of(&lock(&self.inner.state))
     }
 
     /// 当前材质源的方块目录（只读内存）；没有材质源时为 None。
@@ -284,10 +284,7 @@ impl TextureService {
         state.active = active;
         state.panorama = panorama;
         state.lru.clear();
-        ArtStatus {
-            source: state.active.as_ref().map(|a| a.catalog.version_id.clone()),
-            panorama: state.panorama.is_some(),
-        }
+        status_of(&state)
     }
 
     /// 按「本机完整集 > 下载缓存 > 本机降级集」取第一个准备得起来的：下载的是某个时点最新正式版的完整
@@ -326,7 +323,7 @@ impl TextureService {
         match prepared {
             Ok(Ok(prepared)) => {
                 tracing::info!(version = %source.version_id, full = source.full, files = prepared.files.len(), blocks = prepared.catalog.blocks.len(), "原版材质源就绪");
-                Some(active(prepared))
+                Some(active(prepared, !source.full))
             }
             Ok(Err(reason)) => {
                 tracing::warn!(version = %source.version_id, %reason, "准备原版材质缓存失败");
@@ -351,7 +348,7 @@ impl TextureService {
         match loaded {
             Ok(Some(prepared)) => {
                 tracing::info!(version = %prepared.catalog.version_id, files = prepared.files.len(), blocks = prepared.catalog.blocks.len(), "使用下载来的原版材质");
-                Some(active(prepared))
+                Some(active(prepared, false))
             }
             Ok(None) => None,
             Err(err) => {
@@ -757,11 +754,22 @@ impl TextureService {
     }
 }
 
-fn active(prepared: disk_cache::Prepared) -> Active {
+fn active(prepared: disk_cache::Prepared, degraded: bool) -> Active {
     Active {
+        skins: DefaultSkinSet::of_source(&prepared.files),
         dir: prepared.dir,
         files: prepared.files,
         catalog: prepared.catalog,
+        degraded,
+    }
+}
+
+fn status_of(state: &State) -> ArtStatus {
+    ArtStatus {
+        source: state.active.as_ref().map(|a| a.catalog.version_id.clone()),
+        degraded: state.active.as_ref().is_some_and(|a| a.degraded),
+        default_skins: state.active.as_ref().map(|a| a.skins).unwrap_or_default(),
+        panorama: state.panorama.is_some(),
     }
 }
 

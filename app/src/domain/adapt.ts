@@ -103,7 +103,7 @@ export function authServerFromDto(dto: AuthServerDto): AuthServer {
 export interface AuthlibProfile {
   uuid: string;
   name: string;
-  /** 取不到皮肤时为 null，画剪影。 */
+  /** 拿不到远程皮肤时是按角色 UUID 选的默认皮肤；UUID 不是 32 位十六进制时为 null，画人偶。 */
   skin: SkinInfoDto | null;
 }
 
@@ -160,6 +160,8 @@ export interface InstanceSummary {
   cover: string | null;
   /** 封面方块用的玩家图片在材质协议 /cover/ 下的取图键；没设或文件不见了为 null。 */
   coverImage: string | null;
+  /** 封面方块图片的主色调（色相 0-359），卡面的渐变花瓣按它画；没有图片、图片太灰或没记色调时为 null，按方块的色调画。 */
+  coverImageHue: number | null;
   /** 卡面背景；follow 跟随外观设置里的默认。 */
   background: CoverBackground;
   /** 卡面背景图片的取图键；没设或文件不见了为 null。 */
@@ -175,12 +177,14 @@ export interface InstanceSummary {
   playtimeMin: number | null;
   /** 游玩记录读不出来的原因。 */
   playError: string | null;
-  /** 实例目录或工作目录读不出来的原因；此时 createdAt 或 modCount、worldCount、isolated 为 null。 */
+  /** 实例目录或工作目录读不出来的原因；此时 createdAt 或 modCount、worldCount、resourcePackCount、isolated 为 null。 */
   dirError: string | null;
   /** mods/ 下的文件数，只数不解析；损坏、设置或工作目录读不出时为 null。 */
   modCount: number | null;
   /** saves/ 下的存档数（每个文件夹算一个）；何时为 null 同 modCount。 */
   worldCount: number | null;
+  /** resourcepacks/ 下的资源包数（文件夹与 .zip 文件各算一个，与内容列表同一口径）；何时为 null 同 modCount。 */
+  resourcePackCount: number | null;
   /** 隔离的生效值；何时为 null 同 modCount。 */
   isolated: boolean | null;
   /** 实例设置里的最大内存 MB；null 为跟随全局（或设置读不出）。 */
@@ -277,6 +281,10 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
   if (dto.activity === "inherited" && dto.used_by === null) throw new Error(`实例 ${dto.id} 被当作基底占着，却没说是哪个实例在用`);
   if (dto.used_by !== null && dto.activity === null) throw new Error(`实例 ${dto.id} 正被 ${dto.used_by} 使用，却没有报出占用`);
   if ((dto.playtime_min === null) !== (dto.play_error !== null)) throw new Error(`实例 ${dto.id} 的游玩时长与它的读取错误对不上`);
+  const hue = dto.cover_image_hue;
+  if (hue !== null && (dto.cover_image === null || !Number.isInteger(hue) || hue < 0 || hue >= 360)) {
+    throw new Error(`实例 ${dto.id} 的封面方块图片色调不对（${String(hue)}，取图键 ${String(dto.cover_image)}）`);
+  }
   return {
     id: dto.id,
     name: dto.id,
@@ -290,6 +298,7 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     description: dto.description,
     cover: dto.cover,
     coverImage: dto.cover_image,
+    coverImageHue: hue,
     background: oneOf(dto.background, COVER_BACKGROUNDS, "卡面背景"),
     backgroundImage: dto.background_image,
     pinned: ctx.pins.includes(dto.id),
@@ -302,6 +311,7 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     dirError: dto.dir_error,
     modCount: dto.mod_count,
     worldCount: dto.world_count,
+    resourcePackCount: dto.resource_pack_count,
     isolated: dto.isolated,
     memoryMb: dto.memory_mb,
     modpack: dto.modpack === null ? null : modpackFromDto(dto.modpack),
@@ -405,6 +415,8 @@ export interface Settings {
   extraJavaPaths: string[];
   preferDedicatedGpu: boolean;
   skipAccessibilityOnboarding: boolean;
+  /** 新建实例与导入整合包时沿用默认设置。 */
+  newInstanceTemplate: boolean;
   /** 存档备份：退出游戏后是否自动备份，自动备份每个存档留几份、全部备份的总量上限（GB）。 */
   worldBackup: WorldBackup;
 }
@@ -443,6 +455,7 @@ export function settingsFromDto(dto: ConfigDto): Settings {
     extraJavaPaths: [...dto.extra_java_paths],
     preferDedicatedGpu: dto.prefer_dedicated_gpu,
     skipAccessibilityOnboarding: dto.skip_accessibility_onboarding,
+    newInstanceTemplate: dto.new_instance_template,
     worldBackup: { auto: dto.world_backup.auto, keepPerWorld: dto.world_backup.keep_per_world, maxTotalGb: dto.world_backup.max_total_gb },
   };
 }
@@ -466,6 +479,7 @@ export interface SettingsPatch {
   language?: UiLanguage;
   preferDedicatedGpu?: boolean;
   skipAccessibilityOnboarding?: boolean;
+  newInstanceTemplate?: boolean;
   /** 三项一起写：后端要求一次给全。 */
   worldBackup?: WorldBackup;
 }
@@ -533,7 +547,16 @@ export function taskFromRecord(dto: TaskRecordDto): Task {
     createdAt: dto.created_at,
     finishedAt: dto.finished_at,
     spec: { command: dto.spec.command, args: dto.spec.args },
+    gameDir: journalGameDir(dto),
   };
+}
+
+/** 记录里的发起时游戏目录：较早的日志没有这一项，记为不知道（null）；有这一项却不是字符串或 null 是日志坏了。 */
+function journalGameDir(dto: TaskRecordDto): string | null {
+  const value: unknown = dto.game_dir;
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new Error(`任务 ${dto.id} 的 game_dir 应为字符串或 null`);
+  return value;
 }
 
 export function taskToRecord(task: Task): TaskRecordDto {
@@ -556,5 +579,6 @@ export function taskToRecord(task: Task): TaskRecordDto {
     created_at: task.createdAt,
     finished_at: task.finishedAt,
     spec: { command: task.spec.command, args: task.spec.args },
+    game_dir: task.gameDir,
   };
 }

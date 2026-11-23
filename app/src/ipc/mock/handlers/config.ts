@@ -11,6 +11,8 @@ import type {
 } from "../../config";
 import { UI_LANGUAGES } from "../../config";
 import { IpcError } from "../../errors";
+import type { UsageNoticeAcceptanceDto } from "../../system";
+import { GAME_DIR_CHANGED_ERROR_CODE } from "../../tasks";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
 
 export const MOCK_DATA_DIR = "D:\\Games\\Launcher";
@@ -80,6 +82,7 @@ function seedConfig(): ConfigDto {
     extra_java_paths: [],
     prefer_dedicated_gpu: false,
     skip_accessibility_onboarding: true,
+    new_instance_template: true,
     world_backup: { auto: true, keep_per_world: 5, max_total_gb: 20 },
   };
 }
@@ -90,6 +93,8 @@ let disk = new Set(SEED_DISK.map(norm));
 let withVersions = new Set(SEED_WITH_VERSIONS.map(norm));
 let versions = seedVersions();
 let firstRunCompleted = false;
+/** 与后端配置的 usage_notice 一致：确认过的须知版本与时刻，没确认过为 null。 */
+let usageNotice: UsageNoticeAcceptanceDto | null = null;
 
 /**
  * 与后端 FirstRunBaseline 一致：首次启动向导第一步之前的目录记录。第一步可以提交不止一次（回到第一步改了再离开），
@@ -154,6 +159,18 @@ function directoryName(path: string): string {
 /** 当前游戏目录。 */
 export function mockGameDir(): string {
   return config.game_dir;
+}
+
+/**
+ * 与后端 ensure_game_dir 同口径：按实例名动手的任务命令带来的 gameDir（入队那一刻的游戏目录）不是当前目录时报
+ * game_dir_changed，什么都不动。调用方与后端同序，放在占住实例、登记任务之前。缺这个参数是 Tauri 自己的参数错误。
+ */
+export function ensureMockGameDir(args: MockArgs, command: string): void {
+  const expected = args.gameDir;
+  if (typeof expected !== "string") throw tauriArgError(command, "gameDir", "missing required key gameDir");
+  const current = config.game_dir;
+  if (samePath(expected, current)) return;
+  throw new IpcError(GAME_DIR_CHANGED_ERROR_CODE, `当前游戏目录已经换了，不是发起任务时的那个（发起于 ${expected}，当前是 ${current}）`, { expected, current });
 }
 
 /** 游戏目录的显示名，与目录列表同一规则；还没记录的文件夹也按它推。 */
@@ -247,6 +264,15 @@ export function markFirstRunCompleted(): void {
   firstRunCompleted = true;
 }
 
+export function usageNoticeAcceptance(): UsageNoticeAcceptanceDto | null {
+  return usageNotice === null ? null : { ...usageNotice };
+}
+
+/** 与后端 accept_usage_notice 一致：替换之前的记录，时刻取此刻。版本号的校验由调用方做。 */
+export function recordUsageNoticeAcceptance(version: number): void {
+  usageNotice = { version, accepted_at: Date.now() };
+}
+
 /** 解析带名目录：路径按游戏目录规则，名字去空白后不能为空。 */
 export function parseNamedDirectory(raw: unknown, command: string): NamedDirectoryDto {
   const dto = requireStruct(raw, ["name", "path"], command, "extraDirectories");
@@ -322,6 +348,11 @@ export function mockWorldBackupSettings(): WorldBackupSettings {
   return config.world_backup;
 }
 
+/** 新实例是否沿用默认设置；实例 mock 的 template_info 与套用默认设置都按它。 */
+export function mockNewInstanceTemplate(): boolean {
+  return config.new_instance_template;
+}
+
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], what: string): T {
   if (!allowed.includes(value as T)) throw new IpcError("invalid_argument", `未知${what} ${String(value)}`);
   return value as T;
@@ -388,6 +419,7 @@ function updateConfig(args: MockArgs): void {
   if (args.language !== undefined) next.language = oneOf(args.language, UI_LANGUAGES, "的界面语言");
   if (args.preferDedicatedGpu !== undefined) next.prefer_dedicated_gpu = requireBoolean(args, "preferDedicatedGpu");
   if (args.skipAccessibilityOnboarding !== undefined) next.skip_accessibility_onboarding = requireBoolean(args, "skipAccessibilityOnboarding");
+  if (args.newInstanceTemplate !== undefined) next.new_instance_template = requireBoolean(args, "newInstanceTemplate");
   if (args.worldBackup !== undefined) next.world_backup = parseWorldBackup(args.worldBackup);
   config = next;
 }
@@ -472,6 +504,7 @@ export function reset(): void {
   versions = seedVersions();
   firstRunCompleted = false;
   firstRunBaseline = null;
+  usageNotice = null;
 }
 
 interface ConfigSnapshot {
@@ -481,25 +514,31 @@ interface ConfigSnapshot {
   withVersions: string[];
   versions: [path: string, names: string[]][];
   firstRunCompleted: boolean;
+  usageNotice: UsageNoticeAcceptanceDto | null;
 }
 
 /** 后来才加进配置、早先存下的快照里没有的字段。 */
-type LaterConfigFields = "extra_java_paths" | "prefer_dedicated_gpu" | "skip_accessibility_onboarding";
-type StoredConfigSnapshot = Omit<ConfigSnapshot, "config"> & { config: Omit<ConfigDto, LaterConfigFields> & Partial<Pick<ConfigDto, LaterConfigFields>> };
+type LaterConfigFields = "extra_java_paths" | "prefer_dedicated_gpu" | "skip_accessibility_onboarding" | "new_instance_template";
+type StoredConfigSnapshot = Omit<ConfigSnapshot, "config" | "usageNotice"> & {
+  config: Omit<ConfigDto, LaterConfigFields> & Partial<Pick<ConfigDto, LaterConfigFields>>;
+  usageNotice?: UsageNoticeAcceptanceDto | null;
+};
 
 // 快照形状一变就升版本：旧快照里的配置缺字段，读回来会在 DTO 适配处出错，不如启用时就明确报版本不符。
 // 版本 4：另存各目录的版本名（移动实例会往里加）。
 export const persist: MockPersist = {
   version: 4,
-  snapshot: (): ConfigSnapshot => ({ config, extras, disk: [...disk], withVersions: [...withVersions], versions: [...versions], firstRunCompleted }),
+  snapshot: (): ConfigSnapshot => ({ config, extras, disk: [...disk], withVersions: [...withVersions], versions: [...versions], firstRunCompleted, usageNotice }),
   restore: (data) => {
     const saved = data as StoredConfigSnapshot;
-    // 与后端配置的 serde(default) 一致：手动 Java、独显偏好与跳过无障碍引导是后加的字段，之前存下的快照没有它们，按默认值读入
-    config = { extra_java_paths: [], prefer_dedicated_gpu: false, skip_accessibility_onboarding: true, ...saved.config };
+    // 与后端配置的 serde(default) 一致：手动 Java、独显偏好、跳过无障碍引导与沿用默认设置是后加的字段，之前存下的快照没有它们，按默认值读入
+    config = { extra_java_paths: [], prefer_dedicated_gpu: false, skip_accessibility_onboarding: true, new_instance_template: true, ...saved.config };
     extras = saved.extras;
     disk = new Set(saved.disk);
     withVersions = new Set(saved.withVersions);
     versions = new Map(saved.versions);
     firstRunCompleted = saved.firstRunCompleted;
+    // 与后端一样，早先存下、还没有这一项的快照按没确认过读入
+    usageNotice = saved.usageNotice === undefined ? null : saved.usageNotice;
   },
 };

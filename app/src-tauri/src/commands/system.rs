@@ -1,8 +1,13 @@
-//! 系统：内存建议、首次启动、启动提示与连通性探测。
+//! 系统：内存建议、首次启动、使用须知的确认、启动提示与连通性探测。
+
+use std::num::NonZeroU32;
 
 use petalfall_base::fs::DataDirResolution;
+use petalfall_core::data_format::GuardMode;
 use petalfall_core::folders::{ensure_game_dir, probe_dir, validate_game_dir, FirstRunBaseline};
-use petalfall_core::{ConfigRecovery, MemoryAdvice, MemoryLimit, NeedFactor};
+use petalfall_core::{
+    ConfigRecovery, MemoryAdvice, MemoryLimit, NeedFactor, UsageNoticeAcceptance,
+};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
@@ -104,9 +109,72 @@ pub(crate) async fn complete_first_run_with(
     };
     // 建目录在拿写锁之前：盘慢或挂起时不连累其它命令。
     ensure_game_dir(&game_dir).await?;
+    // 选的目录可能被更新的落樱用过，或记号读不懂：核对不过就不收下它，配置与首次启动状态都不动，用户换一个
+    // 文件夹再提交。关卡要读写记号，在写锁之外的快照上做。
+    facade
+        .snapshot()
+        .await
+        .guard_game_dir_at(&game_dir, GuardMode::Use)
+        .await?;
     facade
         .update(|petalfall| {
             petalfall.complete_first_run(&base, game_dir, extras);
+            Ok::<_, CommandError>(())
+        })
+        .await
+}
+
+// ---- 使用须知 ----
+
+/// 本机确认过的使用须知。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct UsageNoticeAcceptanceDto {
+    /// 确认的是第几版：须知文首「版本：N」的 N，从 1 起。
+    pub version: u32,
+    /// 确认的时刻，Unix 毫秒。
+    pub accepted_at: u64,
+}
+
+impl From<UsageNoticeAcceptance> for UsageNoticeAcceptanceDto {
+    fn from(acceptance: UsageNoticeAcceptance) -> Self {
+        Self {
+            version: acceptance.version.get(),
+            accepted_at: acceptance.accepted_at,
+        }
+    }
+}
+
+/// 本机确认过的使用须知；没确认过（含旧配置没有这一项）为 null。须知的版本号只在前端产物里，
+/// 要不要再展示由前端拿它来比。
+#[tauri::command]
+pub async fn usage_notice_acceptance(
+    facade: State<'_, Facade>,
+) -> Result<Option<UsageNoticeAcceptanceDto>, CommandError> {
+    Ok(facade
+        .read()
+        .await
+        .usage_notice_acceptance()
+        .map(UsageNoticeAcceptanceDto::from))
+}
+
+/// 用户点了同意：记下第 `version` 版与此刻的时间并落盘。`version` 是 0 时报 invalid_argument，什么都不记。
+#[tauri::command]
+pub async fn accept_usage_notice(
+    version: u32,
+    facade: State<'_, Facade>,
+) -> Result<(), CommandError> {
+    accept_usage_notice_with(&facade, version).await
+}
+
+pub(crate) async fn accept_usage_notice_with(
+    facade: &Facade,
+    version: u32,
+) -> Result<(), CommandError> {
+    let version = NonZeroU32::new(version)
+        .ok_or_else(|| CommandError::invalid_argument("使用须知的版本号从 1 起，收到的是 0"))?;
+    facade
+        .update(|petalfall| {
+            petalfall.accept_usage_notice(version);
             Ok::<_, CommandError>(())
         })
         .await
@@ -583,6 +651,97 @@ mod tests {
         assert!(!dir.path().join("config.json").exists());
     }
 
+    /// 选的目录被更新的落樱用过、或记号读不懂：不收下它，不写配置、仍是首次启动、当前目录照旧，记号也不动；
+    /// detail 的 path 是选的游戏目录。之后换一个记号等于这一版的文件夹再提交，照常完成。
+    #[tokio::test]
+    async fn first_run_refuses_a_game_dir_whose_data_format_it_cannot_use() {
+        use petalfall_core::data_format::DATA_FORMAT;
+
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let slot = FirstRunBaselineSlot::default();
+        let config_path = dir.path().join("config.json");
+        let default_dir = facade.read().await.game_dir().to_path_buf();
+        let write_stamp = |game_dir: &std::path::Path, contents: &str| {
+            let stamp = game_dir.join(".petalfall").join("data-format.json");
+            std::fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+            std::fs::write(&stamp, contents).unwrap();
+            stamp
+        };
+
+        let newer = dir.path().join("Newer").join(".minecraft");
+        let newer_stamp = write_stamp(
+            &newer,
+            &format!(
+                r#"{{"data_format":{},"written_by":"1.0.0-beta.5"}}"#,
+                DATA_FORMAT + 1
+            ),
+        );
+        let broken = dir.path().join("Broken").join(".minecraft");
+        let broken_stamp = write_stamp(&broken, "[2]");
+
+        for (target, stamp, expected_code, detail) in [
+            (
+                &newer,
+                &newer_stamp,
+                code::GAME_DIR_DATA_TOO_NEW,
+                serde_json::json!({
+                    "path": newer.display().to_string(),
+                    "found": DATA_FORMAT + 1,
+                    "supported": DATA_FORMAT,
+                    "written_by": "1.0.0-beta.5",
+                    "written_by_channel": "beta",
+                }),
+            ),
+            (
+                &broken,
+                &broken_stamp,
+                code::DATA_FORMAT_UNREADABLE,
+                serde_json::json!({
+                    "path": broken.display().to_string(),
+                    "reason": "不是 JSON 对象，而是数组",
+                }),
+            ),
+        ] {
+            let stamp_before = std::fs::read(stamp).unwrap();
+
+            let err = complete_first_run_with(
+                &facade,
+                &slot,
+                &target.display().to_string(),
+                vec![NamedDirectoryDto {
+                    name: "HMCL".into(),
+                    path: r"D:\HMCL\.minecraft".into(),
+                }],
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.code, expected_code, "{}", target.display());
+            assert_eq!(err.detail, Some(detail), "{}", target.display());
+            assert!(facade.read().await.is_first_run());
+            assert_eq!(facade.read().await.game_dir(), default_dir.as_path());
+            assert!(!config_path.exists());
+            assert_eq!(std::fs::read(stamp).unwrap(), stamp_before);
+        }
+
+        let chosen = dir.path().join("Chosen").join(".minecraft");
+        let chosen_contents = format!(r#"{{"data_format":{DATA_FORMAT}}}"#);
+        let chosen_stamp = write_stamp(&chosen, &chosen_contents);
+        complete_first_run_with(&facade, &slot, &chosen.display().to_string(), Vec::new())
+            .await
+            .unwrap();
+        assert!(!facade.read().await.is_first_run());
+        let saved = ConfigStore::at(&config_path).load().await.unwrap();
+        assert!(saved.first_run_completed);
+        assert_eq!(saved.game_directory.as_deref(), Some(chosen.as_path()));
+        assert!(saved.extra_game_directories.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(chosen_stamp).unwrap(),
+            chosen_contents
+        );
+    }
+
     #[tokio::test]
     async fn unknown_instance_in_memory_advice_is_version_not_installed() {
         let dir = tempfile::tempdir().unwrap();
@@ -606,5 +765,68 @@ mod tests {
         let limit = json["limit"]["mb"].as_u64().unwrap();
         assert!(limit * 2 <= json["total_mb"].as_u64().unwrap());
         assert_eq!(json["recommended_mb"].as_u64().unwrap(), limit.min(2560));
+    }
+
+    fn now_millis() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// 同意之后版本与时刻都落了盘，读回来的就是这一份；再同意更新的一版时整条换掉。
+    #[tokio::test]
+    async fn accepting_usage_notice_persists_version_and_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        assert_eq!(facade.read().await.usage_notice_acceptance(), None);
+        let first = 1 + fastrand::u32(..500);
+
+        let before = now_millis();
+        accept_usage_notice_with(&facade, first).await.unwrap();
+        let after = now_millis();
+
+        let saved = ConfigStore::at(dir.path().join("config.json"))
+            .load()
+            .await
+            .unwrap()
+            .usage_notice
+            .expect("同意之后 config.json 里应有记录");
+        assert_eq!(saved.version.get(), first);
+        assert!(
+            (before..=after).contains(&saved.accepted_at),
+            "确认时刻 {} 不在命令前后 {before}..={after} 之间",
+            saved.accepted_at
+        );
+        let read = facade
+            .read()
+            .await
+            .usage_notice_acceptance()
+            .map(UsageNoticeAcceptanceDto::from);
+        assert_eq!(
+            serde_json::to_value(read).unwrap(),
+            serde_json::json!({ "version": first, "accepted_at": saved.accepted_at })
+        );
+
+        accept_usage_notice_with(&facade, first + 1).await.unwrap();
+        let replaced = ConfigStore::at(dir.path().join("config.json"))
+            .load()
+            .await
+            .unwrap()
+            .usage_notice
+            .unwrap();
+        assert_eq!(replaced.version.get(), first + 1);
+        assert!(replaced.accepted_at >= saved.accepted_at);
+    }
+
+    /// 版本号 0 不是任何一版须知：拒绝，内存与盘上都不记。
+    #[tokio::test]
+    async fn zero_usage_notice_version_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let err = accept_usage_notice_with(&facade, 0).await.unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        assert_eq!(facade.read().await.usage_notice_acceptance(), None);
+        assert!(!dir.path().join("config.json").exists());
     }
 }

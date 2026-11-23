@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
-// 浮层面板的形变与头尾结构：jsdom 不做布局，形变本身播不出来，这里断言的是它依赖的结构、定位时机与标记。
+// 浮层面板的形变与头尾结构：jsdom 不做布局，形变本身播不出来，这里断言的是它依赖的结构、定位时机与标记；另有打开时初始聚焦的时机。
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MotionConfig, visualElementStore } from "framer-motion";
-import { act, useState } from "react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { act, useRef, useState, type ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { render, setRect, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
-import { Popover } from "./Popover";
+import { keydown, render, setRect, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
+import { refuseHiddenFocus } from "../test/focus-fixup";
+import { Popover, usePopoverInitialFocus } from "./Popover";
 import styles from "./Popover.module.css";
 
 let view: Rendered | undefined;
@@ -27,10 +28,11 @@ interface HostProps {
   header?: boolean;
   footer?: boolean;
   className?: string;
+  maxWidth?: "default" | "window";
 }
 
 /** 锚点按钮加一个开着的浮层；rerender 换 props 时面板不重新挂载。 */
-function Host({ layoutKey, header = false, footer = false, className }: HostProps) {
+function Host({ layoutKey, header = false, footer = false, className, maxWidth }: HostProps) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   return (
     <>
@@ -42,6 +44,7 @@ function Host({ layoutKey, header = false, footer = false, className }: HostProp
         placement="bottom-end"
         aria-label="下载快览"
         className={className}
+        maxWidth={maxWidth}
         layoutKey={layoutKey}
         header={header ? <p>标题行</p> : undefined}
         footer={footer ? <p>底栏</p> : undefined}
@@ -111,6 +114,15 @@ describe("面板结构", () => {
     expect(p.hasAttribute("data-structured")).toBe(true);
     expect(p.hasAttribute("data-framer-portal-id")).toBe(false);
     expect([...p.children].map((c) => c.className)).toEqual([styles.header, styles.body]);
+  });
+
+  it("宽度上限默认不带标记（样式表里的 360）；maxWidth 为 window 时带上标记，样式表据此只夹在窗口内", () => {
+    const { rerender } = mount({});
+    expect(panel().hasAttribute("data-max-width")).toBe(false);
+    rerender({ maxWidth: "default" });
+    expect(panel().hasAttribute("data-max-width")).toBe(false);
+    rerender({ maxWidth: "window" });
+    expect(panel().getAttribute("data-max-width")).toBe("window");
   });
 });
 
@@ -217,6 +229,82 @@ describe("减少动画", () => {
   });
 });
 
+// 面板定位前是 visibility: hidden，浏览器不让隐藏的元素获得焦点：refuseHiddenFocus 让 jsdom 照这条规则处理 focus()
+describe("初始聚焦", () => {
+  /** 内容经 usePopoverInitialFocus 把焦点放到第二个按钮上。 */
+  function FocusSecond() {
+    const target = useRef<HTMLButtonElement>(null);
+    usePopoverInitialFocus(() => target.current?.focus());
+    return (
+      <>
+        <button type="button">前一个</button>
+        <button type="button" ref={target}>
+          目标
+        </button>
+      </>
+    );
+  }
+
+  function FocusHost({ autoFocus = false, children }: { autoFocus?: boolean; children: ReactNode }) {
+    const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+    const [open, setOpen] = useState(false);
+    return (
+      <>
+        <button ref={setAnchor} onClick={() => setOpen(true)}>
+          筛选
+        </button>
+        <Popover open={open} anchor={anchor} onClose={() => setOpen(false)} autoFocus={autoFocus} aria-label="筛选">
+          {children}
+        </Popover>
+      </>
+    );
+  }
+
+  /** 焦点先放在锚点上（像真实点击那样），再记录打开这一下之后的每次 focus()。 */
+  function openFrom(ui: ReactNode) {
+    view = render(
+      <OverlayProvider>
+        {ui}
+        <OverlayRoot />
+      </OverlayProvider>,
+    );
+    const anchor = view.container.querySelector("button") as HTMLButtonElement;
+    act(() => anchor.focus());
+    const calls = refuseHiddenFocus();
+    act(() => anchor.click());
+    return { anchor, calls };
+  }
+
+  it("autoFocus：面板定位完、可见之后才把焦点移进面板，隐藏时一次也不聚焦；Esc 关闭后焦点回到锚点", () => {
+    const { anchor, calls } = openFrom(
+      <FocusHost autoFocus>
+        <p>主体</p>
+      </FocusHost>,
+    );
+    expect(panel().style.visibility).toBe("visible");
+    expect(calls.map((c) => [c.target, c.hidden])).toEqual([[panel(), false]]);
+    expect(document.activeElement).toBe(panel());
+    keydown(panel(), "Escape");
+    expect(document.activeElement).toBe(anchor);
+  });
+
+  it("内容经 usePopoverInitialFocus 聚焦：在面板可见的那次提交里执行一次，落在内容指定的元素上", () => {
+    const { calls } = openFrom(
+      <FocusHost>
+        <FocusSecond />
+      </FocusHost>,
+    );
+    const target = [...panel().querySelectorAll("button")].find((b) => b.textContent === "目标");
+    expect(calls.map((c) => [c.target, c.hidden])).toEqual([[target, false]]);
+    expect(document.activeElement).toBe(target);
+  });
+
+  it("usePopoverInitialFocus 用在 Popover 之外直接抛错", () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(() => render(<FocusSecond />)).toThrow("usePopoverInitialFocus 只能用在 Popover 的内容里");
+  });
+});
+
 describe("样式约定", () => {
   const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "Popover.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
@@ -254,5 +342,17 @@ describe("样式约定", () => {
     expect(css).toMatch(/(^|\n)\.header,\s*\.footer\s*\{/);
     expect(rule(".footer").get("position")).toBe("relative");
     expect(rule(".content").get("position")).toBe("relative");
+  });
+
+  // 发现页适配实例的选项是「适配：」加最长 32 个汉字的实例名，约 490px，留在 360 里会被截断
+  it("默认最大宽 360；窗口档只换上限变量，下拉选择按它算的最大宽一起放开，夹在窗口内两侧各 8", () => {
+    const base = rule(".panel");
+    expect(base.get("--popover-max-width")).toBe("360px");
+    expect(base.get("max-width")).toBe("var(--popover-max-width)");
+    expect(rule(".panel[data-match-width]").get("max-width")).toBe("max(var(--popover-max-width), var(--popover-anchor-width))");
+    const wide = rule('.panel[data-max-width="window"]');
+    expect(wide.get("--popover-max-width")).toBe("calc(100% - var(--sk-space-8) * 2)");
+    // 只换变量：不另写 max-width，免得盖掉下拉选择「不小于触发器宽」的那条
+    expect(wide.has("max-width")).toBe(false);
   });
 });

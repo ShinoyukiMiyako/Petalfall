@@ -1,6 +1,8 @@
-// 没有自定义皮肤时原版客户端（1.19.3 起）显示的默认皮肤：由 UUID 的哈希在 9 套默认皮肤 × 细臂、宽臂两种体型里选一套。
+// 没有自定义皮肤时原版客户端显示的默认皮肤：由 UUID 的哈希选出。1.19.3 起在 9 套默认皮肤 × 细臂、宽臂两种体型里选一套；
+// 更早只有宽臂的史蒂夫与细臂的艾利克斯两套，按哈希的奇偶选。
 // 离线账户永远没有自定义皮肤，进游戏看到的就是这一套；添加离线账户的弹窗按它预览，真正的账户皮肤由后端回答。
-// 皮肤图本身不随应用分发，按白名单路径从本机游戏文件读取，读不到时立绘退回剪影。
+// 皮肤图本身不随应用分发，按白名单路径从本机游戏文件读取，读不到时立绘退回人偶；所以选取规则跟着材质源的版本走，
+// 旧版材质源里没有 18 款的图。
 
 import type { SkinRef } from "../../art/skin/layout";
 
@@ -26,11 +28,26 @@ export function javaUuidHash(uuid: string): number {
 
 type DefaultSkinRef = Extract<SkinRef, { kind: "default" }>;
 
-/** 还没输入用户名时离线弹窗舞台上站的两位：宽臂的史蒂夫与细臂的艾利克斯，1.19.3 以前原版只有这两套默认皮肤。 */
-export const STARTER_SKINS: readonly { name: string; skin: DefaultSkinRef }[] = [
-  { name: "Steve", skin: { kind: "default", path: "entity/player/wide/steve", model: "wide" } },
-  { name: "Alex", skin: { kind: "default", path: "entity/player/slim/alex", model: "slim" } },
+/** 材质源里是哪一套默认皮肤（材质状态的 legacySkins）：1.19.3 起的 18 款，或更早只有的两款。 */
+export type DefaultSkinSet = "modern" | "legacy";
+
+/** 1.19.3 以前原版的两套默认皮肤，下标是哈希的最低位：客户端在 (uuid.hashCode() & 1) == 1 时给细臂艾利克斯，否则宽臂史蒂夫。 */
+const LEGACY_SKINS: readonly DefaultSkinRef[] = [
+  { kind: "default", path: "entity/steve", model: "wide" },
+  { kind: "default", path: "entity/alex", model: "slim" },
 ];
+
+/** 还没输入用户名时离线弹窗舞台上站的两位：宽臂的史蒂夫与细臂的艾利克斯，1.19.3 以前原版只有这两套默认皮肤。 */
+export const STARTER_SKINS: Readonly<Record<DefaultSkinSet, readonly { name: string; skin: DefaultSkinRef }[]>> = {
+  modern: [
+    { name: "Steve", skin: { kind: "default", path: "entity/player/wide/steve", model: "wide" } },
+    { name: "Alex", skin: { kind: "default", path: "entity/player/slim/alex", model: "slim" } },
+  ],
+  legacy: [
+    { name: "Steve", skin: LEGACY_SKINS[0] },
+    { name: "Alex", skin: LEGACY_SKINS[1] },
+  ],
+};
 
 /** 原版默认皮肤数组里第 index 套（0 到 17）。 */
 function skinAt(index: number): DefaultSkinRef {
@@ -40,10 +57,18 @@ function skinAt(index: number): DefaultSkinRef {
   return { kind: "default", path: `entity/player/${model}/${name}`, model };
 }
 
-/** 这个 UUID 在原版客户端里的默认皮肤：下标为哈希对 18 取非负余数（Java 的 Math.floorMod）。 */
-export function defaultSkin(uuid: string): DefaultSkinRef {
-  return skinAt(((javaUuidHash(uuid) % DEFAULT_SKIN_COUNT) + DEFAULT_SKIN_COUNT) % DEFAULT_SKIN_COUNT);
+/**
+ * 这个 UUID 在原版客户端里的默认皮肤。1.19.3 起下标为哈希对 18 取非负余数（Java 的 Math.floorMod）；
+ * 更早看哈希的最低位，负哈希按补码取位，与 Java 的 & 一致。
+ */
+export function defaultSkin(uuid: string, set: DefaultSkinSet): DefaultSkinRef {
+  const hash = javaUuidHash(uuid);
+  if (set === "legacy") return LEGACY_SKINS[hash & 1];
+  return skinAt(((hash % DEFAULT_SKIN_COUNT) + DEFAULT_SKIN_COUNT) % DEFAULT_SKIN_COUNT);
 }
 
-/** 全部 18 套默认皮肤，顺序同原版数组。离线弹窗打开时预取它们，输入停顿后换上的立绘第一帧就是真皮肤。 */
-export const DEFAULT_SKINS: readonly DefaultSkinRef[] = Array.from({ length: DEFAULT_SKIN_COUNT }, (_, i) => skinAt(i));
+/** 一套里的全部默认皮肤，顺序同原版数组。离线弹窗打开时预取它们，输入停顿后换上的立绘第一帧就是真皮肤。 */
+export const DEFAULT_SKINS: Readonly<Record<DefaultSkinSet, readonly DefaultSkinRef[]>> = {
+  modern: Array.from({ length: DEFAULT_SKIN_COUNT }, (_, i) => skinAt(i)),
+  legacy: LEGACY_SKINS,
+};

@@ -3,8 +3,10 @@
 // 构建信息与第三方许可清单由构建脚本生成（scripts/build-info.mjs、scripts/third-party-licenses.mjs），这里只给读取入口。
 
 import type { BuildInfo } from "../../scripts/build-info.mjs";
-import { ADDITIONAL_TERMS_FILE, ASSET_LICENSE_FILE, LICENSE_TEXT_FILE, THIRD_PARTY_LICENSES_FILE } from "../../scripts/licenses-file.mjs";
+import { ADDITIONAL_TERMS_FILE, ASSET_LICENSE_FILE, LICENSE_TEXT_FILE, PRIVACY_NOTICE_FILE, THIRD_PARTY_LICENSES_FILE, USAGE_NOTICE_FILE } from "../../scripts/licenses-file.mjs";
 import type { ThirdPartyManifest } from "../../scripts/third-party-licenses.mjs";
+import { BundledFileError } from "./bundled-file";
+import { parseLegalNotice, type LegalNotice } from "./legal-notice";
 
 export type { BuildInfo, ReleaseChannel } from "../../scripts/build-info.mjs";
 export type { ThirdPartyManifest, ThirdPartyPackage } from "../../scripts/third-party-licenses.mjs";
@@ -44,11 +46,14 @@ export { LICENSE_TEXT_FILE };
 /** 附加条款与素材许可在产物根目录下的文件名（同样由 vite.config.ts 写进两个产物）。 */
 export { ADDITIONAL_TERMS_FILE, ASSET_LICENSE_FILE };
 
+/** 使用须知与隐私说明在产物根目录下的文件名（源文件在仓库的 docs 下，同样由 vite.config.ts 写进两个产物）。 */
+export { PRIVACY_NOTICE_FILE, USAGE_NOTICE_FILE };
+
 /** 第三方许可清单：体积大、只有关于页用到，用到时才去读。 */
 export async function loadThirdPartyLicenses(): Promise<ThirdPartyManifest> {
   const url = `${import.meta.env.BASE_URL}${THIRD_PARTY_LICENSES_FILE}`;
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`第三方许可清单读不出来：${url} 返回 ${response.status}`);
+  if (!response.ok) throw new BundledFileError("第三方许可清单", `${url} 返回 ${response.status}`);
   return (await response.json()) as ThirdPartyManifest;
 }
 
@@ -56,7 +61,7 @@ export async function loadThirdPartyLicenses(): Promise<ThirdPartyManifest> {
 async function loadLegalText(file: string, what: string): Promise<string> {
   const url = `${import.meta.env.BASE_URL}${file}`;
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`${what}读不出来：${url} 返回 ${response.status}`);
+  if (!response.ok) throw new BundledFileError(what, `${url} 返回 ${response.status}`);
   return response.text();
 }
 
@@ -73,4 +78,19 @@ export function loadAdditionalTerms(): Promise<string> {
 /** 素材许可：关于页与引导程序的协议页都用它，用到时才去读。 */
 export function loadAssetLicense(): Promise<string> {
   return loadLegalText(ASSET_LICENSE_FILE, "素材许可");
+}
+
+/** 读一份须知并按文首约定拆出版本号与正文；文首不合约定时报错。 */
+async function loadNotice(file: string, what: string): Promise<LegalNotice> {
+  return parseLegalNotice(await loadLegalText(file, what), what);
+}
+
+/** 使用须知：每次启动都经它读一次，与本机确认过的版本比对（state/usage-notice），使用须知页画的就是这一份；关于页的弹窗打开时另经它读。 */
+export function loadUsageNotice(): Promise<LegalNotice> {
+  return loadNotice(USAGE_NOTICE_FILE, "使用须知");
+}
+
+/** 隐私说明：关于页与使用须知页用它，用到时才去读。 */
+export function loadPrivacyNotice(): Promise<LegalNotice> {
+  return loadNotice(PRIVACY_NOTICE_FILE, "隐私说明");
 }

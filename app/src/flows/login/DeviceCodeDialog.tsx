@@ -5,6 +5,7 @@
 // - 获取代码时按拿到代码后的样子画：两步说明照常显示，只有链接、代码格与倒计时条是骨架，代码到了原位交叉淡化，
 //   弹窗不变高。骨架过了加载门的延迟才出现、出现了至少停留同样久，代码很快回来时界面不闪。
 // - 等待、成功、失败三种面在主体里交叉淡化，弹窗面板随之形变。
+// - 本机还没有原版材质时，成功区末尾顺带一行「下载原版材质」（与账户页同一个部件）：新账户没有自定义皮肤时默认皮肤画不出来。
 // 弹窗本身由 LoginFlow 渲染（各种登录共用一个），这里只算外框与主体交上去。
 
 import { motion, useReducedMotionConfig } from "framer-motion";
@@ -12,17 +13,20 @@ import { memo, useRef, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { AccountAvatar } from "../../art/skin/AccountAvatar";
 import { Spinner } from "../../art/Spinner";
+import { ART_DOWNLOAD_COPY } from "../../copy/cover";
 import { ACTION_ERROR, MICROSOFT_LOGIN_COPY, microsoftLoginFailure, withoutSettingsAction, type LoginFailureAction } from "../../copy/flows";
 import type { Account } from "../../domain/adapt";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
-import { codeCell, fade, springs } from "../../lib/motion";
+import { codeCell, successMark } from "../../lib/motion";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { errorDetailOf } from "../../state/errors";
 import { onboardingActive } from "../../state/selectors";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { deviceCodeExpired, deviceCodeRemaining, type DeviceLogin, type LoginState } from "../../state/login";
+import { ArtDownload, useSkinArtMissing } from "../../pages/shared/cover-picker/ArtDownload";
+import { Appear } from "../../ui/Appear";
 import { Banner } from "../../ui/Banner";
 import { Button, GlyphSlot } from "../../ui/Button";
 import { CopyButton } from "../../ui/KV";
@@ -71,6 +75,7 @@ export const DeviceCodeDialog = memo(function DeviceCodeDialog({ login, report }
   const totalMs = useCodeLifetime(device);
   const onboarding = useLauncherSelector(onboardingActive);
   const gate = useLoadingGate(device.status === "requesting");
+  const artMissing = useSkinArtMissing();
 
   const close = () => void run(() => actions.closeLogin(), ACTION_ERROR.cancelLogin);
   const restart = () => void run(() => actions.startMicrosoftLogin(login.intent), ACTION_ERROR.microsoftLogin);
@@ -108,7 +113,7 @@ export const DeviceCodeDialog = memo(function DeviceCodeDialog({ login, report }
       break;
     }
     case "success":
-      body = <Success account={device.account} updated={device.updated} />;
+      body = <Success account={device.account} updated={device.updated} artMissing={artMissing} />;
       footer = (
         <Button variant="primary" data-autofocus="" onClick={close}>
           {MICROSOFT_LOGIN_COPY.done}
@@ -178,8 +183,9 @@ export const DeviceCodeDialog = memo(function DeviceCodeDialog({ login, report }
     size: "md",
     closeOnScrim: false,
     onClose: close,
-    // 倒计时每秒重渲染一次，只在换状态、骨架换成代码时量布局
-    layoutKey: `${device.status}:${gate.view}`,
+    // 倒计时每秒重渲染一次，只在换状态、骨架换成代码、成功区的下载入口出没时量布局。入口在按钮、进度与失败之间换时
+    // 同为 30 高（小号按钮 30，进度一行字加细进度条也是 30）；下完后材质源随即换上、入口退场，收尾那一行不单独量
+    layoutKey: `${device.status}:${gate.view}${success && artMissing ? ":art" : ""}`,
     footer,
     body: <Swap id={success ? "success" : device.status === "failed" ? "failed" : "code"}>{body}</Swap>,
   });
@@ -315,11 +321,11 @@ function CopyLink({ text }: { text: string }) {
   return <CopyButton text={text} label={MICROSOFT_LOGIN_COPY.copyLink} copiedLabel={DEVICE_DIALOG_COPY.copied} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />;
 }
 
-function Success({ account, updated }: { account: Account; updated: boolean }) {
+function Success({ account, updated, artMissing }: { account: Account; updated: boolean; artMissing: boolean }) {
   const skin = useLoginSkin(account.uuid);
   return (
     <div className={styles.success}>
-      <motion.span className={styles.successMark} initial={{ opacity: 0, scale: 0.6 }} animate={{ opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } }} aria-hidden="true">
+      <motion.span className={styles.successMark} {...successMark} aria-hidden="true">
         <Icon name="check" size={24} />
       </motion.span>
       <p className={styles.successTitle} role="status">
@@ -333,6 +339,8 @@ function Success({ account, updated }: { account: Account; updated: boolean }) {
           <p className={styles.chipLine}>{DEVICE_DIALOG_COPY.accountLine}</p>
         </div>
       </div>
+      {/* 主按钮「完成」在底栏，这里只用幽灵按钮；下完后头像就地换上皮肤，这一行原地淡出，弹窗随布局签名形变 */}
+      <Appear itemClassName={styles.artEntry}>{artMissing && <ArtDownload key="art" compact quiet note={ART_DOWNLOAD_COPY.skinNoteShort} />}</Appear>
     </div>
   );
 }

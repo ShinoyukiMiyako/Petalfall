@@ -6,14 +6,17 @@ import { act, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { accountKindLabel } from "../copy/flows";
-import { ACCOUNT_COPY } from "../copy/shell";
+import { ACCOUNT_COPY, SHELL_ACTION_ERROR } from "../copy/shell";
 import { LOADING_DELAY_MS } from "../domain/limits";
 import type { AccountDto } from "../ipc/accounts";
+import { IpcError } from "../ipc/errors";
+import { fade } from "../lib/motion";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { resources } from "../state/resource";
+import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { accountDto, bootOverrides, deferred, resetRecorder, settle, type Deferred } from "../test/launcher";
-import { AccountCapsule } from "./AccountCapsule";
+import { AccountCapsule, useAccountSkin } from "./AccountCapsule";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider } from "./shell";
 import { TIER_REGULAR_MIN } from "./tier";
@@ -70,7 +73,10 @@ function holdAccounts(): Deferred<AccountDto[]> {
   return pending;
 }
 
-beforeEach(() => {
+// 有用例要在假时钟上逐帧采样：每个用例开始前先在真实计时器上把帧循环排空再换假时钟，否则还排在真实计时器上的那一帧
+// 会让换上假时钟之后的头几步推进扑空
+beforeEach(async () => {
+  await drainFrames();
   vi.useFakeTimers();
   // regular 档：胶囊里有名字，换账户时才看得出是哪一层
   vi.stubGlobal("innerWidth", TIER_REGULAR_MIN);
@@ -84,9 +90,6 @@ beforeEach(() => {
   ipc.overrides.set("set_current_account", () => null);
 });
 afterEach(() => {
-  view?.unmount();
-  view = undefined;
-  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -110,10 +113,11 @@ describe("冷启动时账户还没读到", () => {
     expect(capsule().dataset.kind).toBe("account");
   });
 
-  it("读到之后同一个胶囊换成当前账户：旧的骨架层退场，账户层从透明淡入", async () => {
+  it("等待期内就读到：同一个胶囊换成当前账户，看不见的骨架层直接拿掉、不播退场；只有胶囊外框从透明淡入，账户层挂上就是不透明的", async () => {
     const accounts = holdAccounts();
     await mount();
     const loading = capsule();
+    expect(capsule().hasAttribute("data-pending")).toBe(true);
     accounts.resolve([STEVE, ALEX]);
     await flush();
     expect(capsule()).toBe(loading);
@@ -121,11 +125,52 @@ describe("冷启动时账户还没读到", () => {
     expect(capsule().disabled).toBe(false);
     expect(capsule().hasAttribute("aria-hidden")).toBe(false);
     expect(capsule().getAttribute("aria-label")).toBe(ACCOUNT_COPY.current("Steve", accountKindLabel("offline", null)));
+    // 帧在假时钟下没往前走，骨架层要是在播退场就还在：胶囊正从透明淡入，骨架照常淡出的话会在账户名底下透出来
+    expect(faces()).toHaveLength(1);
+    expect(faces()[0].textContent).toBe("Steve");
+    // 同一次提交里胶囊去掉 data-pending，外框按样式表的过渡从透明淡入；账户层不再自己从透明起步
+    expect(capsule().hasAttribute("data-pending")).toBe(false);
+    expect(faces()[0].style.opacity).toBe("1");
+  });
+
+  it("等待期内就读到之后的每一帧：账户层一直是 1，看得见的不透明度只有胶囊外框那一层，第一张画面不是两层相乘", async () => {
+    const accounts = holdAccounts();
+    await mount();
+    accounts.resolve([STEVE, ALEX]);
+    await flush();
+    const [face] = faces();
+    expect(face.textContent).toBe("Steve");
+    // 看得见的不透明度是外框乘账户层。外框是 CSS 过渡，jsdom 不跑；账户层要是自己也走一遍 fade.in，
+    // 第一张画面就是外框这一帧的取值再乘上同一条曲线的开头。采样到两倍于淡入的时长，晚起步的淡入也逃不过
+    const until = performance.now() + 2 * fade.in.duration * 1000;
+    const seen = new Set<string>();
+    while (performance.now() < until) {
+      await stepFrames(1);
+      seen.add(face.style.opacity);
+    }
+    expect(face.isConnected).toBe(true);
+    expect([...seen]).toEqual(["1"]);
+  });
+
+  it("骨架露出来之后才读到：骨架层叠在下面退场，账户层从透明淡入", async () => {
+    const accounts = holdAccounts();
+    await mount();
+    await act(() => vi.advanceTimersByTimeAsync(LOADING_DELAY_MS));
+    expect(capsule().hasAttribute("data-pending")).toBe(false);
+    const [skeleton] = faces();
+    accounts.resolve([STEVE, ALEX]);
+    await flush();
+    // 骨架至少停留一个延迟，到点那一刻换成账户；帧还没往前走，退场停在开头
+    await act(() => vi.advanceTimersByTimeAsync(LOADING_DELAY_MS));
+    expect(capsule().dataset.kind).toBe("account");
     expect(faces()).toHaveLength(2);
+    expect(faces()[0]).toBe(skeleton);
+    expect(skeleton.textContent).toBe("");
+    expect(faces()[1].textContent).toBe("Steve");
     expect(faces()[1].style.opacity).toBe("0");
   });
 
-  it("读完确实没有账户才是「添加账户」，仍是同一个胶囊", async () => {
+  it("读完确实没有账户才是「添加账户」，仍是同一个胶囊；等待期内读完的同样不播骨架退场", async () => {
     bootOverrides(ipc, { accounts: [] });
     const accounts = holdAccounts();
     await mount();
@@ -136,6 +181,10 @@ describe("冷启动时账户还没读到", () => {
     expect(capsule()).toBe(loading);
     expect(capsule().dataset.kind).toBe("add");
     expect(capsule().getAttribute("aria-label")).toBe(ACCOUNT_COPY.addLabel);
+    expect(faces()).toHaveLength(1);
+    expect(faces()[0].textContent).toBe(ACCOUNT_COPY.add);
+    // 与读到账户时一样只淡胶囊外框一层
+    expect(faces()[0].style.opacity).toBe("1");
   });
 
   it("挂载时账户早已读到：直接是账户胶囊，内容不单独淡入", async () => {
@@ -232,5 +281,61 @@ describe("已经读到账户之后", () => {
     // 退场在假时钟下播不完，节点还在；减少动画下缩放一步到位，退场带缩放的话这里已经是 scale(0.6)
     expect(dot.isConnected).toBe(true);
     expect(dot.style.transform).not.toContain("scale");
+  });
+});
+
+describe("胶囊与切换菜单头像用的皮肤", () => {
+  const REMOTE = { kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true } as const;
+  const seen: unknown[] = [];
+
+  function SkinProbe({ uuid }: { uuid: string }) {
+    launcher = useLauncher();
+    seen.push(useAccountSkin(uuid));
+    return null;
+  }
+
+  async function mountProbe(uuid: string) {
+    seen.length = 0;
+    view = render(
+      <LauncherProvider>
+        <ShellProvider>
+          <SkinProbe uuid={uuid} />
+        </ShellProvider>
+      </LauncherProvider>,
+    );
+    await flush();
+  }
+
+  it("皮肤信息还在读时是「读取中」而不是「没有皮肤」：头像留着正在显示的脸，读到再换上", async () => {
+    const pending = deferred<typeof REMOTE>();
+    ipc.overrides.set("skin_info", () => pending.promise);
+    await mountProbe(STEVE.uuid);
+    expect(seen.at(-1)).toBe("loading");
+    pending.resolve(REMOTE);
+    await flush();
+    expect(seen.at(-1)).toEqual(REMOTE);
+  });
+
+  it("重取失败时沿用上次读到的皮肤；失败照旧经统一错误处理报成通知", async () => {
+    ipc.overrides.set("skin_info", () => REMOTE);
+    await mountProbe(STEVE.uuid);
+    expect(seen.at(-1)).toEqual(REMOTE);
+    ipc.overrides.set("skin_info", () => {
+      throw new IpcError("io", "账户文件读不出来");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    act(() => resources.invalidate(`skin:${STEVE.uuid}`));
+    await flush();
+    expect(seen.at(-1)).toEqual(REMOTE);
+    expect(launcher.state.toasts.map((t) => `${t.tone}:${t.title}`)).toEqual([`error:${SHELL_ACTION_ERROR.skin}`]);
+  });
+
+  it("从没读到过就失败：没有可沿用的，头像画人偶（null）", async () => {
+    ipc.overrides.set("skin_info", () => {
+      throw new IpcError("io", "账户文件读不出来");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mountProbe(STEVE.uuid);
+    expect(seen.at(-1)).toBeNull();
   });
 });

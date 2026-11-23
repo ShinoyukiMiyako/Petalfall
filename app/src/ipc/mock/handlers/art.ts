@@ -2,7 +2,7 @@ import type { ArtDownloadProgressDto, ArtStatusDto, BlockCatalogDto, CatalogBloc
 import { IpcError } from "../../errors";
 import { emitMockEvent } from "../events";
 import type { MockHandlers } from "../types";
-import { hasMockAccount, isMockOfflineAccount } from "./accounts";
+import { hasMockAccount } from "./accounts";
 
 // ipc/ 只能以类型方式引用别的模块，事件名与名单在这里按后端各写一份。
 const ART_CHANGED_EVENT = "petalfall://art-changed";
@@ -23,19 +23,26 @@ export function setMockArtStatus(next: ArtStatusDto): void {
   if (changed) emitMockEvent(ART_CHANGED_EVENT, next);
 }
 
-// 原版客户端默认皮肤数组的顺序（先 9 套细臂、后 9 套宽臂）与 Java 的 UUID.hashCode 加 Math.floorMod，与后端同一规则。
+// 原版客户端默认皮肤数组的顺序（先 9 套细臂、后 9 套宽臂）与 Java 的 UUID.hashCode 加 Math.floorMod，与后端同一规则；
+// 材质源早于 1.19.3 时与后端一样按哈希的最低位在 steve 与 alex 里选。
 const DEFAULT_SKIN_NAMES = ["alex", "ari", "efe", "kai", "makena", "noor", "steve", "sunny", "zuri"] as const;
 
 /** 导出给测试逐个核对：mock 生成的离线 UUID 只落在少数下标上，经 skin_info 覆盖不到全部 18 套。 */
-export function defaultSkin(uuid: string): Extract<SkinInfoDto, { kind: "default" }> {
+export function defaultSkin(uuid: string, legacy: boolean): Extract<SkinInfoDto, { kind: "default" }> {
   const hex = uuid.replace(/-/g, "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new IpcError("internal", `离线账户的 UUID 不是 32 位十六进制：${uuid}`);
+  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new IpcError("internal", `账户的 UUID 不是 32 位十六进制：${uuid}`);
   const hash = [0, 8, 16, 24].reduce((acc, at) => acc ^ Number.parseInt(hex.slice(at, at + 8), 16), 0) | 0;
+  if (legacy) return (hash & 1) === 1 ? { kind: "default", path: "entity/alex", model: "slim" } : { kind: "default", path: "entity/steve", model: "wide" };
   const count = DEFAULT_SKIN_NAMES.length * 2;
   const index = ((hash % count) + count) % count;
   const slim = index < DEFAULT_SKIN_NAMES.length;
   const name = DEFAULT_SKIN_NAMES[slim ? index : index - DEFAULT_SKIN_NAMES.length];
   return slim ? { kind: "default", path: `entity/player/slim/${name}`, model: "slim" } : { kind: "default", path: `entity/player/wide/${name}`, model: "wide" };
+}
+
+/** 拿不到远程皮肤时与后端一样按 UUID 给的默认皮肤，跟着当前材质源选哪一套；账户与外置登录待选的角色共用。 */
+export function fallbackSkin(uuid: string): Extract<SkinInfoDto, { kind: "default" }> {
+  return defaultSkin(uuid, status.source?.legacy_skins === true);
 }
 
 async function sha1Hex(text: string): Promise<string> {
@@ -140,7 +147,7 @@ async function artDownload(): Promise<ArtStatusDto> {
       await sleep(DOWNLOAD_STEP_MS);
       emitMockEvent(ART_DOWNLOAD_EVENT, step);
     }
-    setMockArtStatus({ source: { version_id: MOCK_DOWNLOADED_VERSION }, panorama: status.panorama });
+    setMockArtStatus({ source: { version_id: MOCK_DOWNLOADED_VERSION, degraded: false, legacy_skins: false }, panorama: status.panorama });
     return status;
   } finally {
     downloading = false;
@@ -154,13 +161,13 @@ export const handlers: MockHandlers = {
 
   art_download: () => artDownload(),
 
-  // 浏览器里没有远程皮肤缓存：正版与外置账户回 null（画剪影）；离线账户与后端一样给它的默认皮肤；
-  // 不存在的账户与后端一样报 AccountNotFound。
+  // 浏览器里没有远程皮肤缓存，正版与外置账户都拿不到远程皮肤：与后端一样按 UUID 给默认皮肤，与离线账户同一套规则；
+  // 不存在的账户与后端一样报 AccountNotFound。mock 的账户 UUID 都是自己生成的 32 位十六进制，碰不到后端回 null 的那一支。
   skin_info: (args) => {
     const uuid = args.accountUuid;
     if (typeof uuid !== "string") throw new IpcError("unknown", "invalid args `accountUuid` for command `skin_info`: missing required key accountUuid");
     if (!hasMockAccount(uuid)) throw new IpcError("AccountNotFound", `账户不存在: ${uuid}`, { uuid });
-    return isMockOfflineAccount(uuid) ? defaultSkin(uuid) : null;
+    return fallbackSkin(uuid);
   },
 
   // 只做后端同样的地址与主机校验并给出同样的键（地址的 SHA-1），不下载任何东西。

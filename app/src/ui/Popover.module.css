@@ -78,6 +78,14 @@
   max-width: max(var(--popover-max-width), var(--popover-anchor-width));
 }
 
+/*
+ * 不设固定上限，只夹在窗口内：改的是上限变量，上面两条按它算的最大宽一起生效。
+ * 百分比对着浮层根（窗口内容区）算，两侧边距与定位时夹在窗口内的 8 一致
+ */
+.panel[data-max-width="window"] {
+  --popover-max-width: calc(100% - var(--sk-space-8) * 2);
+}
+
 /* 退场中的面板不再接收指针：重新打开时新面板已在它之上挂载 */
 .panel[data-exiting] {
   pointer-events: none;

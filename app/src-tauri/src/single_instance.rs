@@ -123,7 +123,7 @@ impl Instance {
         self.waited_for_exit
     }
 
-    /// 应答事件。退出时要拉起安装程序的，用它先打发走在等的后来者。
+    /// 应答事件。要拉起安装程序的，在更新插件的退出前钩子里用它先打发走在等的后来者。
     pub fn answer(&self) -> Answer {
         self.answer.clone()
     }
@@ -448,6 +448,18 @@ mod tests {
             "除了 Local 这个前缀不能再有反斜杠：{lower}"
         );
         assert!(lower.starts_with("Local\\"), "{lower}");
+    }
+
+    /// 不同版本靠同一个名字在同一个数据目录上互斥。拼法一变，新旧版本就互不排斥，会同时写同一份数据，
+    /// 所以把整串钉成字面量：前缀、分隔符与应答后缀都不能动。
+    #[test]
+    fn the_name_is_spelled_the_way_released_versions_spell_it() {
+        let name = event_name(&PathBuf::from(r"D:\Games\Petalfall"));
+        assert_eq!(name, r"Local\Petalfall-d:/games/petalfall");
+        assert_eq!(
+            answer_name(&name),
+            r"Local\Petalfall-d:/games/petalfall|answer"
+        );
     }
 
     /// 真正创建一次，确认这种名字系统收：中文路径与空格都常见，应答名多出的 `|` 也要收。

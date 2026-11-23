@@ -13,7 +13,7 @@ import { GAME_EXIT_EVENT } from "../../ipc/launch";
 import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
 import type { MemoryAdviceDto } from "../../ipc/system";
 import { APP_NAME } from "../../lib/app-info";
-import { COMPLETION_HOLD_S } from "../../lib/progress-display";
+import { COMPLETION_HOLD_S, SPEED_REFRESH_MS } from "../../lib/progress-display";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickSaveFile } from "../../shell/platform";
 import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
@@ -22,7 +22,7 @@ import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, useLauncherSelector, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
-import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { fakeAnimate, keydown, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered, type ResizeObserverStub, type StubAnimation } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { emulateFocusFixup } from "../../test/focus-fixup";
 import { CORE_EVENT } from "../../ipc/tasks";
@@ -35,20 +35,25 @@ import { creationRef, creationRefEqual, installStage } from "./model";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
-// 让位挂到了哪些容器上、走哪条弹簧：jsdom 不做布局，让位本身在这里测不了，只核对它挂对了地方；挂载照常交给真实现
+// 让位挂到了哪些容器上、走哪条弹簧：jsdom 不做布局，让位本身在这里测不了，只核对它挂对了地方；挂载照常交给真实现，
+// 当场补跑的 sync 也原样交出
 const reflowed = vi.hoisted(() => new Map<Element, string>());
 vi.mock("../../lib/reflow", async (orig) => {
   const mod = await orig<typeof import("../../lib/reflow")>();
-  const { useCallback } = await import("react");
+  const { useMemo } = await import("react");
   return {
     ...mod,
     useReflow: <T extends HTMLElement>(spring: Parameters<typeof mod.useReflow>[0] = "settle") => {
       const real = mod.useReflow<T>(spring);
-      return useCallback(
-        (el: T | null) => {
-          if (el !== null) reflowed.set(el, spring);
-          return real(el);
-        },
+      return useMemo(
+        () =>
+          Object.assign(
+            (el: T | null) => {
+              if (el !== null) reflowed.set(el, spring);
+              return real(el);
+            },
+            { sync: real.sync },
+          ),
         [real, spring],
       );
     },
@@ -59,6 +64,21 @@ vi.mock("../../shell/platform", async (orig) => {
   const actual = await orig<typeof import("../../shell/platform")>();
   return { ...actual, pickSaveFile: vi.fn(actual.pickSaveFile) };
 });
+// 按可访问名称数进度条的渲染次数：计数外壳直接调用原组件函数，父级带来的重渲染都记在它上面。进度条的平滑走动画值，不自己重渲染
+const barRenders = vi.hoisted(() => new Map<string, number>());
+vi.mock("../../ui/ProgressBar", async (orig) => {
+  const mod = await orig<typeof import("../../ui/ProgressBar")>();
+  return {
+    ...mod,
+    ProgressBar: (props: Parameters<typeof mod.ProgressBar>[0]) => {
+      if (props.label !== undefined) {
+        const seen = barRenders.get(props.label);
+        barRenders.set(props.label, seen === undefined ? 1 : seen + 1);
+      }
+      return mod.ProgressBar(props);
+    },
+  };
+});
 
 const ID = "樱花生存";
 const DAY = 24 * 3600 * 1000;
@@ -67,6 +87,7 @@ const NOW = new Date(2026, 9, 31, 12, 0, 0).getTime();
 let view: Rendered | undefined;
 let nav: NavApi;
 let launcher: LauncherApi;
+let sizes: ResizeObserverStub;
 let instances: InstanceDto[];
 let settings: InstanceSettingsDto;
 let mods: InstalledMod[];
@@ -151,7 +172,8 @@ function button(name: string | RegExp, root: ParentNode = document): HTMLButtonE
   const all = [...root.querySelectorAll<HTMLButtonElement>("button")];
   const found = all.find((b) => {
     const label = nameOf(b);
-    return typeof name === "string" ? label === name || b.textContent === name : name.test(label);
+    // 文案槽（LabelSlot）里叠着全部候选，文字内容是几条拼起来的，看得见的只有标着 data-current 的那条
+    return typeof name === "string" ? label === name || b.textContent === name || b.querySelector("[data-current]")?.textContent === name : name.test(label);
   });
   if (found === undefined) throw new Error(`找不到按钮 ${String(name)}`);
   return found;
@@ -241,7 +263,7 @@ beforeEach(() => {
   vi.mocked(pickSaveFile).mockReset();
   vi.mocked(pickSaveFile).mockRejectedValue(new Error("这个用例不该弹保存对话框"));
   stubMatchMedia(false);
-  stubResizeObserver();
+  sizes = stubResizeObserver();
   stubCanvas();
   vi.stubGlobal(
     "IntersectionObserver",
@@ -330,9 +352,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  view?.unmount();
-  view = undefined;
-  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -683,6 +702,21 @@ describe("实例详情：后端正在改动实例", () => {
     expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
   });
 
+  it("侧栏已固定满：头图图钉名称换成上限那一句，外观同禁用；点了只给上限提示，不改固定列表", async () => {
+    vi.stubGlobal("innerWidth", 1200);
+    const others = ["一", "二", "三", "四", "五"].map((n) => instanceDto(`固定${n}`));
+    instances = [...instances, ...others];
+    bootOverrides(ipc, { instances, pins: others.map((i) => i.id), config: configDto({ memory: { max_mb: 4096, min_mb: null, auto: false } }) });
+    ipc.overrides.set("list_instances", () => instances);
+    await open("overview");
+    const pin = button("侧栏最多固定 5 个实例，先取消固定一个");
+    expect([pin.getAttribute("aria-pressed"), pin.getAttribute("aria-disabled"), pin.dataset.disabled]).toEqual(["false", "true", "true"]);
+    click(pin);
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+    expect(launcher.state.toasts.map((t) => [t.tone, t.title])).toEqual([["warning", "侧栏最多固定 5 个实例，先取消固定一个"]]);
+  });
+
   it("设置页的重命名与删除按钮带原因禁用，Mod 开关照常可用", async () => {
     instances = instances.map((i) => (i.id === ID ? { ...i, activity: "modifying" } : i));
     await open("settings");
@@ -924,6 +958,90 @@ describe("实例详情：新建还没落盘的实例", () => {
   });
 });
 
+describe("实例详情：导入中的整合包占位项", () => {
+  // 导入命令一直不返回：实例目录建好之前后端不认这个名字，与新建的占位项一样只改装好后要不要固定，不写固定列表
+  const PACK = "周末联机";
+
+  async function openImporting(tab: InstanceTab) {
+    ipc.overrides.set("install_modpack", () => new Promise(() => undefined));
+    ipc.overrides.set("install_version", () => new Promise(() => undefined));
+    await open("overview");
+    await act(async () => {
+      await launcher.actions.installModpack({
+        source: { kind: "file", path: "D:/整合包/周末联机.mrpack" },
+        name: PACK,
+        cover: "grass",
+        packName: PACK,
+        packVersion: "1.0.0",
+        modCount: 12,
+        mcVersion: "1.21.1",
+        loader: "fabric",
+        loaderVersion: "0.16.10",
+        excludedOptional: [],
+      });
+      await launcher.actions.createInstance({ name: "周末生存", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "cherry_planks" });
+      await settle();
+    });
+    expect(launcher.state.tasks.filter((t) => t.kind === "modpack").map((t) => t.status)).toEqual(["running"]);
+    expect(launcher.state.instances.find((i) => i.id === PACK)?.placeholder).toBe(true);
+    act(() => nav.go({ page: "instance", id: PACK, tab }));
+    await flush();
+  }
+
+  async function tipOf(el: HTMLElement): Promise<string | null | undefined> {
+    act(() => {
+      el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = el.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error(`「${nameOf(el)}」悬停后没有关联提示气泡`);
+    return document.getElementById(tipId)?.textContent;
+  }
+
+  it("头图的图钉入队就按已固定画、照常可点：提示只写名称，点了只改装好后要不要固定，不写固定列表；新建的占位项同样", async () => {
+    vi.stubGlobal("innerWidth", 1200);
+    await openImporting("overview");
+    const before = callsOf(ipc, "set_sidebar_pins").length;
+    const pin = button("从侧栏取消固定");
+    expect(pin.getAttribute("aria-disabled")).toBeNull();
+    expect(pin.getAttribute("aria-pressed")).toBe("true");
+    expect(await tipOf(pin)).toBe("从侧栏取消固定");
+    click(pin);
+    await flush();
+    expect(launcher.state.instances.find((i) => i.id === PACK)).toMatchObject({ placeholder: true, pinned: false });
+    expect(button("固定到侧栏").getAttribute("aria-pressed")).toBe("false");
+    expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(before);
+    expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
+
+    // 设置标签在导入期间换成安装说明，里面没有「固定到侧栏」开关
+    click(byRole("tab", /^设置/));
+    await flush();
+    expect(text()).toContain("安装完成后可用");
+    expect(document.querySelector('[role="switch"][aria-label="固定到侧栏"]')).toBeNull();
+
+    act(() => nav.go({ page: "instance", id: "周末生存", tab: "overview" }));
+    await flush();
+    expect(button("从侧栏取消固定").getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("compact 档：头图菜单里的固定项照常可点，只改装好后要不要固定，不写固定列表", async () => {
+    vi.stubGlobal("innerWidth", 1024);
+    await openImporting("overview");
+    const before = callsOf(ipc, "set_sidebar_pins").length;
+    click(button("更多操作"));
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "从侧栏取消固定");
+    if (item === undefined) throw new Error("菜单里没有只写标签的「从侧栏取消固定」");
+    expect(item.getAttribute("aria-disabled")).toBeNull();
+    click(item);
+    await flush();
+    expect(launcher.state.instances.find((i) => i.id === PACK)).toMatchObject({ placeholder: true, pinned: false });
+    expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(before);
+    expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
+  });
+});
+
 describe("实例详情：新建与导入还没装好", () => {
   const NAME = "周末生存";
   const TITLE = "安装 1.21.1 + Fabric 0.16.10";
@@ -1024,6 +1142,8 @@ describe("实例详情：新建与导入还没装好", () => {
     act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: 20, bytes: 20_480, total_bytes: 40_960, speed: 1_048_576 }));
     await flush();
     expect(byRole("progressbar", TITLE).getAttribute("aria-valuenow")).toBe("50");
+    // 首批快照从空开始，百分数与进度条沿弹簧走上去，不一帧到位
+    await stepFrames(30);
     expect(text()).toContain("50% · 1.0 MB/s · 共 40.0 KB");
   });
 
@@ -1173,6 +1293,43 @@ describe("实例详情：新建与导入还没装好", () => {
     expect(nav.route).toEqual({ page: "instance", id: NAME, tab: "mods" });
     expect(text()).toContain("还没有安装 Mod");
     expect(queriesFor(NAME)).toContain("list_mods");
+  });
+
+  it("头图的安装标签：装好之后、落地重扫回来之前写「安装中 100%」，不翻回「等待安装」；重扫回来后退场", async () => {
+    const live = (el: Element) => el.closest("[inert]") === null;
+    const installChips = () => [...document.querySelectorAll<HTMLElement>('section [class*="_heroChip_"]')].filter((el) => live(el) && /等待安装|安装中/.test(textOf(el)));
+    const installLabel = () => {
+      const [chip] = installChips();
+      if (chip === undefined) throw new Error("头图上没有安装标签");
+      const current = chip.querySelector("[data-current]");
+      return textOf(current === null ? chip : current);
+    };
+    await openCreating("overview");
+    const task = launcher.state.tasks.find((t) => t.instanceId === NAME);
+    if (task === undefined || task.status !== "running") throw new Error("新建任务应在进行中");
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: 16, bytes: 16_384, total_bytes: 40_960, speed: 1_048_576 }));
+    await flush();
+    expect(installLabel()).toBe("安装中 40%");
+
+    const release = holdScans();
+    instances = [...instances, instanceDto(NAME, { loaders: fabric })];
+    await act(async () => {
+      install.resolve(installResult());
+      await settle(20);
+    });
+    expect(launcher.state.tasks.find((t) => t.id === task.id)?.status).toBe("done");
+    expect(installLabel()).toBe("安装中 100%");
+    // 收尾那一拍过了、概览换成「正在刷新」时，头图仍是同一句，不与说明卡对不上
+    await passHold();
+    expect(text()).toContain("安装任务已经结束，正在刷新实例列表…");
+    expect(installLabel()).toBe("安装中 100%");
+    expect(installChips()).toHaveLength(1);
+
+    await act(async () => {
+      release();
+      await settle(20);
+    });
+    expect(installChips()).toHaveLength(0);
   });
 
   it("装的过程中没有重扫、安装失败且盘上留了目录：留在实例页，换成失败原因与「修复实例」", async () => {
@@ -1380,6 +1537,70 @@ describe("实例详情：新建与导入还没装好", () => {
     await act(async () => {
       release();
       await settle(20);
+    });
+  });
+
+  describe("减少动画", () => {
+    const bars = () => [...document.querySelectorAll('[role="progressbar"]')];
+    const shown = (list: Element[]) => list.map((bar) => [bar.getAttribute("aria-label"), bar.getAttribute("aria-valuenow")]);
+    const liveBars = () => bars().filter((bar) => bar.closest("[inert]") === null);
+    const exitingBars = () => bars().filter((bar) => bar.closest("[inert]") !== null);
+
+    /** 开着减少动画进概览、新建任务下到一半。 */
+    async function halfway() {
+      stubMatchMedia(true);
+      await openCreating("overview");
+      const task = launcher.state.tasks.find((t) => t.instanceId === NAME);
+      if (task === undefined || task.status !== "running") throw new Error("新建任务应在进行中");
+      act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: 20, bytes: 20_480, total_bytes: 40_960, speed: 1_048_576 }));
+      await flush();
+      expect(shown(liveBars())).toEqual([[TITLE, "50"]]);
+      return task;
+    }
+
+    it("任务一完成横幅就退场；退场的那一条接着画这个已完成的任务（满格、完成前的速度），不翻回排队中", async () => {
+      const task = await halfway();
+      const release = holdScans();
+      instances = [...instances, instanceDto(NAME, { loaders: fabric })];
+      await act(async () => {
+        install.resolve(installResult());
+        await settle(20);
+      });
+      // 没有收尾那一拍：完成的同一次提交里横幅就撤下，说明卡直接换成正在刷新
+      expect(launcher.state.tasks.find((t) => t.id === task.id)?.status).toBe("done");
+      expect(text()).toContain("安装任务已经结束，正在刷新实例列表…");
+      expect(liveBars()).toEqual([]);
+      expect(shown(exitingBars())).toEqual([[TITLE, "100"]]);
+      expect(text()).toContain(" · 1.0 MB/s · 共 40.0 KB");
+      expect(text()).not.toContain(OVERVIEW_QUEUED);
+      await act(async () => {
+        release();
+        await settle(20);
+      });
+    });
+
+    it("任务失败时退场的那一条不按满格画：失败没有推满这回事", async () => {
+      await halfway();
+      const release = holdScans();
+      instances = [
+        ...instances,
+        instanceDto(NAME, {
+          status: "broken",
+          mc_version: null,
+          java_major: null,
+          incomplete: { kind: "install", outcome: "failed", started_at: NOW, spec: { mc_version: "1.21.1", loader: "fabric", loader_version: "0.16.10" }, error: { code: "network_failed", message: "连接超时" } },
+        }),
+      ];
+      await act(async () => {
+        install.reject(new IpcError("network_failed", "连接超时"));
+        await settle(20);
+      });
+      expect(liveBars()).toEqual([]);
+      expect(exitingBars().map((bar) => bar.getAttribute("aria-valuenow"))).toEqual(["0"]);
+      await act(async () => {
+        release();
+        await settle(20);
+      });
     });
   });
 });
@@ -1883,13 +2104,14 @@ describe("实例详情：概览", () => {
     expect(text()).not.toContain("上次启动崩溃了");
   });
 
-  it("补全装完：安装横幅先推满进度、停一拍再走；这一拍里状态层还拿着补全前扫的列表，原先损坏的实例不先冒出损坏横幅", async () => {
+  it("补全装完：安装横幅推满进度后留到列表重读回来再走；这期间状态层手里还是补全前扫的那份，原先损坏的实例不冒出损坏横幅", async () => {
     instances = instances.map((i) => (i.id === ID ? { ...i, status: "broken", broken_reason: "缺少版本 JSON" } : i));
     const repair = deferred<RepairResultDto>();
     ipc.overrides.set("repair_instance", () => repair.promise);
     const live = (el: Element) => el.closest("[inert]") === null;
     const bannerTitle = (title: string) => [...document.querySelectorAll("div")].filter((el) => el.childElementCount === 0 && el.textContent === title && live(el));
     const liveBars = () => [...document.querySelectorAll('[role="progressbar"]')].filter(live);
+    const heroChips = () => [...document.querySelectorAll<HTMLElement>('section [class*="_heroChip_"]')].filter(live).map(textOf);
     await open("overview");
     expect(bannerTitle("实例文件不完整，暂时无法启动")).toHaveLength(1);
 
@@ -1924,17 +2146,136 @@ describe("实例详情：概览", () => {
     expect(liveBars().map((bar) => bar.getAttribute("aria-valuenow"))).toContain("100");
     expect(text()).toContain(" · 2.0 MB/s · 共 40.0 KB");
 
-    // 收尾过了：安装横幅退场；重读回来后没有损坏横幅
+    // 收尾过了、重读还没回来：实例照旧按安装中派生，安装横幅接着按满格画，损坏横幅与头图的「文件不完整」都不冒出来。
+    // 头图标签在这一段不写百分比：补全不按新建那样写「安装中 100%」
     await act(async () => {
       await vi.advanceTimersByTimeAsync(COMPLETION_HOLD_S * 1000);
     });
-    expect(bannerTitle(task.title)).toHaveLength(0);
+    expect(bannerTitle(task.title)).toHaveLength(1);
+    expect(liveBars().map((bar) => bar.getAttribute("aria-valuenow"))).toContain("100");
+    expect(bannerTitle("实例文件不完整，暂时无法启动")).toHaveLength(0);
+    expect(heroChips()).not.toContain("文件不完整");
+    expect(heroChips().join()).not.toContain("100%");
+    // 重读回来：安装横幅退场，也没有损坏横幅
     await act(async () => {
       if (release === null) throw new Error("挂起的重读没有放行函数");
       release();
       await settle(20);
     });
+    expect(bannerTitle(task.title)).toHaveLength(0);
     expect(bannerTitle("实例文件不完整，暂时无法启动")).toHaveLength(0);
+    expect(heroChips()).not.toContain("文件不完整");
+  });
+
+  it("减少动画：补全一完成安装横幅就退场，退场的那一条按满格画这个已完成的任务，不翻回排队中", async () => {
+    stubMatchMedia(true);
+    const repair = deferred<RepairResultDto>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    const bars = () => [...document.querySelectorAll('[role="progressbar"]')];
+    const shown = (list: Element[]) => list.map((bar) => [bar.getAttribute("aria-label"), bar.getAttribute("aria-valuenow")]);
+    await open("overview");
+    await act(async () => {
+      await launcher.actions.repairInstance(ID);
+      await settle(20);
+    });
+    const task = launcher.state.tasks.find((t) => t.instanceId === ID);
+    if (task === undefined || task.status !== "running") throw new Error("补全任务应在进行中");
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: 30, bytes: 30_720, total_bytes: 40_960, speed: 2_097_152 }));
+    await flush();
+    expect(shown(bars())).toEqual([[task.title, "75"]]);
+    // 横幅是概览挂上之后才出现的一项，先停在看不见的起点，画出第一帧之后才淡入；还没起步就撤掉的不播退场、当场移除。
+    // 先推几帧让它淡入起步，完成时才有一段退场可看
+    const item = bars()[0].closest('[class*="_banner_"]')?.parentElement;
+    if (item === null || item === undefined) throw new Error("安装横幅没有出入场的包裹层");
+    expect(item.style.opacity).toBe("0");
+    await stepFrames(3);
+    expect(Number(item.style.opacity)).toBeGreaterThan(0);
+
+    await act(async () => {
+      repair.resolve({ reinstalled: false, libraries: 40, assets: 0, natives: 0 });
+      await settle(20);
+    });
+    expect(launcher.state.tasks.find((t) => t.id === task.id)?.status).toBe("done");
+    expect(item.isConnected).toBe(true);
+    expect(item.hasAttribute("inert")).toBe(true);
+    expect(bars().filter((bar) => bar.closest("[inert]") === null)).toEqual([]);
+    expect(shown(bars().filter((bar) => bar.closest("[inert]") !== null))).toEqual([[task.title, "100"]]);
+    expect(text()).toContain(" · 2.0 MB/s · 共 40.0 KB");
+    expect(text()).not.toContain("安装任务排队中");
+  });
+
+  it("减少动画：补全装完、列表重读还没回来时，原先损坏的实例照旧按安装中画，不在这一段冒出损坏横幅", async () => {
+    stubMatchMedia(true);
+    instances = instances.map((i) => (i.id === ID ? { ...i, status: "broken", broken_reason: "缺少版本 JSON" } : i));
+    const repair = deferred<RepairResultDto>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    const live = (el: Element) => el.closest("[inert]") === null;
+    const bannerTitle = (title: string) => [...document.querySelectorAll("div")].filter((el) => el.childElementCount === 0 && el.textContent === title && live(el));
+    await open("overview");
+    expect(bannerTitle("实例文件不完整，暂时无法启动")).toHaveLength(1);
+    await act(async () => {
+      await launcher.actions.repairInstance(ID);
+      await settle(20);
+    });
+    const task = launcher.state.tasks.find((t) => t.instanceId === ID);
+    if (task === undefined || task.status !== "running") throw new Error("补全任务应在进行中");
+
+    let release: (() => void) | null = null;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    ipc.overrides.set("list_instances", async () => {
+      await held;
+      return instances;
+    });
+    instances = instances.map((i) => (i.id === ID ? { ...i, status: "ready", broken_reason: null } : i));
+    await act(async () => {
+      repair.resolve({ reinstalled: false, libraries: 40, assets: 0, natives: 0 });
+      await settle(20);
+    });
+    // 减少动画没有收尾那一拍：任务完成的这一刻到重读回来之间，横幅照旧是安装横幅、按满格画
+    expect(launcher.state.tasks.find((t) => t.id === task.id)?.status).toBe("done");
+    expect(bannerTitle(task.title)).toHaveLength(1);
+    expect(bannerTitle("实例文件不完整，暂时无法启动")).toHaveLength(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(COMPLETION_HOLD_S * 1000);
+    });
+    expect(bannerTitle(task.title)).toHaveLength(1);
+    expect(bannerTitle("实例文件不完整，暂时无法启动")).toHaveLength(0);
+    await act(async () => {
+      if (release === null) throw new Error("挂起的重读没有放行函数");
+      release();
+      await settle(20);
+    });
+    expect(bannerTitle(task.title)).toHaveLength(0);
+    expect(bannerTitle("实例文件不完整，暂时无法启动")).toHaveLength(0);
+  });
+
+  it("安装横幅的速度到点补字：只重画速度那一段文字，进度条连同横幅都不重渲染", async () => {
+    const MB = 1024 * 1024;
+    const repair = deferred<RepairResultDto>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    await open("overview");
+    await act(async () => {
+      await launcher.actions.repairInstance(ID);
+      await settle(20);
+    });
+    const task = launcher.state.tasks.find((t) => t.instanceId === ID);
+    if (task === undefined || task.status !== "running") throw new Error("补全任务应在进行中");
+    const progress = (speed: number) =>
+      act(() => {
+        emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: 30, bytes: 30_720, total_bytes: 40_960, speed });
+      });
+    // 从 0 起步的速度直接换上；同一拍里再报一个快得多的，字先停在上一拍
+    progress(2 * MB);
+    progress(6 * MB);
+    expect(text()).toContain(" · 2.0 MB/s · 共 40.0 KB");
+    const before = barRenders.get(task.title);
+    if (before === undefined) throw new Error("安装横幅没有画进度条");
+    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS));
+    // 间隔满时补上平滑后的值：6 - (6 - 2) * e^-0.5 ≈ 3.57 MB/s
+    expect(text()).toContain(" · 3.6 MB/s · 共 40.0 KB");
+    expect(barRenders.get(task.title)).toBe(before);
   });
 
   it("停在页面上又玩了一局、正常退出：实例列表重读出上次游玩之前，横幅与头图的「上次崩溃」不再亮回来", async () => {
@@ -2045,6 +2386,53 @@ describe("实例详情：概览", () => {
     expect(empty?.querySelectorAll('[class*="_row_"]')).toHaveLength(0);
   });
 
+  it("资源包与光影读到之前按实例列表里的资源包数占位：光影一行加每个资源包一行，读到之后行数不变；没有资源包或数不出来时占两行", async () => {
+    const card = () => {
+      const heading = [...document.querySelectorAll("h3")].find((h) => h.textContent === "资源包与光影");
+      const found = heading?.closest("[data-pad]");
+      if (found === undefined || found === null) throw new Error("找不到资源包与光影卡");
+      return found;
+    };
+    const placeholderRows = () => {
+      const placeholder = card().querySelector("[aria-busy='true'] > [data-pending]");
+      if (placeholder === null) throw new Error("资源包与光影卡读到之前没有占位");
+      return placeholder.querySelectorAll('[class*="_row_"]').length;
+    };
+    const packs = ["Faithful.zip", "旧材质", "Stay True.zip", "Fresh Animations.zip"].map((file_name, i) => ({
+      file_name,
+      is_dir: !file_name.endsWith(".zip"),
+      size_bytes: 10,
+      modified_at: null,
+      load_order: i === 1 ? null : i + 1,
+    }));
+    const pending = deferred<InstanceContentDto>();
+    ipc.overrides.set("list_instance_content", () => pending.promise);
+    instances = instances.map((i) => (i.id === ID ? { ...i, resource_pack_count: packs.length } : i));
+    await open("overview");
+    expect(placeholderRows()).toBe(5);
+    await act(async () => {
+      pending.resolve({ ...contentDto(), resource_packs: packs });
+      await settle(20);
+    });
+    expect(card().querySelector("[data-pending]")).toBeNull();
+    const rows = [...card().querySelectorAll("li")].filter((li) => li.closest("[inert]") === null);
+    expect(rows).toHaveLength(5);
+    expect(rows.map(textOf).filter((t) => t.includes("资源包"))).toHaveLength(4);
+
+    for (const [count, expected] of [
+      [0, 2],
+      [null, 2],
+    ] as const) {
+      view?.unmount();
+      instances = instances.map((i) => (i.id === ID ? { ...i, resource_pack_count: count } : i));
+      ipc.overrides.set("list_instance_content", () => new Promise<InstanceContentDto>(() => undefined));
+      resources.clear();
+      resetRecorderKeepOverrides();
+      await open("overview");
+      expect(placeholderRows(), `资源包数 ${String(count)}`).toBe(expected);
+    }
+  });
+
   it("头图的启动胶囊、更多钮在同一行，这一行按胶囊的 morph 弹簧让位；更多钮直接以提示气泡宿主排在行里，不另垫一层盒子", async () => {
     await open("overview");
     const capsule = document.querySelector(`[role="group"][aria-label="启动「${ID}」"]`);
@@ -2060,6 +2448,84 @@ describe("实例详情：概览", () => {
     expect(more.parentElement).toBe(slot);
     // 名称、标签所在的文字列也是这一行的直接子项：胶囊变宽时它变窄，文字列变高时它在行里重新居中
     expect([...row.children].some((child) => child.querySelector("h1") !== null)).toBe(true);
+  });
+
+  it("胶囊的形变一起步，头图这一行当场补跑让位：图钉与更多钮跟胶囊左缘同一刻起步，不等尺寸观察；尺寸观察随后报到时不再起第二段", async () => {
+    // 图钉只在不是最窄一档时排在行里
+    vi.stubGlobal("innerWidth", 1200);
+    // 胶囊变宽多少随机取：图钉与更多钮各被往左挤这么多。尺寸观察报到之前假时钟走多少也随机
+    const grow = 100 + Math.round(Math.random() * 200);
+    const resizeAfter = 1 + Math.round(Math.random() * 14);
+    const played: { el: Element; frames: Keyframe[]; animation: StubAnimation }[] = [];
+    // jsdom 没有 Web Animations，装上之后让位才开始观察，所以要在挂载之前装
+    Object.defineProperty(HTMLElement.prototype, "animate", {
+      configurable: true,
+      value: fakeAnimate((el, frames, _options, animation) => played.push({ el, frames, animation })),
+    });
+    onTestFinished(() => {
+      delete (HTMLElement.prototype as { animate?: unknown }).animate;
+    });
+    // 启动一直不返回：胶囊停在加载面
+    ipc.overrides.set("launch_game", () => new Promise(() => undefined));
+    await open("overview");
+
+    const capsule = document.querySelector<HTMLElement>(`[role="group"][aria-label="启动「${ID}」"]`);
+    const row = capsule?.parentElement;
+    if (capsule === null || row === null || row === undefined) throw new Error("找不到启动胶囊所在的行");
+    const pin = button("固定到侧栏", row);
+    const more = button("更多操作", row);
+    // jsdom 不做布局：胶囊外框的宽度（布局动画据此认出它变宽），与两枚图标钮在行里的位置（行宽定死、胶囊贴右，
+    // 文字列吸收宽度变化），都按胶囊展开与否给出
+    const ROW_WIDTH = 900;
+    const ICON = 48;
+    const GAP = 12;
+    const width = () => (capsule.hasAttribute("data-expanded") ? 148 + grow : 148);
+    const leftOf = new Map<HTMLElement, () => number>([
+      [more, () => ROW_WIDTH - width() - GAP - ICON],
+      [pin, () => ROW_WIDTH - width() - 2 * (GAP + ICON)],
+    ]);
+    capsule.getBoundingClientRect = () => {
+      const w = width();
+      return { left: ROW_WIDTH - w, top: 0, right: ROW_WIDTH, bottom: 56, width: w, height: 56, x: ROW_WIDTH - w, y: 0, toJSON: () => ({}) } as DOMRect;
+    };
+    vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockImplementation(function (this: HTMLElement) {
+      return leftOf.has(this) ? row : null;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockImplementation(function (this: HTMLElement) {
+      const left = leftOf.get(this);
+      return left === undefined ? 0 : left();
+    });
+    // 提示气泡的宿主在模块样式里是 display: contents，jsdom 读不到模块样式
+    for (const icon of [pin, more]) {
+      const host = icon.parentElement;
+      if (host === null || !host.hasAttribute("data-tooltip-host")) throw new Error("图标钮外面应是提示气泡的宿主");
+      host.style.display = "contents";
+    }
+    // 尺寸观察开始观察时先报一次：让位记下起点
+    sizes.resize(row, 0);
+    const slides = (el: Element) => played.filter((p) => p.el === el);
+    expect([slides(pin), slides(more)]).toEqual([[], []]);
+
+    click(button("启动游戏", capsule));
+    expect(capsule.hasAttribute("data-expanded")).toBe(true);
+    // 布局在提交后的微任务里冲刷，形变在那时起步；这之前假时钟不走、一帧也没走，尺寸观察也还没报
+    const morphAt = performance.now();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    for (const icon of [pin, more]) {
+      expect(slides(icon)).toHaveLength(1);
+      const [slide] = slides(icon);
+      expect(String(slide.frames[0].translate)).toBe(`${grow}px 0px`);
+      expect([slide.animation.startTime, slide.animation.fill, slide.animation.playState]).toEqual([morphAt, "backwards", "running"]);
+    }
+
+    // 尺寸观察要到下一帧的渲染步骤才报：位置已在形变起步时记过，不再起一段
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(resizeAfter);
+    });
+    sizes.resize(row, 0);
+    expect([slides(pin).length, slides(more).length]).toEqual([1, 1]);
   });
 
   it("标签条那一行是换标签时外壳滚回的锚点", async () => {
@@ -2794,12 +3260,23 @@ describe("实例详情：设置", () => {
     });
   });
 
-  it("删除实例：确认框按后端预览列出会一起移入回收站的存档，确认后删除", async () => {
+  it("删除实例：点了马上开框，确认键等后端预览到了才可按；确认框按预览列出会一起移入回收站的存档，确认后删除", async () => {
+    const pending = deferred<unknown>();
+    ipc.overrides.set("preview_instance_deletion", () => pending.promise);
     await open("settings");
     click(button("删除实例"));
     await flush();
     expect(callsOf(ipc, "preview_instance_deletion")).toEqual([{ id: ID }]);
     expect(dialog().querySelector("h2")?.textContent).toBe("删除「樱花生存」？");
+    const early = button("删除实例", dialog());
+    expect(early.getAttribute("aria-disabled")).toBe("true");
+    click(early);
+    await flush();
+    expect(callsOf(ipc, "delete_instance")).toEqual([]);
+    await act(async () => {
+      pending.resolve({ id: ID, worlds: contentDto().worlds, size_bytes: 3 * 1024 * 1024, file_count: 10, dependents: [], activity: null });
+      await settle(20);
+    });
     expect(dialog().textContent).toContain("实例文件夹会移入回收站，其中的 2 个存档（共 3.0 MB）也会一起删除：");
     expect([...dialog().querySelectorAll("li")].map(textOf)).toEqual(["旧世界", "新世界"]);
     click(button("删除实例和 2 个存档", dialog()));
@@ -2834,13 +3311,20 @@ describe("实例详情：设置", () => {
     expect(callsOf(ipc, "repair_instance")).toHaveLength(1);
   });
 
-  it("有实例依赖它：预览里就看出删不了，不弹确认框，直接说明是谁依赖它，不发删除", async () => {
+  it("有实例依赖它：预览里就看出删不了，确认框里说明是谁依赖它，确认键一直不可按，只能关掉，不发删除", async () => {
     ipc.overrides.set("preview_instance_deletion", () => ({ id: ID, worlds: [], size_bytes: 0, file_count: 0, dependents: ["Fabric 整合"], activity: null }));
     await open("settings");
     click(button("删除实例"));
     await flush();
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
-    expect(launcher.state.toasts.at(-1)).toMatchObject({ tone: "warning", title: `不能删除「${ID}」`, body: "实例「Fabric 整合」依赖它，要先删除依赖它的实例" });
+    expect(dialog().textContent).toContain(`不能删除「${ID}」：实例「Fabric 整合」依赖它，要先删除依赖它的实例。`);
+    const confirm = button("删除实例", dialog());
+    expect(confirm.getAttribute("aria-disabled")).toBe("true");
+    click(confirm);
+    await flush();
+    expect(launcher.state.toasts.filter((t) => t.tone === "warning")).toEqual([]);
+    click(button("关闭", dialog()));
+    await flush();
+    expect(document.querySelectorAll("[data-sk-modal-layer]:not([data-exiting])")).toHaveLength(0);
     expect(callsOf(ipc, "delete_instance")).toEqual([]);
   });
 
@@ -3612,7 +4096,7 @@ describe("实例详情：存档备份", () => {
     expect(menuItems().map((el) => el.getAttribute("aria-disabled"))).toEqual([null, null, null]);
     click(menuItem("备份存档"));
     await flush();
-    expect(callsOf(ipc, "backup_world")).toEqual([{ id: ID, world: "w2", taskId: `${launcher.state.tasks[0].id}#1` }]);
+    expect(callsOf(ipc, "backup_world")).toEqual([{ gameDir: "D:/Games/.minecraft", id: ID, world: "w2", taskId: `${launcher.state.tasks[0].id}#1` }]);
     expect(launcher.state.tasks[0]).toMatchObject({ kind: "world_backup", title: "备份「新世界」" });
     expect(toastTitles()).toContain("已开始备份「新世界」");
   });
@@ -3689,7 +4173,7 @@ describe("实例详情：存档备份", () => {
     await flush();
     const calls = callsOf(ipc, "restore_world_backup");
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toEqual({ id: ID, world: "w2", file: "b-mid.zip", taskId: `${launcher.state.tasks[0].id}#1` });
+    expect(calls[0]).toEqual({ gameDir: "D:/Games/.minecraft", id: ID, world: "w2", file: "b-mid.zip", taskId: `${launcher.state.tasks[0].id}#1` });
     expect(launcher.state.tasks[0]).toMatchObject({ kind: "world_restore", title: "恢复「新世界」" });
   });
 
@@ -3921,7 +4405,7 @@ describe("实例详情：存档备份", () => {
     click(rowMenu("新世界"));
     click(menuItem("导出存档"));
     await flush();
-    expect(callsOf(ipc, "export_world")).toEqual([{ id: ID, world: "w2", dest: "E:\\导出\\新世界.zip", taskId: `${launcher.state.tasks[0].id}#1` }]);
+    expect(callsOf(ipc, "export_world")).toEqual([{ gameDir: "D:/Games/.minecraft", id: ID, world: "w2", dest: "E:\\导出\\新世界.zip", taskId: `${launcher.state.tasks[0].id}#1` }]);
     expect(launcher.state.tasks[0]).toMatchObject({ kind: "world_backup", title: "导出「新世界」" });
   });
 

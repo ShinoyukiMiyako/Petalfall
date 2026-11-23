@@ -36,9 +36,36 @@ describe("任务的适配：任务日志", () => {
       created_at: 0,
       finished_at: null,
       spec: { command: "install_version", args: { id: "1.21.1", targetName: "生存" } },
+      game_dir: "D:\\Games\\.minecraft",
     };
     const task = { ...taskFromRecord(record), phase: { plan: ["metadata", "libraries"] as const, index: 1, batch: { total: 40, totalBytes: 50_000_000 } } };
     expect(taskToRecord(task)).toEqual(record);
     expect(taskFromRecord(record).phase).toBeNull();
+  });
+
+  it("发起时的游戏目录原样往返；较早的日志没有这一项读成 null（不拿别的目录补），写回仍是 null；类型不对按日志坏了报错", () => {
+    const record = {
+      id: "t1",
+      kind: "world_backup" as const,
+      title: "备份「新的世界」",
+      detail: "「生存」",
+      instance_id: "生存",
+      status: "failed" as const,
+      progress: 0,
+      bytes: 0,
+      total_bytes: null,
+      speed_bps: 0,
+      attempt: 1,
+      error: { code: "io", message: "磁盘满了" },
+      created_at: 0,
+      finished_at: 1,
+      spec: { command: "backup_world", args: { id: "生存", world: "新的世界" } },
+    };
+    expect(taskFromRecord({ ...record, game_dir: "E:\\HMCL\\.minecraft" }).gameDir).toBe("E:\\HMCL\\.minecraft");
+    const old = taskFromRecord(record);
+    expect(old.gameDir).toBeNull();
+    expect(taskToRecord(old).game_dir).toBeNull();
+    expect(taskFromRecord({ ...record, game_dir: null }).gameDir).toBeNull();
+    expect(() => taskFromRecord({ ...record, game_dir: 42 as never })).toThrow("任务 t1 的 game_dir 应为字符串或 null");
   });
 });

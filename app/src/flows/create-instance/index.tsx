@@ -11,17 +11,18 @@
 // 确认步的开局选项（沿用默认设置、加载器的 API、性能组合）的勾选记在这里而不是确认步里：跳回前面改了加载器或版本
 // 再回来，用户动过的勾选还在。默认设置与开局 Mod 从选定加载器起就开始查，到确认步时多半已经查好。
 
-import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
-import { useMemo, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type Ref } from "react";
+import { AnimatePresence, motion, useComposedRefs, useIsPresent, useReducedMotionConfig, type AnimationDefinition } from "framer-motion";
+import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type Ref } from "react";
+import { Icon } from "../../art/Icon";
 import { DEFAULT_COVER, type InstanceCover } from "../../art/iso/covers";
 import { InstanceAvatarBase } from "../../art/iso/InstanceAvatarBase";
 import { ACTION_ERROR, coverLabel, LOADER_NAME } from "../../copy/flows";
 import { instanceNameError } from "../../domain/rules";
 import type { LoaderKind } from "../../domain/types";
-import { stepPane, stepPaneFade } from "../../lib/motion";
+import { springAt, stepPane, stepPaneFade } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
 import { useMounted } from "../../lib/useMounted";
-import { isImeComposing } from "../../lib/util";
+import { cx, isImeComposing } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import type { FlowProps } from "../../state/flows";
@@ -30,10 +31,10 @@ import { useLoaderVersions, useManifest, useVersionRequirements } from "../../st
 import { useStarterMods, useTemplateInfo } from "../../state/queries/starter";
 import { canPinMore } from "../../state/selectors";
 import { Appear } from "../../ui/Appear";
-import { Button } from "../../ui/Button";
+import { Button, CONTROL_ICON_SIZE } from "../../ui/Button";
 import { KeyHint } from "../../ui/KeyHint";
 import { LabelSlot } from "../../ui/LabelSlot";
-import { Modal } from "../../ui/Modal";
+import { AUTOFOCUS_ATTR, Modal } from "../../ui/Modal";
 import { CREATE_COPY } from "./copy";
 import styles from "./create.module.css";
 import {
@@ -62,7 +63,22 @@ import {
   type VersionFilter,
 } from "./model";
 import { Preview, StepNav } from "./Rail";
-import { ConfirmStep, CoverStep, LoaderStep, LoaderVersionStep, NameStep, VersionStep, type CreateFailure } from "./Steps";
+import { ConfirmStep, CoverStep, LoaderStep, LoaderVersionStep, NameStep, StepEnteredContext, VersionStep, type CreateFailure } from "./Steps";
+
+/** 确认步主按钮的两条文案：各占一层交叉淡化，每层的 LabelSlot 都列着这两条，层宽取较宽的「创建并开始安装」。 */
+const CREATE_LABELS = [CREATE_COPY.create, CREATE_COPY.creating] as const;
+
+/**
+ * 「上一步」插进来时等多久才淡入（秒）。「取消」从它那一格（「上一步」的宽加一个间距）沿 morph 滑走，要走完九成才让出一个间距；
+ * 当场淡入的话两行字叠着画一百多毫秒。等「取消」离终点只剩这一格的 1/20（默认字号下约 5 px，不到一个间距）再淡入，
+ * 这一刻按 morph 的解析解取。时钟是同一个：传 morph 的让位把起步时刻钉在提交后的微任务里，framer-motion 给这次入场钉的
+ * 起步时刻是提交时建动画的那一刻（Appear 的 enterStart 为 commit，不等首帧画出），两者只差这次提交余下的几个回调，60 Hz、提交再长都对得上。
+ */
+const BACK_ENTER_DELAY = (() => {
+  let seconds = 0;
+  while (springAt("morph", 1, 0, seconds).x > 1 / 20) seconds += 0.001;
+  return seconds;
+})();
 
 interface StepPaneProps {
   /**
@@ -77,13 +93,66 @@ interface StepPaneProps {
   children: ReactNode;
 }
 
-/** 换步时新旧两步短暂并存：正在退场的那一步点不到、聚焦不到，读屏也不再读它，操作只落在新的一步上。 */
+/** 焦点已经没有着落：落回 body、所在节点已卸载，或还停在带 inert 的退场层里（浏览器随后也会把它挪回 body）。 */
+function focusLost(): boolean {
+  const active = document.activeElement;
+  return active === null || active === document.body || !active.isConnected || active.closest("[inert]") !== null;
+}
+
+function firstLive(pane: HTMLElement, selector: string): HTMLElement | null {
+  for (const el of pane.querySelectorAll<HTMLElement>(selector)) if (el.closest("[inert]") === null) return el;
+  return null;
+}
+
+/**
+ * 换步后焦点的落点：名称输入框，其次单选组的停靠点（已选项），都没有时（清单还在读、读不到、确认步）落到标题。
+ * 不取文档顺序里的第一个可聚焦控件：版本步排最前的是搜索框，落在那里方向键动的是光标而不是选中项；
+ * 外观步是「随机一块」、确认步是开局选项的复选框，Enter 归它们自己，连按 Enter 会换掉封面、改掉勾选。
+ */
+function stepFocusTarget(pane: HTMLElement): HTMLElement {
+  const target = firstLive(pane, `[${AUTOFOCUS_ATTR}]`) ?? firstLive(pane, '[role="radio"][tabindex="0"]') ?? firstLive(pane, `.${styles.stepTitle}`);
+  if (target === null) throw new Error("新的一步里没有标题，换步后的焦点无处可落");
+  return target;
+}
+
+/**
+ * 换步时新旧两步短暂并存：正在退场的那一步点不到、聚焦不到，读屏也不再读它，操作只落在新的一步上。
+ * 在输入框或单选项上按 Enter 换步时，焦点所在的旧一步在同一次提交里带上 inert，浏览器随后把焦点丢回 body，
+ * 之后的 Enter 不再经过步骤容器。所以新的一步一挂上（提交后、绘制前）就把焦点交给它的落点：此刻焦点还停在
+ * 刚带上 inert 的旧一步里，判得出是丢了；等入场播完再交，这段时间里连按的 Enter 全落空。
+ * 入场播完时焦点若又没了着落，再兜一次：点左栏跳步时被点的那一行成了当前步而禁用，浏览器稍后才把焦点挪走，挂载时还判不出。
+ * 点「下一步」时焦点在不动的主按钮上，入场期间用户自己聚焦了别处，都不抢。
+ * 弹窗打开时的第一步不播入场，两处都不接管，由弹窗按 data-autofocus 初始聚焦。
+ *
+ * 入场播完时经 StepEnteredContext 告诉这一步，挂上之后才补的重活等到这时再做；只有读它的组件随之重渲染。
+ */
 function StepPane({ ref, direction, enter, onKeyDown, children }: StepPaneProps) {
   const present = useIsPresent();
   const reduced = useReducedMotionConfig() === true;
+  const self = useRef<HTMLDivElement | null>(null);
+  const attach = useComposedRefs(ref, self);
+  const [entered, setEntered] = useState(!enter);
+  // 不让浏览器为露出焦点去滚：.main 是 overflow: hidden，被程序滚动后没有滚动条可以滚回来
+  const takeFocus = (pane: HTMLElement) => stepFocusTarget(pane).focus({ preventScroll: true });
+  // 提交之后、绘制之前：新一步的 DOM 已经挂好，单选组的停靠点在，名称框的 autoFocus 也已生效
+  useLayoutEffect(() => {
+    const pane = self.current;
+    if (pane === null) throw new Error("新的一步尚未挂载");
+    // 只在挂载时接管：之后焦点怎么走归用户
+    if (enter && focusLost()) takeFocus(pane);
+  }, []);
+  const onAnimationComplete = (definition: AnimationDefinition) => {
+    // 只认入场（退场播完也回调，标签是 exit）
+    if (definition !== "center") return;
+    setEntered(true);
+    const pane = self.current;
+    // 已经开始退场的这一步带 inert，不再接管
+    if (pane === null || pane.closest("[inert]") !== null || !focusLost()) return;
+    takeFocus(pane);
+  };
   return (
     <motion.div
-      ref={ref}
+      ref={attach}
       className={styles.pane}
       custom={direction}
       variants={reduced ? stepPaneFade : stepPane}
@@ -92,8 +161,9 @@ function StepPane({ ref, direction, enter, onKeyDown, children }: StepPaneProps)
       exit="exit"
       inert={!present}
       onKeyDown={onKeyDown}
+      onAnimationComplete={onAnimationComplete}
     >
-      {children}
+      <StepEnteredContext.Provider value={entered}>{children}</StepEnteredContext.Provider>
     </motion.div>
   );
 }
@@ -152,8 +222,11 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
   const opened = useMounted();
   // 步骤里的块晚到、出没（确认步的 Java 说明、创建失败横幅、版本步的提示行）时，其余块滑到新位置
   const paneReflow = useReflow<HTMLDivElement>();
-  // 底栏按钮行：「上一步」出没时「取消」滑过去
-  const footReflow = useReflow<HTMLDivElement>();
+  // 底栏按钮行：「上一步」出没时「取消」滑过去。位移全来自「上一步」的增删：主按钮每一步同宽，弹窗主体定高、换步时外框不形变，
+  // 没有尺寸变化引起的让位，也就没有要在 onLayoutAnimationStart 里补跑的。传 morph 是要它的时钟：起步时刻钉在提交后的微任务里，
+  // 「上一步」的入场延迟（BACK_ENTER_DELAY）按同一条弹簧、同一个时钟算；settle 要等新排布画出两帧才起步，提交越长落后越多
+  const footReflow = useReflow<HTMLDivElement>("morph");
+  const reduced = useReducedMotionConfig() === true;
 
   const trimmed = name.trim();
   const filter: VersionFilter = {
@@ -369,7 +442,7 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
 
   const isLast = index === visible.length - 1;
   const onName = step === "name";
-  const createLabel = <LabelSlot current={creating ? CREATE_COPY.creating : CREATE_COPY.create} options={[CREATE_COPY.create, CREATE_COPY.creating]} />;
+  const primaryLabel = !isLast ? CREATE_COPY.next : creating ? CREATE_COPY.creating : CREATE_COPY.create;
 
   return (
     <Modal
@@ -404,7 +477,15 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
               {CREATE_COPY.cancel}
             </Button>
           </div>
-          <Appear itemClassName={styles.footItem}>
+          {/*
+           * 「上一步」的那一格，「取消」的让位要穿过它：
+           * - 进：先透明着占住位置，等「取消」滑出去再淡入（BACK_ENTER_DELAY，从插进来那次提交起算）；减少动画时让位一步到位，不用等。
+           * - 退：留在布局里淡完才拿掉，「取消」等拿掉那一刻（增删观察报上来）再滑回来，不从淡出中的它上面压过去。
+           *   退到一半被拉回（点了上一步又马上点下一步）时「取消」一直没动，从当前的不透明度直接淡回 1。插进来还没开始淡入就退场的，
+           *   两个值都已在退场的终点上，退场当场播完、这一格随即拿掉，再点下一步是新插进来的一格，照旧等。
+           * 退场中带 inert：点不到、聚焦不到；焦点正在它上面时由新的一步接管（StepPane）。
+           */}
+          <Appear itemClassName={styles.footItem} enterDelay={reduced ? undefined : BACK_ENTER_DELAY} enterStart="commit" exitInLayout>
             {index > 0 && (
               <Button key="back" icon="arrow-left" disabled={creating} onClick={() => goTo(index - 1)}>
                 {CREATE_COPY.back}
@@ -412,24 +493,36 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
             )}
           </Appear>
           {/*
-           * 主按钮在「下一步」与「创建并开始安装」之间换的是同一个按钮（聚焦着的按钮不丢焦点），宽度按最宽的那种定死：
-           * 隐形的创建按钮垫在同一格里撑出宽度，真按钮撑满这一格。换文案、换成加载态时同一行的按钮都不被挤动
+           * 主按钮从头到尾是同一个按钮（聚焦着的按钮不丢焦点），每一步都一样宽，换文案、换成加载态时同一行的按钮都不被挤动：
+           * - 前置图标位常驻（下载，创建中换成加载指示），「下一步」时样式表让它透明。宽度由它加「创建并开始安装」撑出；
+           *   进出确认步时它淡入淡出，不随按钮的 icon 属性来去而一帧出没。
+           * - 三条文案各一层叠着交叉淡化。「下一步」连同后置箭头铺满按钮、按不带前置图标的按钮居中；
+           *   「创建并开始安装」「正在创建…」接在图标位后面，宽度由 LabelSlot 按两条里较宽的定
            */}
-          <div className={styles.primarySlot}>
-            {isLast ? (
-              <Button variant="primary" icon="download" block className={styles.primaryButton} loading={creating} disabled={!canCreate} onClick={() => void create()}>
-                {createLabel}
-              </Button>
-            ) : (
-              <Button variant="primary" iconRight="arrow-right" block className={styles.primaryButton} disabled={!valid[step]} onClick={next}>
+          <div className={styles.footItem}>
+            <Button
+              variant="primary"
+              icon="download"
+              className={styles.primaryButton}
+              data-face={isLast ? "create" : "next"}
+              loading={isLast && creating}
+              // 创建中不按校验判禁用：新实例入队就进了实例列表，名称随即与它重名，按校验会把加载中的按钮原生禁用
+              // （降到禁用的不透明度、焦点丢回 body）。加载态自己挡住重复点击
+              disabled={isLast ? !creating && !canCreate : !valid[step]}
+              onClick={isLast ? () => void create() : next}
+            >
+              <span className={cx(styles.primaryFace, styles.primaryNext)} data-current={!isLast || undefined} aria-hidden={isLast || undefined}>
                 {CREATE_COPY.next}
-              </Button>
-            )}
-            <span className={styles.primaryGhost} aria-hidden="true" inert>
-              <Button variant="primary" icon="download">
-                {createLabel}
-              </Button>
-            </span>
+                <Icon name="arrow-right" size={CONTROL_ICON_SIZE.md} />
+              </span>
+              <span className={styles.primaryLabels}>
+                {CREATE_LABELS.map((label) => (
+                  <span key={label} className={cx(styles.primaryFace, styles.primaryLabel)} data-current={label === primaryLabel || undefined} aria-hidden={label !== primaryLabel || undefined}>
+                    <LabelSlot current={label} options={CREATE_LABELS} />
+                  </span>
+                ))}
+              </span>
+            </Button>
           </div>
         </div>
       }

@@ -1,9 +1,11 @@
 // 错误进通知正文时的写法：后端原文原样给出，带错误码（XErr、HTTP 状态）时在末尾用全角括号附上。
 // 「复制错误信息」要的是完整的一份：错误名与错误码、原文、后端给的原因链与其余结构化细节，贴进反馈里就能定位。
 
+import { dataFormatUnreadableText, gameDirDataTooNewText } from "../copy/data-format";
 import { INSTANCE_IN_USE_COPY } from "../copy/flows";
 import { instanceBusyFromError, isInstanceBusy } from "../domain/instance-busy";
 import { IpcError, isIpcError, UNKNOWN_ERROR_CODE } from "../ipc/errors";
+import { DATA_FORMAT_UNREADABLE_ERROR_CODE, GAME_DIR_DATA_TOO_NEW_ERROR_CODE, parseDataFormatUnreadable, parseGameDirDataTooNew, type DataFormatUnreadableDto, type GameDirDataTooNewDto } from "../ipc/instances";
 import type { UpdateSourceFailureDto, UpdateSourceFailureKind } from "../ipc/system";
 
 function numericDetail(detail: unknown, key: string): number | null {
@@ -17,6 +19,41 @@ function inUseReason(error: IpcError): string | null {
   if (!isInstanceBusy(error)) return null;
   const { usedBy } = instanceBusyFromError(error);
   return usedBy === null ? null : INSTANCE_IN_USE_COPY.reason(usedBy);
+}
+
+/** 后端因游戏目录的数据格式拒绝读写：目录被更新的版本用过（too_new），或记数据格式的文件读不懂（unreadable）。 */
+export type GameDirDataRejection = { kind: "too_new"; detail: GameDirDataTooNewDto } | { kind: "unreadable"; detail: DataFormatUnreadableDto };
+
+/**
+ * 游戏目录的数据格式拒绝与它解析好的 detail；别的错误为 null。页面与流程不能引用 ipc，经这里认这两个错误码，
+ * detail 的校验只在 ipc 里写一份。detail 不成形是前后端契约破坏，抛出。
+ */
+export function gameDirDataRejectionOf(error: unknown): GameDirDataRejection | null {
+  if (!isIpcError(error)) return null;
+  const where = `${error.code} 的 detail`;
+  switch (error.code) {
+    case GAME_DIR_DATA_TOO_NEW_ERROR_CODE:
+      return { kind: "too_new", detail: parseGameDirDataTooNew(error.detail, where) };
+    case DATA_FORMAT_UNREADABLE_ERROR_CODE:
+      return { kind: "unreadable", detail: parseDataFormatUnreadable(error.detail, where) };
+    default:
+      return null;
+  }
+}
+
+/**
+ * 游戏目录的数据格式比这一版新、或记号读不懂时，界面不显示格式号，正文按 detail 写出是哪个目录、被哪一版用过，
+ * 不用后端原文。其余错误为 null。
+ */
+function dataFormatReason(error: IpcError): string | null {
+  const rejection = gameDirDataRejectionOf(error);
+  if (rejection === null) return null;
+  switch (rejection.kind) {
+    case "too_new":
+      return gameDirDataTooNewText(rejection.detail);
+    case "unreadable":
+      return dataFormatUnreadableText(rejection.detail);
+  }
 }
 
 /** 网络层失败的种类：connect（DNS 解析失败、连接被拒、TLS 握手失败）或 timeout。 */
@@ -61,6 +98,8 @@ export function describeError(error: unknown): string {
   if (!isIpcError(error)) return error.message;
   const inUse = inUseReason(error);
   if (inUse !== null) return inUse;
+  const dataFormat = dataFormatReason(error);
+  if (dataFormat !== null) return dataFormat;
   const xerr = numericDetail(error.detail, "xerr");
   if (xerr !== null) return `${error.message}（XErr ${xerr}）`;
   const status = numericDetail(error.detail, "status");

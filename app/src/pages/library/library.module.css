@@ -16,7 +16,10 @@
 
 /* ---------------------------------------------------------------- 页头 */
 
-/* 副标题的骨架条与文字叠在同一格里交叉淡化。块级网格：行内的话骨架条没有文字基线，行框会多出一截下沉 */
+/*
+ * 副标题的骨架条与文字叠在同一格里交叉淡化。块级网格：行内的话骨架条没有文字基线，行框会多出一截下沉。
+ * 它也是 span 版 Loadable 的根：两层成了网格项才有块级尺寸，行内的话 popLayout 量到的宽高是 auto，退场的那一层抽不出布局
+ */
 .subtitleSwap {
   display: grid;
 }
@@ -63,6 +66,14 @@
 
 .search {
   width: var(--lib-search-width);
+}
+
+/*
+ * compact 档的 180px 里，占位文字与快捷键提示放不下，原样会被截成半个字。Chromium 的占位文字继承输入框自己的
+ * text-overflow（写在 ::placeholder 上不生效），所以写在输入框上：没聚焦时占位文字与输入的内容都单行省略
+ */
+.search input {
+  text-overflow: ellipsis;
 }
 
 .directory {
@@ -170,6 +181,12 @@
   opacity: 1;
 }
 
+/* 侧栏满时图钉标着不可用：出现时停在禁用的不透明度，上面那条的权重更高，不压住就会把它提回满格 */
+.card:hover .pin[aria-disabled="true"],
+.card:focus-within .pin[aria-disabled="true"] {
+  opacity: var(--sk-disabled);
+}
+
 /*
  * 字色随卡面形态换时淡过去，不在卡面图片显出来之前一帧跳色。文字阴影不过渡、随形态瞬切（卡面组件自己也是这样）：
  * 它带一层 14px 的模糊，补间时每帧都要重绘，一屏多张卡同时换卡面时开销太大
@@ -193,8 +210,13 @@
 /*
  * 顶上的标签与图钉也是卡面的兄弟，而卡面只在下沿压暗：描边标签与幽灵图钉没有底，柔色调的底是半透明的，
  * 深浅材质上都可能读不清。垫一层表面色、字照常用正文色与色调色，日夜都在自己的表面上读。
- * 未按下的图钉悬停时交回图标按钮自己的不透明悬停底；按下的图钉本来没有悬停变化，一直垫着。
+ * 未按下的图钉悬停时交回图标按钮自己的悬停底：图钉不在卡面里、接不到卡面下发的底色，这里照样下发表面色，
+ * 半透明的悬停叠层铺在它上面，不直接落在材质上。按下的图钉本来没有悬停变化，一直垫着。
  */
+.coverArea:has(> .cover:is([data-source="texture"], [data-source="remote"])) {
+  --icon-button-base: var(--sk-surface);
+}
+
 .coverArea:has(> .cover:is([data-source="texture"], [data-source="remote"])) :is(.chip, .currentTag, .pin:not(:hover), .pin[aria-pressed="true"]) {
   background-color: var(--sk-surface);
 }
@@ -273,7 +295,8 @@
  * （靠折行裁掉的话，游玩时长涨一位就可能让某一项一下子出现或消失）。最宽写法：「11 个月前」占满预留的 4.4em，
  * 「读不到」3em，四位 Mod 数、三位存档数（每位按 0.6em 算），加上每项 16px 图标与 4px 间距、三处 12px 列距，约 255px；
  * 三项约 202px，常规档刚过分档线时最窄的卡也排得下。容器查询的条件里不能用自定义属性，阈值只能写字面值。
- * 收起只是视觉上的（与 .srOnly 同法，绝对定位不占行内位置）：读屏照旧读到第四项，不用 display: none 把它移出无障碍树。
+ * 收起只是视觉上的（与全局的 sk-sr-only 同一套声明，绝对定位不占行内位置）：读屏照旧读到第四项，不用 display: none 把它移出无障碍树。
+ * 条件规则作用在既有的列表项上，套不了类名，所以照抄一份。
  */
 @container (width < 256px) {
   .stats > li:nth-child(n + 4) {
@@ -286,8 +309,29 @@
   }
 }
 
+/*
+ * 损坏原因占统计行的位置、与它同高同上边距：一行字，放不下时省略。卡片按所在行的高度拉伸，损坏卡要是高出一截，
+ * 它跨行、出现或消失时同一行的卡片和贴底的底栏会一帧变高变矮（让位只补位置，不补尺寸）。
+ * 浮在标题按钮的整卡覆盖层之上，悬停才看得到被省略的全文；只占文字的宽度，旁边的空白处照样点开详情。
+ */
 .broken {
-  margin-top: var(--sk-space-8);
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-4);
+  width: fit-content;
+  max-width: 100%;
+  height: var(--sk-lh-caption);
+  margin: var(--sk-space-8) 0 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
+.brokenIcon {
+  flex: none;
+  color: var(--sk-warn);
 }
 
 /* ---------------------------------------------------------------- 底栏 */
@@ -495,14 +539,4 @@
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-}
-
-/* 只给读屏的加载说明：骨架层整层 aria-hidden，说明放在它外面 */
-.srOnly {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
 }

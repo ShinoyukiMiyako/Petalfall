@@ -5,12 +5,14 @@ import { AnimatePresence, motion, MotionConfig } from "framer-motion";
 import { act, useId, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pageItem, popMark } from "../lib/motion";
-import { keydown, render, stubResizeObserver, waitForFrames, type Rendered, type ResizeObserverStub } from "../test/dom";
+import { drainFrames, fakeAnimate, keydown, render, stepFrames, stubResizeObserver, waitForFrames, type Rendered, type ResizeObserverStub } from "../test/dom";
 import { Badge } from "./Badge";
 import { Card } from "./Card";
 import { Page, PageArrivalProvider } from "./Page";
 import { SEGMENT_THUMB_RADIUS, SegmentedControl, type SegmentOption } from "./SegmentedControl";
+import segmentStyles from "./SegmentedControl.module.css";
 import { INDICATOR_RADIUS, TabPanel, Tabs, tabDomId, type TabItem } from "./Tabs";
+import tabStyles from "./Tabs.module.css";
 
 let view: Rendered | undefined;
 let observers: ResizeObserverStub;
@@ -142,7 +144,7 @@ describe("Tabs", () => {
 
   it("各标签是让位的直接子项：徽标晚到撑宽某个标签时，后面的标签滑过去", () => {
     // jsdom 没有 Web Animations，让位在那里不启动；补上之后才能看到它观察了哪些元素
-    Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: () => undefined });
+    Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: fakeAnimate() });
     try {
       view = render(<Tabs id="r" value="overview" items={SECTIONS} ariaLabel="实例详情" onChange={() => undefined} />);
       const list = document.querySelector('[role="tablist"]') as HTMLElement;
@@ -207,6 +209,36 @@ describe("Tabs", () => {
     const wrapper = document.querySelector("b")?.parentElement as HTMLElement;
     expect(wrapper.style.opacity).toBe("0");
     expect(wrapper.style.transform).toBe(transform);
+  });
+
+  function MotionTabs({ reducedMotion, value }: { reducedMotion: "always" | "never"; value: Section }) {
+    return (
+      <MotionConfig reducedMotion={reducedMotion}>
+        <Tabs id="m" value={value} items={SECTIONS} ariaLabel="实例详情" onChange={() => undefined} />
+      </MotionConfig>
+    );
+  }
+  const indicators = () => [...document.querySelectorAll<HTMLElement>(`.${tabStyles.indicator}`)];
+
+  it("减少动画时指示块不从旧标签瞬移过来，而是在新标签上从透明淡入；挂载时就在的那一块不淡入", async () => {
+    view = render(<MotionTabs reducedMotion="always" value="overview" />);
+    expect(indicators()).toHaveLength(1);
+    expect(indicators()[0].style.opacity).not.toBe("0");
+    view.rerender(<MotionTabs reducedMotion="always" value="logs" />);
+    const [moved] = indicators();
+    expect(indicators()).toHaveLength(1);
+    expect(selectedTab()?.textContent).toBe("日志与历史");
+    expect(selectedTab()?.contains(moved)).toBe(true);
+    expect(moved.style.opacity).toBe("0");
+    await waitForFrames(() => expect(moved.style.opacity).toBe("1"));
+  });
+
+  it("不减少动画时指示块照旧滑过去，新标签上的那一块不从透明起", () => {
+    view = render(<MotionTabs reducedMotion="never" value="overview" />);
+    view.rerender(<MotionTabs reducedMotion="never" value="logs" />);
+    const [moved] = indicators();
+    expect(selectedTab()?.contains(moved)).toBe(true);
+    expect(moved.style.opacity).not.toBe("0");
   });
 
   it("徽标传空串或布尔值时不包徽标层（空层也会吃掉内容间距、撑宽标签）；数字 0 照常显示", () => {
@@ -425,6 +457,89 @@ describe("TabPanel 入场", () => {
     expect(panel().style.opacity).toBe("0");
     expect(panel().style.transform).toBe("translateY(6px)");
   });
+
+  function Panes({ reducedMotion }: { reducedMotion: "never" | "always" }) {
+    const id = useId();
+    const [value, setValue] = useState<Pane>("overview");
+    return (
+      <MotionConfig reducedMotion={reducedMotion}>
+        <Tabs id={id} value={value} items={PANES} ariaLabel="资源详情" onChange={setValue} />
+        <TabPanel tabsId={id} value={value}>
+          {value}
+        </TabPanel>
+      </MotionConfig>
+    );
+  }
+
+  /** 面板正在入场的半路上：透明度在 0 与 1 之间；减少动画时位移一步到位，只有透明度在走。 */
+  function expectMidEntrance(reducedMotion: "never" | "always") {
+    const opacity = Number(panel().style.opacity);
+    expect(opacity).toBeGreaterThan(0);
+    expect(opacity).toBeLessThan(1);
+    if (reducedMotion === "always") {
+      expect(panel().style.transform).toBe("none");
+      return;
+    }
+    const shift = /^translateY\((.+)px\)$/.exec(panel().style.transform);
+    if (shift === null) throw new Error(`面板没有在上移的半路上：${panel().style.transform}`);
+    expect(Number(shift[1])).toBeGreaterThan(0);
+    expect(Number(shift[1])).toBeLessThan(6);
+  }
+
+  it.each(["never", "always"] as const)(
+    "不归页面管的第一次挂载（弹窗里）先停在起点，画出第一帧之后才开始入场，挂载那一帧再长也不吃掉入场的开头（减少动画 %s）",
+    async (reducedMotion) => {
+      // 换到假时钟之前把真实计时器上排着的帧走完，否则假时钟下帧循环推不动（见 test/dom 的 drainFrames）
+      await drainFrames();
+      vi.useFakeTimers();
+      try {
+        view = render(<Panes reducedMotion={reducedMotion} />);
+        // 第一帧画的是起点：挂载与这一帧的渲染花多久，入场都还没开始计时
+        await stepFrames(1);
+        expect(panel().style.opacity).toBe("0");
+        expect(panel().style.transform).toBe("translateY(6px)");
+        // 第一帧之后放行（放行排在绘制之后的任务里，假时钟要再推进一帧才到点），入场从头走起
+        await stepFrames(2);
+        expectMidEntrance(reducedMotion);
+        await stepFrames(60);
+        expect(panel().style.opacity).toBe("1");
+        expect(panel().style.transform).toBe("none");
+      } finally {
+        view?.unmount();
+        view = undefined;
+        await drainFrames();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["never", "always"] as const)(
+    "换标签时新面板不等画：旧面板在换的那次提交里撤掉，之后的第一帧新面板已在入场，内容区不空一帧（减少动画 %s）",
+    async (reducedMotion) => {
+      await drainFrames();
+      vi.useFakeTimers();
+      try {
+        view = render(<Panes reducedMotion={reducedMotion} />);
+        // 先让第一次挂载的入场走完，换标签时屏上是一块完整的旧面板
+        await stepFrames(60);
+        expect(panel().style.opacity).toBe("1");
+        act(() => selectedTab()?.focus());
+        keydown(document.activeElement as Element, "ArrowRight");
+        expect(document.querySelectorAll('[role="tabpanel"]')).toHaveLength(1);
+        expect(panel().textContent).toBe("mods");
+        await stepFrames(1);
+        expectMidEntrance(reducedMotion);
+        await stepFrames(60);
+        expect(panel().style.opacity).toBe("1");
+        expect(panel().style.transform).toBe("none");
+      } finally {
+        view?.unmount();
+        view = undefined;
+        await drainFrames();
+        vi.useRealTimers();
+      }
+    },
+  );
 });
 
 type Loader = "all" | "fabric" | "forge" | "quilt";
@@ -536,6 +651,36 @@ describe("SegmentedControl", () => {
     // 布局动画把投影写在 transform 上，按压缩放不能占用它
     expect(ruleOf(css, ".item:active:not(:disabled) .thumb")).not.toContain("transform");
     expect(ruleOf(css, ":global([data-sk-reduced]) .item:active .thumb")).toContain("scale: none;");
+  });
+
+  function MotionFilter({ reducedMotion, value }: { reducedMotion: "always" | "never"; value: Loader }) {
+    return (
+      <MotionConfig reducedMotion={reducedMotion}>
+        <SegmentedControl value={value} options={LOADERS} ariaLabel="按加载器筛选" onChange={() => undefined} />
+      </MotionConfig>
+    );
+  }
+  const thumbs = () => [...document.querySelectorAll<HTMLElement>(`.${segmentStyles.thumb}`)];
+
+  it("减少动画时选中块不从旧项瞬移过来，而是在新项里从透明淡入；挂载时就在的那一块不淡入", async () => {
+    view = render(<MotionFilter reducedMotion="always" value="all" />);
+    expect(thumbs()).toHaveLength(1);
+    expect(thumbs()[0].style.opacity).not.toBe("0");
+    view.rerender(<MotionFilter reducedMotion="always" value="quilt" />);
+    const [moved] = thumbs();
+    expect(thumbs()).toHaveLength(1);
+    expect(checked()?.getAttribute("aria-label")).toBe("Quilt，1 个");
+    expect(checked()?.contains(moved)).toBe(true);
+    expect(moved.style.opacity).toBe("0");
+    await waitForFrames(() => expect(moved.style.opacity).toBe("1"));
+  });
+
+  it("不减少动画时选中块照旧滑过去，新项里的那一块不从透明起", () => {
+    view = render(<MotionFilter reducedMotion="never" value="all" />);
+    view.rerender(<MotionFilter reducedMotion="never" value="quilt" />);
+    const [moved] = thumbs();
+    expect(checked()?.contains(moved)).toBe(true);
+    expect(moved.style.opacity).not.toBe("0");
   });
 
   it("选项少于 2 个或多于 6 个直接抛错", () => {

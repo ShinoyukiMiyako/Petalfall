@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use petalfall_setup_lib::boot::{self, Claim, DesktopUser, Notice, Webview};
 use petalfall_setup_lib::cli;
-use petalfall_setup_lib::commands::{self, SetupContext};
+use petalfall_setup_lib::commands::{self, FallenBack, SetupContext};
 use petalfall_setup_lib::extract::WEBVIEW_DATA_PREFIX;
 use petalfall_setup_lib::log::{self, SetupLog};
 use petalfall_setup_lib::overlay;
@@ -116,7 +116,10 @@ fn run(webview: Webview, log: &Arc<SetupLog>) -> Result<ExitCode, Box<dyn Error>
     log.info(format_args!("启动，WebView2：{webview:?}"));
     // 赶在互斥那关之前记下：被转发掉的那个进程带的是什么参数，日志里也要查得到
     let parsed = cli::parse(std::env::args_os().skip(1));
-    log.info(format_args!("启动方式：{:?}", parsed.launch));
+    log.info(format_args!(
+        "启动方式：{:?}，换通道开关：{}",
+        parsed.launch, parsed.channel_switch
+    ));
     if !parsed.ignored.is_empty() {
         log.warn(format_args!(
             "这些参数不起作用，已忽略：{:?}",
@@ -155,6 +158,8 @@ fn run(webview: Webview, log: &Arc<SetupLog>) -> Result<ExitCode, Box<dyn Error>
         Arc::clone(&instance),
         Arc::clone(log),
         parsed.launch,
+        parsed.channel_switch,
+        log::local_app_data()?,
     ));
 
     if let Webview::Unavailable { reason } = &webview {
@@ -171,9 +176,11 @@ fn run(webview: Webview, log: &Arc<SetupLog>) -> Result<ExitCode, Box<dyn Error>
 }
 
 fn fall_back(context: &SetupContext) -> Result<ExitCode, Box<dyn Error>> {
-    context.start_fallback()?;
-    let code = context.wait_for_wizard()?;
-    Ok(code.map_or(ExitCode::FAILURE, exit_code))
+    match context.fall_back(boot::alert)? {
+        FallenBack::Ran(code) => Ok(exit_code(code)),
+        // 判定不能装，什么都没装
+        FallenBack::Refused => Ok(ExitCode::FAILURE),
+    }
 }
 
 fn exit_code(code: i32) -> ExitCode {

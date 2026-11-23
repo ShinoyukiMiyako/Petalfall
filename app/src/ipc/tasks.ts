@@ -1,6 +1,8 @@
 // 长任务的关联、取消与任务日志，以及后端进度事件 petalfall://core-event。
 // 安装版本、装 Mod、装 Java、修复、整合包、启动这些长命令都带 taskId 参数；
 // 进度事件带 task_id 用来区分并行的任务，不带 task_id 的事件只属于启动会话。
+// 按实例名动手的任务命令（新建、导入、补全、装与更新 Mod 和资源、存档的备份恢复与导出、导出整合包）另带 gameDir：
+// 入队那一刻的游戏目录，当前目录已经不是它时后端以 GAME_DIR_CHANGED_ERROR_CODE 拒绝，什么都不动。
 
 import type { TaskKind, TaskStatus } from "../domain/types";
 import { invoke, listen, type UnlistenFn } from "./bridge";
@@ -8,6 +10,9 @@ import type { MoveBlockerDto } from "./instances";
 import type { BlockedFileDto } from "./modpack";
 
 export const CORE_EVENT = "petalfall://core-event";
+
+/** 任务发起时的游戏目录已经不是当前目录（切换目录之后重试）。detail：`{ expected, current }`。 */
+export const GAME_DIR_CHANGED_ERROR_CODE = "game_dir_changed";
 
 /**
  * step：命令作为组合任务的一项调用时，调用方给的「第几项」（从 0 计），后端原样标在这次调用的每条事件上。
@@ -98,6 +103,8 @@ export interface TaskRecordDto {
   created_at: number;
   finished_at: number | null;
   spec: TaskSpecDto;
+  /** 入队那一刻的游戏目录。较早写入的日志没有这一项，读回后再写时为 null。 */
+  game_dir?: string | null;
 }
 
 /**

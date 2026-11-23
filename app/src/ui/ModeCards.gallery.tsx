@@ -6,11 +6,12 @@ import { ModeCards, type ModeOption, type PreviewAccent, type PreviewMode } from
 const OPTIONS: readonly ModeOption[] = [
   { value: "day", label: "日樱", desc: "浅粉白底，适合白天" },
   { value: "night", label: "夜樱", desc: "深紫灰底与紫水晶点缀" },
+  { value: "system", label: "跟随系统", desc: "随 Windows 的浅色、深色模式切换" },
 ];
 
 const ACCENTS: readonly PreviewAccent[] = ["sakura", "amethyst", "moss"];
 
-/** 陈列里只切这一组卡片的选中项，不改整页外观：两张预览始终画各自明暗的真实样子。 */
+/** 陈列里只切这一组卡片的选中项，不改整页外观：各张预览始终画各自明暗的真实样子。 */
 function Demo({ accent }: { accent: PreviewAccent }) {
   const [mode, setMode] = useState<PreviewMode>("day");
   return (

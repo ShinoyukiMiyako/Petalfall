@@ -122,7 +122,7 @@ describe("useArt", () => {
     expect(await loadArt(URL_A)).toEqual({ kind: "missing" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
-    act(() => setArtStatus({ source: { versionId: "1.21.1" }, panorama: false }));
+    act(() => setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false }));
     expect(peekArt(URL_A)).toBeUndefined();
     await settle();
     expect(kindOf(view)).toBe("ready");

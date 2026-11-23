@@ -8,7 +8,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode, type RefObject } from "react";
 import { PanoramaBackdrop } from "../art/panorama/PanoramaBackdrop";
-import { PetalCanvas } from "../art/petals/PetalCanvas";
+import { PetalCanvas, type PetalCanvasProps } from "../art/petals/PetalCanvas";
 import type { PetalDowngrade } from "../art/petals/engine";
 import { Logo } from "../art/Logo";
 import { thumbRegister } from "../ipc/art";
@@ -32,7 +32,7 @@ import { useMounted } from "../lib/useMounted";
 import { FOCUS_FALLBACK_ATTR, OverlayRoot } from "./overlay";
 import { PageErrorBoundary } from "./PageError";
 import type { AnyPage, PageRegistry } from "./pages";
-import { useNav, useShell, type NavArrival } from "./shell";
+import { useNav, usePetalsPaused, useShell, type NavArrival } from "./shell";
 import { Sidebar } from "./Sidebar";
 import { TitleBar, useReportedWindowFrame, WindowControls } from "./TitleBar";
 import { Toasts } from "./Toasts";
@@ -62,8 +62,8 @@ export interface AppShellProps {
   startupNotices?: () => Promise<readonly StartupNotice[]>;
 }
 
-/** 首帧与窗口显示之后再预载其余页面，不和首屏抢主线程。 */
-export const PAGE_PRELOAD_DELAY_MS = 800;
+/** 预载其余页面的空闲回调最多等这么久：主线程一直忙、空闲时段迟迟不来时也照常开始，不拖到冷启动后点进别的页面的时候。 */
+export const PAGE_PRELOAD_IDLE_TIMEOUT_MS = 500;
 
 // 资源图标、资讯配图、服务器图标的地址解析：同一地址整个进程只向后端登记一次，所以解析函数只建一份
 const resolveRemoteImage = createThumbResolver(thumbRegister);
@@ -79,17 +79,22 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
   // 组件库里的外部链接（资源介绍、更新说明）与其他打开网址的入口走同一个出口，失败经统一错误处理弹通知
   const openLink = useCallback((url: string) => void run(() => actions.openExternal(url), SHELL_ACTION_ERROR.openLink), [actions, run]);
 
-  useRevealWindow(firstRunKnown);
+  const revealed = useRevealWindow(firstRunKnown);
   useCloseGuard();
   useAfterLaunch();
   useBackgroundAttention();
   useStartupNotices(startupNotices);
   useDocumentLang();
 
+  // 其余页面在首屏画完之后的第一个空闲时段预载。首屏是知道要不要进首次启动向导之后的那一屏，画完它才显示窗口，
+  // 这时与「是否首次启动」同一批的首查（配置、账户、实例列表）也已发出。要等显示窗口的命令应答再登记空闲回调：
+  // 页面块与命令都经宿主的 UI 线程应答，页面块的请求排在显示窗口前面时，窗口要等这一批都应答完才显示出来。
+  // 也不能再晚：冷启动后马上点进没加载过的页面，内容区要空过 React 的 Suspense 占位节流（300 ms）
   useEffect(() => {
-    const timer = window.setTimeout(() => void run(() => pages.preloadAll(), SHELL_ACTION_ERROR.pagePreload), PAGE_PRELOAD_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [pages, run]);
+    if (!revealed) return;
+    const idle = requestIdleCallback(() => void run(() => pages.preloadAll(), SHELL_ACTION_ERROR.pagePreload), { timeout: PAGE_PRELOAD_IDLE_TIMEOUT_MS });
+    return () => cancelIdleCallback(idle);
+  }, [revealed, pages, run]);
 
   // 主界面一出来就把游戏目录列表取进缓存：实例库工具条的目录选择要在第一帧就在，不等进页面才去要、晚到再淡入插进来。
   // 首次启动向导期间不取：目录还没选定，取到的是向导之前的旧记录
@@ -141,7 +146,7 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
               向导收尾后先播完它自己的退场，再换成主界面：两者都占满整个网格，不能叠着同时出现。
               这里不能写 initial={false}：它会把「不播入场」记在首屏那一支的上下文里，整场会话不再更新，
               之后在它下面挂载的每个页面、每个分页面板的入场都被一并跳过。启动那一屏不淡入改由 MainFrame 自己管。
-              presenceAffectsLayout 关掉：开着时外壳根每重渲染一次（命令面板开合、窗口失焦、分档变化），在场上下文都换一个新对象，
+              presenceAffectsLayout 关掉：开着时外壳根每重渲染一次（命令面板开合、分档变化），在场上下文都换一个新对象，
               主界面里每个读它的 motion 元素（侧栏、标题栏、页面）都跟着重渲染，带布局动画的还要重量一次布局。
               这里同一时刻只有一支，没有兄弟要随它进出让位，换场靠的是 isPresent 本身的变化，不靠这个新对象。
             */}
@@ -184,7 +189,7 @@ const PAGE_ARRIVAL: Readonly<Record<NavArrival, PageArrival>> = {
 
 /**
  * 页面槽：放在错误边界里面，槽每次挂上时取一次到达方式，之后不再变。换路由键、错误页点「重新加载」都是连槽一起重挂，
- * 新挂上的页面拿到的就是这一次导航的到达方式；槽挂着期间主界面再重渲染（分档、花瓣暂停）不改它，
+ * 新挂上的页面拿到的就是这一次导航的到达方式；槽挂着期间主界面再重渲染（分档、外观）不改它，
  * 已经挂着的页面不会因为取值变了多重渲染一次。
  * 导航状态停在 boot 直到第一次导航，但启动那一屏只有一次：主界面挂上之后、还没导航就重挂的页面
  * （重新加载、实例被删退回实例库）按新进入处理，不然错误视图淡入了，重载回来的页面反而一帧硬切出来。
@@ -200,8 +205,8 @@ function PageArrivalSlot({ arrival, bootShown, children }: { arrival: NavArrival
  */
 const MainFrame = memo(function MainFrame({ pages, bindScroll, enter }: { pages: PageRegistry; bindScroll: (el: HTMLDivElement | null) => void; enter: boolean }) {
   const { route, arrival } = useNav();
-  const { tier, petalsPaused } = useShell();
-  const { appearance, reduced } = useAppearance();
+  const { tier } = useShell();
+  const { appearance, resolvedMode, reduced } = useAppearance();
   const run = useRunner();
   const onDowngrade = useCallback(
     (event: PetalDowngrade) =>
@@ -226,12 +231,11 @@ const MainFrame = memo(function MainFrame({ pages, bindScroll, enter }: { pages:
       <motion.div className={styles.main} {...columns}>
         <TitleBar />
         <div className={styles.content}>
-          <PetalCanvas
+          <HomePetals
             show={route.page === "home" && appearance.petals}
-            paused={petalsPaused}
             reduced={reduced}
             tier={tier}
-            mode={appearance.mode}
+            mode={resolvedMode}
             accent={appearance.accent}
             onDowngrade={onDowngrade}
           />
@@ -248,6 +252,12 @@ const MainFrame = memo(function MainFrame({ pages, bindScroll, enter }: { pages:
     </>
   );
 });
+
+/** 花瓣层。暂停状态放在这一小块里订阅：开关弹窗、窗口失焦聚焦只让它重渲染，不牵动 MainFrame。 */
+function HomePetals(props: Omit<PetalCanvasProps, "paused">) {
+  const paused = usePetalsPaused();
+  return <PetalCanvas {...props} paused={paused} />;
+}
 
 /** 窗口左上角的品牌行。焦点状态放在这一小块里订阅：窗口失焦时只换字标颜色，不牵动 MainFrame 重渲染。 */
 function SidebarBrand() {

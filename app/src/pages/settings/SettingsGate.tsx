@@ -40,8 +40,8 @@ const SECTION_SKELETON: Readonly<Record<GatedSection, readonly SkeletonShape[]>>
   download: [card(true, 1, 90), card(false, 2)],
   // 运行时（自动下载与运行时列表）、下载运行时（一行下拉）、显卡（开关与说明）
   java: [card(true, 1, 158), card(false, 0, 30), card(true, 1, 30)],
-  // 内存（自动分配与滑杆）、版本隔离、游戏目录（路径、其他文件夹、数据目录）、存档备份（三行）
-  game: [card(true, 1, 76), card(true, 1), card(true, 0, 200), card(true, 3)],
+  // 内存（自动分配与滑杆）、版本隔离、新实例（一行开关）、游戏目录（路径、其他文件夹、数据目录）、存档备份（三行）
+  game: [card(true, 1, 76), card(true, 1), card(false, 1), card(true, 0, 200), card(true, 3)],
   // 品牌卡、启动器更新（状态行与自动检查）、版本信息（六行键值）、支持（六行）、页尾声明
   about: [{ kind: "plain", height: 126, radius: "lg" }, card(false, 1, 46), card(false, 0, 160), card(false, 6), { kind: "plain", height: 220, radius: "md" }],
 };
@@ -84,10 +84,10 @@ function SectionSkeleton({ section }: { section: GatedSection }) {
  * 门要是跟着面板重挂，就会从头再等一个出现延迟，骨架先隐身再淡入，内容列空白一下。
  */
 export function useSettingsLoad(): LoadingView {
-  const status = useLauncherSelector((s) => s.status.settings);
-  const loaded = useLauncherSelector((s) => s.settings !== null);
-  // 读失败不算加载中：错误卡换下骨架；点重试才开始新一轮，骨架照样等满延迟才显形
-  return useLoadingGate(!loaded && status.kind === "loading").view;
+  // 读失败不算加载中：错误卡换下骨架；点重试才开始新一轮，骨架照样等满延迟才显形。
+  // 只选这一个布尔：设置页根挂着这个钩子，选整个状态对象的话，配置读到之后每次重读的状态换新都会让整页连同导航与分区重渲染
+  const loading = useLauncherSelector((s) => s.settings === null && s.status.settings.kind === "loading");
+  return useLoadingGate(loading).view;
 }
 
 /** view 取自 useSettingsLoad。 */
@@ -104,7 +104,7 @@ export function SettingsGate({ section, view, children }: { section: SettingsSec
           tone="danger"
           announce
           action={
-            <Button size="sm" onClick={() => void run(() => actions.reload("settings"), LOAD_COPY.failedTitle)}>
+            <Button size="sm" variant="ghost" onClick={() => void run(() => actions.reload("settings"), LOAD_COPY.failedTitle)}>
               {LOAD_COPY.retry}
             </Button>
           }

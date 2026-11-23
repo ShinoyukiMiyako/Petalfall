@@ -5,6 +5,7 @@ import { frameData } from "framer-motion";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { onTestFinished, vi } from "vitest";
+import { registerRenderTeardown } from "./teardown";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -14,19 +15,43 @@ export interface Rendered {
   unmount(): void;
 }
 
-export function render(ui: ReactNode): Rendered {
-  const container = document.createElement("div");
-  document.body.append(container);
+/** 经 render、renderWithoutAct 挂上、还没卸载的组件，用例结束时由 test/setup.ts 的全局收尾卸载（见 drainFrames 之后的 afterTest）。 */
+const mounted = new Set<Rendered>();
+
+function mount(container: HTMLDivElement, ui: ReactNode, commit: (update: () => void) => void): Rendered {
   const root = createRoot(container);
-  act(() => root.render(ui));
-  return {
+  const rendered: Rendered = {
     container,
-    rerender: (next) => act(() => root.render(next)),
+    rerender: (next) => commit(() => root.render(next)),
     unmount: () => {
-      act(() => root.unmount());
+      mounted.delete(rendered);
+      commit(() => root.unmount());
       container.remove();
     },
   };
+  // 先登记再渲染：首次渲染就抛错的，根与容器同样要在用例结束时收走
+  mounted.add(rendered);
+  commit(() => root.render(ui));
+  return rendered;
+}
+
+function bodyContainer(): HTMLDivElement {
+  const container = document.createElement("div");
+  document.body.append(container);
+  return container;
+}
+
+export function render(ui: ReactNode): Rendered {
+  return mount(bodyContainer(), ui, (update) => act(update));
+}
+
+/**
+ * 不经 act 的 render：整个应用按真实时间自行调度的冒烟与流程测试关掉了 act 环境（IS_REACT_ACT_ENVIRONMENT 为 false），
+ * 这时再调 act，React 会报测试环境不支持 act。挂载、重渲染与卸载都不包 act，同样登记进用例结束时的统一收尾。
+ * 要在首次渲染之前就拿到容器的（例如只给应用根元素替换布局量值），自己建好挂进 body 再传进来，卸载时一并移除。
+ */
+export function renderWithoutAct(ui: ReactNode, container: HTMLDivElement = bodyContainer()): Rendered {
+  return mount(container, ui, (update) => update());
 }
 
 export interface MediaQueryStub {
@@ -58,6 +83,43 @@ export function stubMatchMedia(initial: boolean): MediaQueryStub {
     },
     listenerCount: () => listeners.size,
   };
+}
+
+/**
+ * 替换 window.matchMedia：每个查询串各有一个可控的匹配值与各自的监听者。查了没列出的查询直接抛错，
+ * 不让被测代码悄悄拿到一个默认值。
+ */
+export function stubMediaQueries<Q extends string>(initial: Readonly<Record<Q, boolean>>): Readonly<Record<Q, MediaQueryStub>> {
+  const stubs = {} as Record<Q, MediaQueryStub>;
+  const lists = new Map<string, MediaQueryList>();
+  for (const media of Object.keys(initial) as Q[]) {
+    let matches = initial[media];
+    const listeners = new Set<() => void>();
+    lists.set(media, {
+      get matches() {
+        return matches;
+      },
+      media,
+      onchange: null,
+      addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+    } as unknown as MediaQueryList);
+    stubs[media] = {
+      set(next) {
+        matches = next;
+        act(() => {
+          for (const listener of [...listeners]) listener();
+        });
+      },
+      listenerCount: () => listeners.size,
+    };
+  }
+  vi.stubGlobal("matchMedia", (media: string) => {
+    const list = lists.get(media);
+    if (list === undefined) throw new Error(`测试没有替换这个媒体查询：${media}`);
+    return list;
+  });
+  return stubs;
 }
 
 export interface ResizeObserverStub {
@@ -104,6 +166,71 @@ export function stubResizeObserver(): ResizeObserverStub {
   };
 }
 
+/** fakeAnimate 交给组件的 Animation：组件与让位会碰的几样都在，时间不自己走。 */
+export interface StubAnimation {
+  currentTime: number | null;
+  /**
+   * 与 Web Animations 一致：建好时为 null，替身自己不定。走 morph 的让位把它钉在建好的那一刻，
+   * 组件测试据此断言让位与形变同一刻起步；暂停、播放都不碰它。
+   */
+  startTime: number | null;
+  /** animate 时传的 fill；没传时记成 Web Animations 的默认值 auto。 */
+  readonly fill: FillMode;
+  playState: AnimationPlayState;
+  onfinish: (() => void) | null;
+  oncancel: (() => void) | null;
+  cancel(): void;
+  finish(): void;
+  pause(): void;
+  play(): void;
+}
+
+/**
+ * 共用的 animate 替身：作为 Object.defineProperty 的 value 装到某个元素原型（或单个元素）的 animate 上，
+ * 每次调用建一个停在起点（currentTime 0、running、startTime null）的 Animation，把元素、关键帧、时间参数与它交给 record，再返回它。
+ * jsdom 没有 Web Animations，装上它的元素会被让位当成能动的：从静止起步时 pause、隔几帧 play，被顶替时 cancel，
+ * 接续时读 currentTime，走 morph 时写 startTime。缺哪一样，让位一起步就抛 TypeError，所以不要再手写只有一两样的返回值。
+ * 这几样只改 playState 与 currentTime，不调 onfinish、oncancel（真实的事件也要等下一帧才派发）；
+ * 要由用例决定何时播完、断言交接过程的，用 stubSpanAnimations。
+ * 要断言让位的起步时刻与 fill 的，从 record 的第四个参数拿到 Animation，读它的 startTime 与 fill。
+ * 不要装到 Element.prototype：framer-motion 按它自己有没有 animate 决定走不走 Web Animations。
+ * E：装在哪类元素上，record 收到的元素就按它标注。
+ */
+export function fakeAnimate<E extends Element = Element>(record?: (el: E, frames: Keyframe[], options: KeyframeAnimationOptions, animation: StubAnimation) => void) {
+  return function animate(this: E, frames: Keyframe[], options: KeyframeAnimationOptions): StubAnimation {
+    const animation: StubAnimation = {
+      currentTime: 0,
+      startTime: null,
+      // KeyframeEffect 的 fill 默认就是 auto，不是在补空值
+      fill: options.fill ?? "auto",
+      playState: "running",
+      onfinish: null,
+      oncancel: null,
+      cancel() {
+        this.playState = "idle";
+        this.currentTime = null;
+      },
+      finish() {
+        const duration = options.duration;
+        if (typeof duration !== "number") throw new Error(`animate 替身只认数值时长，这次是 ${String(duration)}`);
+        this.playState = "finished";
+        this.currentTime = duration;
+      },
+      // 与 Web Animations 一致：暂停不挪时间；已取消的再暂停停在起点，已取消或播完的再播从头开始
+      pause() {
+        if (this.currentTime === null) this.currentTime = 0;
+        this.playState = "paused";
+      },
+      play() {
+        if (this.currentTime === null || this.playState === "finished") this.currentTime = 0;
+        this.playState = "running";
+      },
+    };
+    record?.(this, frames, options, animation);
+    return animation;
+  };
+}
+
 /** 假 Web Animations 记下的一次 animate 调用，同时充当返回给组件的 Animation。 */
 export interface FakeAnimation {
   readonly el: Element;
@@ -111,10 +238,14 @@ export interface FakeAnimation {
   readonly options: KeyframeAnimationOptions;
   /** 用例可以直接改它，模拟动画播到一半：组件被打断时按它算出此刻的值。 */
   currentTime: number | null;
+  playState: AnimationPlayState;
   cancelled: boolean;
   finished: boolean;
   onfinish: (() => void) | null;
   cancel(): void;
+  /** 暂停不挪时间（让位从静止起步时先停在起点、隔几帧再播）。 */
+  pause(): void;
+  play(): void;
 }
 
 export interface SpanAnimationsStub {
@@ -149,12 +280,20 @@ export function stubSpanAnimations(): SpanAnimationsStub {
         frames,
         options,
         currentTime: 0,
+        playState: "running",
         cancelled: false,
         finished: false,
         onfinish: null,
         cancel() {
           this.cancelled = true;
+          this.playState = "idle";
           this.currentTime = null;
+        },
+        pause() {
+          this.playState = "paused";
+        },
+        play() {
+          this.playState = "running";
         },
       };
       played.push(animation);
@@ -172,6 +311,7 @@ export function stubSpanAnimations(): SpanAnimationsStub {
   const finish = (animation: FakeAnimation) =>
     act(() => {
       animation.currentTime = Number(animation.options.duration);
+      animation.playState = "finished";
       animation.finished = true;
       animation.onfinish?.();
     });
@@ -211,7 +351,11 @@ const FRAME_WAIT_TIMEOUT_MS = 3_000;
  * - 换计时器（假换真、真换假，也包括 beforeEach 里每个用例重装一次假时钟）时，要是还有一帧排在旧计时器上：
  *   framer-motion 以为下一帧已经排着，不再排新的；jsdom 也以为计时器还在，不再起新的。旧的是假时钟时那一帧永远不来，
  *   同文件后面的用例连页面根的入场、Page 的首帧闸门都推不动；旧的是真实计时器时，换上假时钟后最初几步推进会扑空。
- *   换之前先卸载、再 drainFrames 把帧循环排空。
+ *   换之前先卸载、再 drainFrames 把帧循环排空。用例结束时这一步由 test/setup.ts 统一做（见 afterTest）；
+ *   用例中途换计时器、beforeEach 里由真换假、describe 里的 afterEach 换回真实计时器的，仍要自己排空。
+ * - 经窗口排的动画帧回调（产品代码里现取的 requestAnimationFrame）不归 framer-motion 管，假定时器下排在假时钟上。
+ *   lib/reflow 的等待队列是模块级的，排着时恰好有一个这样的回调，按帧数一帧一排：丢了这一帧，队列以为还排着，
+ *   同文件后面挂进来的让位一个也不播。drainFrames 连这一路一起排空。
  */
 
 /**
@@ -245,23 +389,51 @@ export async function stepFrames(count: number): Promise<void> {
 }
 
 /**
- * 把 framer-motion 的帧循环排空：在当前的计时器上一段一段地走，直到走完一段没有任何一帧被处理（帧时间戳不再变）。
+ * 把帧循环排空：在当前的计时器上一段一段地走，直到走完一段 framer-motion 没有处理任何一帧（帧时间戳没落在这一段里）、
+ * 也没有谁经窗口新排动画帧回调（lib/reflow 的等待队列这类一帧一排的，framer-motion 的时间戳看不出来）。
  * 换计时器之前在旧计时器下调用：用例收尾时先卸载，再 drainFrames，再 useRealTimers，同文件后面的用例帧循环才接得上。
- * 假定时器下每段推进一帧；真实计时器下每段等两个帧长，排着的那一帧一定先于这次等待到点。
- * 限制：还挂着无限循环的动画（转圈、呼吸）时永远排不空，到上限直接报错，所以要先卸载。
+ * 假定时器下每段推进一帧；真实计时器下每段等两个帧长，排着的那一帧一定先于这次等待到点，它在回调里再排的下一帧数得到。
+ * 限制：还挂着无限循环的动画（转圈、呼吸）或每帧都再排一帧的回调时永远排不空，到上限直接报错，所以要先卸载。
  */
 export async function drainFrames(): Promise<void> {
   const fake = vi.isFakeTimers();
   const stepMs = fake ? FRAME_MS : 2 * FRAME_MS;
   const step = fake ? () => stepFrames(1) : () => act(() => new Promise<void>((resolve) => setTimeout(resolve, stepMs)));
   const limit = Math.ceil(FRAME_WAIT_TIMEOUT_MS / stepMs);
-  for (let i = 0; i < limit; i++) {
-    const before = frameData.timestamp;
-    await step();
-    if (frameData.timestamp === before) return;
+  // 排空期间经窗口排的回调照常交给原来的那一个，只多数一下；framer-motion 取走的是 jsdom 自己的，不经这里
+  const request = window.requestAnimationFrame;
+  let requested = 0;
+  window.requestAnimationFrame = (callback) => {
+    requested++;
+    return request.call(window, callback);
+  };
+  try {
+    for (let i = 0; i < limit; i++) {
+      const start = performance.now();
+      requested = 0;
+      await step();
+      // 不拿走之前的帧时间戳来比：frameData 是模块级的，停在上一个用例最后一帧的时刻，而假时钟每装一次都从 0 计时。
+      // 这一段恰好在同一毫秒走了一帧（都是装上假时钟后的第 16 ms）时前后两值相同，会被认成没走帧，帧循环还排着下一帧就返回，
+      // 换计时器后同文件后面的用例 framer-motion 一帧都推不动。旧值碰巧落在这一段里只是多走一段
+      const ran = frameData.timestamp >= start && frameData.timestamp <= performance.now();
+      if (!ran && requested === 0) return;
+    }
+  } finally {
+    // 换回原来的那一个：假时钟卸下时按它身上的标记决定还原还是删掉全局的 requestAnimationFrame
+    window.requestAnimationFrame = request;
   }
-  throw new Error(`帧循环走了 ${FRAME_WAIT_TIMEOUT_MS} ms 仍没停下：还有动画在跑，先卸载再排空`);
+  throw new Error(`帧循环走了 ${FRAME_WAIT_TIMEOUT_MS} ms 仍没停下：还有动画或每帧再排的动画帧回调，先卸载再排空`);
 }
+
+/**
+ * 每个用例结束后的组件收尾，test/setup.ts 经 test/teardown 调用：卸载还挂着的组件，停在假定时器上的再把帧循环排空，
+ * 之后 setup 才换回真实计时器。真实计时器上排着的帧不会卡住，照常按真实时间到点，不为它多等两个帧长。
+ */
+async function afterTest(): Promise<void> {
+  for (const rendered of [...mounted]) rendered.unmount();
+  if (vi.isFakeTimers()) await drainFrames();
+}
+registerRenderTeardown(afterTest);
 
 /** 固定元素的布局矩形（jsdom 不做布局，getBoundingClientRect 恒为 0）。 */
 export function setRect(el: Element, rect: { left: number; top: number; width: number; height: number }): void {

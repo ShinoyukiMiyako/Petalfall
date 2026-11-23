@@ -45,10 +45,26 @@ export function useServerStatus(): ResourceResult<ServerStatusDto[]> {
   return useResource("servers:status", () => pingServers());
 }
 
-/** skin:<uuid> —— 账户的远程皮肤；没有为 null（画默认皮肤或剪影）。 */
+/**
+ * skin:<uuid> —— 账户的皮肤：远程皮肤，拿不到时是默认皮肤；为 null 时画人偶。刷新或重新登录账户、后端在后台改写了这个账户、
+ * 默认皮肤换了一套、断网恢复时失效重取。
+ */
 export function useSkinInfo(accountUuid: string | null): ResourceResult<SkinInfoDto | null> {
   return useResource(accountUuid === null ? null : `skin:${accountUuid}`, () => {
     if (accountUuid === null) throw new Error("未启用的查询不应发出请求");
     return skinInfo(accountUuid);
   });
+}
+
+/**
+ * 皮肤读取结果交给头像与立绘时的说法，即 art/skin 的 SkinSource（state/ 不引入 art/，这里按结构写出同一个并集）。
+ * 还在读时说「读取中」而不是「没有」：换到皮肤信息没缓存的账户时留着正在显示的那一张直到读到，一次交叉换上，
+ * 不先落回人偶再淡入。刷新账户后重取失败时资源的 error 态带着上一次读到的结果，沿用它，
+ * 已知有皮肤的账户不因一次重取失败退回人偶；从没读到过的才当作没有皮肤。
+ */
+export function skinSource(skin: ResourceResult<SkinInfoDto | null>): SkinInfoDto | null | "loading" {
+  if (skin.status === "loading") return "loading";
+  if (skin.status === "ready") return skin.data;
+  if (skin.data === undefined) return null;
+  return skin.data;
 }

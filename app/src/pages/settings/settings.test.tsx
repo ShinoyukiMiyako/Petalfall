@@ -1,14 +1,24 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
-import { act } from "react";
+import { act, memo } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { ART_DOWNLOAD_COPY } from "../../copy/cover";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { IpcError } from "../../ipc/errors";
 import { APP_NAME, APP_NAME_EN, ISSUES_URL, REPO_URL } from "../../lib/app-info";
 import type { GpuAdapterDto, JavaInstallationDto } from "../../ipc/java";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { setMockGpuAdapters, setMockJavaInstallations } from "../../ipc/mock/handlers/java";
-import { setMockUpdateSourceFailures } from "../../ipc/mock/handlers/system";
+import {
+  setMockUpdateDataTooNew,
+  setMockUpdateManifest,
+  setMockUpdaterUnsupported,
+  setMockUpdaterVersion,
+  setMockUpdateSourceFailures,
+} from "../../ipc/mock/handlers/system";
+import { COMPLETION_HOLD_S } from "../../lib/progress-display";
+import { REFLOW_SKIP_ATTR } from "../../lib/reflow";
+import { NO_ART, setArtStatus } from "../../mc/art";
 import { catalogFromDto, setBlockCatalog } from "../../mc/catalog";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickFile } from "../../shell/platform";
@@ -18,7 +28,8 @@ import panelStyles from "../../shell/UpdatePanel.module.css";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { ICON_PATHS } from "../../art/icon-paths";
+import { render, stubMatchMedia, stubMediaQueries, stubResizeObserver, type Rendered } from "../../test/dom";
 import { NAV_ANCHOR_ATTR } from "../../ui/Page";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { callsOf, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
@@ -33,10 +44,29 @@ vi.mock("../../shell/platform", async (orig) => {
   const actual = await orig<typeof import("../../shell/platform")>();
   return { ...actual, pickFile: vi.fn(actual.pickFile) };
 });
-// 「下载原版材质」由它自己的测试覆盖；外观分区只管放不放、放在哪、用不用紧凑版
-vi.mock("../shared/cover-picker/ArtDownload", async () => {
+// 分区导航自己不订阅状态，只随设置页根一起渲染：包一层计数，数设置页根渲染了几次
+const navRenders = vi.hoisted(() => ({ count: 0 }));
+vi.mock("./SettingsNav", async (orig) => {
+  const mod = await orig<typeof import("./SettingsNav")>();
   const { createElement } = await import("react");
-  return { ArtDownload: ({ compact }: { compact?: boolean }) => createElement("div", { "data-art-download": compact === true ? "compact" : "full" }) };
+  return {
+    ...mod,
+    SettingsNav: (props: Parameters<typeof mod.SettingsNav>[0]) => {
+      navRenders.count++;
+      return createElement(mod.SettingsNav, props);
+    },
+  };
+});
+// 「下载原版材质」的下载流程由它自己的测试覆盖；外观分区只管放不放、放在哪、用不用紧凑版、说明用哪一套。
+// 部件本体与「要不要给下载入口」照用，外面套一层标出用的哪一档
+vi.mock("../shared/cover-picker/ArtDownload", async (orig) => {
+  const actual = await orig<typeof import("../shared/cover-picker/ArtDownload")>();
+  const { createElement } = await import("react");
+  return {
+    ...actual,
+    ArtDownload: (props: Parameters<typeof actual.ArtDownload>[0]) =>
+      createElement("div", { "data-art-download": props.compact === true ? "compact" : "full" }, createElement(actual.ArtDownload, props)),
+  };
 });
 
 let view: Rendered | undefined;
@@ -44,10 +74,13 @@ let nav: NavApi;
 let launcher: LauncherApi;
 let commands: SettingsCommands & { calls: string[] };
 
+/** 与外壳的页面槽一样路由不变就不重渲染：Harness 订阅了整份状态，不隔开的话状态每变一次设置页都跟着重渲染。 */
+const RoutedSettingsPage = memo(SettingsPage);
+
 function Harness() {
   nav = useNav();
   launcher = useLauncher();
-  return nav.route.page === "settings" ? <SettingsPage route={nav.route} /> : null;
+  return nav.route.page === "settings" ? <RoutedSettingsPage route={nav.route} /> : null;
 }
 
 function fakeCommands(): SettingsCommands & { calls: string[] } {
@@ -106,9 +139,12 @@ function live<E extends Element = HTMLElement>(selector: string): E[] {
   return all<E>(selector).filter((el) => el.closest("[inert]") === null);
 }
 
+/** 按钮上看得见的文字：文案槽（LabelSlot）里叠着全部候选，看得见的只有标着 data-current 的那条。 */
+const shownText = (b: Element) => (b.querySelector("[data-align] > [data-current]") ?? b).textContent?.trim();
+
 /** 按可见文字或无障碍名称找按钮（含 role=radio / switch / combobox 的按钮）。 */
 function button(name: string): HTMLButtonElement {
-  const found = all<HTMLButtonElement>("button").find((b) => b.getAttribute("aria-label") === name || b.textContent?.trim() === name);
+  const found = all<HTMLButtonElement>("button").find((b) => b.getAttribute("aria-label") === name || shownText(b) === name);
   if (found === undefined) throw new Error(`找不到按钮「${name}」`);
   return found;
 }
@@ -213,6 +249,19 @@ describe("设置页：骨架与分区导航", () => {
     await mount();
     const items = all<HTMLButtonElement>('nav[aria-label="设置分区"] button').slice(0, 5);
     expect(items.map((b) => b.textContent)).toEqual(["常规启动后行为、语言", "下载下载源与速度", "Java运行时与自动选择", "游戏内存、隔离与目录", "外观明暗、强调色、花瓣、动画"]);
+  });
+
+  it("卡头下挂着让位列、行会变高变矮的卡片，外框下沿跟着让位走：常规「启动」、外观「背景与动效」、关于「更新」；别的卡片不开", async () => {
+    vi.stubGlobal("__PETALFALL_BUILD__", BUILD);
+    onTestFinished(() => void vi.unstubAllGlobals());
+    const edged: Record<string, (string | null | undefined)[]> = {};
+    for (const section of ["general", "download", "java", "game", "appearance", "about"] as const) {
+      await mount(section);
+      edged[section] = live("[data-edge]").map((card) => card.querySelector("h3")?.textContent);
+      view?.unmount();
+      view = undefined;
+    }
+    expect(edged).toEqual({ general: ["启动"], download: [], java: [], game: [], appearance: ["背景与动效"], about: [`${APP_NAME}更新`] });
   });
 
   it("分区布局标为导航锚点：导航与分区面板都在这一行里，一页只有这一个", async () => {
@@ -331,12 +380,41 @@ describe("设置页：骨架与分区导航", () => {
     await mount();
     expect(text()).toContain("配置载入失败");
     expect(text()).toContain("config.json 第 3 行格式不对");
+    // 错误卡里的说明块：重试是文字之后的幽灵小按钮
+    expect([button("重试").dataset.variant, button("重试").dataset.size]).toEqual(["ghost", "sm"]);
     await click(navItem("下载"));
     expect(nav.route).toEqual({ page: "settings", section: "download" });
     fail = false;
     await click(button("重试"));
     expect(text()).not.toContain("配置载入失败");
     expect(radio("镜像源优先").getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("配置已读到后再读一遍：读的过程与读失败都不让设置页根重渲染，错误卡照样换上，重试成功后回到分区", async () => {
+    await mount("general");
+    expect(text()).toContain("游戏启动后");
+    const again = deferred<unknown>();
+    ipc.overrides.set("get_config", () => again.promise);
+    const before = navRenders.count;
+    let reloading: Promise<void> | undefined;
+    act(() => {
+      reloading = launcher.actions.reload("settings");
+    });
+    await flush();
+    expect([launcher.state.status.settings.kind, navRenders.count]).toEqual(["loading", before]);
+    await act(async () => {
+      again.reject(new IpcError("config_invalid", "config.json 第 7 行格式不对"));
+      await reloading;
+      await settle(20);
+    });
+    expect([launcher.state.status.settings.kind, navRenders.count]).toEqual(["error", before]);
+    // 错误卡由分区门自己订阅状态换上，不靠设置页根重渲染
+    expect(text()).toContain("config.json 第 7 行格式不对");
+    ipc.overrides.delete("get_config");
+    await click(button("重试"));
+    expect(launcher.state.status.settings.kind).toBe("ready");
+    expect(text()).not.toContain("配置载入失败");
+    expect(text()).toContain("游戏启动后");
   });
 });
 
@@ -538,6 +616,26 @@ describe("设置页：Java", () => {
     expect(text()).toContain("首次启动时会自动下载");
     expect(text()).toContain("还缺 Java 25、Java 21、Java 8，首次启动对应实例时会自动下载。");
     expect(all('[role="radio"]')).toEqual([]);
+  });
+
+  it("扫描出错：列表位置换成写着原因的说明块，重试是文字之后的幽灵小按钮，点了再扫一次", async () => {
+    let fail = true;
+    ipc.overrides.set("detect_java", async (args) => {
+      if (fail) throw new Error("拒绝访问 C:\\Program Files\\Java");
+      return mockInvoke("detect_java", args);
+    });
+    await mount("java");
+    const alert = section("Java 运行时").querySelector<HTMLElement>('[data-tone="danger"]');
+    if (alert === null) throw new Error("Java 卡里没有读失败的说明块");
+    expect(alert.textContent).toBe("扫描 Java 时出错拒绝访问 C:\\Program Files\\Java重试");
+    const retry = [...alert.querySelectorAll<HTMLButtonElement>("button")];
+    expect(retry.map((b) => [b.textContent, b.dataset.variant, b.dataset.size])).toEqual([["重试", "ghost", "sm"]]);
+
+    fail = false;
+    const before = callsOf(ipc, "detect_java").length;
+    await click(retry[0]);
+    expect(callsOf(ipc, "detect_java")).toHaveLength(before + 1);
+    expect(radio("自动选择").getAttribute("aria-checked")).toBe("true");
   });
 
   it("本机扫出 7 个运行时：列表照常列出全部 8 项（含自动选择），可以选中最后一个", async () => {
@@ -1133,6 +1231,7 @@ describe("设置页：Java · 显卡", () => {
     ipc.overrides.delete("gpu_adapters");
     const retry = [...card.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === "重试");
     if (retry === undefined) throw new Error("显卡卡里没有「重试」");
+    expect([retry.dataset.variant, retry.dataset.size]).toEqual(["ghost", "sm"]);
     await click(retry);
     expect(callsOf(ipc, "gpu_adapters")).toHaveLength(2);
     expect(section("显卡").querySelector('[data-tone="info"]')?.textContent).toContain("Intel(R) UHD Graphics 和 NVIDIA GeForce RTX 4060 Laptop GPU");
@@ -1270,6 +1369,60 @@ describe("设置页：游戏", () => {
     expect(text()).not.toContain("已有 mods 或 saves");
   });
 
+  describe("新实例沿用默认设置", () => {
+    const TEMPLATE = "沿用默认设置";
+    const stored = async () => (await mockInvoke<{ new_instance_template: boolean }>("get_config")).new_instance_template;
+    const enabledInTemplateInfo = async () => (await mockInvoke<{ enabled: boolean }>("template_info")).enabled;
+
+    it("在「新实例」卡里，卡排在版本隔离之后、游戏目录之前；默认开，说明写清补什么、关掉后怎样", async () => {
+      await mount("game");
+      const toggle = button(TEMPLATE);
+      expect(section("新实例").contains(toggle)).toBe(true);
+      expect(toggle.getAttribute("role")).toBe("switch");
+      expect(toggle.getAttribute("aria-checked")).toBe("true");
+      const titles = all('[role="region"] h3').map((h) => h.textContent);
+      expect(titles.slice(titles.indexOf("版本隔离"), titles.indexOf("游戏目录") + 1)).toEqual(["版本隔离", "新实例", "游戏目录"]);
+      expect(section("新实例").textContent).toContain(
+        "新建实例与导入整合包时，把在实例设置里保存的默认设置（键位、视距、服务器列表）补进新实例，实例里已有的文件不动。关掉后一律不沿用，已保存的默认设置仍然留着。",
+      );
+    });
+
+    it("关掉写入 newInstanceTemplate: false，再打开写回 true；控件、状态层、配置与默认设置的 enabled 都跟着变", async () => {
+      await mount("game");
+      await click(button(TEMPLATE));
+      expect(callsOf(ipc, "update_config")).toEqual([{ newInstanceTemplate: false }]);
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("false");
+      expect(launcher.state.settings?.newInstanceTemplate).toBe(false);
+      expect([await stored(), await enabledInTemplateInfo()]).toEqual([false, false]);
+
+      await click(button(TEMPLATE));
+      expect(callsOf(ipc, "update_config")).toEqual([{ newInstanceTemplate: false }, { newInstanceTemplate: true }]);
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("true");
+      expect([await stored(), await enabledInTemplateInfo()]).toEqual([true, true]);
+    });
+
+    it("配置里已经关掉：打开设置页时开关就是关的", async () => {
+      await mockInvoke("update_config", { newInstanceTemplate: false });
+      await mount("game");
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("false");
+    });
+
+    it("写入中开关先显示关；失败后回到开，error 通知标题点名设置项、正文给原因，配置没变", async () => {
+      const write = deferred<null>();
+      ipc.overrides.set("update_config", () => write.promise);
+      await mount("game");
+      await click(button(TEMPLATE));
+      expect(callsOf(ipc, "update_config")).toEqual([{ newInstanceTemplate: false }]);
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("false");
+
+      write.reject(new IpcError("config_io", "磁盘已满"));
+      await flush();
+      expect(button(TEMPLATE).getAttribute("aria-checked")).toBe("true");
+      expect(toasts()).toContainEqual({ tone: "error", title: `没能保存「${TEMPLATE}」`, body: "磁盘已满" });
+      expect(await stored()).toBe(true);
+    });
+  });
+
   it("其他文件夹：切换前二次确认，确认后切换并刷新列表；访问不到的不能切；移除只删记录", async () => {
     let dirs = [
       { name: "默认目录", path: "D:\\Games\\Launcher\\.minecraft", is_current: true, available: true },
@@ -1397,7 +1550,10 @@ describe("设置页：外观", () => {
   it("非当前的明暗与强调色也画出真实颜色：预览按各自的明暗与当前强调色，色块各画各的", async () => {
     await mount("appearance");
     const previews = () => all('[role="radiogroup"][aria-label="明暗"] [data-mode]').map((p) => [p.getAttribute("data-mode"), p.getAttribute("data-tint")]);
+    // 跟随系统那张卡叠画日樱、夜樱两幅
     expect(previews()).toEqual([
+      ["day", "sakura"],
+      ["night", "sakura"],
       ["day", "sakura"],
       ["night", "sakura"],
     ]);
@@ -1407,8 +1563,35 @@ describe("设置页：外观", () => {
     expect(previews()).toEqual([
       ["day", "moss"],
       ["night", "moss"],
+      ["day", "moss"],
+      ["night", "moss"],
     ]);
     expect(radio("青苔").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("明暗三档：默认选中日樱；选跟随系统写 mode: system，按系统此刻的深浅色画，系统切换时当场换，卡头图标换成显示器", async () => {
+    const media = stubMediaQueries({ "(prefers-reduced-motion: reduce)": false, "(prefers-color-scheme: dark)": true });
+    await mount("appearance");
+    expect(all('[role="radiogroup"][aria-label="明暗"] [role="radio"]').map((r) => [r.textContent?.slice(0, 4), r.getAttribute("aria-checked")])).toEqual([
+      ["日樱浅粉", "true"],
+      ["夜樱深紫", "false"],
+      ["跟随系统", "false"],
+    ]);
+    // 系统是深色也不影响默认的日樱
+    expect(document.documentElement.getAttribute("data-sk-mode")).toBe("day");
+
+    await click(radio("跟随系统"));
+    expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { mode: "system" } }]);
+    expect(radio("跟随系统").getAttribute("aria-checked")).toBe("true");
+    expect(document.documentElement.getAttribute("data-sk-mode")).toBe("night");
+    expect(section("明暗").querySelector("svg > path")?.getAttribute("d")).toBe(ICON_PATHS.monitor.s);
+    expect((await mockInvoke<{ mode: string }>("get_appearance")).mode).toBe("system");
+
+    media["(prefers-color-scheme: dark)"].set(false);
+    await flush();
+    expect(document.documentElement.getAttribute("data-sk-mode")).toBe("day");
+    expect(radio("跟随系统").getAttribute("aria-checked")).toBe("true");
+    expect(callsOf(ipc, "set_appearance")).toHaveLength(1);
   });
 
   it("明暗即时生效并写后端；本机没有樱花林全景时开关禁用并说明原因", async () => {
@@ -1422,6 +1605,15 @@ describe("设置页：外观", () => {
     expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { mode: "night" } }, { patch: { petals: false } }]);
   });
 
+  it("「减少动画」的说明照实写：花瓣定格、位移缩放停掉、页面切换只留淡入，并写明系统偏好盖过这里", async () => {
+    await mount("appearance");
+    const row = button("减少动画").closest('[class*="row"]');
+    // 页面换场时旧页直接卸下、只有新页淡入，所以不能写成「页面过渡停掉」或「淡入淡出」
+    expect(row?.querySelector('[class*="description"]')?.textContent).toBe(
+      "花瓣不再飘落，卡面视差、按下时的收缩等各处的位移缩放都停掉，页面切换只留淡入。系统开了「减少动态效果」时无论这里怎么设都会生效。",
+    );
+  });
+
   it("实例卡面默认背景：两档各写出外观补丁；本机没有原版材质时这一行下面放紧凑的材质下载，有了就收起", async () => {
     onTestFinished(() => setBlockCatalog(null));
     await mount("appearance");
@@ -1432,6 +1624,9 @@ describe("设置页：外观", () => {
     // 下载块包在一层出入场的外壳里，外壳紧跟在这一行后面
     const host = download[0].parentElement;
     expect(host?.previousElementSibling?.textContent).toMatch(/^实例卡面默认背景/);
+    // 这一行的说明已经写了没有材质：下载块不加标题，只有一句说明
+    expect([...download[0].querySelectorAll("p")].map((p) => p.textContent)).toEqual(["从 Mojang 官方源或镜像下载原版材质，整包约 20 到 40 MB，下完只留不到 1 MB。"]);
+    expect(text()).not.toContain("本机的原版材质不全");
 
     await click(radio("渐变花瓣"));
     expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { cover_background: "art" } }]);
@@ -1444,6 +1639,38 @@ describe("设置页：外观", () => {
     expect(host?.hasAttribute("inert")).toBe(true);
     expect(live("[data-art-download]")).toEqual([]);
     expect(text()).toContain("方块平铺取封面方块的材质，读取自你本机的游戏文件。");
+  });
+
+  it("本机最新的原版早于 1.20：卡面默认背景下面同样放紧凑的材质下载，标题与说明写材质不全，与方块选择框同一份文案", async () => {
+    onTestFinished(() => {
+      setBlockCatalog(null);
+      setArtStatus(NO_ART);
+    });
+    // 外壳的材质绑定开机就按材质状态载入目录：降级集也有目录
+    ipc.overrides.set("art_status", () => ({ source: { version_id: "1.16.5", degraded: true, legacy_skins: true }, panorama: false }));
+    ipc.overrides.set("art_blocks", () => ({ version_id: "1.16.5", blocks: [] }));
+    await mount("appearance");
+    expect(text()).toContain("方块平铺取封面方块的材质，读取自你本机的游戏文件。");
+    const download = live("[data-art-download]");
+    expect(download.map((d) => d.getAttribute("data-art-download"))).toEqual(["compact"]);
+    expect(download[0].parentElement?.previousElementSibling?.textContent).toMatch(/^实例卡面默认背景/);
+    const paragraphs = [...download[0].querySelectorAll("p")].map((p) => p.textContent);
+    expect(paragraphs).toEqual(["本机的原版材质不全", ART_DOWNLOAD_COPY.degradedBody]);
+    expect(paragraphs[1]).toMatch(/^本机最新的原版早于 1\.20，推荐里有些方块那时还没有，只能画成实例徽记。下载最新正式版的材质就能补齐：/);
+    expect([...download[0].querySelectorAll("button")].map((b) => b.textContent)).toEqual(["下载原版材质"]);
+  });
+
+  it("本机的原版材质齐全：卡面默认背景下面不放材质下载", async () => {
+    onTestFinished(() => {
+      setBlockCatalog(null);
+      setArtStatus(NO_ART);
+    });
+    ipc.overrides.set("art_status", () => ({ source: { version_id: "1.21.4", degraded: false, legacy_skins: false }, panorama: false }));
+    ipc.overrides.set("art_blocks", () => ({ version_id: "1.21.4", blocks: [] }));
+    await mount("appearance");
+    expect(text()).toContain("方块平铺取封面方块的材质，读取自你本机的游戏文件。");
+    expect(all("[data-art-download]")).toEqual([]);
+    expect(all("button").filter((b) => b.textContent === "下载原版材质")).toEqual([]);
   });
 });
 
@@ -1478,21 +1705,37 @@ describe("设置页：关于与启动器更新", () => {
     await click(button("下载更新"));
     const [download] = callsOf(ipc, "download_update");
     expect(typeof download.taskId).toBe("string");
-    // 假后端每 120 ms 报一次进度，共 12 MB。卡片主句的百分比条条都换，面板与卡片的已下大小按 500 ms 的节拍换字
+    // 假后端每 120 ms 报一次进度，共 12 MB。卡片主句的百分数在第一条到时直接写出，之后与进度条同一条平滑逐帧走；
+    // 面板与卡片的已下大小从 0 开始传的第一条立即换上，之后按 500 ms 的节拍换字
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(250);
+      await vi.advanceTimersByTimeAsync(130);
     });
-    expect(text()).toContain("正在下载 0.2.0 · 40%");
+    expect(text()).toContain("正在下载 0.2.0 · 20%");
+    expect(text()).toContain("2.4 MB / 12.0 MB");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120);
+    });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
-    expect(text()).toContain("9.6 MB / 12.0 MB");
+    // 换上 2.4 MB 之后还不满 500 ms：其后报上来的几条都还没换上
+    expect(text()).toContain("2.4 MB / 12.0 MB");
+    expect(text()).not.toContain("9.6 MB");
     expect(button("后台下载").textContent).toBe("后台下载");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
     await flush();
+    // 假后端 600 ms 时报完。完成后卡片与面板都先按下载中留一拍：已下大小立即到总量，百分数与进度条推满，再换成已下好
+    expect(text()).toContain("12.0 MB / 12.0 MB");
+    expect(text()).toContain("正在下载 0.2.0 · ");
+    expect(text()).not.toContain("新版本已经下好了。");
+    expect(text()).not.toContain("0.2.0 已下好，等待安装");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(COMPLETION_HOLD_S * 1000);
+    });
     expect(text()).toContain("新版本已经下好了。");
+    expect(text()).toContain("0.2.0 已下好，等待安装");
     expect(callsOf(ipc, "save_task_journal")).toHaveLength(0);
 
     const install = all<HTMLButtonElement>(OPEN_DIALOG + ' button').find((b) => b.textContent === "重启并安装");
@@ -1524,7 +1767,8 @@ describe("设置页：关于与启动器更新", () => {
     });
     const switchNow = () => all<HTMLButtonElement>(OPEN_DIALOG + ' button').find((b) => b.textContent === "改为现在安装") as HTMLButtonElement;
     const confirmButton = (label: string) => {
-      const found = all<HTMLButtonElement>(OPEN_DIALOG + ' button').find((b) => b.textContent === label);
+      // 更新面板换阶段时退场的那一组键还在原处淡出，同名的「重启并安装」不算
+      const found = live<HTMLButtonElement>(OPEN_DIALOG + ' button').find((b) => b.textContent === label);
       if (found === undefined) throw new Error(`确认框里没有「${label}」`);
       return found;
     };
@@ -1562,7 +1806,12 @@ describe("设置页：关于与启动器更新", () => {
     expect(layer.hasAttribute("data-pending")).toBe(true);
     // 主句、次句各一行，右边一个按钮
     expect(layer.querySelectorAll('[class*="updateTitle"], [class*="mutedText"]')).toHaveLength(2);
+    // 选项块按支持自更新画：小标题、两行说明、三个同高的块，与真实的选项块同在一块带分隔线的区域里
+    const channel = layer.querySelector(`.${settingsStyles.channelBlock}`);
+    expect(channel?.querySelectorAll(`.${settingsStyles.channelDesc} [data-last]`)).toHaveLength(1);
+    expect([...(channel?.querySelector(`.${settingsStyles.channelSkeleton}`)?.children ?? [])].map((block) => (block as HTMLElement).style.height)).toEqual(["86px", "86px", "86px"]);
     expect([...card.querySelectorAll("button")].some((b) => b.textContent === "检查更新")).toBe(false);
+    expect(card.querySelector('[role="radiogroup"]')).toBeNull();
 
     await act(async () => {
       info.resolve(await mockInvoke("updater_info", {}));
@@ -1570,6 +1819,7 @@ describe("设置页：关于与启动器更新", () => {
     });
     expect(card.textContent).toContain("当前是 0.1.0");
     expect(card.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(card.querySelector('[role="radiogroup"]')?.closest(`.${settingsStyles.channelBlock}`)).not.toBeNull();
   });
 
   it("检查失败：卡内如实显示后端原因并给出重试，重试成功后显示新版本", async () => {
@@ -1685,8 +1935,9 @@ describe("设置页：关于与启动器更新", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(130);
     });
-    // 已下大小的字按 500 ms 的节拍换，第一个源报的这一条只在卡片主句的百分比上
+    // 已下大小从 0 开始传的第一条立即换上，与卡片主句的百分数同时到
     expect(text()).toContain("正在下载 0.2.0 · 20%");
+    expect(text()).toContain("2.4 MB / 12.0 MB");
     expect(text()).not.toContain("已换用备用下载源");
     // 换源提示要让读屏念出来：status 节点在第一个源时就挂着、是空的，换源时只换文字
     const panel = openDialogs()[0];
@@ -1702,15 +1953,25 @@ describe("设置页：关于与启动器更新", () => {
     expect(panel?.textContent).not.toContain("2.4 MB");
     expect(text()).toContain("0 B · 已换用备用下载源（2/4）");
 
-    // 换源那一刻字回到 0 B，从那时起满 500 ms 换上最近报上来的一条
+    // 换源那一刻字回到 0 B；新源报上来的第一条立即换上，之后按 500 ms 的节拍换
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(120);
     });
-    expect(text()).toContain("9.6 MB / 12.0 MB · 已换用备用下载源（2/4）");
+    expect(text()).toContain("2.4 MB / 12.0 MB · 已换用备用下载源（2/4）");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(380);
+    });
+    expect(text()).toContain("2.4 MB / 12.0 MB · 已换用备用下载源（2/4）");
+    expect(text()).not.toContain("9.6 MB");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(150);
     });
     await flush();
+    // 下完后留住的那一拍里换源说明还在，与推满的进度同处一句
+    expect(text()).toContain("12.0 MB / 12.0 MB · 已换用备用下载源（2/4）");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(COMPLETION_HOLD_S * 1000);
+    });
     expect(text()).toContain("新版本已经下好了。");
     expect(text()).not.toContain("已换用备用下载源");
   });
@@ -1739,6 +2000,199 @@ describe("设置页：关于与启动器更新", () => {
     expect(all("button").some((b) => b.textContent === "重试")).toBe(false);
   });
 
+  describe("更新通道", () => {
+    const card = () => section(`${APP_NAME}更新`);
+    /** 卡里在场的状态行（退场中的旧内容层带 inert）。 */
+    const statusLine = () => {
+      const found = live(`.${settingsStyles.updateRow}`).find((row) => card().contains(row));
+      if (found === undefined) throw new Error("更新卡里没有状态行");
+      return found;
+    };
+    const status = () => [statusLine().querySelector(`.${settingsStyles.updateTitle}`)?.textContent, statusLine().querySelector(`.${settingsStyles.mutedText}`)?.textContent];
+    const checkedTiles = () => live<HTMLButtonElement>('[role="radiogroup"] [role="radio"][aria-checked="true"]').map((t) => t.textContent?.slice(0, 3));
+    const dialogButton = (label: string) => {
+      const found = all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === label);
+      if (found === undefined) throw new Error(`确认框里没有「${label}」`);
+      return found;
+    };
+    const commandOrder = (...cmds: string[]) => ipc.calls.filter((c) => cmds.includes(c.cmd)).map((c) => c.cmd);
+    const advance = (ms: number) =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+
+    it("放在状态行之下、「自动检查更新」之上；勾选生效的偏好，「现在装的」标在包的通道上", async () => {
+      await mount("about");
+      const group = card().querySelector<HTMLElement>('[role="radiogroup"]');
+      const toggle = card().querySelector<HTMLElement>('[role="switch"]');
+      if (group === null || toggle === null) throw new Error("更新卡里少了选项块或开关");
+      expect(group.getAttribute("aria-label")).toBe("更新通道");
+      expect(statusLine().compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(group.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(group.closest(`.${settingsStyles.channelBlock}`)?.textContent).toContain(
+        "更新通道从选的这条线接收更新。选了更稳的线时，现在的版本先留着，等那条线出了更新的版本再换过去。",
+      );
+      expect(checkedTiles()).toEqual(["正式版"]);
+      expect(radio("正式版").textContent).toContain("现在装的");
+      expect([radio("预览版").textContent, radio("测试版").textContent].some((t) => t?.includes("现在装的"))).toBe(false);
+    });
+
+    it("选更快的线：马上写入、不弹确认；检查后状态行写出新版本属于哪条线", async () => {
+      await mount("about");
+      await click(radio("测试版"));
+      expect(callsOf(ipc, "set_update_channel")).toEqual([{ channel: "beta" }]);
+      expect(openDialogs()).toEqual([]);
+      expect(checkedTiles()).toEqual(["测试版"]);
+      expect(status()).toEqual(["当前是 0.1.0", "已开启启动时自动检查"]);
+
+      await click(button("检查更新"));
+      expect(status()).toEqual(["有新版本 0.3.0-beta.1", "属于测试版 · 发布于 2026年10月30日"]);
+    });
+
+    it("选更慢的线：不弹确认，状态行当场写明要等到哪个正式版、在那之前收不到哪条线的更新；检查过后照样这么写", async () => {
+      setMockUpdaterVersion("1.0.0-dev.60");
+      await mount("about");
+      expect(checkedTiles()).toEqual(["预览版"]);
+      expect(radio("预览版").textContent).toContain("现在装的");
+      await click(radio("测试版"));
+      expect(callsOf(ipc, "set_update_channel")).toEqual([{ channel: "beta" }]);
+      expect(openDialogs()).toEqual([]);
+      expect(status()).toEqual(["在等测试版追上来", "要等到正式版 1.0.0 发布，在那之前收不到预览版的更新"]);
+
+      await click(button("检查更新"));
+      const [title, sub] = status();
+      expect(title).toBe("在等测试版追上来");
+      expect(sub).toMatch(/^要等到正式版 1\.0\.0 发布，在那之前收不到预览版的更新 · .+检查过$/);
+    });
+
+    it("偏好选成还没发布的正式版：允许选，检查后状态行说发布之前收不到任何更新", async () => {
+      setMockUpdaterVersion("1.0.0-beta.3");
+      setMockUpdateManifest("stable", { state: "not_published" });
+      await mount("about");
+      await click(radio("正式版"));
+      expect(callsOf(ipc, "set_update_channel")).toEqual([{ channel: "stable" }]);
+      expect(status()).toEqual(["在等正式版追上来", "要等到正式版 1.0.0 发布，在那之前收不到测试版的更新"]);
+
+      await click(button("检查更新"));
+      const [title, sub] = status();
+      expect(title).toBe("正式版还没有发布");
+      expect(sub).toMatch(/^发布之前收不到任何更新 · .+检查过$/);
+    });
+
+    it("正在下载时改通道：先确认，继续下载则不写、下载照旧；确认后先取消下载、等它返回再写，状态行回到未检查", async () => {
+      await mount("about");
+      await click(button("检查更新"));
+      await click(button("查看更新"));
+      await click(button("下载更新"));
+      // 第一条进度到时百分数直接写出；之后的随平滑逐帧走，到哪一格不在这里核对
+      await advance(130);
+      await click(button("后台下载"));
+      expect(status()[0]).toBe("正在下载 0.2.0 · 20%");
+
+      await click(radio("测试版"));
+      expect(all(OPEN_DIALOG + " h2").map((h) => h.textContent)).toEqual(["把更新通道改成测试版？"]);
+      expect(openDialogs()[0]?.textContent).toContain("正在下载的 0.2.0 会被取消，之后按测试版检查更新。");
+      await click(dialogButton("继续下载"));
+      expect(callsOf(ipc, "set_update_channel")).toEqual([]);
+      expect(callsOf(ipc, "cancel_task")).toEqual([]);
+      expect(checkedTiles()).toEqual(["正式版"]);
+      expect(status()[0]).toMatch(/^正在下载 0\.2\.0/);
+
+      await click(radio("测试版"));
+      await click(dialogButton("改成测试版"));
+      // 假后端每 120 ms 才看一次取消，走过这一步下载命令才返回
+      await advance(150);
+      await flush();
+      expect(commandOrder("cancel_task", "set_update_channel")).toEqual(["cancel_task", "set_update_channel"]);
+      expect(callsOf(ipc, "set_update_channel")).toEqual([{ channel: "beta" }]);
+      expect(checkedTiles()).toEqual(["测试版"]);
+      expect(status()).toEqual(["当前是 0.1.0", "已开启启动时自动检查"]);
+    });
+
+    it("已下好时改通道：确认框说丢掉下好的那一版；确认后写入，不取消任何下载，状态行回到未检查", async () => {
+      await mount("about");
+      await click(button("检查更新"));
+      await click(button("查看更新"));
+      await click(button("下载更新"));
+      await advance(250);
+      await click(button("后台下载"));
+      await advance(1000);
+      await flush();
+      expect(status()[0]).toBe("0.2.0 已下好，等待安装");
+
+      await click(radio("预览版"));
+      expect(openDialogs()[0]?.textContent).toContain("已下好的 0.2.0 会被丢掉，之后按预览版检查更新。");
+      expect(all<HTMLButtonElement>(OPEN_DIALOG + " button").map((b) => b.textContent)).toEqual(["取消", "改成预览版"]);
+      await click(dialogButton("改成预览版"));
+      expect(callsOf(ipc, "set_update_channel")).toEqual([{ channel: "dev" }]);
+      expect(callsOf(ipc, "cancel_task")).toEqual([]);
+      expect(checkedTiles()).toEqual(["预览版"]);
+      expect(status()).toEqual(["当前是 0.1.0", "已开启启动时自动检查"]);
+    });
+
+    it("下好的那一版读不了这台电脑上的数据：状态行说暂时没有能装的、已丢弃；再检查时写被拒的那一版", async () => {
+      setMockUpdateDataTooNew(["0.2.0"]);
+      await mount("about");
+      await click(button("检查更新"));
+      await click(button("查看更新"));
+      await click(button("下载更新"));
+      await advance(250);
+      await click(button("后台下载"));
+      await advance(1000);
+      await flush();
+      expect(status()).toEqual(["暂时没有能装的新版本", "0.2.0 读不了这台电脑上的数据，已丢弃"]);
+      expect(statusLine().querySelector("button")?.textContent).toBe("检查更新");
+
+      await click(statusLine().querySelector("button") as HTMLButtonElement);
+      expect(callsOf(ipc, "check_update")).toHaveLength(2);
+      const [title, sub] = status();
+      expect(title).toBe("暂时没有能装的新版本");
+      expect(sub).toMatch(/^0\.2\.0 读不了这台电脑上的数据 · .+检查过$/);
+    });
+
+    it("偏好通道的更新源还没跟上：状态行用中性的说法，按钮是重试", async () => {
+      setMockUpdateManifest("stable", { state: "stale", version: "0.1.0", seen: "0.2.0" });
+      await mount("about");
+      await click(button("检查更新"));
+      expect(status()).toEqual(["正式版的更新源还没跟上", "它给出的版本比这台电脑以前拿到过的旧，过一阵再查"]);
+      expect(statusLine().querySelector("button")?.textContent).toBe("重试");
+      expect(all("[data-selectable]").filter((el) => card().contains(el))).toEqual([]);
+    });
+
+    it("写入失败：弹「没能保存「更新通道」」，选项回到原值", async () => {
+      ipc.overrides.set("set_update_channel", () => {
+        throw new IpcError("config_write_failed", "配置文件写不进去");
+      });
+      await mount("about");
+      await click(radio("测试版"));
+      expect(toasts()).toContainEqual({ tone: "error", title: "没能保存「更新通道」", body: "配置文件写不进去" });
+      expect(checkedTiles()).toEqual(["正式版"]);
+      expect(status()).toEqual(["当前是 0.1.0", "已开启启动时自动检查"]);
+    });
+
+    it.each([
+      { name: "没配签名公钥", setup: () => setMockUpdaterUnsupported("missing_pubkey"), sub: "这个版本没有配置更新签名公钥，验不了更新包，所以不检查更新" },
+      { name: "版本号认不出通道", setup: () => setMockUpdaterVersion("0.1.0-alpha.1"), sub: "这个版本的版本号认不出是哪个发布通道，不知道该从哪里取更新，所以不检查更新" },
+    ])("不支持自更新（$name）：没有选项块，状态行照旧说明原因", async ({ setup, sub }) => {
+      setup();
+      await mount("about");
+      expect(status()).toEqual(["当前环境不支持自动更新", sub]);
+      expect(card().querySelector('[role="radiogroup"]')).toBeNull();
+      expect(card().querySelector(`.${settingsStyles.channelBlock}`)).toBeNull();
+    });
+
+    it("更新信息读不出来：换成带重试的说明块，没有选项块", async () => {
+      ipc.overrides.set("updater_info", () => {
+        throw new IpcError("io", "读不到更新信息");
+      });
+      await mount("about");
+      expect(card().textContent).toContain("版本信息读不出来");
+      expect(card().querySelector('[role="radiogroup"]')).toBeNull();
+      const retry = [...card().querySelectorAll<HTMLButtonElement>('[data-tone="danger"] button')];
+      expect(retry.map((b) => [b.textContent, b.dataset.variant, b.dataset.size])).toEqual([["重试", "ghost", "sm"]]);
+    });
+  });
+
   it("支持卡：打开日志目录", async () => {
     await mount("about");
     await click(rowButton("打开日志目录", "打开"));
@@ -1759,10 +2213,87 @@ describe("设置页：关于与启动器更新", () => {
     ]);
   });
 
-  it("支持卡依次列出日志目录、协议全文、附加条款、素材许可、第三方许可与问题反馈", async () => {
+  it("支持卡依次列出日志目录、使用须知、隐私说明、协议全文、附加条款、素材许可、第三方许可与问题反馈", async () => {
     await mount("about");
     const titles = [...section("支持").querySelectorAll("button")].map((b) => b.closest('[class*="row"]')?.firstElementChild?.firstElementChild?.textContent);
-    expect(titles).toEqual(["打开日志目录", "协议全文", "附加条款", "素材许可", "第三方许可", "问题反馈"]);
+    expect(titles).toEqual(["打开日志目录", "使用须知", "隐私说明", "协议全文", "附加条款", "素材许可", "第三方许可", "问题反馈"]);
+  });
+
+  describe.each([
+    { title: "使用须知", url: "/usage-notice.md" },
+    { title: "隐私说明", url: "/privacy.md" },
+  ])("$title", ({ title, url }) => {
+    it("打开弹窗时才读产物里的文件：副标题是文首的版本号，正文按富文本画、加粗照样加粗，文首两行不重复显示；关上再开不重读", async () => {
+      // 随机的版本号与正文：显示的必须是读回来的那份，而不是哪里写死的文本
+      const version = 1 + Math.floor(Math.random() * 999);
+      const marker = Math.random().toString(36).slice(2);
+      const body = `# ${APP_NAME}${title}\n\n版本：${version}\n\n开头一段 ${marker}。\n\n## 1. 小节\n\n- **重要的一条。**\n- 普通的一条。\n`;
+      const fetchMock = vi.fn(async (_url: string) => ({ ok: true, status: 200, text: async () => body }));
+      vi.stubGlobal("fetch", fetchMock);
+      await mount("about");
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      await click(rowButton(title, "查看"));
+      expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([url]);
+      const [dialog] = openDialogs();
+      expect(dialog.querySelector("h2")?.textContent).toBe(title);
+      expect(dialog.className).toContain("noticeDialog");
+      expect(dialog.querySelector("h2 + p")?.textContent).toBe(`第 ${version} 版`);
+      const region = dialog.querySelector<HTMLElement>('[role="region"]');
+      if (region === null) throw new Error("须知的正文区没有画出来");
+      expect(region.getAttribute("aria-label")).toBe(title);
+      expect(region.tabIndex).toBe(0);
+      expect([...region.querySelectorAll("p, h4, li")].map((el) => [el.tagName, el.textContent])).toEqual([
+        ["P", `开头一段 ${marker}。`],
+        ["H4", "1. 小节"],
+        ["LI", "重要的一条。"],
+        ["P", "重要的一条。"],
+        ["LI", "普通的一条。"],
+        ["P", "普通的一条。"],
+      ]);
+      expect([...region.querySelectorAll("strong")].map((el) => el.textContent)).toEqual(["重要的一条。"]);
+      expect(region.textContent).not.toContain("版本：");
+      expect(region.textContent).not.toContain(`${APP_NAME}${title}`);
+      expect(dialog.querySelector("pre")).toBeNull();
+
+      await click(button("关闭"));
+      expect(openDialogs()).toHaveLength(0);
+      await click(rowButton(title, "查看"));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(openDialogs()[0]?.querySelector("h2 + p")?.textContent).toBe(`第 ${version} 版`);
+    });
+
+    it("读不出来：弹窗里写明原因与请求地址，不留白、没有版本号；重试再读一次", async () => {
+      const body = `# ${title}\n\n版本：3\n\n正文\n`;
+      const fetchMock = vi
+        .fn(async (_url: string) => ({ ok: true, status: 200, text: async () => body }))
+        .mockResolvedValueOnce({ ok: false, status: 404, text: async () => "Not Found" });
+      vi.stubGlobal("fetch", fetchMock);
+      await mount("about");
+      await click(rowButton(title, "查看"));
+
+      const [dialog] = openDialogs();
+      const alert = dialog.querySelector('[role="alert"]');
+      expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe(`${title}读不出来`);
+      // 标题已点名是哪份，原文只给原因
+      expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe(`${url} 返回 404`);
+      expect(dialog.querySelector("h2 + p")).toBeNull();
+      expect(dialog.querySelector('[role="region"]')).toBeNull();
+
+      await click(all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === "重试") as HTMLButtonElement);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(openDialogs()[0]?.querySelector("h2 + p")?.textContent).toBe("第 3 版");
+      expect(openDialogs()[0]?.querySelector('[role="region"]')?.textContent).toBe("正文");
+    });
+
+    it("文首没有版本号：按读失败显示原因，不当成第 1 版", async () => {
+      vi.stubGlobal("fetch", vi.fn(async (_url: string) => ({ ok: true, status: 200, text: async () => `# ${title}\n\n正文\n` })));
+      await mount("about");
+      await click(rowButton(title, "查看"));
+      const [dialog] = openDialogs();
+      expect(dialog.querySelector('[role="alert"] [class*="errorText"]')?.textContent).toBe(`${title}的文首应是一行「# 标题」，接着一行「版本：N」（N 是从 1 起的整数）`);
+      expect(dialog.querySelector('[role="region"]')).toBeNull();
+    });
   });
 
   describe.each([
@@ -1807,7 +2338,8 @@ describe("设置页：关于与启动器更新", () => {
       const [dialog] = openDialogs();
       const alert = dialog.querySelector('[role="alert"]');
       expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe(`${title}读不出来`);
-      expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe(`${title}读不出来：${url} 返回 404`);
+      // 标题已点名是哪份，原文只给原因
+      expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe(`${url} 返回 404`);
       expect(dialog.querySelector("pre")).toBeNull();
 
       await click(all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === "重试") as HTMLButtonElement);
@@ -1827,9 +2359,12 @@ describe("设置页：关于与启动器更新", () => {
     expect(loading()?.hasAttribute("data-pending")).toBe(true);
     expect(loading()?.textContent).toBe("正在读取协议全文…");
     // 转圈所在的骨架层对读屏隐藏：读取中的说明另有一份在它外面，转圈显形时才写进去，读屏念得到
-    const status = dialog.querySelector<HTMLElement>('[role="status"]');
-    if (status === null) throw new Error("弹窗里没有给读屏的读取中说明");
-    expect([status.closest('[aria-hidden="true"]'), status.textContent]).toEqual([null, ""]);
+    const statuses = [...dialog.querySelectorAll<HTMLElement>('[role="status"]')].filter((el) => el.closest('[aria-hidden="true"]') === null);
+    if (statuses.length !== 1) throw new Error(`弹窗里读屏听得到的读取中说明应只有一份，实际有 ${statuses.length} 份`);
+    const [status] = statuses;
+    expect(status.textContent).toBe("");
+    // 用的是加载层自带的那一份：紧挨着加载层的根（带 aria-busy），带着不参与让位的标记
+    expect([status.nextElementSibling?.getAttribute("aria-busy"), status.hasAttribute(REFLOW_SKIP_ATTR)]).toEqual(["true", true]);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
@@ -1920,7 +2455,8 @@ describe("设置页：关于与启动器更新", () => {
     const [dialog] = openDialogs();
     const alert = dialog.querySelector('[role="alert"]');
     expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe("协议全文读不出来");
-    expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe("协议全文读不出来：/LICENSE.txt 返回 404");
+    // 标题已点名是哪份，原文只给原因
+    expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe("/LICENSE.txt 返回 404");
     expect(dialog.querySelector("pre")).toBeNull();
     expect(dialog.textContent).not.toContain("Not Found");
 
@@ -1953,6 +2489,24 @@ describe("设置页：关于与启动器更新", () => {
       REPO_URL,
       [`${APP_NAME_EN} 0.3.0-preview.2`, "发布通道：预览版", "构建日期：2026年10月30日", "开源协议：AGPL-3.0-only", "素材许可：CC BY-NC-ND 4.0", `源代码：${REPO_URL}`].join("\n"),
     ]);
+  });
+
+  it("本机与 fork 构建（构建信息的通道为 local）：品牌卡的通道标、「发布通道」一行与复制文本都写本机构建", async () => {
+    vi.stubGlobal("__PETALFALL_BUILD__", { ...BUILD, version: "1.0.0", channel: "local" });
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    await mount("about");
+    expect(document.querySelector('[class*="brandName"] [data-tone]')?.textContent).toBe("本机构建");
+    const card = section("版本信息");
+    const rows = [...card.querySelectorAll("dl > div")].map((row) => [row.querySelector("dt")?.textContent, row.querySelector("dd")?.textContent]);
+    expect(rows.slice(0, 2)).toEqual([
+      ["版本", "1.0.0"],
+      ["发布通道", "本机构建"],
+    ]);
+    await click(card.querySelector<HTMLButtonElement>('button[aria-label="复制"]') as HTMLButtonElement);
+    expect(writeText.mock.calls.map((c) => c[0].split("\n").slice(0, 2))).toEqual([[`${APP_NAME_EN} 1.0.0`, "发布通道：本机构建"]]);
+    // 版本号像正式版也不标成正式版：本机构建推不出它属于哪条线
+    expect(document.querySelector('[class*="brandName"]')?.textContent).toBe(`${APP_NAME}${APP_NAME_EN}本机构建`);
   });
 
   it("第三方许可：打开弹窗时才读清单，按前端与 Rust 分组列出名称、版本与许可证", async () => {
@@ -2004,8 +2558,9 @@ describe("设置页：关于与启动器更新", () => {
     await mount("about");
     await click(rowButton("第三方许可", "查看"));
     const [dialog] = openDialogs();
-    expect(dialog.textContent).toContain("第三方许可清单读不出来");
-    expect(dialog.textContent).toContain("返回 404");
+    const alert = dialog.querySelector('[role="alert"]');
+    expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe("第三方许可清单读不出来");
+    expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe("/third-party-licenses.json 返回 404");
     await click(all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === "重试") as HTMLButtonElement);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(openDialogs()[0]?.textContent).toContain("serde");

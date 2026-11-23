@@ -14,7 +14,7 @@ import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKe
 import { Icon, type IconName } from "../art/Icon";
 import { cx, isImeComposing } from "../lib/util";
 import { mergeDescribedBy, useFieldControl } from "./Field";
-import { Popover } from "./Popover";
+import { Popover, usePopoverInitialFocus } from "./Popover";
 import styles from "./Select.module.css";
 import { TextInput } from "./TextInput";
 import { isTypeaheadKey, matchTypeahead, useTypeahead } from "./typeahead";
@@ -40,10 +40,15 @@ export interface SelectProps<T extends string> {
   block?: boolean;
   /**
    * 触发器宽度按最长的选项（含占位）预留：换选中项时触发器不变宽，同一行右对齐的其他控件不被挤动。
-   * 只给宽度随内容走的触发器打开（工具条里的排序、适配实例）。撑满（block）或调用方已给固定宽的不要开：
+   * 只给宽度随内容走的触发器打开（工具条里的排序）。撑满（block）或调用方已给固定宽的不要开：
    * 宽度本来就不变，预留只会在触发器里白白多出最多 8 个隐藏节点。block 时不生效。
    */
   reserveWidth?: boolean;
+  /**
+   * 弹出列表的宽度上限。default：浮层默认的 360；window：随最长的选项排开、显示全名，只夹在窗口内。
+   * 给定宽、长选项在触发器上被省略的下拉用（发现页的适配实例），只在选项文字有长度上限时开，见 Popover 的 maxWidth。
+   */
+  listMaxWidth?: "default" | "window";
   disabled?: boolean;
   invalid?: boolean;
   /** 不在 Field 里时必填。 */
@@ -109,6 +114,7 @@ export function Select<T extends string>({
   size = "md",
   block = false,
   reserveWidth = false,
+  listMaxWidth = "default",
   disabled = false,
   invalid = false,
   ariaLabel,
@@ -252,7 +258,7 @@ export function Select<T extends string>({
         </span>
         <Icon name="chevron-down" size={16} className={styles.chevron} />
       </button>
-      <Popover open={open} anchor={trigger} onClose={() => setOpen(false)} placement="bottom-start" offset={6} matchWidth role="presentation">
+      <Popover open={open} anchor={trigger} onClose={() => setOpen(false)} placement="bottom-start" offset={6} matchWidth maxWidth={listMaxWidth} role="presentation">
         <SelectList
           listId={listId}
           optionId={optionId}
@@ -327,10 +333,14 @@ function SelectList<T extends string>({
     panel.style.minHeight = `${panel.offsetHeight}px`;
   }, []);
 
-  // 打开即聚焦过滤框。不用 autoFocus：开发构建的 StrictMode 会重放 effect，autoFocus 不会重放
-  useLayoutEffect(() => {
-    if (filterable) filterRef.current?.focus();
-  }, [filterable]);
+  // 打开即聚焦过滤框，等浮层面板可见之后：定位前的面板是隐藏的，挂载时聚焦会落空。
+  // 不用 autoFocus：时机同样太早，且开发构建的 StrictMode 会重放 effect，autoFocus 不会重放
+  usePopoverInitialFocus(() => {
+    if (!filterable) return;
+    const filter = filterRef.current;
+    if (filter === null) throw new Error("下拉列表的过滤框没有挂上");
+    filter.focus();
+  });
 
   // 键盘移动高亮时把它滚进列表可视区
   useLayoutEffect(() => {

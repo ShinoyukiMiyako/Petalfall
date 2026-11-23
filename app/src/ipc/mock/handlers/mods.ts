@@ -35,6 +35,7 @@ import { CORE_EVENT } from "../../tasks";
 import { byCodeUnit, findMockSource, newestFirst, sourceVersions, type MockProject, type MockSource } from "../catalog";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
+import { ensureMockGameDir } from "./config";
 import { argReader, eventOwner, forgetMockPackFiles, mockPackFiles, parsePlatform as parsePlatformArg, renameMockPackFiles, runMockTask, simulateDownload, type MockPackFile } from "./discover";
 import { acquireMockInstance, mockInstanceFacts, mockInstanceIds, withMockInstance } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
@@ -825,6 +826,7 @@ function installMod(args: MockArgs): Promise<ModInstallOutcomeDto> {
   const platform = parsePlatformArg(read.string("platform"));
   const projectId = read.string("projectId");
   const modVersionId = read.string("modVersionId");
+  ensureMockGameDir(args, "install_mod");
   const hold = acquireMockInstance(versionId, "modifying");
   return runMockTask(taskId, async () => {
     const instance = mockInstance(versionId);
@@ -1025,6 +1027,8 @@ export const handlers: MockHandlers = {
   // 查更新会把反查到的身份回写卷宗，同样占住实例
   check_updates: (args) => {
     const id = requireString(args.versionId, "versionId");
+    // 与后端一样，带了发起时的目录（重试「全部更新」前的预检）才核对
+    if (args.gameDir !== undefined) ensureMockGameDir(args, "check_updates");
     return withMockInstance(id, "modifying", () => checkUpdates(mockInstance(id)));
   },
   update_mod: async (args): Promise<ModUpdateOutcomeDto> => {
@@ -1033,6 +1037,7 @@ export const handlers: MockHandlers = {
     const id = requireString(args.versionId, "versionId");
     const fileName = requireNonEmpty(args.fileName, "fileName");
     const modVersionId = requireNonEmpty(args.modVersionId, "modVersionId");
+    ensureMockGameDir(args, "update_mod");
     const hold = acquireMockInstance(id, "modifying");
     try {
       beginMockTask(taskId);

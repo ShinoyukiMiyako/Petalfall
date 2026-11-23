@@ -59,6 +59,7 @@ class OverlayRegistry {
   };
 
   getSnapshot = (): OverlaySnapshot => this.snapshot;
+  getScrimOpen = (): boolean => this.snapshot.scrimOpen;
   getRoot = (): HTMLElement | null => this.root;
 
   private notify(): void {
@@ -129,7 +130,10 @@ function useRegistry(): OverlayRegistry {
   return registry;
 }
 
-/** 提供 Esc 栈与浮层根。整个应用只挂一个，包住外壳与所有会弹出浮层的组件。 */
+/**
+ * 提供 Esc 栈与浮层根。外壳只挂一个，包住外壳与所有会弹出浮层的组件。
+ * 例外是外壳之前的使用须知页：它自带一套给隐私说明弹窗用，同意后与外壳的这一套同时在场的只有它的退场那几帧，那时它的弹窗已算关上、栈是空的。
+ */
 export function OverlayProvider({ children }: { children: ReactNode }) {
   const [registry] = useState(() => new OverlayRegistry());
   useEffect(() => {
@@ -165,6 +169,15 @@ export function useOverlayRoot(): HTMLElement | null {
 export function useOverlayState(): OverlaySnapshot {
   const registry = useRegistry();
   return useSyncExternalStore(registry.subscribe, registry.getSnapshot, registry.getSnapshot);
+}
+
+/**
+ * 只订阅有没有带遮罩的浮层。Popover、Menu、Select 开合只改深度，只看遮罩的组件取整份快照会随这些开合各重渲染一遍，
+ * 它们用这个。
+ */
+export function useScrimOpen(): boolean {
+  const registry = useRegistry();
+  return useSyncExternalStore(registry.subscribe, registry.getScrimOpen, registry.getScrimOpen);
 }
 
 export interface OverlayControls {

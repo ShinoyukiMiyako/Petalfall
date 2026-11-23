@@ -82,8 +82,8 @@
   margin: 0;
   padding: var(--sk-space-10) var(--sk-space-12);
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   color: var(--sk-text-2);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -116,19 +116,6 @@
   color: var(--sk-text-2);
 }
 
-/* 读屏的播报区：看得见的「正在读取」在骨架里，骨架整层对读屏隐藏。脱离底块的布局，不占清单的高度 */
-.status {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-  border: 0;
-}
-
 .failed {
   display: flex;
   flex-direction: column;
@@ -146,8 +133,8 @@
 .failedDetail {
   margin: 0;
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   color: var(--sk-text-2);
   overflow-wrap: anywhere;
 }

@@ -44,6 +44,7 @@ import {
   modTotals,
   overridesHeap,
   overviewBanner,
+  packsPlaceholderRows,
   pageViewEqual,
   parseDimension,
   peekLayout,
@@ -221,7 +222,7 @@ describe("整页订阅的启动视图", () => {
   const T0 = 1_700_000_000_000;
   const account = { uuid: "u", name: "Steve", kind: "microsoft" as const };
   const repair = (status: Task["status"], progress: number, speedBps: number, id = "repair-1"): Task => ({
-    ...newTask({ id, kind: "game", title: "补全 生存", detail: "", instanceId: "生存", spec: { command: "repair", args: { versionId: "生存" } } }, T0),
+    ...newTask({ gameDir: "D:/Games/.minecraft", id, kind: "game", title: "补全 生存", detail: "", instanceId: "生存", spec: { command: "repair", args: { versionId: "生存" } } }, T0),
     status,
     progress,
     speedBps,
@@ -349,7 +350,7 @@ describe("新建与导入还没装好", () => {
   const T0 = 1_700_000_000_000;
   const NAME = "周末生存";
   const task = (id: string, command: string, status: Task["status"], over: Partial<Task> = {}): Task => ({
-    ...newTask({ id, kind: "game", title: `任务 ${id}`, detail: "", instanceId: NAME, spec: { command, args: {} } }, T0),
+    ...newTask({ gameDir: "D:/Games/.minecraft", id, kind: "game", title: `任务 ${id}`, detail: "", instanceId: NAME, spec: { command, args: {} } }, T0),
     status,
     ...over,
   });
@@ -586,7 +587,7 @@ describe("路径", () => {
 describe("更新任务换掉的 Mod", () => {
   it("挡住「全部更新」的只有本实例排队或进行中的更新任务", () => {
     const task = (command: string, instanceId: string, status: Task["status"]): Task => ({
-      ...newTask({ id: `${command}-${status}`, kind: "mod", title: "", detail: "", instanceId, spec: { command, args: {} } }, 0),
+      ...newTask({ gameDir: "D:/Games/.minecraft", id: `${command}-${status}`, kind: "mod", title: "", detail: "", instanceId, spec: { command, args: {} } }, 0),
       status,
     });
     expect(isPendingModUpdate(task("update_mod", "生存", "queued"), "生存")).toBe(true);
@@ -808,6 +809,22 @@ describe("存档卡加载期的占位", () => {
   it("没有存档画空状态的轮廓；存档数读不出时按 3 行", () => {
     expect(worldsPlaceholder(0)).toEqual({ kind: "empty" });
     expect(worldsPlaceholder(null)).toEqual({ kind: "rows", rows: 3, foot: false });
+  });
+});
+
+describe("资源包与光影卡加载期的占位", () => {
+  it("光影一行加上资源包的行数，与读到之后画的行一样多：没有资源包时也有一行「未添加资源包」", () => {
+    expect(packsPlaceholderRows(0)).toBe(2);
+    expect(packsPlaceholderRows(1)).toBe(2);
+    expect(packsPlaceholderRows(2)).toBe(3);
+    expect(packsPlaceholderRows(7)).toBe(8);
+    // 列表不分页、不设上限，占位也不设
+    const n = 2 + Math.floor(Math.random() * 300);
+    expect(packsPlaceholderRows(n), `资源包 ${n} 个`).toBe(n + 1);
+  });
+
+  it("资源包数读不出时按光影一行加资源包一行", () => {
+    expect(packsPlaceholderRows(null)).toBe(2);
   });
 });
 

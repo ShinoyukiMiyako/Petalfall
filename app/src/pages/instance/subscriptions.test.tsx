@@ -20,7 +20,7 @@ import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
-import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { render, stepFrames, stubMatchMedia, stubResizeObserver } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, configDto, deferred, emit, instanceDto, memoryAdviceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
@@ -145,7 +145,6 @@ const ID = "樱花生存";
 const OTHER = "创造";
 const NOW = new Date(2026, 9, 31, 12, 0, 0).getTime();
 
-let view: Rendered | undefined;
 let launcher: LauncherApi;
 let nav: NavApi;
 let commits = 0;
@@ -168,7 +167,7 @@ const flush = () =>
   });
 
 async function open(tab: InstanceTab, id = ID) {
-  view = render(
+  render(
     <AppearanceProvider initial={DEFAULT_APPEARANCE}>
       <LauncherProvider>
         <ShellProvider>
@@ -307,13 +306,8 @@ beforeEach(() => {
   ipc.overrides.set("rollback_checks", () => history.map((e) => ({ event_id: e.id, can_rollback: e.kind === "update", reason: e.kind === "update" ? null : "安装事件不支持回滚" })));
 });
 
-// 横幅的百分数逐帧走：用例结束先卸载、把假时钟下的帧循环排空，同文件后面的用例才推得动动画
-afterEach(async () => {
-  view?.unmount();
-  view = undefined;
-  await drainFrames();
+afterEach(() => {
   vi.unstubAllGlobals();
-  vi.useRealTimers();
 });
 
 describe("实例详情：本实例运行中，20 批游戏日志", () => {

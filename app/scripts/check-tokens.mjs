@@ -5,7 +5,7 @@
 //
 // 豁免：在违规行或它的上一行写注释 `sk-guard-allow T1: 理由`（多条规则用逗号分隔），理由必填，
 // 缺理由本身记为 T0。ui/ 目录允许的字面色值登记在 scripts/allowed-literals.json。
-// 测试文件（*.test.ts / *.test.tsx）不受 T1、T6、T7、T12 约束：它们要断言令牌字面值、要直接引入被模拟的依赖；
+// 测试文件（*.test.ts / *.test.tsx）不受 T1、T6、T7、T12、T13 约束：它们要断言令牌字面值、要直接引入被模拟的依赖；
 // 陈列文件（*.gallery.tsx）不受 T6 约束：它们只在开发构建出现，需要引入陈列排版件与浮层根。
 //
 // 用法：node scripts/check-tokens.mjs [--root <目录>]，目录默认为本脚本所在工程（含 src/ 的那一层）。
@@ -19,7 +19,7 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 export const RULES = {
   T0: "豁免缺少理由",
   T1: "字面色值",
-  T2: "页面写死样式",
+  T2: "写死样式",
   T3: "Tailwind 任意值与数字间距",
   T4: "颜色透明度修饰",
   T5: "视口断点",
@@ -30,6 +30,7 @@ export const RULES = {
   T10: "产品名",
   T11: "富文本注入",
   T12: "令牌覆盖",
+  T13: "阴影令牌",
 };
 
 const SOURCE_EXT = /\.(ts|tsx|css)$/;
@@ -108,6 +109,16 @@ const TOKEN_DECLARATION = /--sk-[a-z0-9-]+["']?\s*:|setProperty\(\s*["'`]--sk-/;
 const T2_PROPERTY = /^(padding|margin)(-[a-z]+)*$|^(gap|row-gap|column-gap|border-radius|box-shadow|color|border-color|outline-color|fill|stroke|font-size|font-weight)$|^background(-[a-z]+)*$/;
 const T2_KEYWORDS = new Set(["0", "none", "auto", "inherit", "initial", "unset", "transparent", "currentColor", "currentcolor", "normal"]);
 const T2_INLINE = /\b(padding\w*|margin\w*|gap|borderRadius|boxShadow|color|background\w*|borderColor|outlineColor|fill|stroke|fontSize|fontWeight)\s*:\s*(-?\d|["'`](?!var\())/;
+// 这几个目录里的间距与圆角常是组件按自身尺寸定的私有值，不归 T2 管（字面色值另由 T1 查）；字号在哪里都只取字阶，所以只查字号
+const T2_FONT_SIZE_ZONES = ["launch", "ui", "shell", "art"];
+const T2_INLINE_FONT_SIZE = /\bfontSize\s*:\s*(-?\d|["'`](?!var\())/;
+const CSS_DECLARATION = /^\s*([a-z-]+)\s*:\s*([^;{}]+?)\s*;?\s*$/;
+
+/** 单行 CSS 声明的属性与值；去掉行内注释，不是声明的行（选择器、括号、跨行写法的续行）为 null。 */
+function cssDeclaration(line) {
+  const m = line.replace(/\/\*.*?\*\//g, "").match(CSS_DECLARATION);
+  return m && !m[1].startsWith("--") ? { property: m[1], value: m[2] } : null;
+}
 
 /** 按顶层空白拆分 CSS 值（括号内的空白不拆）。 */
 function splitValue(value) {
@@ -132,6 +143,125 @@ function isTokenValue(value) {
   );
 }
 
+// ---------------------------------------------------------------- 阴影令牌
+
+// 阴影令牌的值是 box-shadow 列表，代进 outline、border、color、background 一类属性时整条声明在计算值阶段作废、
+// 退回初始值（outline 退回 none，聚焦环就没了），浏览器不报错。所以它们只许写进 box-shadow；text-shadow 不认扩展半径
+// 与 inset，只放过每一层都不带这两样的令牌；filter 的 drop-shadow() 只收一层，项目里也没有这种用法，不放。
+// 自定义属性只是转交，不查。
+const SHADOW_LENGTH = /^-?(\d+(\.\d+)?|\.\d+)[a-z]*$/;
+const SK_VAR_USE = /var\(\s*(--sk-[a-z0-9-]+)/g;
+const BOX_SHADOW = new Set(["box-shadow", "boxShadow"]);
+const TEXT_SHADOW = new Set(["text-shadow", "textShadow"]);
+// 同一行里「键: 字符串」的一对，键可带引号：内联样式与 framer-motion 的样式对象都这样写
+const TS_STYLE_PAIR = /["']?([A-Za-z-][\w-]*)["']?\s*:\s*(["'`])(.*?)\2/g;
+
+/** 按顶层逗号拆分 CSS 值（括号内的逗号不拆）。 */
+function splitLayers(value) {
+  const layers = [];
+  let depth = 0;
+  let current = "";
+  for (const ch of value) {
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (ch === "," && depth === 0) {
+      layers.push(current.trim());
+      current = "";
+    } else current += ch;
+  }
+  layers.push(current.trim());
+  return layers;
+}
+
+/** 一层阴影是可选的 inset 加 2 到 4 个连续的长度、前或后恰好一个颜色；不是阴影为 null，是则给出它能否写进 text-shadow。 */
+function shadowLayer(layer) {
+  const parts = splitValue(layer);
+  const insets = parts.filter((p) => p === "inset").length;
+  const rest = parts.filter((p) => p !== "inset");
+  const colors = rest.filter((p) => !SHADOW_LENGTH.test(p));
+  const lengths = rest.length - colors.length;
+  const colorAtEdge = colors.length === 1 && (rest[0] === colors[0] || rest[rest.length - 1] === colors[0]);
+  if (insets > 1 || !colorAtEdge || lengths < 2 || lengths > 4) return null;
+  return { text: insets === 0 && lengths <= 3 };
+}
+
+/**
+ * tokens.css 里值是阴影列表的令牌 -> 能否写进 text-shadow。按值认而不按名字认：--sk-focus、--sk-gloss 的名字里没有 shadow。
+ * 同一令牌在各主题块里声明多次时任一处是阴影就算，text-shadow 要每一处都容得下；值恰好是另一个阴影令牌的别名时跟着本名算。
+ */
+export function shadowTokens(tokensCss) {
+  const declared = new Map();
+  for (const m of tokensCss.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/(--sk-[a-z0-9-]+)\s*:\s*([^;{}]+);/g)) {
+    const values = declared.get(m[1]);
+    if (values) values.push(m[2].trim());
+    else declared.set(m[1], [m[2].trim()]);
+  }
+  const shadows = new Map();
+  for (const [name, values] of declared) {
+    const layers = values.map((v) => splitLayers(v).map(shadowLayer)).filter((ls) => ls.every((l) => l !== null)).flat();
+    if (layers.length > 0) shadows.set(name, layers.every((l) => l.text));
+  }
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const [name, values] of declared) {
+      if (shadows.has(name)) continue;
+      const target = values.map((v) => /^var\((--sk-[a-z0-9-]+)\)$/.exec(v)?.[1]).find((t) => t !== undefined && shadows.has(t));
+      if (target === undefined) continue;
+      shadows.set(name, shadows.get(target));
+      grew = true;
+    }
+  }
+  return shadows;
+}
+
+/** 值里每个用错属性的阴影令牌：在值里的位置与报错文案。 */
+function misusedShadows(property, value, shadows) {
+  if (property.startsWith("--") || BOX_SHADOW.has(property)) return [];
+  return [...value.matchAll(SK_VAR_USE)]
+    .filter((m) => shadows.has(m[1]) && !(shadows.get(m[1]) && TEXT_SHADOW.has(property)))
+    .map((m) => ({ index: m.index, message: `${m[1]} 只允许写进 ${shadows.get(m[1]) ? "box-shadow 与 text-shadow" : "box-shadow"}，不允许用在 ${property}` }));
+}
+
+/** CSS 里的每条声明（值可以跨行）：属性名、值与值在全文里的起点。注释先换成等长空白，位置不变；括号与引号里的分号不算边界。 */
+function cssDeclarations(text) {
+  const src = text.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, " "));
+  const out = [];
+  let start = 0;
+  let depth = 0;
+  let quote = null;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    else if (depth === 0 && (ch === "{" || ch === "}" || ch === ";")) {
+      // 以 { 结尾的是选择器或 @ 规则的开头，不是声明
+      const m = ch === "{" ? null : /^\s*(--[\w-]+|[a-z-]+)\s*:/.exec(src.slice(start, i));
+      if (m) out.push({ property: m[1], value: src.slice(start + m[0].length, i), at: start + m[0].length });
+      start = i + 1;
+    }
+  }
+  return out;
+}
+
+function checkShadowTokens(text, isCss, shadows, report) {
+  if (shadows.size === 0) return;
+  if (isCss) {
+    for (const decl of cssDeclarations(text)) {
+      for (const bad of misusedShadows(decl.property, decl.value, shadows)) report(text.slice(0, decl.at + bad.index).split("\n").length - 1, "T13", bad.message);
+    }
+    return;
+  }
+  text.split(/\r?\n/).forEach((line, i) => {
+    if (COMMENT_LINE.test(line)) return;
+    for (const pair of line.matchAll(TS_STYLE_PAIR)) for (const bad of misusedShadows(pair[1], pair[3], shadows)) report(i, "T13", bad.message);
+  });
+}
+
 // ---------------------------------------------------------------- 依赖方向
 
 const TAURI_CORE = /^@tauri-apps\/api\/(core|event)$/;
@@ -142,7 +272,8 @@ const PAGE_SHELL_NAMES = new Set(["useShell", "useNav", "useRunner"]);
 /** 目录 -> 允许引入的目录或模块（不带扩展名，前缀匹配到目录边界）；不在表中的目录不受目录约束。 */
 const DEPENDENCY_ALLOW = {
   pages: ["pages", "ui", "art", "launch", "shell", "state", "domain", "copy", "lib"],
-  flows: ["flows", "ui", "art", "launch", "shell", "state", "domain", "copy", "lib"],
+  // pages/shared 是页面与流程共用的部件（下载原版材质：账户页与向导、登录弹窗同一个）；各页面自己的目录流程仍然不能引入
+  flows: ["flows", "ui", "art", "launch", "shell", "state", "domain", "copy", "lib", "pages/shared"],
   // shell/overlay 是浮层机制（浮层根、Esc 栈、焦点圈定），不含应用状态；提示气泡等组件必须挂进它
   ui: ["ui", "art", "lib", "domain/format", "shell/overlay"],
   art: ["art", "lib"],
@@ -207,7 +338,7 @@ function loadAllowedLiterals() {
   return data.ui;
 }
 
-function checkSourceFile(srcRel, text, allowedUiLiterals, report) {
+function checkSourceFile(srcRel, text, allowedUiLiterals, shadows, report) {
   const lines = text.split(/\r?\n/);
   const isTest = TEST_FILE.test(srcRel);
   const isGallery = GALLERY_FILE.test(srcRel);
@@ -228,13 +359,21 @@ function checkSourceFile(srcRel, text, allowedUiLiterals, report) {
 
     if (inZones("pages", "flows", "setup")) {
       if (isCss) {
-        const decl = line.replace(/\/\*.*?\*\//g, "").match(/^\s*([a-z-]+)\s*:\s*([^;{}]+?)\s*;?\s*$/);
-        if (decl && !decl[1].startsWith("--") && T2_PROPERTY.test(decl[1]) && !isTokenValue(decl[2])) report(i, "T2", line);
+        const decl = cssDeclaration(line);
+        if (decl && T2_PROPERTY.test(decl.property) && !isTokenValue(decl.value)) report(i, "T2", line);
       }
       if (isTsx) {
         for (const style of line.matchAll(/style=\{\{(.*?)\}\}/g)) if (T2_INLINE.test(style[1])) report(i, "T2", line);
         if (OPACITY_MODIFIER.test(line)) report(i, "T4", line);
       }
+    }
+
+    if (inZones(...T2_FONT_SIZE_ZONES)) {
+      if (isCss) {
+        const decl = cssDeclaration(line);
+        if (decl && decl.property === "font-size" && !isTokenValue(decl.value)) report(i, "T2", line);
+      }
+      if (isTsx) for (const style of line.matchAll(/style=\{\{(.*?)\}\}/g)) if (T2_INLINE_FONT_SIZE.test(style[1])) report(i, "T2", line);
     }
 
     if (inZones("pages", "flows", "shell", "setup") && isTsx && TAILWIND_ARBITRARY.some((re) => re.test(line))) report(i, "T3", line);
@@ -258,6 +397,8 @@ function checkSourceFile(srcRel, text, allowedUiLiterals, report) {
     if (srcRel !== "styles/tokens.css" && !isTest && TOKEN_DECLARATION.test(line)) report(i, "T12", line);
   });
 
+  if (!isTest) checkShadowTokens(text, isCss, shadows, report);
+
   if (!isCss && !isTest && !isGallery) checkImports(srcRel, text, report);
 }
 
@@ -267,6 +408,9 @@ function checkSourceFile(srcRel, text, allowedUiLiterals, report) {
  */
 export function checkTokens({ root }) {
   const allowedUiLiterals = loadAllowedLiterals();
+  // 样例目录多半不带令牌表，那里 T13 无从认起、自然不报；应用自己的令牌表由自测核对认出了哪些
+  const tokensFile = join(root, "src", "styles", "tokens.css");
+  const shadows = existsSync(tokensFile) ? shadowTokens(readFileSync(tokensFile, "utf8")) : new Map();
   const violations = [];
   const scan = (file, check) => {
     const rel = toPosix(relative(root, file));
@@ -285,7 +429,7 @@ export function checkTokens({ root }) {
   const srcRoot = join(root, "src");
   for (const file of walk(srcRoot).filter((f) => SOURCE_EXT.test(f))) {
     const srcRel = toPosix(relative(srcRoot, file));
-    scan(file, (text, report) => checkSourceFile(srcRel, text, allowedUiLiterals, report));
+    scan(file, (text, report) => checkSourceFile(srcRel, text, allowedUiLiterals, shadows, report));
   }
   const emojiOnly = (text, report) =>
     text.split(/\r?\n/).forEach((line, i) => {

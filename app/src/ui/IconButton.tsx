@@ -39,6 +39,7 @@ export interface IconButtonProps extends NativeButton {
   /**
    * 强制显示提示（转给 Tooltip 的 open）：为真时立即显示，转为假时收起这一次显示。操作结果要让指针用户也看得见时用，
    * 例如复制后的「已复制」：按下时悬停出来的提示已经收起，名称换了也看不到。tooltip={false} 且没有禁用原因时无效。
+   * 例外同 Tooltip 的 open：键盘聚焦打开的那一次，转为假时焦点还在按钮上（按回车复制）就不收起，转回普通显示、换上此刻的 label。
    */
   tooltipOpen?: boolean;
   /** 右上角角标（计数等），偏移 −4 / −4。 */
@@ -70,6 +71,10 @@ export function IconButton({
   // 不可用而保持可聚焦：带原因的禁用，或要求禁用时留住焦点；只传 disabled 时以原生禁用为准，原因也不显示
   const softDisabled = disabled ? focusableWhenDisabled : disabledReason !== undefined;
   const guard = softDisabledProps(softDisabled, onClick);
+  const ariaDisabled = softDisabled ? true : rest["aria-disabled"];
+  // 调用方自己标 aria-disabled 的按钮（侧栏满时的图钉：点了由状态层弹上限提示）外观同样是禁用：变淡、不铺悬停叠层、按下不缩。
+  // 点击照常交给调用方，不在这里挡
+  const looksDisabled = ariaDisabled === true || ariaDisabled === "true";
 
   const button = (
     <button
@@ -78,11 +83,11 @@ export function IconButton({
       className={cx(styles.button, className)}
       data-variant={variant}
       data-size={size}
-      data-disabled={softDisabled || undefined}
+      data-disabled={looksDisabled || undefined}
       disabled={disabled && !focusableWhenDisabled}
       aria-label={label}
       aria-pressed={pressed}
-      aria-disabled={softDisabled ? true : rest["aria-disabled"]}
+      aria-disabled={ariaDisabled}
       onClick={guard.onClick}
     >
       {/* 换图标（复制换成已复制、固定换成取消固定）时新图标弹出、旧图标淡出，不在同一帧硬切 */}

@@ -78,7 +78,7 @@ describe("材质 mock", () => {
     setMockArtStatus({ source: null, panorama: false });
     expect(received).toEqual([]);
 
-    const next: ArtStatusDto = { source: { version_id: "1.21.1" }, panorama: true };
+    const next: ArtStatusDto = { source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: true };
     setMockArtStatus(next);
     expect(received).toEqual([next]);
     expect(await artStatus()).toEqual(next);
@@ -88,8 +88,13 @@ describe("材质 mock", () => {
     expect((await artStatus()).source).toBeNull();
   });
 
-  it("皮肤：正版账户回 null（画剪影），未知账户报 AccountNotFound", async () => {
-    expect(await skinInfo("6a1f0c0e4b5d4c3e9f2a7b8c9d0e1f20")).toBeNull();
+  it("皮肤：浏览器里没有远程皮肤，正版与外置账户与后端一样按 UUID 给默认皮肤、跟着材质源换一套；未知账户报 AccountNotFound", async () => {
+    // 种子里的微软账户哈希为 593896604、外置账户为 -456729892，按 Java 的 UUID.hashCode 另行算出
+    expect(await skinInfo("6a1f0c0e4b5d4c3e9f2a7b8c9d0e1f20")).toEqual({ kind: "default", path: "entity/player/wide/noor", model: "wide" });
+    expect(await skinInfo("b7c2d3e4f5a64b7c8d9e0f1a2b3c4d5e")).toEqual({ kind: "default", path: "entity/player/slim/efe", model: "slim" });
+    setMockArtStatus({ source: { version_id: "1.19.2", degraded: true, legacy_skins: true }, panorama: false });
+    expect(await skinInfo("6a1f0c0e4b5d4c3e9f2a7b8c9d0e1f20")).toEqual({ kind: "default", path: "entity/steve", model: "wide" });
+    expect(await skinInfo("b7c2d3e4f5a64b7c8d9e0f1a2b3c4d5e")).toEqual({ kind: "default", path: "entity/steve", model: "wide" });
     const missing = await rejection(skinInfo("0".repeat(32)));
     expect(missing.code).toBe("AccountNotFound");
     expect(missing.detail).toEqual({ uuid: "0".repeat(32) });
@@ -99,8 +104,36 @@ describe("材质 mock", () => {
     const account = await createOfflineAccount("Steve");
     const skin = await skinInfo(account.uuid);
     if (skin === null || skin.kind !== "default") throw new Error(`离线账户应有默认皮肤：${JSON.stringify(skin)}`);
-    expect(skin).toEqual(defaultSkin(account.uuid));
+    expect(skin).toEqual(defaultSkin(account.uuid, "modern"));
     expect(SKIN_TEXTURES).toContain(skin.path);
+  });
+
+  it("皮肤：材质源早于 1.19.3 时离线账户与后端一样按旧版两款给，与离线弹窗的预览一致", async () => {
+    // mock 自己生成离线 UUID（不是原版的离线 UUID），所以按前端规则比对，而不是写死某个名字的结果
+    const accounts = [];
+    for (const name of ["Steve", "Alex", "Notch", "jeb_"]) accounts.push(await createOfflineAccount(name));
+    setMockArtStatus({ source: { version_id: "1.19.2", degraded: true, legacy_skins: true }, panorama: false });
+    const legacy = [];
+    for (const account of accounts) {
+      const skin = await skinInfo(account.uuid);
+      expect(skin).toEqual(defaultSkin(account.uuid, "legacy"));
+      legacy.push(skin);
+    }
+    expect(legacy.every((skin) => skin?.kind === "default" && (skin.path === "entity/steve" || skin.path === "entity/alex"))).toBe(true);
+    // 降级源里 1.19.3、1.19.4 已是 18 款
+    setMockArtStatus({ source: { version_id: "1.19.4", degraded: true, legacy_skins: false }, panorama: false });
+    for (const account of accounts) expect(await skinInfo(account.uuid)).toEqual(defaultSkin(account.uuid, "modern"));
+  });
+
+  it.each([
+    ["00000000-0000-0000-0000-000000000000", "entity/steve", "wide"],
+    ["00000000-0000-0000-0000-000000000001", "entity/alex", "slim"],
+    ["00000000-0000-0000-0000-0000ffffffff", "entity/alex", "slim"],
+    ["00000000-0000-0000-0000-0000fffffffe", "entity/steve", "wide"],
+    ["80000000-0000-0000-0000-000000000000", "entity/steve", "wide"],
+    ["853c80ef-3c37-49fd-aa49-938b674adae6", "entity/alex", "slim"],
+  ])("皮肤：mock 的旧版规则看哈希最低位，与前端、后端同一组：%s -> %s", (uuid, path, model) => {
+    expect(mockDefaultSkin(uuid, true)).toEqual({ kind: "default", path, model });
   });
 
   // mock 为了不跨层引用另写了一份选取规则，而 mock 生成的离线 UUID 只落在少数下标上，经 skin_info 碰不到全部 18 套；
@@ -125,14 +158,14 @@ describe("材质 mock", () => {
     ["dd65f65c-9448-2c9f-1c44-7d2ed65c3369", "entity/player/wide/sunny", "wide"],
     ["06f83a78-c14d-33c9-b17e-1bef3f6e7275", "entity/player/wide/zuri", "wide"],
   ])("皮肤：mock 的默认皮肤规则与原版客户端的实际输出一致：%s -> %s", (uuid, path, model) => {
-    expect(mockDefaultSkin(uuid)).toEqual({ kind: "default", path, model });
-    expect(mockDefaultSkin(uuid.replace(/-/g, "").toUpperCase())).toEqual({ kind: "default", path, model });
+    expect(mockDefaultSkin(uuid, false)).toEqual({ kind: "default", path, model });
+    expect(mockDefaultSkin(uuid.replace(/-/g, "").toUpperCase(), false)).toEqual({ kind: "default", path, model });
   });
 
   it("皮肤：mock 拿到不是 32 位十六进制的 UUID 按内部错误抛出", () => {
     for (const bad of ["", "1c8d7b0d-84b6", "zz8d7b0d84b68b9a0dfcba7b668da3e0", "1c8d7b0d84b68b9a0dfcba7b668da3e00"]) {
-      expect(() => mockDefaultSkin(bad), bad).toThrow(IpcError);
-      expect(() => mockDefaultSkin(bad), bad).toThrow("不是 32 位十六进制");
+      expect(() => mockDefaultSkin(bad, false), bad).toThrow(IpcError);
+      expect(() => mockDefaultSkin(bad, true), bad).toThrow("不是 32 位十六进制");
     }
   });
 
@@ -161,7 +194,7 @@ describe("方块目录 mock", () => {
   });
 
   it("有材质源时给一份合成目录：版本与材质源一致，按 id 排序，前端校验能通过", async () => {
-    setMockArtStatus({ source: { version_id: "1.21.1" }, panorama: false });
+    setMockArtStatus({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false });
     const dto = await artBlocks();
     if (dto === null) throw new Error("有材质源时目录不应为 null");
     expect(dto.version_id).toBe("1.21.1");
@@ -182,7 +215,7 @@ describe("方块目录 mock", () => {
   });
 
   it("每次返回独立的副本：改了返回值不影响下一次", async () => {
-    setMockArtStatus({ source: { version_id: "1.21.1" }, panorama: false });
+    setMockArtStatus({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false });
     const first = await artBlocks();
     first?.blocks.splice(0);
     expect((await artBlocks())?.blocks).toHaveLength(28);
@@ -207,7 +240,7 @@ describe("下载原版材质 mock", () => {
     expect(client.map((p) => p.downloaded)).toEqual([6837504, 13675008, 20512512, 27350016]);
     expect(client.every((p) => p.total === 27350016)).toBe(true);
     expect(progress.at(-2)).toEqual({ stage: "names", downloaded: 684032, total: 684032 });
-    const expected: ArtStatusDto = { source: { version_id: MOCK_DOWNLOADED_VERSION }, panorama: false };
+    const expected: ArtStatusDto = { source: { version_id: MOCK_DOWNLOADED_VERSION, degraded: false, legacy_skins: false }, panorama: false };
     expect(result).toEqual(expected);
     expect(changed).toEqual([expected]);
     expect(await artStatus()).toEqual(expected);
@@ -221,7 +254,7 @@ describe("下载原版材质 mock", () => {
     setMockArtStatus({ source: null, panorama: true });
     const pending = artDownload();
     await vi.runAllTimersAsync();
-    expect(await pending).toEqual({ source: { version_id: MOCK_DOWNLOADED_VERSION }, panorama: true });
+    expect(await pending).toEqual({ source: { version_id: MOCK_DOWNLOADED_VERSION, degraded: false, legacy_skins: false }, panorama: true });
   });
 
   it("上一次没下完再调报 task_conflict；下完之后可以再下", async () => {
@@ -233,7 +266,7 @@ describe("下载原版材质 mock", () => {
     await first;
     const again = artDownload();
     await vi.runAllTimersAsync();
-    expect((await again).source).toEqual({ version_id: MOCK_DOWNLOADED_VERSION });
+    expect((await again).source).toEqual({ version_id: MOCK_DOWNLOADED_VERSION, degraded: false, legacy_skins: false });
   });
 
   it("重置后回到没有材质源", async () => {
@@ -254,10 +287,10 @@ describe("Tauri 窗口里的材质命令", () => {
 
   it("命令名与参数键与 Rust 签名一致", async () => {
     vi.mocked(tauriInvoke)
-      .mockResolvedValueOnce({ source: { version_id: "1.21.1" }, panorama: false })
+      .mockResolvedValueOnce({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false })
       .mockResolvedValueOnce({ kind: "remote", sha1: "a".repeat(40), model: "slim", hat: true })
       .mockResolvedValueOnce("b".repeat(40));
-    expect(await artStatus()).toEqual({ source: { version_id: "1.21.1" }, panorama: false });
+    expect(await artStatus()).toEqual({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: false });
     expect(await skinInfo("c".repeat(32))).toEqual({ kind: "remote", sha1: "a".repeat(40), model: "slim", hat: true });
     expect(await thumbRegister("https://cdn.modrinth.com/x.png")).toBe("b".repeat(40));
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([

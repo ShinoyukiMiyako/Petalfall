@@ -7,8 +7,9 @@ import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LogLine } from "../domain/types";
 import { APP_NAME } from "../lib/app-info";
+import { scrollGlide, springAt } from "../lib/motion";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { focusByKeyboard, keydown, render, stubResizeObserver, waitForFrames, type Rendered, type ResizeObserverStub } from "../test/dom";
+import { drainFrames, focusByKeyboard, keydown, render, stepFrames, stubResizeObserver, waitForFrames, type Rendered, type ResizeObserverStub } from "../test/dom";
 import {
   countLogLevels,
   distanceFromBottom,
@@ -19,12 +20,14 @@ import {
   LOG_ROW_HEIGHT,
   LogConsole,
   longestTextColumns,
+  noteClearDelay,
   STICK_THRESHOLD,
   textColumns,
   WRAP_RENDER_LIMIT,
   type LogConsoleLine,
   type LogConsoleProps,
 } from "./LogConsole";
+import styles from "./LogConsole.module.css";
 
 const AT = new Date(2026, 9, 30, 12, 3, 11).getTime();
 const line = (i: number, level: LogConsoleLine["level"] = "info", source: LogConsoleLine["source"] = "game"): LogConsoleLine => ({
@@ -40,12 +43,11 @@ const PADDING = 8 + 14;
 const scrollTops = new WeakMap<Element, number>();
 
 /**
- * 平滑滚动的调用记录。jsdom 没有 scrollTo：替身记下平滑滚动（「跳到最新」对日志区发出的），默认一步到位，
- * 并依次派发途中的 scroll 与结束时的 scrollend。瞬时调用（虚拟列表写回位置、测量找补）默认不生效，与没有 scrollTo 时一致；
- * 要模拟它中止平滑滚动的用例自己换掉 instantImpl。
+ * 平滑滚动的调用记录。jsdom 没有 scrollTo：替身记下平滑滚动，一步到位，并依次派发途中的 scroll 与结束时的 scrollend。
+ * 「跳到最新」由组件自己逐帧写滚动位置，不该发出任何平滑滚动，用例断言这份记录为空。
+ * 瞬时调用（虚拟列表写回位置、测量找补）默认不生效，与没有 scrollTo 时一致；要数它的用例自己换掉 instantImpl。
  */
 let scrollToCalls: ScrollToOptions[];
-let scrollToImpl: (el: Element, options: ScrollToOptions) => void;
 let instantImpl: (el: Element, options: ScrollToOptions) => void;
 const arrive = (el: Element, options: ScrollToOptions) => {
   if (options.top === undefined) throw new Error("scrollTo 没给 top");
@@ -60,7 +62,6 @@ let ro: ResizeObserverStub;
 let scrollTopWrites: number;
 beforeEach(() => {
   scrollToCalls = [];
-  scrollToImpl = arrive;
   instantImpl = () => undefined;
   Object.defineProperty(Element.prototype, "scrollTo", {
     configurable: true,
@@ -71,18 +72,18 @@ beforeEach(() => {
         return;
       }
       scrollToCalls.push(options);
-      scrollToImpl(this, options);
+      arrive(this, options);
     },
   });
   ro = stubResizeObserver();
   scrollTopWrites = 0;
-  // jsdom 不做布局：日志区给一个固定视口高，内容高取画布声明的高度，滚动位置记在表里
+  // jsdom 不做布局：日志区给一个固定视口高，内容高取画布（滚动区里最后一块，前面可能有省略说明条）声明的高度，滚动位置记在表里
   vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(function (this: Element) {
     return this.getAttribute("role") === "log" ? VIEWPORT : 0;
   });
   vi.spyOn(Element.prototype, "scrollHeight", "get").mockImplementation(function (this: Element) {
     if (this.getAttribute("role") !== "log") return 0;
-    return Number.parseFloat((this.firstElementChild as HTMLElement).style.height);
+    return Number.parseFloat((this.lastElementChild as HTMLElement).style.height);
   });
   vi.spyOn(Element.prototype, "scrollTop", "get").mockImplementation(function (this: Element) {
     const top = scrollTops.get(this);
@@ -136,11 +137,6 @@ const userScroll = (top: number) =>
   });
 /** n 行时滚到底的位置：「跳到最新」以元素能滚到的最大位置为目标。 */
 const maxTop = (n: number) => n * LOG_ROW_HEIGHT + PADDING - VIEWPORT;
-/** 让出几帧：虚拟列表的定时核对、尺寸回报都在帧里。 */
-const frames = (n: number) =>
-  act(async () => {
-    for (let i = 0; i < n; i++) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  });
 
 describe("纯函数", () => {
   const mixed = [line(0, "info", "launcher"), line(1, "warn", "game"), line(2, "error", "game"), line(3, "error", "launcher"), line(4, "info", "game")];
@@ -211,11 +207,141 @@ describe("日志行", () => {
 });
 
 describe("贴底与跳到最新", () => {
+  /**
+   * 「跳到最新」的补间由组件自己逐帧排：换成手动的帧，按用例给的时间戳推进。
+   * framer-motion 用它导入时取走的 requestAnimationFrame，胶囊的进出照常走真实帧。
+   */
+  const queued = new Map<number, FrameRequestCallback>();
+  let nextFrameId = 1;
+  let clock = 0;
+  beforeEach(() => {
+    queued.clear();
+    clock = 1000;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const id = nextFrameId++;
+      queued.set(id, callback);
+      return id;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+      queued.delete(id);
+    });
+  });
+  afterEach(() => {
+    // 先卸载：卸载时取消排着的帧也要经过替身
+    view?.unmount();
+    view = undefined;
+    vi.unstubAllGlobals();
+  });
+
+  const FRAME_MS = 16;
+  /** 时钟前进 ms，执行排着的帧回调；不替浏览器派发滚动事件（浏览器的那一次要到下一帧才来）。 */
+  const runFrame = (ms: number) =>
+    act(() => {
+      clock += ms;
+      const due = [...queued.values()];
+      queued.clear();
+      for (const callback of due) callback(clock);
+    });
+  /** 走一帧：执行排着的帧回调；滚动位置变了，再像浏览器那样派发一次 scroll。 */
+  const frame = (ms = FRAME_MS) => {
+    const before = scroller().scrollTop;
+    runFrame(ms);
+    if (scroller().scrollTop !== before) act(() => scroller().dispatchEvent(new Event("scroll")));
+  };
+  /** 逐帧走到补间结束（不再排帧），每帧之前先做 beforeFrame。走了一秒还没结束就报错，不让用例空转。 */
+  const glideOut = (beforeFrame: () => void = () => undefined) => {
+    for (let spent = 0; queued.size > 0; spent += FRAME_MS) {
+      if (spent > 1000) throw new Error("补间走了一秒还没结束");
+      beforeFrame();
+      frame();
+    }
+  };
+  /** 补间时长取整到毫秒：用例按它逐帧推进时间。 */
+  const glideMs = (distance: number) => Math.round(scrollGlide(distance).duration * 1000);
+  const clickJump = () => {
+    const button = jump();
+    if (button === undefined) throw new Error("没有出现跳到最新");
+    act(() => button.click());
+  };
+  const toggleWrap = () => act(() => document.querySelector<HTMLButtonElement>('button[aria-label="自动换行"]')?.click());
+  /** 行的上沿：虚拟列表写在 transform 里的位置。 */
+  const rowStart = (row: HTMLElement) => {
+    const match = /^translateY\((-?[\d.]+)px\)$/.exec(row.style.transform);
+    if (match === null) throw new Error(`认不出行的位置：${row.style.transform}`);
+    return Number(match[1]);
+  };
+  const renderedInOrder = () => rendered().sort((a, b) => Number(a.dataset.index) - Number(b.dataset.index));
+  /** ResizeObserver 对每个新挂上的行报一次初始尺寸，之后尺寸不变就不再报。 */
+  const rowReporter = () => {
+    const reported = new WeakSet<Element>();
+    return () => {
+      for (const row of rendered()) {
+        if (reported.has(row)) continue;
+        reported.add(row);
+        ro.resize(row, 600);
+      }
+    };
+  };
+
   it("挂载即贴底，新行进来跟着滚到底", () => {
     mount({ lines: lines(10) });
     expect(scroller().scrollTop).toBe(10 * LOG_ROW_HEIGHT + PADDING);
     view?.rerender(ui({ lines: lines(15) }));
     expect(scroller().scrollTop).toBe(15 * LOG_ROW_HEIGHT + PADDING);
+    expect(jump()).toBeUndefined();
+  });
+
+  /**
+   * 浏览器为贴底写入派发的那次滚动事件：位置先夹到能滚到的最大处（jsdom 的替身不夹）。
+   * 虚拟列表收到它就进入「滚动中」，150 ms 没有新的滚动事件才复位；实时输出每批只隔 100 ms，贴底跟随时它一直在「滚动中」。
+   */
+  const reportStickScroll = () =>
+    act(() => {
+      const el = scroller();
+      el.scrollTop = Math.max(0, Math.min(el.scrollTop, el.scrollHeight - VIEWPORT));
+      el.dispatchEvent(new Event("scroll"));
+    });
+
+  it("换行时贴底跟随实时输出：虚拟列表一直在「滚动中」，新挂上的行仍当场量出高度，这一帧就按真实高度排开、贴到真实的底部", () => {
+    // 与环形缓冲一样只在尾部追加，已有的行对象不换
+    const all = lines(60);
+    mount({ lines: all.slice(0, 40), live: true });
+    toggleWrap();
+    // 之后来的行都折成三行
+    const realHeight = (index: number) => (index >= 40 ? 3 * LOG_ROW_HEIGHT : LOG_ROW_HEIGHT);
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.index === undefined ? 0 : realHeight(Number(this.dataset.index));
+    });
+    for (let count = 43; count <= 58; count += 3) {
+      reportStickScroll();
+      view?.rerender(ui({ lines: all.slice(0, count), live: true }));
+      // 不报 ResizeObserver：此刻的样子就是这一帧画出去的样子
+      const rows = renderedInOrder();
+      expect(Number(rows.at(-1)?.dataset.index)).toBe(count - 1);
+      for (let i = 1; i < rows.length; i++) {
+        expect(rowStart(rows[i]), `${count} 行时第 ${rows[i].dataset.index} 行`).toBe(rowStart(rows[i - 1]) + realHeight(Number(rows[i - 1].dataset.index)));
+      }
+      expect(scroller().scrollTop, "贴到按真实行高算出的底部").toBe(40 * LOG_ROW_HEIGHT + (count - 40) * 3 * LOG_ROW_HEIGHT + PADDING);
+    }
+    expect(jump()).toBeUndefined();
+  });
+
+  it("贴底跟随实时输出时打开自动换行：视口之上的行挂载时量出高度也不写测量找补、不在提交阶段要求同步重渲染，仍贴在底部", () => {
+    const error = vi.spyOn(console, "error");
+    mount({ lines: lines(60), live: true });
+    reportStickScroll();
+    // 每行都折成两行：视口之上的行第一次量出高度，虚拟列表默认会为它们各写一次瞬时滚动
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.index === undefined ? 0 : 2 * LOG_ROW_HEIGHT;
+    });
+    let instantWrites = 0;
+    instantImpl = () => {
+      instantWrites++;
+    };
+    toggleWrap();
+    expect(instantWrites).toBe(0);
+    expect(error).not.toHaveBeenCalled();
+    expect(scroller().scrollTop).toBe(scroller().scrollHeight);
     expect(jump()).toBeUndefined();
   });
 
@@ -228,16 +354,21 @@ describe("贴底与跳到最新", () => {
     expect(jump()).toBeDefined();
   });
 
-  it("上翻后新行不再拉动位置；点「跳到最新」平滑滚回底部并恢复贴底，按钮淡出", async () => {
+  it("上翻后新行不再拉动位置；点「跳到最新」由组件逐帧滚回底部、不发平滑滚动命令，到底后恢复贴底，按钮淡出", async () => {
     mount({ lines: lines(20) });
     userScroll(0);
     view?.rerender(ui({ lines: lines(30) }));
     expect(scroller().scrollTop).toBe(0);
-    const button = jump();
-    if (button === undefined) throw new Error("没有出现跳到最新");
-    act(() => button.click());
-    expect(scrollToCalls).toEqual([{ top: maxTop(30), behavior: "smooth" }]);
+    clickJump();
+    // 点下那一刻不动；起步那一帧定下时间起点，之后每帧往下走
+    expect(scroller().scrollTop).toBe(0);
+    frame();
+    frame();
+    expect(scroller().scrollTop).toBeGreaterThan(0);
+    expect(scroller().scrollTop).toBeLessThan(maxTop(30));
+    glideOut();
     expect(scroller().scrollTop).toBe(maxTop(30));
+    expect(scrollToCalls).toEqual([]);
     await waitForFrames(() => expect(jump()).toBeUndefined());
     view?.rerender(ui({ lines: lines(31) }));
     expect(scroller().scrollTop).toBe(31 * LOG_ROW_HEIGHT + PADDING);
@@ -248,10 +379,143 @@ describe("贴底与跳到最新", () => {
     userScroll(0);
     const end = keydown(scroller(), "End");
     expect(end.defaultPrevented).toBe(true);
+    glideOut();
     expect(scroller().scrollTop).toBe(maxTop(20));
-    const ctrlEnd = keydown(scroller(), "End", { ctrlKey: true });
-    expect(ctrlEnd.defaultPrevented).toBe(false);
     await waitForFrames(() => expect(jump()).toBeUndefined());
+  });
+
+  it("Alt、Meta 组合的 Home、End 交给浏览器：不拦默认行为、不排补间，进行中的补间当场停下", () => {
+    mount({ lines: lines(100) });
+    userScroll(0);
+    for (const init of [{ altKey: true }, { metaKey: true }, { ctrlKey: true, altKey: true }]) {
+      for (const key of ["Home", "End"]) {
+        expect(keydown(scroller(), key, init).defaultPrevented, `${key} ${JSON.stringify(init)}`).toBe(false);
+        expect(queued.size).toBe(0);
+      }
+    }
+    clickJump();
+    frame();
+    expect(queued.size).toBe(1);
+    keydown(scroller(), "End", { altKey: true });
+    expect(queued.size).toBe(0);
+  });
+
+  it("换行时按 Home：组件自己逐帧滚到顶，往上途经的行第一次量出高度也正好停在 0，不发滚动命令、不写测量找补；离开底部，出现「跳到最新」", () => {
+    const all = lines(201);
+    mount({ lines: all.slice(0, 200) });
+    toggleWrap();
+    reportStickScroll();
+    // 120 行之前折成两行：往上途中才第一次渲染、第一次量出高度，起点都在滚动位置之上
+    const realHeight = (index: number) => (index < 120 ? 2 * LOG_ROW_HEIGHT : LOG_ROW_HEIGHT);
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.index === undefined ? 0 : realHeight(Number(this.dataset.index));
+    });
+    // 浏览器把测量找补的瞬时写入叠加到进行中的键盘平滑滚动的终点上：途中一次都不该有
+    let instantWrites = 0;
+    instantImpl = () => {
+      instantWrites++;
+    };
+    const home = keydown(scroller(), "Home");
+    expect(home.defaultPrevented).toBe(true);
+    expect(jump(), "按下就离开了底部").toBeDefined();
+    frame();
+    frame();
+    expect(scroller().scrollTop).toBeGreaterThan(0);
+    // 途中挂上的行不报 ResizeObserver 也已按真实高度排开
+    const rows = renderedInOrder();
+    for (let i = 1; i < rows.length; i++) {
+      expect(rowStart(rows[i]), `第 ${rows[i].dataset.index} 行`).toBe(rowStart(rows[i - 1]) + realHeight(Number(rows[i - 1].dataset.index)));
+    }
+    glideOut(rowReporter());
+    expect(scroller().scrollTop).toBe(0);
+    expect(Number(renderedInOrder()[0].dataset.index)).toBe(0);
+    expect(scrollToCalls).toEqual([]);
+    expect(instantWrites).toBe(0);
+    // 停在顶上：新行进来不拉回底部
+    view?.rerender(ui({ lines: all }));
+    expect(scroller().scrollTop).toBe(0);
+  });
+
+  it("换行时按 Ctrl+Home、Ctrl+End：与 Home、End 一样由组件逐帧滚到头，途经的行第一次量出高度也正好停在头上，不发滚动命令、不写测量找补", async () => {
+    mount({ lines: lines(200) });
+    toggleWrap();
+    reportStickScroll();
+    // 前 120 行折成两行：往上途中才第一次渲染、第一次量出高度
+    const realHeight = (index: number) => (index < 120 ? 2 * LOG_ROW_HEIGHT : LOG_ROW_HEIGHT);
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.index === undefined ? 0 : realHeight(Number(this.dataset.index));
+    });
+    // 浏览器把测量找补的瞬时写入叠加到进行中的键盘平滑滚动的终点上：途中一次都不该有
+    let instantWrites = 0;
+    instantImpl = () => {
+      instantWrites++;
+    };
+    const ctrlHome = keydown(scroller(), "Home", { ctrlKey: true });
+    expect(ctrlHome.defaultPrevented).toBe(true);
+    expect(queued.size, "排上了组件自己的补间").toBe(1);
+    expect(jump(), "按下就离开了底部").toBeDefined();
+    glideOut(rowReporter());
+    expect(scroller().scrollTop).toBe(0);
+    expect(Number(renderedInOrder()[0].dataset.index)).toBe(0);
+
+    const ctrlEnd = keydown(scroller(), "End", { ctrlKey: true });
+    expect(ctrlEnd.defaultPrevented).toBe(true);
+    expect(queued.size, "排上了组件自己的补间").toBe(1);
+    glideOut(rowReporter());
+    expect(distanceFromBottom(scroller())).toBe(0);
+    expect(scrollToCalls).toEqual([]);
+    expect(instantWrites).toBe(0);
+    await waitForFrames(() => expect(jump()).toBeUndefined());
+    // 回到贴底：新行进来跟着滚到底
+    view?.rerender(ui({ lines: lines(201) }));
+    expect(scroller().scrollTop).toBe(scroller().scrollHeight);
+  });
+
+  it("滚到顶与滚到底的补间途中按反方向的键：从当前位置改道，不跳；同方向再按不重起", () => {
+    mount({ lines: lines(100) });
+    reportStickScroll();
+    keydown(scroller(), "Home");
+    frame();
+    frame();
+    const turnedAt = scroller().scrollTop;
+    expect(turnedAt).toBeGreaterThan(0);
+    expect(turnedAt).toBeLessThan(maxTop(100));
+    keydown(scroller(), "End");
+    expect(queued.size).toBe(1);
+    // 改道后的起步那一帧停在当前位置，不先跳回哪一头；之后往下走
+    frame();
+    expect(scroller().scrollTop).toBe(turnedAt);
+    frame();
+    expect(scroller().scrollTop).toBeGreaterThan(turnedAt);
+    keydown(scroller(), "Home");
+    frame();
+    frame();
+    // 往顶部走的途中再按 Home 不重起：重起的话下一帧只定时间起点、停在原地
+    const before = scroller().scrollTop;
+    keydown(scroller(), "Home");
+    frame();
+    expect(scroller().scrollTop).toBeLessThan(before);
+    glideOut();
+    expect(scroller().scrollTop).toBe(0);
+  });
+
+  it("内容不满一屏时按 Home：顶部本来就在贴底范围里，仍跟随新行", () => {
+    mount({ lines: lines(3) });
+    reportStickScroll();
+    expect(keydown(scroller(), "Home").defaultPrevented).toBe(true);
+    expect(queued.size).toBe(0);
+    expect(jump()).toBeUndefined();
+    view?.rerender(ui({ lines: lines(4) }));
+    expect(scroller().scrollTop).toBe(scroller().scrollHeight);
+  });
+
+  it("减少动画时按 Home 直接到顶，不排补间", () => {
+    view = render(<MotionConfig reducedMotion="always">{ui({ lines: lines(40) })}</MotionConfig>);
+    reportStickScroll();
+    keydown(scroller(), "Home");
+    expect(queued.size).toBe(0);
+    expect(scroller().scrollTop).toBe(0);
+    expect(scrollToCalls).toEqual([]);
   });
 
   it("「跳到最新」出现时从透明处淡入，不是一帧冒出来", () => {
@@ -276,182 +540,241 @@ describe("贴底与跳到最新", () => {
     await waitForFrames(() => expect(jump()).toBeUndefined());
   });
 
-  it("平滑滚动途中：途经的位置不算上翻，新行进来时把目标改到新的底部；到底后才按实际位置判断", async () => {
-    mount({ lines: lines(40) });
-    userScroll(0);
-    let finish = () => undefined as void;
-    scrollToImpl = (el, options) => {
-      // 只走到半路
-      el.scrollTop = 200;
-      el.dispatchEvent(new Event("scroll"));
-      finish = () => arrive(el, options);
-    };
-    const button = jump();
-    if (button === undefined) throw new Error("没有出现跳到最新");
-    act(() => button.click());
-    expect(scrollToCalls).toEqual([{ top: maxTop(40), behavior: "smooth" }]);
-    view?.rerender(ui({ lines: lines(41) }));
-    // 提交新行的同时平滑地改去新的底部，不在最后一屏里一步跳完
-    expect(scrollToCalls).toEqual([
-      { top: maxTop(40), behavior: "smooth" },
-      { top: maxTop(41), behavior: "smooth" },
-    ]);
-    // 与目标无关的重渲染不重发：每发一次，浏览器都从当前位置重新起一段平滑滚动
-    view?.rerender(ui({ lines: lines(41), live: true }));
-    expect(scrollToCalls).toHaveLength(2);
-    act(() => finish());
-    expect(scroller().scrollTop).toBe(maxTop(41));
-    await waitForFrames(() => expect(jump()).toBeUndefined());
-  });
+  it("补间时长按起步时的距离给、远距离封顶；到时长那一帧正好写到底并结束，途中再按 End 不重起", () => {
+    const near = glideMs(100);
+    const far = glideMs(maxTop(400));
+    expect(far).toBeGreaterThan(near);
+    // 再远也不更慢
+    expect(glideMs(100 * maxTop(400))).toBe(far);
 
-  it("平滑滚动被中止在半路（停下时还没到底）：接着滚到底，半路的位置不算上翻", async () => {
     mount({ lines: lines(40) });
-    userScroll(0);
-    let stop = () => undefined as void;
-    scrollToImpl = (el, options) => {
-      if (scrollToCalls.length > 1) {
-        arrive(el, options);
-        return;
-      }
-      el.scrollTop = 200;
-      el.dispatchEvent(new Event("scroll"));
-      stop = () => el.dispatchEvent(new Event("scrollend"));
-    };
-    const button = jump();
-    if (button === undefined) throw new Error("没有出现跳到最新");
-    act(() => button.click());
-    act(() => stop());
-    expect(scrollToCalls).toEqual([
-      { top: maxTop(40), behavior: "smooth" },
-      { top: maxTop(40), behavior: "smooth" },
-    ]);
+    userScroll(maxTop(40) - 100);
+    clickJump();
+    frame();
+    frame(Math.floor(near / 2));
+    keydown(scroller(), "End");
+    frame(near - Math.floor(near / 2) - 1);
+    expect(queued.size, "差 1 ms 到时长：补间还在走").toBe(1);
+    expect(distanceFromBottom(scroller())).toBeGreaterThan(0);
+    frame(1);
+    expect(queued.size).toBe(0);
     expect(scroller().scrollTop).toBe(maxTop(40));
-    await waitForFrames(() => expect(jump()).toBeUndefined());
+
+    view?.unmount();
+    mount({ lines: lines(400) });
+    userScroll(0);
+    clickJump();
+    frame();
+    frame(far - 1);
+    expect(queued.size, "差 1 ms 到时长：补间还在走").toBe(1);
+    frame(1);
+    expect(queued.size).toBe(0);
+    expect(scroller().scrollTop).toBe(maxTop(400));
+    expect(scrollToCalls).toEqual([]);
   });
 
-  // 测量找补是一次瞬时滚动；按 CSSOM，新的程序滚动会中止正在进行的平滑滚动，平滑滚动停在原处不再走完
-  it("换行时平滑滚动途中有行第一次量出高度：不被测量找补中止在半路，最终贴底、按钮不再出现", async () => {
-    mount({ lines: lines(200) });
-    act(() => document.querySelector<HTMLButtonElement>('button[aria-label="自动换行"]')?.click());
+  it("换行时补间途中连续追加行、途经的行量出新高度：每帧追着当时的底部走，提交与测量都不动滚动位置、不发滚动命令，按时结束并贴底", async () => {
+    // 与环形缓冲一样只在尾部追加，已有的行对象不换：行的键随对象走，换了对象量过的高度就丢了
+    const all = lines(300);
+    mount({ lines: all.slice(0, 200) });
+    toggleWrap();
     userScroll(0);
-    // 中段的行折成两行：滚到半路时才第一次渲染、第一次量出高度
+    // 120 行之后折成两行：跳转途中才第一次渲染、第一次量出高度
     vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
       if (this.dataset.index === undefined) return 0;
-      const index = Number(this.dataset.index);
-      return index >= 60 && index < 140 ? 2 * LOG_ROW_HEIGHT : LOG_ROW_HEIGHT;
+      return Number(this.dataset.index) >= 120 ? 2 * LOG_ROW_HEIGHT : LOG_ROW_HEIGHT;
     });
-    let finish = () => undefined as void;
+    // 虚拟列表的测量找补走瞬时 scrollTo：途经的行在滚动位置之上第一次量出高度时它默认会写一次，途中一次都不该有
     let instantWrites = 0;
-    instantImpl = (el, options) => {
-      if (options.top === undefined) throw new Error("scrollTo 没给 top");
+    instantImpl = () => {
       instantWrites++;
-      finish = () => undefined;
-      el.scrollTop = options.top;
-      el.dispatchEvent(new Event("scroll"));
-      el.dispatchEvent(new Event("scrollend"));
     };
-    scrollToImpl = (el, options) => {
-      // 后发的平滑滚动顶替先发的那一段：先发的不会再走到它的终点
-      if (scrollToCalls.length > 1) {
-        finish = () => undefined;
-        arrive(el, options);
-        return;
-      }
-      el.scrollTop = 2000;
-      el.dispatchEvent(new Event("scroll"));
-      finish = () => arrive(el, options);
-    };
-    const button = jump();
-    if (button === undefined) throw new Error("没有出现跳到最新");
-    act(() => button.click());
-    // 半路上新渲染出来的行，尺寸经 ResizeObserver 报上来
-    act(() => {
-      for (const row of rendered()) ro.resize(row, 600);
-    });
-    act(() => finish());
-    await waitForFrames(() => expect(jump()).toBeUndefined());
+    const reportNewRows = rowReporter();
+    const total = glideMs(maxTop(200));
+    clickJump();
+    frame();
+    let count = 200;
+    let last = scroller().scrollTop;
+    for (let spent = FRAME_MS; spent < total; spent += FRAME_MS) {
+      // 每帧来一行新日志，新挂上的行把尺寸报上来
+      count++;
+      const before = scroller().scrollTop;
+      view?.rerender(ui({ lines: all.slice(0, count) }));
+      reportNewRows();
+      expect(scroller().scrollTop, "提交新行、量出行高时不写滚动位置").toBe(before);
+      frame();
+      expect(queued.size, `第 ${spent} ms 补间还在走`).toBe(1);
+      expect(scroller().scrollTop).toBeGreaterThan(last);
+      last = scroller().scrollTop;
+    }
+    expect(distanceFromBottom(scroller())).toBeGreaterThan(0);
+    count++;
+    view?.rerender(ui({ lines: all.slice(0, count) }));
+    reportNewRows();
+    frame();
+    // 到时长：写到这一刻的底部，补间结束
+    expect(queued.size).toBe(0);
     expect(distanceFromBottom(scroller())).toBe(0);
-    // 途中一次瞬时滚动都没有：测量找补被压住，平滑滚动没有被中止过
+    expect(scrollToCalls).toEqual([]);
     expect(instantWrites).toBe(0);
-    // 行高变了，目标跟着改到新的底部
-    expect(scrollToCalls.length).toBeGreaterThan(1);
+    await waitForFrames(() => expect(jump()).toBeUndefined());
+    // 之后新行照常即时贴底
+    view?.rerender(ui({ lines: all.slice(0, count + 1) }));
+    expect(scroller().scrollTop).toBe(scroller().scrollHeight);
+  });
+
+  it("滚到底的补间尾段来了新的一批行：推远的那一截从当前位置改道、摊到余下的帧上，不在一帧里补齐；到时长落在当时的底部并恢复贴底", async () => {
+    // 实时会话：环形缓冲只在尾部追加，已有的行对象不换；每批 3 行
+    const all = lines(207);
+    const batch = 3 * LOG_ROW_HEIGHT;
+    mount({ lines: all.slice(0, 200), live: true });
+    userScroll(maxTop(200) - 3000);
+    const total = glideMs(3000);
+    // 按 250 Hz 左右的帧推进（宿主是高刷屏）：尾段还剩十几到几十帧，推远的那一截有帧可摊
+    const FAST_MS = 4;
+    // 两批分别在补间走到约 85% 与 92% 的时刻进来：此时补间本身几乎停下，原写法会把整批行高落在下一帧里
+    const arrivals = [Math.round(total * 0.85), Math.round(total * 0.92)];
+    clickJump();
+    frame(FAST_MS);
+    let count = 200;
+    let elapsed = 0;
+    let last = scroller().scrollTop;
+    const steps: number[] = [];
+    while (queued.size > 0) {
+      if (elapsed > 1000) throw new Error("补间走了一秒还没结束");
+      elapsed += FAST_MS;
+      if (arrivals.length > 0 && elapsed >= arrivals[0]) {
+        arrivals.shift();
+        count += 3;
+        const before = scroller().scrollTop;
+        view?.rerender(ui({ lines: all.slice(0, count), live: true }));
+        expect(scroller().scrollTop, "提交新行时不写滚动位置").toBe(before);
+      }
+      frame(FAST_MS);
+      if (count > 200) steps.push(scroller().scrollTop - last);
+      last = scroller().scrollTop;
+    }
+    expect(arrivals, "两批都在补间途中进来").toEqual([]);
+    expect(steps.length).toBeGreaterThan(10);
+    for (const step of steps) expect(step, "只往下走").toBeGreaterThanOrEqual(0);
+    expect(Math.max(...steps), `批次进来之后每帧的位移：${steps.map((s) => s.toFixed(1)).join(", ")}`).toBeLessThan(batch / 2);
+    // 到时长：写到这一刻的底部，补间结束
+    expect(scroller().scrollTop).toBe(maxTop(206));
+    expect(scrollToCalls).toEqual([]);
+    await waitForFrames(() => expect(jump()).toBeUndefined());
+    // 恢复贴底：之后新行照常即时贴底
+    view?.rerender(ui({ lines: all, live: true }));
+    expect(scroller().scrollTop).toBe(scroller().scrollHeight);
   });
 
   it("换行时落点附近有从没量过的折行行：跳到最新之后每一行都按量出的真实高度排开，不叠在下一行上", async () => {
     // 在底部打开换行再上翻：之后新来的行从没挂载过、没量过；其中后段的行折成两行
     mount({ lines: lines(40) });
-    act(() => document.querySelector<HTMLButtonElement>('button[aria-label="自动换行"]')?.click());
+    toggleWrap();
     userScroll(0);
     view?.rerender(ui({ lines: lines(200) }));
     const realHeight = (index: number) => (index >= 120 ? 2 * LOG_ROW_HEIGHT : LOG_ROW_HEIGHT);
     vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
       return this.dataset.index === undefined ? 0 : realHeight(Number(this.dataset.index));
     });
-    // 平滑滚动每次只走到目标、不结束：途中目标还会随行高改，结束由用例最后派发
-    scrollToImpl = (el, options) => {
-      if (options.top === undefined) throw new Error("scrollTo 没给 top");
-      el.scrollTop = options.top;
-      el.dispatchEvent(new Event("scroll"));
-    };
-    // ResizeObserver 对每个新挂上的行报一次初始尺寸，之后尺寸不变就不再报
-    const reported = new WeakSet<Element>();
-    const reportNewRows = () => {
-      for (const row of rendered()) {
-        if (reported.has(row)) continue;
-        reported.add(row);
-        ro.resize(row, 600);
-      }
-    };
-    const button = jump();
-    if (button === undefined) throw new Error("没有出现跳到最新");
-    act(() => button.click());
-    // 量出新高度、目标改到新的底部、又挂上新的行：直到落点附近的行都报过
-    for (let round = 0; round < 20; round++) reportNewRows();
-    await frames(3);
-    act(() => {
-      scroller().dispatchEvent(new Event("scrollend"));
-    });
+    const reportNewRows = rowReporter();
+    clickJump();
+    // 每帧把新挂上的行报上来：量出新高度、终点跟着推远、又挂上新的行
+    glideOut(reportNewRows);
+    reportNewRows();
     await waitForFrames(() => expect(jump()).toBeUndefined());
     expect(distanceFromBottom(scroller())).toBe(0);
 
-    const start = (row: HTMLElement) => {
-      const match = /^translateY\((-?[\d.]+)px\)$/.exec(row.style.transform);
-      if (match === null) throw new Error(`认不出行的位置：${row.style.transform}`);
-      return Number(match[1]);
-    };
-    const rows = rendered().sort((a, b) => Number(a.dataset.index) - Number(b.dataset.index));
+    const rows = renderedInOrder();
     expect(Number(rows.at(-1)?.dataset.index)).toBe(199);
     expect(rows.length).toBeGreaterThan(12);
     for (let i = 1; i < rows.length; i++) {
-      expect(start(rows[i]), `第 ${rows[i].dataset.index} 行`).toBe(start(rows[i - 1]) + realHeight(Number(rows[i - 1].dataset.index)));
+      expect(rowStart(rows[i]), `第 ${rows[i].dataset.index} 行`).toBe(rowStart(rows[i - 1]) + realHeight(Number(rows[i - 1].dataset.index)));
     }
   });
 
-  it("平滑滚动途中用户自己滚了：之后的位置照常判断，新行不再拉回底部", async () => {
+  it("换行时补间一帧滚过几屏：新挂上的行当场量出高度，这一帧就按真实高度排开，不等 ResizeObserver 报上来；落点上方的行量出高度也不写测量找补", () => {
+    mount({ lines: lines(400) });
+    toggleWrap();
+    userScroll(0);
+    // 每三行有一行折成三行
+    const realHeight = (index: number) => (index % 3 === 0 ? 3 * LOG_ROW_HEIGHT : LOG_ROW_HEIGHT);
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.index === undefined ? 0 : realHeight(Number(this.dataset.index));
+    });
+    // 虚拟列表的测量找补走瞬时 scrollTo：落点上方的折行行第一次量出高度时它默认会写一次，补间途中一次都不该有
+    let instantWrites = 0;
+    instantImpl = () => {
+      instantWrites++;
+    };
+    clickJump();
+    runFrame(FRAME_MS);
+    // 只走这一帧，不报 ResizeObserver、不等浏览器的滚动事件：此刻的样子就是这一帧画出去的样子
+    runFrame(Math.floor(glideMs(maxTop(400)) / 2));
+    const top = scroller().scrollTop;
+    const rows = renderedInOrder();
+    expect(Number(rows[0].dataset.index)).toBeGreaterThan(100);
+    expect(rows.some((row) => rowStart(row) <= top && rowStart(row) + realHeight(Number(row.dataset.index)) > top)).toBe(true);
+    // 这一帧挂上的行里确实有落点上方、第一次量出高度的折行行：找补的判据在这里被问到过
+    expect(rows.some((row) => rowStart(row) < top && Number(row.dataset.index) % 3 === 0)).toBe(true);
+    for (let i = 1; i < rows.length; i++) {
+      expect(rowStart(rows[i]), `第 ${rows[i].dataset.index} 行`).toBe(rowStart(rows[i - 1]) + realHeight(Number(rows[i - 1].dataset.index)));
+    }
+    expect(instantWrites).toBe(0);
+    expect(scrollToCalls).toEqual([]);
+  });
+
+  it("一帧滚过几千像素：这一帧就换上新位置的行，不等浏览器下一帧的滚动事件，可视区不空", () => {
+    mount({ lines: lines(400) });
+    userScroll(0);
+    clickJump();
+    runFrame(FRAME_MS);
+    runFrame(Math.floor(glideMs(maxTop(400)) / 2));
+    const top = scroller().scrollTop;
+    expect(top).toBeGreaterThan(10 * VIEWPORT);
+    // 可视区从 top 到 top + VIEWPORT，首尾两行都要已经渲染出来
+    const firstVisible = Math.floor((top - 8) / LOG_ROW_HEIGHT);
+    const lastVisible = Math.floor((top + VIEWPORT - 8) / LOG_ROW_HEIGHT);
+    const indices = rendered().map((row) => Number(row.dataset.index));
+    expect(indices).toContain(firstVisible);
+    expect(indices).toContain(lastVisible);
+  });
+
+  it("补间途中用户自己滚了：补间当场停下，之后的位置照常判断，新行不再拉回底部", () => {
     mount({ lines: lines(40) });
     userScroll(0);
-    scrollToImpl = () => undefined;
-    const button = jump();
-    if (button === undefined) throw new Error("没有出现跳到最新");
-    act(() => button.click());
+    clickJump();
+    frame();
+    frame();
     act(() => {
       scroller().dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
     });
+    expect(queued.size).toBe(0);
     userScroll(100);
+    frame();
     view?.rerender(ui({ lines: lines(41) }));
-    // 已经不是程序滚动：底部变了也不会再发一次滚动，之后的帧里也没有
-    await frames(3);
-    expect(scrollToCalls).toHaveLength(1);
     expect(scroller().scrollTop).toBe(100);
+    expect(jump()).toBeDefined();
+    expect(scrollToCalls).toEqual([]);
   });
 
-  it("减少动画时直接到位，不走平滑滚动", () => {
+  it("补间途中卸载：排着的帧随之取消", () => {
+    mount({ lines: lines(40) });
+    userScroll(0);
+    clickJump();
+    frame();
+    expect(queued.size).toBe(1);
+    view?.unmount();
+    view = undefined;
+    expect(queued.size).toBe(0);
+  });
+
+  it("减少动画时直接到位，不排补间、不走平滑滚动", () => {
     view = render(<MotionConfig reducedMotion="always">{ui({ lines: lines(20) })}</MotionConfig>);
     userScroll(0);
-    const button = jump();
-    if (button === undefined) throw new Error("没有出现跳到最新");
-    act(() => button.click());
+    clickJump();
     expect(scrollToCalls).toEqual([]);
+    expect(queued.size).toBe(0);
     expect(scroller().scrollTop).toBe(20 * LOG_ROW_HEIGHT + PADDING);
   });
 });
@@ -490,6 +813,58 @@ describe("上翻阅读时的位置找补", () => {
     expect(scroller().scrollTop).toBe(100 + BAR);
   });
 
+  describe("用户自己换了内容、省略说明随之出现或消失时不找补", () => {
+    const BAR = 31;
+    beforeEach(() => {
+      vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+        if (this.textContent?.startsWith("较早的") === true) return BAR;
+        return this.dataset.index === undefined ? 0 : LOG_ROW_HEIGHT;
+      });
+    });
+    const omittedNote = () => [...document.querySelectorAll("span")].find((s) => s.textContent?.startsWith("较早的"))?.textContent;
+    const toggleWrap = () => act(() => document.querySelector<HTMLButtonElement>('button[aria-label="自动换行"]')?.click());
+
+    it("没贴底、停在最上面时打开自动换行，超过显示上限出现说明条：仍停在顶上；再关掉、说明条收起，也不找补", () => {
+      mount({ lines: lines(WRAP_RENDER_LIMIT + 3) });
+      userScroll(0);
+      toggleWrap();
+      expect(omittedNote()).toBe("较早的 3 行已省略，完整日志在 latest.log");
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe(`${BAR}px`);
+      expect(scroller().scrollTop).toBe(0);
+      userScroll(500);
+      toggleWrap();
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe("0px");
+      expect(scroller().scrollTop).toBe(500);
+    });
+
+    it("换行开着、没贴底停在最上面时从「警告及以上」切到「全部」，筛选后的行数越过显示上限出现说明条：仍停在顶上", () => {
+      const mixed = [...Array.from({ length: WRAP_RENDER_LIMIT - 10 }, (_, i) => line(i, "warn")), ...lines(20, WRAP_RENDER_LIMIT)];
+      mount({ lines: mixed, level: "warn" });
+      toggleWrap();
+      expect(omittedNote()).toBeUndefined();
+      userScroll(0);
+      view?.rerender(ui({ lines: mixed, level: "all" }));
+      expect(omittedNote()).toBe("较早的 10 行已省略，完整日志在 latest.log");
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe(`${BAR}px`);
+      expect(scroller().scrollTop).toBe(0);
+    });
+  });
+
+  it("换了筛选之后、说明条没跟着变时，之后上翻阅读中出现的省略说明照常找补", () => {
+    const BAR = 31;
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      if (this.textContent?.startsWith("较早的") === true) return BAR;
+      return this.dataset.index === undefined ? 0 : LOG_ROW_HEIGHT;
+    });
+    const mixed = Array.from({ length: 30 }, (_, i) => line(i, "info", i % 2 === 0 ? "game" : "launcher"));
+    mount({ lines: mixed });
+    userScroll(100);
+    view?.rerender(ui({ lines: mixed, source: "game" }));
+    expect(scroller().scrollTop).toBe(100);
+    view?.rerender(ui({ lines: mixed, source: "game", dropped: 5 }));
+    expect(scroller().scrollTop).toBe(100 + BAR);
+  });
+
   it("换行且超过显示上限时，无关的重渲染不重跑贴底：不在每次渲染里读写滚动区", () => {
     const all = lines(WRAP_RENDER_LIMIT + 3);
     mount({ lines: all });
@@ -501,13 +876,17 @@ describe("上翻阅读时的位置找补", () => {
     expect(scrollTopWrites).toBe(writes + 1);
   });
 
-  it("贴底时出现省略说明：行数与总高都没变，也重新贴到底", () => {
+  it("贴底时出现省略说明：行数没变，内容顶端让出条的高度，贴到新的底部", () => {
+    const BAR = 31;
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      if (this.textContent?.startsWith("较早的") === true) return BAR;
+      return this.dataset.index === undefined ? 0 : LOG_ROW_HEIGHT;
+    });
     const all = lines(30);
     mount({ lines: all });
-    // 模拟说明条压缩日志区后底部的行被裁掉：滚动位置不再在底部，但没有派发滚动事件
-    scroller().scrollTop = 5;
-    view?.rerender(ui({ lines: all, dropped: 5 }));
     expect(scroller().scrollTop).toBe(30 * LOG_ROW_HEIGHT + PADDING);
+    view?.rerender(ui({ lines: all, dropped: 5 }));
+    expect(scroller().scrollTop).toBe(30 * LOG_ROW_HEIGHT + PADDING + BAR);
   });
 
   it("截掉行数：首行在上次的第几位；没截或整体换掉时为 0", () => {
@@ -598,6 +977,54 @@ describe("LogConsole 样式", () => {
     expect(rule(".jump:active")).toMatch(/scale: 0\.97;/);
     expect(rule(".jump:hover::before")).toMatch(/opacity: 1;/);
   });
+
+  it("省略说明条粘在滚动区顶上、叠在滚过去的行上面，自身不占布局高度，底色不透明，正文不折行；筛选为空的说明让出它的高度", () => {
+    expect(rule(".omittedSlot")).toMatch(/position: sticky;/);
+    expect(rule(".omittedSlot")).toMatch(/top: 0;/);
+    expect(rule(".omittedSlot")).toMatch(/z-index: 1;/);
+    expect(rule(".omittedSlot")).toMatch(/height: 0;/);
+    expect(rule(".omitted")).toMatch(/background: var\(--sk-surface\);/);
+    expect(rule(".omittedText")).toMatch(/white-space: nowrap;/);
+    expect(rule(".filteredEmpty")).toMatch(/translate: 0 var\(--log-omitted-pad\);/);
+    expect(rule(".filteredEmpty")).not.toMatch(/margin/);
+  });
+
+  it("筛选为空的说明让位只动 translate，已在屏上时按落定弹簧过渡；减少动画时不过渡", () => {
+    expect(rule(":global(:root:not([data-sk-reduced])) .filteredEmpty[data-glide]")).toMatch(/transition: translate var\(--sk-spring-settle-dur\) var\(--sk-spring-settle\);/);
+    expect(css).not.toMatch(/(?<!:root:not\(\[data-sk-reduced\]\)\) )\.filteredEmpty\[data-glide\] \{/);
+  });
+
+  it("键盘聚焦日志区的焦点环画在滚动区外面一层、叠在说明条之上：说明条粘在顶上时四边都看得见", () => {
+    expect(css).not.toMatch(/\.scroller:focus-visible \{/);
+    expect(rule(".area")).toMatch(/isolation: isolate;/);
+    const ring = rule(".area:has(> .scroller:focus-visible)::after");
+    expect(ring).toMatch(/position: absolute;/);
+    expect(ring).toMatch(/inset: 0;/);
+    expect(ring).toMatch(/pointer-events: none;/);
+    expect(ring).toMatch(/box-shadow: inset 0 0 0 2px var\(--sk-accent\);/);
+    const zIndex = (body: string) => {
+      const match = /z-index: (\d+);/.exec(body);
+      if (match === null) throw new Error("规则里没有 z-index");
+      return Number(match[1]);
+    };
+    expect(zIndex(ring)).toBeGreaterThan(zIndex(rule(".omittedSlot")));
+  });
+
+  it("日志区的下角圆角取所在页面经 --log-corner 给的值、不给时是直角，焦点环与滚动区的底色沿它收住，不越出外面卡片的圆角", () => {
+    expect(rule(".area")).toMatch(/border-bottom-left-radius: var\(--log-corner, 0\);/);
+    expect(rule(".area")).toMatch(/border-bottom-right-radius: var\(--log-corner, 0\);/);
+    for (const inner of [rule(".area:has(> .scroller:focus-visible)::after"), rule(".scroller")]) {
+      expect(inner).toMatch(/border-bottom-left-radius: inherit;/);
+      expect(inner).toMatch(/border-bottom-right-radius: inherit;/);
+    }
+  });
+
+  it("省略说明的计数槽按四位定宽、右对齐，用等宽数字：位数在四位以内变化时后面的文字不右移", () => {
+    expect(rule(".omittedCount")).toMatch(/display: inline-block;/);
+    expect(rule(".omittedCount")).toMatch(/min-width: 4ch;/);
+    expect(rule(".omittedCount")).toMatch(/font-variant-numeric: tabular-nums;/);
+    expect(rule(".omittedCount")).toMatch(/text-align: end;/);
+  });
 });
 
 describe("省略说明与换行", () => {
@@ -611,9 +1038,41 @@ describe("省略说明与换行", () => {
     expect(onOpenLogFile).toHaveBeenCalledTimes(1);
   });
 
+  it("说明里的行数单独放在计数槽里：位数变了只换槽里的数字，前后文字不变", () => {
+    const note = () => [...document.querySelectorAll("span")].find((s) => s.textContent?.startsWith("较早的"));
+    mount({ lines: lines(3), dropped: 99 });
+    const slot = note()?.querySelector(`.${styles.omittedCount}`);
+    expect(slot?.textContent).toBe("99");
+    view?.rerender(ui({ lines: lines(3), dropped: 100 }));
+    expect(note()?.querySelector(`.${styles.omittedCount}`)).toBe(slot);
+    expect(slot?.textContent).toBe("100");
+    expect(note()?.textContent).toBe("较早的 100 行已省略，完整日志在 latest.log");
+  });
+
   it("没有丢弃时不显示说明", () => {
     mount({ lines: lines(3) });
     expect([...document.querySelectorAll("span")].some((s) => s.textContent?.startsWith("较早的"))).toBe(false);
+  });
+
+  it("说明条叠在滚动区里、排在日志行之前，不压缩日志区；行经上内边距让出它的高度，滚到最上面时第一行排在条下面", () => {
+    const BAR = 31;
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      if (this.textContent?.startsWith("较早的") === true) return BAR;
+      return this.dataset.index === undefined ? 0 : LOG_ROW_HEIGHT;
+    });
+    const all = lines(3);
+    mount({ lines: all });
+    expect(rendered()[0].style.transform).toBe("translateY(8px)");
+    expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe("0px");
+    view?.rerender(ui({ lines: all, dropped: 5 }));
+    const note = [...document.querySelectorAll("span")].find((s) => s.textContent?.startsWith("较早的"));
+    if (note === undefined) throw new Error("没有省略说明");
+    expect(scroller().contains(note)).toBe(true);
+    const rows = rendered();
+    expect(note.compareDocumentPosition(rows[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(rows.map((r) => r.style.transform)).toEqual([0, 1, 2].map((i) => `translateY(${8 + BAR + i * LOG_ROW_HEIGHT}px)`));
+    expect((scroller().lastElementChild as HTMLElement).style.height).toBe(`${3 * LOG_ROW_HEIGHT + PADDING + BAR}px`);
+    expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe(`${BAR}px`);
   });
 
   it(`自动换行只渲染最近 ${WRAP_RENDER_LIMIT} 行，多出的计入省略数`, () => {
@@ -660,6 +1119,173 @@ describe("筛选后为空", () => {
     view?.rerender(ui({ lines: [line(0, "info"), line(1, "info")], level: "all", filteredEmpty: NOTE }));
     expect(scroller().textContent).not.toContain(NOTE);
     expect(rendered()).toHaveLength(2);
+  });
+
+  describe("省略说明条出没时让出它的高度", () => {
+    const BAR = 31;
+    beforeEach(() => {
+      vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+        if (this.textContent?.startsWith("较早的") === true) return BAR;
+        return this.dataset.index === undefined ? 0 : LOG_ROW_HEIGHT;
+      });
+    });
+    const noteEl = () => scroller().querySelector<HTMLElement>(":scope > :not([data-index]):not([style])");
+    const infoOnly = [line(0, "info"), line(1, "info")];
+
+    it("说明已在屏上时说明条出现、收起：说明带着过渡滑开、滑回，不一帧跳过去", () => {
+      mount({ lines: infoOnly, level: "error", filteredEmpty: NOTE });
+      const el = noteEl();
+      expect(el?.textContent).toBe(NOTE);
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe("0px");
+      view?.rerender(ui({ lines: infoOnly, level: "error", filteredEmpty: NOTE, dropped: 5 }));
+      expect(noteEl()).toBe(el);
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe(`${BAR}px`);
+      expect(el?.hasAttribute("data-glide")).toBe(true);
+      view?.rerender(ui({ lines: infoOnly, level: "error", filteredEmpty: NOTE, dropped: 0 }));
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe("0px");
+      expect(el?.hasAttribute("data-glide")).toBe(true);
+    });
+
+    it("说明与说明条一起出现（挂载时就有省略）：量出条高的那次直接排到条下面，不滑；之后条再出没才带过渡", () => {
+      mount({ lines: infoOnly, level: "error", filteredEmpty: NOTE, dropped: 5 });
+      const el = noteEl();
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe(`${BAR}px`);
+      expect(el?.hasAttribute("data-glide")).toBe(false);
+      view?.rerender(ui({ lines: infoOnly, level: "error", filteredEmpty: NOTE, dropped: 0 }));
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe("0px");
+      expect(el?.hasAttribute("data-glide")).toBe(true);
+    });
+
+    it("换到筛选为空的同时说明条收起：说明直接排在顶上，不从条下面滑上来", () => {
+      const toggleWrap = () => act(() => document.querySelector<HTMLButtonElement>('button[aria-label="自动换行"]')?.click());
+      const all = lines(WRAP_RENDER_LIMIT + 3);
+      mount({ lines: all, filteredEmpty: NOTE });
+      toggleWrap();
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe(`${BAR}px`);
+      view?.rerender(ui({ lines: all, level: "error", filteredEmpty: NOTE }));
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe("0px");
+      expect(noteEl()?.textContent).toBe(NOTE);
+      expect(noteEl()?.hasAttribute("data-glide")).toBe(false);
+    });
+  });
+});
+
+describe("省略说明条的进出时机", () => {
+  // 逐帧看条的透明度，走假时钟：用例开始前在真实计时器上把帧循环排空再换假时钟，收尾先卸载、再排空、再换回真实计时器
+  const BAR = 31;
+  const NOTE = "当前筛选下没有日志行";
+  const infoOnly = [line(0, "info"), line(1, "info")];
+  beforeEach(async () => {
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      if (this.textContent?.startsWith("较早的") === true) return BAR;
+      return this.dataset.index === undefined ? 0 : LOG_ROW_HEIGHT;
+    });
+    await drainFrames();
+    vi.useFakeTimers();
+  });
+  afterEach(async () => {
+    view?.unmount();
+    view = undefined;
+    await drainFrames();
+    vi.useRealTimers();
+  });
+  /** 说明条外面那层出现动画的包裹：透明度写在它身上。 */
+  const slot = () => scroller().querySelector<HTMLElement>(`.${styles.omittedSlot}`);
+  const opacityOf = (el: HTMLElement | null) => {
+    if (el === null) throw new Error("说明条不在");
+    return Number(el.style.opacity);
+  };
+  const toggleWrap = () => act(() => document.querySelector<HTMLButtonElement>('button[aria-label="自动换行"]')?.click());
+
+  it("关掉换行、说明条随之收起：后面的行同一次提交就排到了顶上，条当帧撤掉，不在它们上面原地淡出", async () => {
+    mount({ lines: lines(WRAP_RENDER_LIMIT + 3) });
+    toggleWrap();
+    await stepFrames(30);
+    const bar = slot();
+    expect(opacityOf(bar)).toBe(1);
+    toggleWrap();
+    await stepFrames(1);
+    expect(bar?.isConnected).toBe(false);
+  });
+
+  it("换筛选、说明条随之收起（含换到筛选为空、说明排到顶上）：条当帧撤掉", async () => {
+    const mixed = [...Array.from({ length: WRAP_RENDER_LIMIT - 10 }, (_, i) => line(i, "warn")), ...lines(20, WRAP_RENDER_LIMIT)];
+    mount({ lines: mixed, filteredEmpty: NOTE });
+    toggleWrap();
+    await stepFrames(30);
+    const bar = slot();
+    expect(opacityOf(bar)).toBe(1);
+    view?.rerender(ui({ lines: mixed, level: "warn", filteredEmpty: NOTE }));
+    await stepFrames(1);
+    expect(bar?.isConnected).toBe(false);
+
+    view?.rerender(ui({ lines: mixed, level: "all", filteredEmpty: NOTE }));
+    await stepFrames(30);
+    const again = slot();
+    expect(opacityOf(again)).toBe(1);
+    view?.rerender(ui({ lines: mixed, level: "error", filteredEmpty: NOTE }));
+    expect(scroller().textContent).toContain(NOTE);
+    await stepFrames(1);
+    expect(again?.isConnected).toBe(false);
+  });
+
+  it("不是用户切换带出的收起（换成了没有省略的日志）：条照常原地淡出", async () => {
+    mount({ lines: lines(3), dropped: 5 });
+    const bar = slot();
+    view?.rerender(ui({ lines: lines(3), dropped: 0 }));
+    await stepFrames(1);
+    expect(bar?.isConnected).toBe(true);
+    expect(bar?.hasAttribute("inert")).toBe(true);
+    await stepFrames(3);
+    expect(opacityOf(bar)).toBeGreaterThan(0);
+    expect(opacityOf(bar)).toBeLessThan(1);
+    await stepFrames(60);
+    expect(bar?.isConnected).toBe(false);
+  });
+
+  it("说明已在屏上时说明条出现：条等说明那一行滑到条的下沿以下再淡入，不半透明地叠在说明上", async () => {
+    mount({ lines: infoOnly, level: "error", filteredEmpty: NOTE });
+    view?.rerender(ui({ lines: infoOnly, level: "error", filteredEmpty: NOTE, dropped: 5 }));
+    const bar = slot();
+    // 条高 31：说明要走过 23 px，settle 弹簧约 101 ms，从画出第一帧之后算起；第 5 帧（80 ms）仍是透明的
+    await stepFrames(5);
+    expect(opacityOf(bar)).toBe(0);
+    await stepFrames(10);
+    expect(opacityOf(bar)).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ["后面是日志行：行经上内边距在条出现的那一帧就让开了", () => mount({ lines: lines(3) }), (dropped: number) => ui({ lines: lines(3), dropped })],
+    [
+      "说明与条一起出现：说明直接排在条下面，不滑",
+      () => mount({ lines: infoOnly, filteredEmpty: NOTE }),
+      (dropped: number) => ui({ lines: infoOnly, level: "error", filteredEmpty: NOTE, dropped }),
+    ],
+    [
+      "减少动画：说明一步到位",
+      () => {
+        view = render(<MotionConfig reducedMotion="always">{ui({ lines: infoOnly, level: "error", filteredEmpty: NOTE })}</MotionConfig>);
+      },
+      (dropped: number) => <MotionConfig reducedMotion="always">{ui({ lines: infoOnly, level: "error", filteredEmpty: NOTE, dropped })}</MotionConfig>,
+    ],
+  ] as const)("%s：条画出第一帧之后就淡入，不等", async (_, first, next) => {
+    first();
+    view?.rerender(next(5));
+    const bar = slot();
+    await stepFrames(3);
+    expect(opacityOf(bar)).toBeGreaterThan(0);
+  });
+
+  it("说明让出条高要等多久：settle 弹簧把说明那一行整个送到条的下沿以下的时刻，早一毫秒还差一点", () => {
+    for (const bar of [30, 31, 38, 120]) {
+      const delay = noteClearDelay(bar);
+      const moved = (t: number) => (1 - springAt("settle", 1, 0, t).x) * bar;
+      // 说明的正文从上内边距 8 px 处起
+      expect(moved(delay)).toBeGreaterThanOrEqual(bar - 8);
+      expect(moved(delay - 0.001)).toBeLessThan(bar - 8);
+    }
+    expect(noteClearDelay(30)).toBeCloseTo(0.099, 3);
+    expect(noteClearDelay(8)).toBe(0);
   });
 });
 
@@ -748,5 +1374,10 @@ describe("新增错误播报", () => {
     expect(status()).toBe("");
     view?.rerender(ui({ lines: [...fresh, line(12, "error")] }));
     expect(status()).toBe("新增 1 条错误");
+  });
+
+  it("播报区只给读屏：走全局的视觉隐藏类，不在模块里另写一份", () => {
+    mount({ lines: [line(0, "error")] });
+    expect(document.querySelector('[role="status"][aria-live="polite"]')?.className).toBe("sk-sr-only");
   });
 });

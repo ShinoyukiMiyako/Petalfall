@@ -13,7 +13,7 @@ describe("packFactLines", () => {
       ["mods", null],
       ["download", null],
       ["memory", "内存跟随全局设置"],
-      ["pin", `装好后固定在侧栏（1/${SIDEBAR_PIN_LIMIT}）`],
+      ["pin", `会自动固定到侧栏（1/${SIDEBAR_PIN_LIMIT}）`],
     ]);
     const ready = packFactLines(base, false, 0);
     expect(ready.map((line) => line.key)).toEqual(pending.map((line) => line.key));

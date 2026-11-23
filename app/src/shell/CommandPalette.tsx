@@ -190,7 +190,7 @@ function usePaletteEntries(query: string, current: LaunchEntry | null): PaletteE
   const { go, route: here } = useNav();
   const chrome = useChrome();
   const { openCreateInstance } = useShell();
-  const { appearance, setAppearance } = useAppearance();
+  const { resolvedMode, setAppearance } = useAppearance();
   const run = useRunner();
   const switchAccount = useSwitchAccount();
 
@@ -245,7 +245,8 @@ function usePaletteEntries(query: string, current: LaunchEntry | null): PaletteE
     navigates: false,
     run: () => openCreateInstance(),
   });
-  const night = appearance.mode === "night";
+  // 按画出来的明暗换到另一档：跟随系统时也是换成与眼前相反的那一档，此后不再跟随系统
+  const night = resolvedMode === "night";
   entries.push({
     id: "action:mode",
     group: "action",

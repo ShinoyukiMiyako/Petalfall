@@ -24,6 +24,7 @@ import { CORE_EVENT, type CoreEvent } from "../../tasks";
 import { findMockSource, findMockVersion, mockProjects, newestFirst, sourceVersions, sourcesGameVersions, sourcesLoaders, type MockProject, type MockSource } from "../catalog";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
+import { ensureMockGameDir } from "./config";
 import { acquireMockInstance, ensureMockSavesFreeForWriting, markMockSavesWritten, mockInstanceWorlds, recordMockPack } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
@@ -391,7 +392,8 @@ function installResource(args: MockArgs): Promise<ResourceInstallOutcomeDto> {
   const platform = parsePlatform(read.string("platform"));
   const projectId = read.string("projectId");
   const fileVersionId = read.string("fileVersionId");
-  // 与后端同序：全部入参解析完再占住实例（modifying），之后登记任务
+  // 与后端同序：全部入参解析完先核对游戏目录，再占住实例（modifying），之后登记任务
+  ensureMockGameDir(args, "install_resource");
   const hold = acquireMockInstance(versionId, "modifying");
   // 数据包写进存档目录，与后端一样先记下再查备份、恢复与读存档的导出
   const unmark = resourceType === "data_pack" ? markMockSavesWritten(versionId) : () => undefined;

@@ -1,15 +1,18 @@
 // 皮肤的取片与排布：头像（正脸 + 帽子层）与立绘方框。坐标单位为皮肤像素；立绘的盒子与 UV 在 figure3d.ts。
 
-import type { SkinModel } from "../illustrations/silhouette";
+export type SkinModel = "wide" | "slim";
 
-export type { SkinModel } from "../illustrations/silhouette";
+/** 臂宽：宽体型 4、细体型 3（皮肤像素）。 */
+export function armWidth(model: SkinModel): 3 | 4 {
+  return model === "slim" ? 3 : 4;
+}
 
 /** 后端皮肤信息：远程皮肤按 sha1 取，默认皮肤按白名单路径取。 */
 export type SkinRef = { kind: "remote"; sha1: string; model: SkinModel; hat: boolean } | { kind: "default"; path: string; model: SkinModel };
 
 /**
- * 头像与立绘收的皮肤：SkinRef 有皮肤，null 没有可用皮肤（画剪影），"loading" 皮肤信息还在读、还不知道有没有。
- * 读取中保留正在显示的那一张，读到再换：换了账户时不先落回剪影、再淡入新皮肤。
+ * 头像与立绘收的皮肤：SkinRef 有皮肤，null 没有可用皮肤（画人偶），"loading" 皮肤信息还在读、还不知道有没有。
+ * 读取中保留正在显示的那一张，读到再换：换了账户时不先落回人偶、再淡入新皮肤。
  */
 export type SkinSource = SkinRef | null | "loading";
 
@@ -25,7 +28,7 @@ export const AVATAR_SPECS: Readonly<Record<AvatarSize, { face: number; radius: n
 
 export type FigureScale = 4 | 5 | 6;
 
-/** 立绘在页面布局里占的方框：底边就是脚底基线，也是剪影的尺寸。 */
+/** 立绘在页面布局里占的方框：底边就是脚底基线。 */
 export const FIGURE_SIZE = { width: 16, height: 32 } as const;
 
 /**

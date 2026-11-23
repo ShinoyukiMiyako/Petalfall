@@ -69,8 +69,8 @@ pub use placeholder::Placeholders;
 pub use precheck::{
     DEFAULT_JAVA_MAJOR, JvmMemoryIssue, MIN_MAX_HEAP_MB, ONEDRIVE_ENV_VARS, PLAYER_NAME_MAX_UNITS,
     PathWarning, SyncProvider, SyncRoot, effective_max_heap_mb, jvm_memory_issue, long_player_name,
-    non_ascii_path_at_risk, path_char_outside_code_page, path_warnings, required_java_major,
-    sync_folder, sync_roots_from_env,
+    non_ascii_path_at_risk, path_char_outside_code_page, path_warnings, player_name_chars_rejected,
+    required_java_major, sync_folder, sync_roots_from_env,
 };
 pub use process::{
     ExitReport, GameSession, KillSwitch, LogBatchSink, LogLine, LogMarker, LogStream, SessionEnd,

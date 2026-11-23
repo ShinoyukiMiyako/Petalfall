@@ -2,7 +2,7 @@
 // 单选列表与单选卡用漫游焦点：组内一个 Tab 停靠点，方向键移动并立即选中，Enter 由流程组件统一当作「下一步」。
 
 import { useAnimate, useReducedMotionConfig } from "framer-motion";
-import { startTransition, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, startTransition, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { COVER_PRESETS, type InstanceCover } from "../../art/iso/covers";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
@@ -10,9 +10,9 @@ import { LoaderTile } from "../../art/illustrations/FeatureTile";
 import { coverLabel, LOADER_NAME, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { Settings } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
-import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { fade, insertItem, shake } from "../../lib/motion";
-import { observeReflow, REFLOW_PAUSED_ATTR, REFLOW_SKIP_ATTR } from "../../lib/reflow";
+import { observeReflow, REFLOW_PAUSED_ATTR } from "../../lib/reflow";
 import { playTrack, playTween, scaleTrack } from "../../lib/slide";
 import { describeError } from "../../state/errors";
 import { useJavaRuntimes, type LoaderVersionDto, type VersionRequirementsDto } from "../../state/queries/catalog";
@@ -72,11 +72,21 @@ const TYPE_TONE = { release: "ok", snapshot: "warn", old: "neutral" } as const;
 /** 封面样本的色相区高度：4 × 4 的网格要放进固定高的右栏，方块宽 32 居中。 */
 const SWATCH_ART_HEIGHT = 48;
 
+/**
+ * 这一步的入场（滑入加淡入，减少动画时只有淡入）播完了没有，由流程组件的步骤容器提供。
+ * 挂上之后才补的重活（外观步的 16 块卡面）等它播完再做：提交阶段不可中断，落在入场途中就是途中的一帧长帧。
+ * 弹窗打开时的第一步不播入场，一挂上就算播完；不在步骤容器里单独渲染时也算播完。
+ */
+export const StepEnteredContext = createContext(true);
+
 function StepHead({ title, body, right }: { title: string; body: string; right?: ReactNode }) {
   return (
     <div className={styles.stepHead}>
       <div className={styles.stepHeadText}>
-        <h3 className={styles.stepTitle}>{title}</h3>
+        {/* 换步后这一步没有可落焦点的选项时（清单还在读、确认步）焦点落在标题上，见流程组件的 StepPane */}
+        <h3 className={styles.stepTitle} tabIndex={-1}>
+          {title}
+        </h3>
         <p className={styles.stepBody}>{body}</p>
       </div>
       {right}
@@ -84,25 +94,24 @@ function StepHead({ title, body, right }: { title: string; body: string; right?:
   );
 }
 
-function SkeletonRows() {
-  return (
-    <div className={styles.list}>
-      {Array.from({ length: SKELETON_ROWS }, (_, i) => (
-        <Skeleton key={i} shape="block" width="100%" height={ROW_HEIGHT} radius="md" className={styles.skeletonRow} />
-      ))}
-    </div>
-  );
-}
-
 /**
- * 读屏听到的「正在读取」：骨架层整层对辅助技术隐藏，说明只能放在 Loadable 外面。播报区常驻，骨架显出来时才写字，
- * 等待期内就读完的请求不播报。它脱离布局（绝对定位、不参与让位），步骤里的块不因它多一道间距。
+ * slow：给了就在骨架层里常驻一句「比平时慢」，为真时淡入。它叠在骨架上、贴住列表区的下沿，不分走列表区的高度，
+ * 内容到达时随骨架层一起交叉淡化退场。骨架层对读屏隐藏，这句另经 Loadable 的 busyLabel 读出。
  */
-function LoadingStatus({ view, label }: { view: LoadingView; label: string }) {
+function SkeletonRows({ slow }: { slow?: boolean }) {
   return (
-    <span className={styles.srOnly} role="status" {...{ [REFLOW_SKIP_ATTR]: "" }}>
-      {view === "skeleton" ? label : ""}
-    </span>
+    <>
+      <div className={styles.list}>
+        {Array.from({ length: SKELETON_ROWS }, (_, i) => (
+          <Skeleton key={i} shape="block" width="100%" height={ROW_HEIGHT} radius="md" className={styles.skeletonRow} />
+        ))}
+      </div>
+      {slow !== undefined && (
+        <p className={styles.skeletonNote} data-shown={slow || undefined}>
+          {SLOW_LOADING_HINT}
+        </p>
+      )}
+    </>
   );
 }
 
@@ -223,8 +232,13 @@ export function VersionStep(props: VersionStepProps) {
           {CREATE_COPY.version.count(items.length)}
         </span>
       </div>
-      <LoadingStatus view={gate.view} label={CREATE_COPY.version.loadingLabel} />
-      <Loadable view={gate.view} skeleton={<SkeletonRows />} className={styles.listArea} contentClassName={styles.listFill}>
+      <Loadable
+        view={gate.view}
+        skeleton={<SkeletonRows slow={gate.slow} />}
+        busyLabel={gate.slow ? CREATE_COPY.version.slowLoadingLabel : CREATE_COPY.version.loadingLabel}
+        className={styles.listArea}
+        contentClassName={styles.listFill}
+      >
         {() => (
           <Appear itemClassName={styles.listFill}>
             {problem !== null ? (
@@ -241,13 +255,8 @@ export function VersionStep(props: VersionStepProps) {
           </Appear>
         )}
       </Loadable>
-      {/* 列表区下方的一行说明：加载比平时慢、版本列表来自离线缓存。放在列表之下，出现时只缩短列表区，不推动上面的内容 */}
+      {/* 列表区下方的一行说明：版本列表来自离线缓存。只随内容一起出现，放在列表之下，出现时只缩短列表区，不推动上面的内容 */}
       <Appear itemClassName={styles.listNoteItem}>
-        {gate.view !== "content" && gate.slow && (
-          <p key="slow" className={styles.listNote}>
-            {SLOW_LOADING_HINT}
-          </p>
-        )}
         {counted && staleSince !== null && (
           <p key="stale" className={styles.listNote}>
             {CREATE_COPY.version.stale(staleSince, now)}
@@ -266,12 +275,15 @@ function VersionList({
   selectedJava,
   now,
 }: Pick<VersionStepProps, "items" | "latestId" | "value" | "onChange" | "selectedJava" | "now">) {
-  // 先画前一屏多一点（见 FIRST_PAINT_ROWS），其余的行在过渡更新里渲染：React 分片做完、不占住换步的滑入
-  const [filled, setFilled] = useState(items.length <= FIRST_PAINT_ROWS);
+  // 先画前一屏多一点（见 FIRST_PAINT_ROWS），其余的行在过渡更新里渲染：React 分片做完、不占住换步的滑入。
+  // 首批至少画到已选的那一行：换步一挂上焦点就落在单选组的停靠点上，已选行还没画出来时停靠点会退到第一行，
+  // 焦点落在没选中的行上，方向键再从那里走就把选择改掉了
+  const firstPaint = Math.max(FIRST_PAINT_ROWS, items.findIndex((v) => v.id === value) + 1);
+  const [filled, setFilled] = useState(items.length <= firstPaint);
   useEffect(() => {
     if (!filled) startTransition(() => setFilled(true));
   }, [filled]);
-  const rows = filled ? items : items.slice(0, FIRST_PAINT_ROWS);
+  const rows = filled ? items : items.slice(0, firstPaint);
 
   // 筛选或搜索换了行。进出的行不多时逐行处理：新来的行淡入并从略小处落到位，留下的行由让位从原位置滑到新位置，
   // 删掉的行直接离开、空出来的位置由滑上来的行补上（行上不挂进出场：几百行各包一层的开销不值这一下淡出）。
@@ -459,8 +471,7 @@ export function LoaderVersionStep({ loader, mcVersion, versions, recommended, va
   return (
     <>
       <StepHead title={CREATE_COPY.loaderVersion.title(loader)} body={CREATE_COPY.loaderVersion.body} />
-      <LoadingStatus view={gate.view} label={CREATE_COPY.loaderVersion.loadingLabel} />
-      <Loadable view={gate.view} skeleton={<SkeletonRows />} className={styles.listArea} contentClassName={styles.listFill}>
+      <Loadable view={gate.view} skeleton={<SkeletonRows />} busyLabel={CREATE_COPY.loaderVersion.loadingLabel} className={styles.listArea} contentClassName={styles.listFill}>
         {() => {
           if (versions.data === undefined) {
             if (versions.status !== "error") throw new Error("加载器版本还在读取，不该画内容");
@@ -566,6 +577,14 @@ export function CoverStep({ previewId, value, onChange, random }: CoverStepProps
     const others = COVER_PRESETS.filter((p) => p.block !== value.block);
     onChange(others[Math.floor(random() * others.length)]);
   };
+  // 16 块卡面（丘陵与像素花瓣）和换步挂在同一次提交里时那一帧很长，入场的第一帧露面时淡入已经走了一半；
+  // 挪到画完第一帧之后补，那次提交（每块卡面量宽、重渲染）又落在入场途中，掉一帧。
+  // 所以换步那一次只挂色样与方块，等这一步入场播完再在过渡更新里补卡面，卡面自己淡入
+  const entered = useContext(StepEnteredContext);
+  const [decorated, setDecorated] = useState(false);
+  useEffect(() => {
+    if (entered) startTransition(() => setDecorated(true));
+  }, [entered]);
   return (
     <>
       <StepHead
@@ -596,11 +615,17 @@ export function CoverStep({ previewId, value, onChange, random }: CoverStepProps
                 if (!on) onChange(p);
               }}
             >
-              <Cover hue={p.hue} seed={p.block} height={SWATCH_ART_HEIGHT} className={styles.swatchArt}>
+              {/* 画面格定高：卡面晚一拍补上时色样不变高；卡面垫在方块下面淡入，方块不随它重挂 */}
+              <span className={styles.swatchArt} style={{ height: SWATCH_ART_HEIGHT }}>
+                {decorated && (
+                  <span className={styles.swatchCover}>
+                    <Cover hue={p.hue} seed={p.block} height={SWATCH_ART_HEIGHT} />
+                  </span>
+                )}
                 <span className={styles.swatchBlock}>
                   <InstanceBlock instanceId={previewId} cover={p} width={32} lift />
                 </span>
-              </Cover>
+              </span>
               <span className={styles.swatchLabel} aria-hidden="true">
                 {label}
               </span>

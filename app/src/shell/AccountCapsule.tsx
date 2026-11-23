@@ -11,18 +11,17 @@
 import { AnimatePresence, motion, useReducedMotionConfig, type HTMLMotionProps } from "framer-motion";
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Icon } from "../art/Icon";
-import type { SkinRef } from "../art/skin/layout";
+import type { SkinSource } from "../art/skin/layout";
 import { AccountAvatar } from "../art/skin/AccountAvatar";
 import { ACTION_ERROR, NEXT_LAUNCH_SUFFIX, TOAST_COPY, accountKindLabel } from "../copy/flows";
 import type { Account } from "../domain/adapt";
 import { useLoadingGate } from "../lib/loading-gate";
 import { fade, popMark, springs } from "../lib/motion";
-import { useMounted } from "../lib/useMounted";
 import { isImeComposing } from "../lib/util";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
-import { useSkinInfo } from "../state/queries/home";
+import { skinSource, useSkinInfo } from "../state/queries/home";
 import { activeAccount, busyInstanceId } from "../state/selectors";
-import { Popover } from "../ui/Popover";
+import { Popover, usePopoverInitialFocus } from "../ui/Popover";
 import { Skeleton } from "../ui/Skeleton";
 import { Tooltip } from "../ui/Tooltip";
 import styles from "./AccountCapsule.module.css";
@@ -52,16 +51,18 @@ export const SLIDES_WITH_CAPSULE: Pick<HTMLMotionProps<"button">, "layout" | "la
  */
 const SKELETON_BAR = { name: 48, kind: 40, nameHeight: 10, kindHeight: 8 } as const;
 
-/** 账户的皮肤；读取失败经外层统一错误处理报告，头像退回剪影（与「没有皮肤」同样的画法）。 */
-export function useAccountSkin(uuid: string): SkinRef | null {
+/**
+ * 账户的皮肤，说法同 skinSource：还在读时是「读取中」，头像留着正在显示的脸。读取失败经外层统一错误处理报告，
+ * 重取失败时沿用上一次读到的皮肤，从没读到过的头像退回人偶（与「没有皮肤」同样的画法）。
+ */
+export function useAccountSkin(uuid: string): SkinSource {
   const skin = useSkinInfo(uuid);
   const run = useRunner();
   const error = skin.status === "error" ? skin.error : null;
   useEffect(() => {
     if (error !== null) void run(() => Promise.reject(error), SHELL_ACTION_ERROR.skin);
   }, [error, run]);
-  if (skin.status === "loading" || skin.data === undefined) return null;
-  return skin.data;
+  return skinSource(skin);
 }
 
 /** 账户行的第二行：需要重新登录时说明这一点，否则写账户类型。 */
@@ -96,13 +97,21 @@ export function AccountCapsule() {
   const [loaded, setLoaded] = useState(!accountsLoading || current !== null);
   if (!accountsLoading && !loaded) setLoaded(true);
   const gate = useLoadingGate(accountsLoading && !loaded);
+  // 骨架露出来过（等过了等待期）。读到账户之后不会再回到加载，所以它一旦为真就不再变
+  const [revealed, setRevealed] = useState(false);
+  if (gate.view === "skeleton" && !revealed) setRevealed(true);
   const { tier } = useShell();
   const { route, go } = useNav();
   const switchTo = useSwitchAccount();
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
-  // 挂载时就在的内容跟着外壳一起出现；之后才换上的（读完账户、切换账户、加上首个账户）淡入
-  const mounted = useMounted();
+  // 上一次提交时胶囊已经看得见（挂载过，也不在等待期）。之后才换上的内容（读完账户、切换账户、加上首个账户）自己淡入；
+  // 胶囊还看不见时换上的不淡：挂载时就在的跟着外壳一起出现，等待期内读到的只随胶囊外框那一层淡入，与加载容器一样只淡一层。
+  // 账户面再自己从透明走一遍的话，两层不透明度相乘，第一张画面几乎看不见
+  const shownBefore = useRef(false);
+  useLayoutEffect(() => {
+    shownBefore.current = gate.view !== "pending";
+  }, [gate.view]);
 
   const account = gate.view === "content" ? current : null;
   const kind: CapsuleKind = gate.view !== "content" ? "loading" : account === null ? "add" : "account";
@@ -150,14 +159,16 @@ export function AccountCapsule() {
           aria-expanded={account === null ? undefined : open}
           onClick={onClick}
         >
-          {/* 换状态与换账户时新旧两层叠放交叉淡入：旧的一层脱离布局淡出，胶囊立即取新内容的宽度去伸缩 */}
-          <AnimatePresence mode="popLayout">
+          {/* 换状态与换账户时新旧两层叠放交叉淡入：旧的一层脱离布局淡出，胶囊立即取新内容的宽度去伸缩。
+              一直停在等待期的骨架例外：它本来就看不见，读到时胶囊正从透明淡入，骨架照常淡出的话两者相乘，骨架条会在名字底下透出来。
+              退场只能经 AnimatePresence 播，所以这时连同它所在的 AnimatePresence 一起换掉（换 key），骨架在同一次提交里离开 DOM */}
+          <AnimatePresence key={kind === "loading" || revealed ? "from-skeleton" : "from-content"} mode="popLayout">
             <motion.span
               key={account === null ? kind : account.uuid}
               className={styles.face}
               layout="position"
               layoutDependency={layoutKey}
-              initial={mounted.current ? { opacity: 0 } : false}
+              initial={shownBefore.current ? { opacity: 0 } : false}
               animate={{ opacity: 1, transition: fade.in }}
               exit={{ opacity: 0, transition: fade.out }}
             >
@@ -243,12 +254,12 @@ function AccountMenu({ accounts, currentId, onPick, onManage }: AccountMenuProps
   const listRef = useRef<HTMLDivElement>(null);
   const items = () => (listRef.current === null ? [] : [...listRef.current.querySelectorAll<HTMLElement>("[data-menu-item]")]);
 
-  useLayoutEffect(() => {
+  usePopoverInitialFocus(() => {
     const all = items();
     const target = all.find((el) => el.dataset.current !== undefined);
     if (target === undefined) throw new Error("账户菜单里没有当前账户");
     target.focus();
-  }, []);
+  });
 
   const onKeyDown = (event: ReactKeyboardEvent) => {
     if (isImeComposing(event)) return;

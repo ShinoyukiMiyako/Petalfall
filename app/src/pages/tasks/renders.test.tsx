@@ -15,6 +15,7 @@ import { render, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, cancelledError, deferred, emit, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import TasksPage from "./index";
+import styles from "./tasks.module.css";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -234,15 +235,49 @@ describe("下载任务页按片订阅", () => {
   it("已下大小到点补字：只重画那一小段文字，任务行与吞吐卡本身都不重渲染", async () => {
     const { running } = await mountBusy();
     const [hot] = running;
-    act(() => {
-      emit(CORE_EVENT, { kind: "download", task_id: `${hot.id}#1`, total: 100, finished: 30, bytes: 30 * MB, total_bytes: 100 * MB, speed: 2 * MB });
-    });
-    // 事件到达的那一刻已下大小还是上一拍的
-    expect(rowText(hot.title)).toContain("0 B / 100 MB");
+    const progress = (bytes: number) =>
+      act(() => {
+        emit(CORE_EVENT, { kind: "download", task_id: `${hot.id}#1`, total: 100, finished: 30, bytes, total_bytes: 100 * MB, speed: 2 * MB });
+      });
+    // 从 0 开始传的第一条直接换上；同一拍里再报一条，字先停在上一拍
+    progress(30 * MB);
+    progress(40 * MB);
+    expect(rowText(hot.title)).toContain("30.0 MB / 100 MB");
     const rowsBefore = new Map(renders.rows);
     const cardBefore = renders.ThroughputCard;
-    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS));
-    expect(rowText(hot.title)).toContain("30.0 MB / 100 MB");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SPEED_REFRESH_MS);
+    });
+    expect(rowText(hot.title)).toContain("40.0 MB / 100 MB");
+    expect(renders.rows.get(hot.id)).toBe(rowsBefore.get(hot.id));
+    expect(renders.ThroughputCard).toBe(cardBefore);
+  });
+
+  it("速度到点补字：只重画那一小段文字，任务行与吞吐卡本身都不重渲染", async () => {
+    const { running } = await mountBusy();
+    const [hot] = running;
+    const flowSpeed = () => {
+      const found = [...(view?.container.querySelectorAll(`.${styles.flowSpeed}`) ?? [])].filter(live);
+      if (found.length !== 1) throw new Error(`在场的总速度有 ${found.length} 处`);
+      return found[0].textContent;
+    };
+    const progress = (speed: number) =>
+      act(() => {
+        emit(CORE_EVENT, { kind: "download", task_id: `${hot.id}#1`, total: 100, finished: 30, bytes: 30 * MB, total_bytes: 100 * MB, speed });
+      });
+    // 从 0 起步的速度直接换上；同一拍里再报一个快得多的，字先停在上一拍
+    progress(2 * MB);
+    progress(6 * MB);
+    expect(rowText(hot.title)).toContain("2.0 MB/s");
+    expect(flowSpeed()).toBe("2.0 MB/s");
+    const rowsBefore = new Map(renders.rows);
+    const cardBefore = renders.ThroughputCard;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SPEED_REFRESH_MS);
+    });
+    // 间隔满时补上平滑后的值：6 - (6 - 2) * e^-0.5 ≈ 3.57 MB/s，行与卡同一拍换
+    expect(rowText(hot.title)).toContain("3.6 MB/s");
+    expect(flowSpeed()).toBe("3.6 MB/s");
     expect(renders.rows.get(hot.id)).toBe(rowsBefore.get(hot.id));
     expect(renders.ThroughputCard).toBe(cardBefore);
   });
@@ -263,7 +298,11 @@ describe("下载任务页按片订阅", () => {
     const { running, queued } = await mountBusy();
     const rowsBefore = new Map(renders.rows);
     const cardBefore = renders.ThroughputCard;
-    for (let i = 0; i < 3; i++) act(() => void vi.advanceTimersByTime(1000));
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+    }
     for (const t of running) expect(renders.rows.get(t.id)).toBe((rowsBefore.get(t.id) as number) + 3);
     for (const id of queued.map((t) => t.id).concat(HISTORY.map((r) => r.id))) expect(renders.rows.get(id)).toBe(rowsBefore.get(id));
     expect(renders.ThroughputCard).toBe(cardBefore + 3);
@@ -276,7 +315,7 @@ describe("下载任务页按片订阅", () => {
     const row = rowOf(next.title);
     const cancel = row.querySelector<HTMLButtonElement>('button[aria-label="取消任务"]');
     if (cancel === null) throw new Error("排队中的任务行没有取消键");
-    cancel.focus();
+    act(() => cancel.focus());
     expect(document.activeElement).toBe(cancel);
 
     await act(async () => {

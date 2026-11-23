@@ -17,7 +17,7 @@ use petalfall_core::{
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
-use crate::commands::art::{skin_info_dto, SkinInfoDto};
+use crate::commands::art::{remote_or_default, SkinInfoDto};
 use crate::commands::CommandError;
 use crate::events::{self, CoreEventForwarder, DEVICE_CODE_EVENT};
 use crate::facade::Facade;
@@ -101,7 +101,7 @@ impl From<AuthServerInfo> for AuthServerDto {
     }
 }
 
-/// 待选角色 DTO：角色 uuid、名字与皮肤（取不到皮肤时为 null，界面画剪影）。
+/// 待选角色 DTO：角色 uuid、名字与皮肤（拿不到远程皮肤时是按角色 uuid 选的默认皮肤，uuid 不合规时为 null，界面画人偶）。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AuthlibProfileDto {
     pub uuid: String,
@@ -379,6 +379,7 @@ pub(crate) async fn authlib_login_with(
         AuthlibLogin::SelectProfile(pending) => {
             let refs = petalfall.authlib_profile_skins(&pending).await;
             let skins = textures.skin_infos(refs).await;
+            let set = textures.status().default_skins;
             let profiles = pending
                 .profiles
                 .iter()
@@ -386,7 +387,7 @@ pub(crate) async fn authlib_login_with(
                 .map(|(profile, skin)| AuthlibProfileDto {
                     uuid: profile.id.clone(),
                     name: profile.name.clone(),
-                    skin: skin.as_ref().map(skin_info_dto),
+                    skin: remote_or_default(&profile.id, skin.as_ref(), set),
                 })
                 .collect();
             let server_name = pending.server.server_name.clone();

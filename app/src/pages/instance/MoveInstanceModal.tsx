@@ -222,7 +222,7 @@ export function MoveInstanceModal({ inst, lockReason, onRename, onClose }: MoveI
               </Loadable>
               {/* 骨架里的「正在检查」对读屏隐藏：播报区随这一块预先挂好、先空着，加载态亮出（含摆着上一份结果时）才写字，
                   读屏才念得出来；回得快时不播，与看得见的骨架同一时机 */}
-              <div role="status" className={styles.status}>
+              <div role="status" className="sk-sr-only">
                 {checkGate.view === "skeleton" ? MOVE_COPY.checking : ""}
               </div>
             </section>
@@ -291,6 +291,8 @@ function MovePreview({ preview, stale, busy, pinned, onRename }: { preview: Move
   const nameTaken = preview.blockers.some((b) => b.kind === "name_taken");
   return (
     <div ref={reflow} className={styles.preview} data-stale={stale || undefined} aria-busy={busy || undefined}>
+      {/* 存档、Mod 和游戏设置不跟着走是点「移动实例」之前必须看到的：排在摘要之前，矮窗口里主体不滚动也露得出来 */}
+      <Appear>{!preview.isolated && <WarnNote key="isolated">{MOVE_COPY.notIsolated}</WarnNote>}</Appear>
       <Inset>
         <KV rows={summaryRows(preview)} />
       </Inset>
@@ -324,7 +326,6 @@ function MovePreview({ preview, stale, busy, pinned, onRename }: { preview: Move
             ))}
           </ul>
         )}
-        {!preview.isolated && <WarnNote key="isolated">{MOVE_COPY.notIsolated}</WarnNote>}
         {preview.missing_in_source > 0 && <WarnNote key="missing">{MOVE_COPY.missingInSource(preview.missing_in_source)}</WarnNote>}
         {pinned && !blocked && <WarnNote key="pinned">{MOVE_COPY.pinned}</WarnNote>}
       </Appear>

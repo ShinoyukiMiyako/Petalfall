@@ -282,13 +282,21 @@ mod tests {
         assert_eq!(window["width"], 1120);
         assert_eq!(window["height"], 720);
         assert_eq!(window["minWidth"], 960);
-        assert_eq!(window["minHeight"], 720);
+        assert_eq!(window["minHeight"], 640);
         assert_eq!(window["decorations"], false);
         assert_eq!(window["shadow"], true);
         assert_eq!(window["transparent"], false);
         assert_eq!(window["resizable"], true);
         assert_eq!(window["maximizable"], true);
         assert_eq!(window["center"], true);
+        // 首次启动装不下工作区时由 window_state 压进主显示器的工作区：它假定配置把窗口居中到主显示器、不另给
+        // 位置；也不叠框架的 preventOverflow，那套不算无边框窗口的缩放边，压完客户区仍出界几个像素
+        for key in ["x", "y", "preventOverflow"] {
+            assert!(
+                window.get(key).is_none(),
+                "主窗口配置不该有 {key}：{window}"
+            );
+        }
         assert_eq!(window["visible"], false);
         assert_eq!(window["backgroundColor"], "#FBF7F9");
         assert_eq!(window["zoomHotkeysEnabled"], false);

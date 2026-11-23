@@ -2,6 +2,7 @@
 // @module-tag heavy-page
 // 启动胶囊的焦点：键盘按了面上的按钮，换上的新面接住焦点，不随旧面一起丢到 body；
 // 按钮在进行中变成不可用时保持可聚焦，焦点留在按钮上。以及换面时的组装与文字槽。
+import { frameData } from "framer-motion";
 import { act, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
@@ -20,9 +21,23 @@ import { assemblyExitMs } from "../art/iso/AssemblingBlock";
 import { assembly, capsuleSwap, fade } from "../lib/motion";
 import { feedSpeed, publishSpeed, SPEED_REFRESH_MS, startSpeed } from "../lib/progress-display";
 import { faceSwap, LaunchCapsule, TEXT_SLOTS } from "./LaunchCapsule";
+import { sessionPhaseLabel } from "./launchView";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
+
+// 面上的按钮图标没有自己的状态，按图标名计数，数的就是面（连同胶囊）的渲染次数；方块自己的组装节拍不算在里面。计数外壳直接调用原组件函数
+const iconRenders = vi.hoisted(() => new Map<string, number>());
+vi.mock("../art/Icon", async (orig) => {
+  const mod = await orig<typeof import("../art/Icon")>();
+  return {
+    ...mod,
+    Icon: (props: Parameters<typeof mod.Icon>[0]) => {
+      iconRenders.set(props.name, (iconRenders.get(props.name) ?? 0) + 1);
+      return mod.Icon(props);
+    },
+  };
+});
 
 let view: Rendered | undefined;
 let launcher: LauncherApi;
@@ -30,6 +45,8 @@ let launcher: LauncherApi;
 let showSecond: (on: boolean) => void = () => {
   throw new Error("Host 还没挂载");
 };
+/** 交给第一枚胶囊的 onMorphStart；用例自己装，收尾清掉。 */
+let morphStart: ((startedAt: number) => void) | undefined;
 
 function Host() {
   launcher = useLauncher();
@@ -38,7 +55,7 @@ function Host() {
   return (
     <>
       <button type="button">别处</button>
-      {launcher.state.instances.some((i) => i.id === "生存") && <LaunchCapsule instanceId="生存" />}
+      {launcher.state.instances.some((i) => i.id === "生存") && <LaunchCapsule instanceId="生存" onMorphStart={morphStart} />}
       {second && (
         <div data-testid="second">
           <LaunchCapsule instanceId="生存" />
@@ -93,6 +110,7 @@ beforeEach(async () => {
 afterEach(() => {
   view?.unmount();
   view = undefined;
+  morphStart = undefined;
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -434,6 +452,17 @@ describe("换面与文字", () => {
     };
   };
 
+  it("阶段播报区挂在胶囊里、用全局视觉隐藏类，写的是会话阶段", async () => {
+    act(() => {
+      void launcher.actions.launch("生存");
+    });
+    await flush();
+    const session = launcher.state.session;
+    if (session === null) throw new Error("没有会话");
+    const live = [...document.querySelectorAll<HTMLElement>("[aria-live='polite']")].filter((el) => el.closest('[role="group"]') !== null);
+    expect(live.map((el) => [el.className, el.textContent])).toEqual([["sk-sr-only", sessionPhaseLabel(session)]]);
+  });
+
   it("加载面的标题、副行与百分比都按候选里最宽的一条占位，进度怎么走胶囊都不变宽", async () => {
     act(() => {
       void launcher.actions.launch("生存");
@@ -506,6 +535,43 @@ describe("换面与文字", () => {
     expect(SESSION_COPY.downloadProgress(2, 10, averaged)).not.toBe(SESSION_COPY.downloadProgress(2, 10, 5 * MB));
   });
 
+  it("下载阶段速度到点补字只重画副行那一段：胶囊与加载面（取消键等）不跟着重渲染", async () => {
+    act(() => {
+      void launcher.actions.launch("生存");
+    });
+    await flush();
+    const session = launcher.state.session;
+    if (session === null) throw new Error("没有会话");
+    const MB = 1024 * 1024;
+    const report = (finished: number, speed: number) =>
+      act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished, total: 10, bytes: 0, total_bytes: null, speed } }));
+    const sub = () => {
+      const line = document.querySelectorAll('[data-face="loading"] [data-slot]')[1];
+      if (line === undefined) throw new Error("加载面没有副行");
+      return slotOf(line).shown;
+    };
+    const t0 = Date.now();
+    // 第一次报上来的速度直接写；同一刻再报一个快得多的，字先停在上一拍
+    report(1, MB);
+    report(2, 5 * MB);
+    expect(sub()).toEqual([SESSION_COPY.downloadProgress(2, 10, MB)]);
+    // 这一局的头一条阶段事件让状态容器在后台重扫实例列表，结果晚几个微任务才落地、胶囊跟着重渲染一次；等它落地再开始数，
+    // 下面推进时钟时数到的才只是速度到点补字
+    await flush();
+    const before = iconRenders.get("x");
+    if (before === undefined) throw new Error("加载面的取消键没有画过");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SPEED_REFRESH_MS);
+    });
+    const averaged = publishSpeed(feedSpeed(startSpeed(MB, t0), 5 * MB, t0), t0 + SPEED_REFRESH_MS).shown;
+    expect(sub()).toEqual([SESSION_COPY.downloadProgress(2, 10, averaged)]);
+    expect(iconRenders.get("x")).toBe(before);
+    // 对照：进度上报让整枚胶囊重渲染，取消键的图标跟着画一次，计数确实看得见面的重渲染
+    report(3, 5 * MB);
+    expect(iconRenders.get("x")).toBeGreaterThan(before);
+  });
+
   it("崩溃线索读出来之前副行就在（空着），读出来后只在这一行里换上字", async () => {
     ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
     const report = deferred<null>();
@@ -572,5 +638,73 @@ describe("换面与文字", () => {
     expect(leave(true, {}, {})).toEqual({ opacity: 0, transition: fade.out });
     expect(enter(false, {}, {})).toEqual({ opacity: 0, y: 6 });
     expect(leave(false, {}, {})).toEqual({ opacity: 0, y: -6, transition: fade.out });
+  });
+});
+
+describe("形变起步的回调", () => {
+  /**
+   * jsdom 不做布局：胶囊的外框按展开与否给两种宽度（就绪 148、展开 312，同高 56）。
+   * 布局动画在提交前后各量一次外框，据此认出它变宽了、起一段形变。
+   */
+  function sizedCapsule(): HTMLElement {
+    const capsule = document.querySelector<HTMLElement>(`[role="group"][aria-label="${LAUNCH_COPY.group("生存")}"]`);
+    if (capsule === null) throw new Error("找不到启动胶囊");
+    capsule.getBoundingClientRect = () => {
+      const width = capsule.hasAttribute("data-expanded") ? 312 : 148;
+      return { left: 0, top: 0, right: width, bottom: 56, width, height: 56, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    };
+    return capsule;
+  }
+
+  it("换面变宽：形变在提交后的微任务里起步，onMorphStart 就在这时调用、只调一次，不等下一帧；只改数字与阶段名的重渲染不调", async () => {
+    let calls = 0;
+    morphStart = () => {
+      calls += 1;
+    };
+    sizedCapsule();
+    act(() => buttonByText(LAUNCH_COPY.launch).click());
+    expect(document.querySelector('[data-face="loading"]')).not.toBeNull();
+    // 提交后的微任务里冲刷布局：一帧都没走
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(calls).toBe(1);
+
+    const session = launcher.state.session;
+    if (session === null) throw new Error("没有会话");
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "preparing", stage_index: 1 }));
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished: 3, total: 100, bytes: 0, total_bytes: null, speed: 1024 } }));
+    await flush();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    expect(calls).toBe(1);
+  });
+
+  it("onMorphStart 收到形变的起步时刻：framer-motion 冲刷布局时写下的帧时间，不是回调这一刻另读的 performance.now()", async () => {
+    // 每读一次时钟往前走一点：回调里另读的时刻必定晚于冲刷时写下的帧时间，两者分得开
+    let clock = 5000 + Math.random() * 1000;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => (clock += 0.3 + Math.random()));
+    const seen: { startedAt: number; timestamp: number; processing: boolean; readAfter: number }[] = [];
+    morphStart = (startedAt) => {
+      seen.push({ startedAt, timestamp: frameData.timestamp, processing: frameData.isProcessing, readAfter: performance.now() });
+    };
+    // 形变起步、回调记下两个时刻就换回假时钟上的 performance.now：卸载后形变仍按自己的时长放完，用例收尾排空帧循环时
+    // 还按这个读一次只走一点的时钟算，几百帧也放不完
+    try {
+      sizedCapsule();
+      act(() => buttonByText(LAUNCH_COPY.launch).click());
+      await act(async () => {
+        await Promise.resolve();
+      });
+    } finally {
+      now.mockRestore();
+    }
+    expect(seen).toHaveLength(1);
+    const [call] = seen;
+    // 回调在 framer 处理这一帧的途中：形变的 startTime 取的就是这时的帧时间
+    expect(call.processing).toBe(true);
+    expect(call.startedAt).toBe(call.timestamp);
+    expect(call.startedAt).toBeLessThan(call.readAfter);
   });
 });

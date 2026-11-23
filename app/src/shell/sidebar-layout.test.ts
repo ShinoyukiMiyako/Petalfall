@@ -10,7 +10,7 @@ const css = strip(readFileSync(new URL("./Sidebar.module.css", import.meta.url),
 const shellCss = strip(readFileSync(new URL("./AppShell.module.css", import.meta.url), "utf8"));
 const titleBarCss = strip(readFileSync(new URL("./TitleBar.module.css", import.meta.url), "utf8"));
 const tokens = strip(readFileSync(new URL("../styles/tokens.css", import.meta.url), "utf8"));
-const tauriConf = JSON.parse(readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8")) as { app: { windows: { minHeight: number }[] } };
+const tauriConf = JSON.parse(readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8")) as { app: { windows: { height: number; minHeight: number }[] } };
 
 function ruleOf(selector: string, source = css): string {
   const rule = new RegExp(`(?:^|\\n)${selector.replace(".", "\\.")} \\{([^}]*)\\}`).exec(source);
@@ -75,6 +75,21 @@ function tokenPx(name: string): number {
   return Number(token[1]);
 }
 
+/** 矮窗口那组规则：`@container sk-sidebar (height < Npx) { … }` 的分界高度与组内原文。 */
+function compactGroup(): { below: number; body: string } {
+  const group = /\n@container sk-sidebar \(height < (\d+)px\) \{([\s\S]*?)\r?\n\}/.exec(css);
+  if (group === null) throw new Error("没有按侧栏槽位高度收紧间距的容器查询");
+  return { below: Number(group[1]), body: group[2] };
+}
+
+/** 窗口高 windowHeight 时 selector 上 property 的取值：矮于分界线、组里又写了这一项时以组里为准。 */
+function declarationAt(selector: string, property: string, windowHeight: number): string {
+  const { below, body } = compactGroup();
+  const compact = new RegExp(`\\n\\s*${selector.replace(".", "\\.")} \\{([^}]*)\\}`).exec(body)?.[1];
+  if (windowHeight < below && compact !== undefined && new RegExp(`(?:^|\\s)${property}:`).test(compact)) return declaration(compact, property);
+  return declaration(ruleOf(selector), property);
+}
+
 const PIN_AVATAR_SIZE = 40;
 
 describe("胶囊与品牌行", () => {
@@ -105,28 +120,62 @@ describe("胶囊与品牌行", () => {
     expect(declaration(brand, "min-width")).toBe("100%");
   });
 
-  it("最小窗口高度下，胶囊放得下固定满额的实例；再矮时列表能收缩滚动，不把设置挤出胶囊", () => {
-    const minHeight = tauriConf.app.windows[0].minHeight;
-    const gap = spaceToken(declaration(capsule, "gap"));
+  const capsuleHeight = (windowHeight: number): number => windowHeight - capsuleTop() - spaceToken(declaration(capsule, "bottom"));
+
+  /** 固定满额时胶囊要的高度，按窗口高 windowHeight 下生效的间距算。 */
+  const capsuleNeeds = (windowHeight: number): number => {
+    const gap = spaceToken(declarationAt(".capsule", "gap", windowHeight));
     const item = px(declaration(ruleOf(".pin"), "height"));
     // .create 的尺寸写在最后一条规则里，前面那条是 .item、.pin 共用的外观
     const create = [...css.matchAll(/\n\.create \{([^}]*)\}/g)].at(-1)?.[1];
     if (create === undefined) throw new Error("没有 .create 规则");
     const createHeight = px(declaration(create, "height")) + 2 * spaceToken(declaration(create, "margin"));
-    const separator = px(declaration(ruleOf(".separator"), "height")) + 2 * spaceToken(declaration(ruleOf(".separator"), "margin"));
-    const pinGutter = spaceToken(declaration(ruleOf(".pins"), "padding"));
-    // 胶囊的直接子项：四个主导航、分隔线、固定列表、新建、留白、设置
-    const fixed = 5 * item + separator + createHeight;
-    const childGaps = 8 * gap;
+    const separator = px(declaration(ruleOf(".separator"), "height")) + 2 * spaceToken(declarationAt(".separator", "margin", windowHeight));
+    const pins = ruleOf(".pins");
+    const pinGutter = spaceToken(declaration(pins, "padding"));
+    // 固定列表的行距是它自己的，不跟胶囊行距走
+    const pinsContent = SIDEBAR_PIN_LIMIT * item + (SIDEBAR_PIN_LIMIT - 1) * spaceToken(declaration(pins, "gap")) + 2 * pinGutter;
     const chrome = 2 * spaceToken(declaration(capsule, "padding")) + 2;
-    const room = minHeight - capsuleTop() - spaceToken(declaration(capsule, "bottom")) - chrome - fixed - childGaps + 2 * pinGutter;
-    const pinsContent = SIDEBAR_PIN_LIMIT * item + (SIDEBAR_PIN_LIMIT - 1) * gap + 2 * pinGutter;
-    expect(room).toBeGreaterThanOrEqual(pinsContent);
+    // 胶囊的直接子项：四个主导航、分隔线、固定列表、新建、留白、设置；固定列表上下的余量由它的负外边距抵消
+    return chrome + 5 * item + separator + createHeight + 8 * gap + pinsContent - 2 * pinGutter;
+  };
+
+  it("最小窗口高度下，胶囊放得下固定满额的实例；再矮时列表能收缩滚动，不把设置挤出胶囊", () => {
+    const minHeight = tauriConf.app.windows[0].minHeight;
+    expect(capsuleHeight(minHeight)).toBeGreaterThanOrEqual(capsuleNeeds(minHeight));
 
     const scroller = ruleOf(".pinScroll");
     expect(declaration(scroller, "flex")).toBe("0 1 auto");
     expect(declaration(scroller, "min-height")).toBe("0");
     expect(declaration(scroller, "overflow-y")).toBe("auto");
+  });
+
+  it("常规高度的侧栏不收紧：分界线正好是常规间距放得下固定满额的最矮窗口，默认窗口在它之上，最小窗口在它之下", () => {
+    const { below } = compactGroup();
+    const main = tauriConf.app.windows[0];
+    // 分界线上走常规间距且正好放下，再矮 1px 就放不下、从这里起收紧：收紧只落在非收不可的高度上
+    expect(capsuleHeight(below)).toBe(capsuleNeeds(below));
+    expect(capsuleNeeds(below - 1)).toBeLessThan(capsuleNeeds(below));
+    expect(main.height).toBeGreaterThanOrEqual(below);
+    expect(main.minHeight).toBeLessThan(below);
+  });
+
+  it("矮窗口只收间距：组里只有 gap 与 margin，各换成更小的现成间距令牌，写法不变；按侧栏槽位的高度判断", () => {
+    const { body } = compactGroup();
+    const rules = [...body.matchAll(/([^{}]+)\{([^}]*)\}/g)];
+    expect(rules.length).toBeGreaterThan(0);
+    const shape = (value: string) => value.replace(/var\(--sk-space-\d+\)/g, "<space>");
+    for (const [, selector, block] of rules) {
+      const declarations = [...block.matchAll(/([\w-]+): ([^;]+);/g)];
+      expect(declarations.length).toBeGreaterThan(0);
+      for (const [, property, value] of declarations) {
+        expect(["gap", "margin"]).toContain(property);
+        const regular = declaration(ruleOf(selector.trim()), property);
+        expect(spaceToken(value)).toBeLessThan(spaceToken(regular));
+        expect(shape(value)).toBe(shape(regular));
+      }
+    }
+    expect(declaration(ruleOf(".sidebarSlot", shellCss), "container")).toBe("sk-sidebar / size");
   });
 });
 

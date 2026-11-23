@@ -11,16 +11,18 @@ import { useRef, useState, type ReactNode, type Ref } from "react";
 import { Icon } from "../../art/Icon";
 import { BlossomBranch } from "../../art/illustrations/BlossomBranch";
 import { useLoadingGate } from "../../lib/loading-gate";
-import { fade, stepPane, stepPaneFade } from "../../lib/motion";
+import { fade, popMark, stepPane, stepPaneFade } from "../../lib/motion";
 import { useMounted } from "../../lib/useMounted";
+import { usePaintedOnce } from "../../lib/usePaintedOnce";
+import { cx } from "../../lib/util";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { describeError } from "../../state/errors";
+import { describeError, gameDirDataRejectionOf } from "../../state/errors";
 import type { FlowProps } from "../../state/flows";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useDiscoveredGameDirectories } from "../../state/queries/catalog";
 import { Appear } from "../../ui/Appear";
-import { Button, GlyphSlot } from "../../ui/Button";
+import { Button, CONTROL_ICON_SIZE, GlyphSlot } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Loadable } from "../../ui/Loadable";
 import { DIR_COPY, FOOTER_COPY, STEP_COPY, stepCounter, WIZARD_LABEL } from "./copy";
@@ -58,9 +60,13 @@ const BRANCH_HEIGHT = 200;
 /**
  * 收尾时整体淡出并轻微放大。退场一律走 fade.out，缩放也跟着它在 120ms 内走完：外壳要等这段退场播完才挂主界面，
  * 缩放若走弹簧，透明度早已到 0 还要再等弹簧静止，窗口只剩底色与标题条。减少动画时只淡出：缩放在那里是一步到位的。
+ *
+ * 淡出在根上，放大在根里面的晕染与面板上：根在外壳的滚动容器里撑满一格，放大根会把容器的可滚动区撑大、冒出滚动条，
+ * 根随之变窄变矮，面板在退场途中一帧左移、上移半个滚动条宽。根自己裁切溢出，里面放大出去的部分不外溢。
+ * 晕染铺满根、面板在根里居中，两者各按自身中心放大，合起来与整体放大一样。
  */
-const FINISH_EXIT = { opacity: 0, scale: 1.02, transition: fade.out } as const;
-const FINISH_EXIT_REDUCED = { opacity: 0, transition: fade.out } as const;
+const FINISH_FADE = { opacity: 0, transition: fade.out } as const;
+const FINISH_GROW = { scale: 1.02, transition: fade.out } as const;
 
 type FinishVia = "start_now" | "skip" | "finish";
 
@@ -70,11 +76,28 @@ function errorCode(error: unknown): string | null {
   return typeof code === "string" ? code : null;
 }
 
+/**
+ * 后端拒绝了这个游戏目录时写在输入框下的原因；别的失败为 null，只由通知说明。
+ * 游戏目录被更新的版本用过、或记数据格式的文件读不懂，同样是这个目录不能用，原因也落在输入框下；
+ * 这两种不用通知里那句带路径的正文：路径就在上面的输入框里。
+ */
+function dirRejection(error: unknown): string | null {
+  if (errorCode(error) === INVALID_GAME_DIRECTORY) return describeError(error);
+  const rejection = gameDirDataRejectionOf(error);
+  if (rejection === null) return null;
+  switch (rejection.kind) {
+    case "too_new":
+      return DIR_COPY.dataTooNew(rejection.detail);
+    case "unreadable":
+      return DIR_COPY.dataFormatUnreadable(rejection.detail.reason);
+  }
+}
+
 interface StepPaneProps {
   /** popLayout 往直接子项上挂 ref 来量尺寸、把退场的那一步抽出布局：React 19 下它是普通 prop，要自己接住挂到根元素上。 */
   ref?: Ref<HTMLDivElement>;
   direction: 1 | -1;
-  /** 是否播入场：向导挂上时就在的那一步不播。 */
+  /** 是否播入场：向导挂上时就在的那一步不播。只认挂载那一刻的值。 */
   enter: boolean;
   children: ReactNode;
 }
@@ -83,14 +106,19 @@ interface StepPaneProps {
 function StepPane({ ref, direction, enter, children }: StepPaneProps) {
   const present = useIsPresent();
   const reduced = useReducedMotionConfig() === true;
+  // 冻结挂载那一刻的值：向导挂上之后每次渲染给的 enter 都为真，挂载时就在的那一步不能因此退回起点
+  const [entering] = useState(enter);
+  // 换上来的一步先停在起点，画出第一帧之后才起步：换步那次提交要挂上整片新内容，从提交就计时的话第一帧画出来时已走掉一截。
+  // 旧的一步这时正在退场，多等这一帧不会露出空白
+  const painted = usePaintedOnce("pane", entering);
   return (
     <motion.div
       ref={ref}
       className={s.pane}
       custom={direction}
       variants={reduced ? stepPaneFade : stepPane}
-      initial={enter ? "enter" : false}
-      animate="center"
+      initial={entering ? "enter" : false}
+      animate={painted ? "center" : "enter"}
       exit="exit"
       data-step-pane=""
       aria-hidden={present ? undefined : true}
@@ -98,6 +126,22 @@ function StepPane({ ref, direction, enter, children }: StepPaneProps) {
     >
       {children}
     </motion.div>
+  );
+}
+
+/**
+ * 步骤条行尾的「已跳过」：跳过那一步时弹出，回到那一步时原地淡出。它在行尾，进出都不挤别的内容，退场不必抽出布局。
+ * 按钮里只能放行内元素，所以不用 ui/Appear（它每项外面包一层 div），自己挂 popMark。
+ */
+function SkippedTag() {
+  const reduced = useReducedMotionConfig() === true;
+  const mark = reduced ? popMark.reduced : popMark.tag;
+  // 跳过与换步落在同一次提交里，那一帧要挂上整片新的一步：先停在起点，画出第一帧之后才弹出，开头一截不在提交里耗掉
+  const painted = usePaintedOnce("tag", true);
+  return (
+    <motion.span className={s.railSkipped} initial={mark.initial} animate={painted ? mark.animate : mark.initial} exit={mark.exit}>
+      {FOOTER_COPY.skippedTag}
+    </motion.span>
   );
 }
 
@@ -121,7 +165,7 @@ function StepRail({ wizard, onJump }: { wizard: WizardState; onJump: (index: num
                 <GlyphSlot glyph={status === "done" ? "check" : "index"}>{status === "done" ? <Icon name="check" size={14} /> : i + 1}</GlyphSlot>
               </span>
               <span className={s.railName}>{STEP_COPY[id].name}</span>
-              {status === "skipped" && <span className={s.railSkipped}>{FOOTER_COPY.skippedTag}</span>}
+              <AnimatePresence>{status === "skipped" && <SkippedTag key="skipped" />}</AnimatePresence>
             </button>
           </li>
         );
@@ -192,7 +236,8 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
       setCommitted(key);
       return true;
     }
-    if (errorCode(result.error) === INVALID_GAME_DIRECTORY) setDirError(describeError(result.error));
+    const rejection = dirRejection(result.error);
+    if (rejection !== null) setDirError(rejection);
     setWizard(backToStart);
     return false;
   };
@@ -292,11 +337,13 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
   const ready = settings !== null;
   const busy = finishing !== null || committing;
   const last = wizard.index === LAST_STEP;
+  // 主按钮在第一步是提交中、在第四步是收尾中才转圈
+  const primaryLoading = last ? finishing === "finish" : committing;
 
   return (
-    <motion.div className={s.root} exit={reduced ? FINISH_EXIT_REDUCED : FINISH_EXIT}>
-      <span className={s.ambience} aria-hidden="true" />
-      <div className={s.panel} role="group" aria-label={WIZARD_LABEL}>
+    <motion.div className={s.root} exit={FINISH_FADE}>
+      <motion.span className={s.ambience} aria-hidden="true" exit={reduced ? undefined : FINISH_GROW} />
+      <motion.div className={s.panel} role="group" aria-label={WIZARD_LABEL} exit={reduced ? undefined : FINISH_GROW}>
         <aside className={s.side}>
           <BlossomBranch width={SIDE_WIDTH[tier]} height={BRANCH_HEIGHT} />
           <StepRail wizard={wizard} onJump={(index) => void jump(index)} />
@@ -344,37 +391,36 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
                   </Button>
                 )}
               </Appear>
-              {/* 隐形的「开始使用 →」垫在同一格里撑出宽度，真按钮撑满这一格：宽度跟着按钮组件自己的尺寸走，不在这里复写 */}
-              <div className={s.primarySlot}>
-                {last ? (
-                  <Button
-                    className={s.primaryAction}
-                    variant="primary"
-                    iconRight="arrow-right"
-                    block
-                    loading={finishing === "finish"}
-                    disabled={!ready || (busy && finishing !== "finish")}
-                    // 加载中文字淡去但保留占位，换成更长的字看不见却会撑宽按钮：可见文案不换，进行中的说法只给读屏
-                    aria-label={finishing === "finish" ? FOOTER_COPY.preparing : undefined}
-                    onClick={() => void finish("finish")}
-                  >
-                    {FOOTER_COPY.finish}
-                  </Button>
-                ) : (
-                  <Button className={s.primaryAction} variant="primary" block loading={committing} disabled={!ready || (busy && !committing)} onClick={() => void next()}>
-                    {FOOTER_COPY.next}
-                  </Button>
-                )}
-                <span className={s.primaryGhost} aria-hidden="true" inert>
-                  <Button variant="primary" iconRight="arrow-right">
-                    {FOOTER_COPY.finish}
-                  </Button>
+              {/*
+               * 主按钮从头到尾是同一颗按钮（聚焦着的按钮不丢焦点），每一步都一样宽，左边的「跳过」不被推走：
+               * - 「开始使用」与后置箭头排成一行撑出宽度。箭头常驻，前三步由样式表按 data-face 隐去，到第四步淡入，
+               *   不随按钮的 iconRight 来去一帧出没。
+               * - 两条文案各一层叠着交叉淡化；「下一步」铺满按钮居中，停在原来不带图标的按钮上的位置。
+               */}
+              <Button
+                className={s.primaryAction}
+                variant="primary"
+                data-face={last ? "finish" : "next"}
+                loading={primaryLoading}
+                disabled={!ready || (busy && !primaryLoading)}
+                // 加载中文字淡去但保留占位，换成更长的字看不见却会撑宽按钮：可见文案不换，进行中的说法只给读屏
+                aria-label={finishing === "finish" ? FOOTER_COPY.preparing : undefined}
+                onClick={() => void (last ? finish("finish") : next())}
+              >
+                <span className={cx(s.primaryFace, s.primaryNext)} data-current={!last || undefined} aria-hidden={last || undefined}>
+                  {FOOTER_COPY.next}
                 </span>
-              </div>
+                <span className={s.primaryFinish}>
+                  <span className={s.primaryFace} data-current={last || undefined} aria-hidden={!last || undefined}>
+                    {FOOTER_COPY.finish}
+                  </span>
+                  <Icon name="arrow-right" size={CONTROL_ICON_SIZE.md} className={s.primaryArrow} />
+                </span>
+              </Button>
             </div>
           </footer>
         </section>
-      </div>
+      </motion.div>
     </motion.div>
   );
 }

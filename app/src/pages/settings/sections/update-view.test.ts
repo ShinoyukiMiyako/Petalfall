@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { INITIAL_UPDATER_STATE, type UpdateInfo, type UpdaterPhase, type UpdaterState } from "../../../state/updater/machine";
-import { downloadSub, updateCardView, type CardContext, type CardView } from "./update-view";
+import { mulberry32 } from "../../../art/illustrations/seed";
+import { INITIAL_UPDATER_STATE, type UpdateInfo, type UpdaterChannels, type UpdaterPhase, type UpdaterState } from "../../../state/updater/machine";
+import { aroundPercent, channelChangeCost, channelChoice, downloadSub, PERCENT_SLOT, updateCardView, versionCore, type CardContext, type CardView } from "./update-view";
 
-const UPDATE: UpdateInfo = { version: "0.3.0", current_version: "0.2.0", notes: null, date: new Date(2026, 9, 28, 12).getTime() };
+const UPDATE: UpdateInfo = { version: "0.3.0", current_version: "0.2.0", notes: null, date: new Date(2026, 9, 28, 12).getTime(), channel: "stable" };
 const NOW = new Date(2026, 9, 31, 12).getTime();
 
 const CTX: CardContext = { checkUpdates: true, skippedVersion: null, now: NOW, online: true, gameRunning: false };
 
-function state(phase: UpdaterPhase): UpdaterState {
-  return { ...INITIAL_UPDATER_STATE, currentVersion: "0.2.0", phase };
+/** 只有一条线时的通道信息：包与偏好都是正式版，本次会话还没取过清单、没拒过版本。 */
+const SAME_STABLE: UpdaterChannels = { package_channel: "stable", preference: "stable", relation: "same", channel_heads: [], refused: [] };
+
+function state(phase: UpdaterPhase, channels: UpdaterChannels = SAME_STABLE, currentVersion = "0.2.0"): UpdaterState {
+  return { ...INITIAL_UPDATER_STATE, currentVersion, channels, phase };
 }
 
 /** 下载中的次句按上报的原值拼出来的样子（组件里换成节流后的已下大小）。 */
@@ -49,7 +53,10 @@ describe("更新卡各阶段", () => {
 
   it("下载中：次句不在纯函数里定稿，交出原始字节与总量；拼句子用调用方给的已下大小，主句的百分比仍按上报的原值", () => {
     const view = updateCardView(state({ kind: "downloading", update: UPDATE, taskId: "t", bytes: 12 * 1024 * 1024, totalBytes: 16 * 1024 * 1024, source: null }), CTX);
-    expect([view.sub, view.progress]).toEqual([null, { bytes: 12 * 1024 * 1024, totalBytes: 16 * 1024 * 1024, switched: null }]);
+    expect([view.sub, view.progress]).toEqual([
+      null,
+      { bytes: 12 * 1024 * 1024, totalBytes: 16 * 1024 * 1024, switched: null, percent: { value: 0.75, track: "t:0", before: "正在下载 0.3.0 · ", after: "" } },
+    ]);
     expect(view.title).toBe("正在下载 0.3.0 · 75%");
     if (view.progress === null) throw new Error("下载中应当给出次句素材");
     expect(downloadSub({ ...view.progress, bytes: 3 * 1024 * 1024 })).toBe("3.0 MB / 16.0 MB");
@@ -67,9 +74,9 @@ describe("更新卡各阶段", () => {
   it("退出时安装、检查失败、下载失败、不支持", () => {
     const onExit = updateCardView(state({ kind: "install_on_exit", update: UPDATE }), CTX);
     expect([onExit.button.label, onExit.button.variant, onExit.button.action]).toEqual(["现在安装", "secondary", "install"]);
-    const failed = updateCardView(state({ kind: "check_failed", message: "清单里没有这个平台", network: null }), CTX);
+    const failed = updateCardView(state({ kind: "check_failed", message: "清单里没有这个平台", network: null, staleChannel: null }), CTX);
     expect([failed.title, failed.sub, failed.subIsError, failed.button.label]).toEqual(["检查更新失败", "清单里没有这个平台", true, "重试"]);
-    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true, network: null, sourcesTried: 1 }), CTX);
+    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true, network: null, sourcesTried: 1, refusal: null }), CTX);
     expect([signature.sub, signature.raw]).toEqual(["下载失败：更新包签名校验不通过，已丢弃，不会安装", null]);
     const unsupported = updateCardView(state({ kind: "unsupported", reason: "debug_build" }), CTX);
     expect([unsupported.title, unsupported.sub, unsupported.button.disabled]).toEqual(["当前环境不支持自动更新", "开发环境或调试模式下不检查更新", true]);
@@ -77,23 +84,23 @@ describe("更新卡各阶段", () => {
 
   it("检查失败是网络层的：主句按种类写中文说明，英文原文放进可选中的次句，按钮仍是重试", () => {
     const raw = "error sending request for url (https://petalfall.org/updates/latest.json)";
-    const connect = updateCardView(state({ kind: "check_failed", message: raw, network: "connect" }), CTX);
+    const connect = updateCardView(state({ kind: "check_failed", message: raw, network: "connect", staleChannel: null }), CTX);
     expect([connect.title, connect.sub, connect.subIsError, connect.button.label, connect.button.action]).toEqual(["连不上更新服务器", raw, true, "重试", "check"]);
-    const timeout = updateCardView(state({ kind: "check_failed", message: raw, network: "timeout" }), CTX);
+    const timeout = updateCardView(state({ kind: "check_failed", message: raw, network: "timeout", staleChannel: null }), CTX);
     expect([timeout.title, timeout.sub, timeout.subIsError]).toEqual(["更新服务器没有响应", raw, true]);
   });
 
   it("更新域名 TLS 不通时后端标 connect：主句全是中文，也不把原因说成用户的网络", () => {
-    const { title } = updateCardView(state({ kind: "check_failed", message: "error sending request", network: "connect" }), CTX);
+    const { title } = updateCardView(state({ kind: "check_failed", message: "error sending request", network: "connect", staleChannel: null }), CTX);
     expect(title).not.toMatch(/[A-Za-z]/);
     expect(title).not.toContain("网络");
   });
 
   it("下载失败是网络层的：次句按种类写中文原因，英文原文另放一行，主句与按钮不变", () => {
     const raw = "error sending request for url (https://petalfall.org/updates/setup-0.3.0.exe)";
-    const connect = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect", sourcesTried: 1 }), CTX);
+    const connect = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect", sourcesTried: 1, refusal: null }), CTX);
     expect([connect.title, connect.accent, connect.sub, connect.subIsError, connect.raw, connect.button.action]).toEqual(["有新版本 0.3.0", true, "下载失败：连不上更新服务器", false, raw, "open_panel"]);
-    const timeout = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout", sourcesTried: 1 }), CTX);
+    const timeout = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout", sourcesTried: 1, refusal: null }), CTX);
     expect([timeout.sub, timeout.raw]).toEqual(["下载失败：更新服务器没有响应", raw]);
   });
 
@@ -108,35 +115,60 @@ describe("更新卡各阶段", () => {
     expect(progressSub(downloading(null, 16 * 1024 * 1024))).toBe("4.0 MB / 16.0 MB");
   });
 
+  it("下载中主句的百分数：总量已知才有；平滑按任务与源分段，换任务或换源从新值起算，还没报过源算第一个源", () => {
+    const MB = 1024 * 1024;
+    const percentOf = (taskId: string, bytes: number, totalBytes: number | null, source: { index: number; count: number; name: string } | null) => {
+      const { progress } = updateCardView(state({ kind: "downloading", update: UPDATE, taskId, bytes, totalBytes, source }), CTX);
+      if (progress === null) throw new Error("下载中应当给出次句素材");
+      return progress.percent;
+    };
+    expect(percentOf("a", 4 * MB, 16 * MB, null)).toEqual({ value: 0.25, track: "a:0", before: "正在下载 0.3.0 · ", after: "" });
+    expect(percentOf("a", 4 * MB, 16 * MB, { index: 0, count: 4, name: "cn" })?.track).toBe("a:0");
+    for (const index of [1, 2, 3]) {
+      expect(percentOf("a", 2 * MB, 16 * MB, { index, count: 4, name: "hk" })).toEqual({ value: 0.125, track: `a:${index}`, before: "正在下载 0.3.0 · ", after: "" });
+    }
+    expect(percentOf("b", 4 * MB, 16 * MB, null)?.track).toBe("b:0");
+    // 重传超出声明大小时截到 100%，与进度条一致
+    expect(percentOf("a", 17 * MB, 16 * MB, null)?.value).toBe(1);
+    expect([percentOf("a", 4 * MB, null, null), percentOf("a", 0, 0, null)]).toEqual([null, null]);
+  });
+
+  it("主句按百分数的占位切成前后两段，占位不是恰好一处就报错", () => {
+    expect(aroundPercent(`正在下载 0.3.0 · ${PERCENT_SLOT}`)).toEqual(["正在下载 0.3.0 · ", ""]);
+    expect(aroundPercent(`已完成${PERCENT_SLOT}，请稍候`)).toEqual(["已完成", "，请稍候"]);
+    expect(() => aroundPercent("正在下载 0.3.0")).toThrow("百分数应当恰好出现一次，实为 0 次");
+    expect(() => aroundPercent(`${PERCENT_SLOT} · ${PERCENT_SLOT}`)).toThrow("百分数应当恰好出现一次，实为 2 次");
+  });
+
   it("试过多个下载源、全都败在网络层：次句说所有下载源，逐源原文另放一行", () => {
     const raw = "cn：error sending request for url (https://dl.petalfall.org/a.exe)\nhk：operation timed out";
-    const connect = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect", sourcesTried: 2 }), CTX);
+    const connect = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect", sourcesTried: 2, refusal: null }), CTX);
     expect([connect.title, connect.sub, connect.subIsError, connect.raw]).toEqual(["有新版本 0.3.0", "下载失败：所有下载源都连不上或没有响应", false, raw]);
-    const timeout = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout", sourcesTried: 4 }), CTX);
+    const timeout = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout", sourcesTried: 4, refusal: null }), CTX);
     expect([timeout.sub, timeout.raw]).toEqual(["下载失败：所有下载源都没有响应", raw]);
   });
 
   it("试过多个下载源、不全是网络层失败：次句写试了几个源都没下完；签名不符仍是固定说法", () => {
     const raw = "cn：error sending request\nhk：Download request failed with status: 404 Not Found\nglobal：too large";
-    const mixed = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null, sourcesTried: 3 }), CTX);
+    const mixed = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null, sourcesTried: 3, refusal: null }), CTX);
     expect([mixed.sub, mixed.raw]).toEqual(["下载失败：3 个下载源都没能下完", raw]);
-    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: true, network: null, sourcesTried: 3 }), CTX);
+    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: true, network: null, sourcesTried: 3, refusal: null }), CTX);
     expect([signature.sub, signature.raw]).toEqual(["下载失败：更新包签名校验不通过，已丢弃，不会安装", null]);
   });
 
   it("下载失败不是网络层的：次句只说下载失败，不把后端原文拼进中文句子", () => {
     const raw = "`Download request failed with status: 503 Service Unavailable`";
-    const other = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null, sourcesTried: 1 }), CTX);
+    const other = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null, sourcesTried: 1, refusal: null }), CTX);
     expect([other.sub, other.raw]).toEqual(["下载失败", raw]);
   });
 
   it("签名不符优先于网络种类：原因固定，不另放原文", () => {
-    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true, network: "connect", sourcesTried: 1 }), CTX);
+    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true, network: "connect", sourcesTried: 1, refusal: null }), CTX);
     expect([signature.sub, signature.raw]).toEqual(["下载失败：更新包签名校验不通过，已丢弃，不会安装", null]);
   });
 
   it("只有下载失败才有另放的原文：检查失败的原文就是次句", () => {
-    const failed = updateCardView(state({ kind: "check_failed", message: "清单里没有这个平台", network: null }), CTX);
+    const failed = updateCardView(state({ kind: "check_failed", message: "清单里没有这个平台", network: null, staleChannel: null }), CTX);
     expect([failed.sub, failed.raw]).toEqual(["清单里没有这个平台", null]);
   });
 
@@ -179,5 +211,210 @@ describe("更新卡各阶段", () => {
 
   it("后端信息到达之前不该渲染", () => {
     expect(() => updateCardView({ ...INITIAL_UPDATER_STATE }, CTX)).toThrow("更新信息到达之前");
+  });
+});
+
+/** 状态行的主句、次句、按钮文字与动作。 */
+function line(view: CardView): [string, string | null, string, string] {
+  return [view.title, view.sub, view.button.label, view.button.action];
+}
+
+const THREE_MINUTES_AGO = NOW - 3 * 60_000;
+
+/** 预览版的包在等测试版追上来。 */
+const DEV_WAITS_BETA: UpdaterChannels = { package_channel: "dev", preference: "beta", relation: "waiting", channel_heads: [], refused: [] };
+
+const STABLE_NOT_PUBLISHED = { channel: "stable", state: "not_published", version: null, date: null } as const;
+
+describe("状态行按通道换的说法", () => {
+  describe("正式版还没有发布", () => {
+    it("偏好是正式版、它的清单确认还没有发布：未检查时只说发布之前收不到更新，已是最新时再接检查时间", () => {
+      const channels: UpdaterChannels = { ...SAME_STABLE, channel_heads: [STABLE_NOT_PUBLISHED] };
+      expect(line(updateCardView(state({ kind: "idle" }, channels), CTX))).toEqual(["正式版还没有发布", "发布之前收不到任何更新", "检查更新", "check"]);
+      expect(line(updateCardView(state({ kind: "up_to_date", checkedAt: THREE_MINUTES_AGO }, channels), CTX))).toEqual([
+        "正式版还没有发布",
+        "发布之前收不到任何更新 · 3 分钟前检查过",
+        "检查更新",
+        "check",
+      ]);
+    });
+
+    it("等正式版追上来时它还没发布：先说还没发布，不写要等到哪一版", () => {
+      const channels: UpdaterChannels = { package_channel: "beta", preference: "stable", relation: "waiting", channel_heads: [STABLE_NOT_PUBLISHED], refused: [] };
+      const view = updateCardView(state({ kind: "up_to_date", checkedAt: THREE_MINUTES_AGO }, channels, "1.0.0-beta.3"), CTX);
+      expect([view.title, view.sub]).toEqual(["正式版还没有发布", "发布之前收不到任何更新 · 3 分钟前检查过"]);
+    });
+
+    it("只在偏好是正式版时说：测试版的人看到正式版没发布照常是已是最新；正式版已发布时也照常", () => {
+      const beta: UpdaterChannels = { package_channel: "beta", preference: "beta", relation: "same", channel_heads: [{ channel: "beta", state: "published", version: "1.0.0-beta.3", date: null }, STABLE_NOT_PUBLISHED], refused: [] };
+      expect(updateCardView(state({ kind: "up_to_date", checkedAt: THREE_MINUTES_AGO }, beta, "1.0.0-beta.3"), CTX).title).toBe("已是最新版本");
+      const published: UpdaterChannels = { ...SAME_STABLE, channel_heads: [{ channel: "stable", state: "published", version: "0.2.0", date: null }] };
+      expect(line(updateCardView(state({ kind: "idle" }, published), CTX))).toEqual(["当前是 0.2.0", "已开启启动时自动检查", "检查更新", "check"]);
+      // 取不到或旧于本机记录都不是「还没发布」
+      for (const failed of ["failed", "stale"] as const) {
+        const head = { channel: "stable", state: failed, version: null, date: null } as const;
+        expect(updateCardView(state({ kind: "idle" }, { ...SAME_STABLE, channel_heads: [head] }), CTX).title).toBe("当前是 0.2.0");
+      }
+    });
+  });
+
+  describe("暂时没有能装的新版本（已是最新时）", () => {
+    it("取最后一条普通更新被拒的记录，换通道被拒的不算", () => {
+      const channels: UpdaterChannels = {
+        ...SAME_STABLE,
+        refused: [
+          { version: "0.3.0", channel: "stable", reason: "preference_unsaved", intent: "update" },
+          { version: "0.4.0", channel: "stable", reason: "data_too_new", intent: "update" },
+          { version: "0.5.0-beta.1", channel: "beta", reason: "data_too_new", intent: "switch" },
+        ],
+      };
+      expect(line(updateCardView(state({ kind: "up_to_date", checkedAt: THREE_MINUTES_AGO }, channels), CTX))).toEqual([
+        "暂时没有能装的新版本",
+        "0.4.0 读不了这台电脑上的数据 · 3 分钟前检查过",
+        "检查更新",
+        "check",
+      ]);
+    });
+
+    it("跟随别的通道时没能保存偏好：写出那一版所属的线", () => {
+      const channels: UpdaterChannels = { ...SAME_STABLE, package_channel: "beta", preference: "beta", refused: [{ version: "1.0.0", channel: "stable", reason: "preference_unsaved", intent: "update" }] };
+      const view = updateCardView(state({ kind: "up_to_date", checkedAt: THREE_MINUTES_AGO }, channels, "1.0.0-beta.3"), CTX);
+      expect([view.title, view.sub]).toEqual(["暂时没有能装的新版本", "没能保存更新通道，正式版 1.0.0 这次先不装 · 3 分钟前检查过"]);
+    });
+
+    it("只有换通道被拒的记录时照常是已是最新；未检查时不说被拒", () => {
+      const switchOnly: UpdaterChannels = { ...SAME_STABLE, refused: [{ version: "0.5.0-beta.1", channel: "beta", reason: "target_unsupported", intent: "switch" }] };
+      expect(updateCardView(state({ kind: "up_to_date", checkedAt: THREE_MINUTES_AGO }, switchOnly), CTX).title).toBe("已是最新版本");
+      const refused: UpdaterChannels = { ...SAME_STABLE, refused: [{ version: "0.4.0", channel: "stable", reason: "data_too_new", intent: "update" }] };
+      expect(updateCardView(state({ kind: "idle" }, refused), CTX).title).toBe("当前是 0.2.0");
+    });
+
+    it("等待中被拒的排在等待前面：「要等到」那句这时已经不成立", () => {
+      const channels: UpdaterChannels = { ...DEV_WAITS_BETA, refused: [{ version: "1.0.0", channel: "stable", reason: "data_too_new", intent: "update" }] };
+      const view = updateCardView(state({ kind: "up_to_date", checkedAt: THREE_MINUTES_AGO }, channels, "1.0.0-dev.60"), CTX);
+      expect([view.title, view.sub]).toEqual(["暂时没有能装的新版本", "1.0.0 读不了这台电脑上的数据 · 3 分钟前检查过"]);
+    });
+  });
+
+  describe("在等更慢的线追上来", () => {
+    it("写明要等到的正式版与在那之前收不到哪条线的更新；已是最新时再接检查时间", () => {
+      expect(line(updateCardView(state({ kind: "idle" }, DEV_WAITS_BETA, "1.0.0-dev.60"), CTX))).toEqual([
+        "在等测试版追上来",
+        "要等到正式版 1.0.0 发布，在那之前收不到预览版的更新",
+        "检查更新",
+        "check",
+      ]);
+      const view = updateCardView(state({ kind: "up_to_date", checkedAt: THREE_MINUTES_AGO }, DEV_WAITS_BETA, "1.0.0-dev.60"), CTX);
+      expect([view.title, view.sub]).toEqual(["在等测试版追上来", "要等到正式版 1.0.0 发布，在那之前收不到预览版的更新 · 3 分钟前检查过"]);
+    });
+
+    it("测试版的包等正式版：收不到的是测试版的更新", () => {
+      const channels: UpdaterChannels = { package_channel: "beta", preference: "stable", relation: "waiting", channel_heads: [], refused: [] };
+      const view = updateCardView(state({ kind: "idle" }, channels, "1.1.0-beta.2"), CTX);
+      expect([view.title, view.sub]).toEqual(["在等正式版追上来", "要等到正式版 1.1.0 发布，在那之前收不到测试版的更新"]);
+    });
+
+    it("同一阶段不在等待时照旧：偏好更快（跟随）与相同都不换说法", () => {
+      for (const channels of [
+        { package_channel: "beta", preference: "dev", relation: "following", channel_heads: [], refused: [] },
+        { package_channel: "beta", preference: "beta", relation: "same", channel_heads: [], refused: [] },
+      ] satisfies UpdaterChannels[]) {
+        expect(line(updateCardView(state({ kind: "idle" }, channels, "1.0.0-beta.3"), CTX))).toEqual(["当前是 1.0.0-beta.3", "已开启启动时自动检查", "检查更新", "check"]);
+        expect(updateCardView(state({ kind: "up_to_date", checkedAt: THREE_MINUTES_AGO }, channels, "1.0.0-beta.3"), CTX).title).toBe("已是最新版本");
+      }
+    });
+
+    it.each([7, 42, 20261110])("种子 %i：要等到的正式版号就是当前版本的核心号，三种形状都照写", (seed) => {
+      const random = mulberry32(seed);
+      const part = () => String(Math.floor(random() * 4_294_967_296));
+      // 边界：全 0 与最小的序号
+      const versions = ["0.0.0", "0.0.0-dev.0", "0.0.0-beta.0"];
+      for (let i = 0; i < 30; i++) {
+        const core = `${part()}.${part()}.${part()}`;
+        versions.push([core, `${core}-dev.${part()}`, `${core}-beta.${part()}`][Math.floor(random() * 3)]);
+      }
+      for (const version of versions) {
+        const core = version.split("-")[0];
+        expect(versionCore(version)).toBe(core);
+        expect(updateCardView(state({ kind: "idle" }, DEV_WAITS_BETA, version), CTX).sub).toBe(`要等到正式版 ${core} 发布，在那之前收不到预览版的更新`);
+      }
+    });
+  });
+
+  it("偏好通道的更新源还没跟上：写中文说法与过一阵再查，不放后端原文，按钮是重试", () => {
+    const view = updateCardView(state({ kind: "check_failed", message: "beta 的更新源给出的 1.0.0-beta.2 比这台电脑见过的 1.0.0-beta.3 旧", network: null, staleChannel: "beta" }), CTX);
+    expect(line(view)).toEqual(["测试版的更新源还没跟上", "它给出的版本比这台电脑以前拿到过的旧，过一阵再查", "重试", "check"]);
+    expect([view.subIsError, view.raw, view.accent]).toEqual([false, null, false]);
+    expect(updateCardView(state({ kind: "check_failed", message: "x", network: null, staleChannel: "stable" }), { ...CTX, online: false }).button.disabledReason).toBe("联网后才能使用");
+  });
+
+  describe("有新版本，属于别的线", () => {
+    const beta: UpdateInfo = { ...UPDATE, version: "0.3.0-beta.1", channel: "beta" };
+
+    it("次句开头写出它属于哪条线，再接发布日期与跳过；主句与按钮同普通更新", () => {
+      const view = updateCardView(state({ kind: "available", update: beta }), CTX);
+      expect([view.title, view.accent, view.sub, view.button.label, view.button.variant, view.button.action]).toEqual([
+        "有新版本 0.3.0-beta.1",
+        true,
+        "属于测试版 · 发布于 2026年10月28日",
+        "查看更新",
+        "primary",
+        "open_panel",
+      ]);
+      expect(updateCardView(state({ kind: "available", update: beta }), { ...CTX, skippedVersion: "0.3.0-beta.1" }).sub).toBe("属于测试版 · 发布于 2026年10月28日 · 你跳过了这个版本");
+      expect(updateCardView(state({ kind: "available", update: { ...beta, date: null } }), CTX).sub).toBe("属于测试版");
+    });
+
+    it("跟随到更慢的线（预览版的包收到正式版）同样写出；属于包的通道时不写", () => {
+      const dev: UpdaterChannels = { package_channel: "dev", preference: "dev", relation: "same", channel_heads: [], refused: [] };
+      expect(updateCardView(state({ kind: "available", update: { ...UPDATE, version: "1.0.0" } }, dev, "1.0.0-dev.60"), CTX).sub).toBe("属于正式版 · 发布于 2026年10月28日");
+      expect(updateCardView(state({ kind: "available", update: { ...UPDATE, version: "1.1.0-dev.1", channel: "dev" } }, dev, "1.0.0-dev.60"), CTX).sub).toBe("发布于 2026年10月28日");
+    });
+  });
+
+  it("普通更新下好后被拒：不说下载失败，原因后面接已丢弃，按钮是检查更新、不打开面板", () => {
+    const view = updateCardView(state({ kind: "download_failed", update: { ...UPDATE, version: "1.0.0" }, reason: "读不了", signature: false, network: null, sourcesTried: 1, refusal: "data_too_new" }), CTX);
+    expect(line(view)).toEqual(["暂时没有能装的新版本", "1.0.0 读不了这台电脑上的数据，已丢弃", "检查更新", "check"]);
+    expect([view.accent, view.raw, view.subIsError, view.button.variant]).toEqual([false, null, false, "secondary"]);
+    expect(updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: false, network: null, sourcesTried: 1, refusal: "data_too_new" }), { ...CTX, online: false }).button.disabledReason).toBe(
+      "联网后才能使用",
+    );
+  });
+
+  it("支持自更新却没给出包的通道是后端违约：报错，不猜成哪条线", () => {
+    const broken: UpdaterChannels = { package_channel: null, preference: null, relation: null, channel_heads: [], refused: [] };
+    expect(() => updateCardView(state({ kind: "idle" }, broken), CTX)).toThrow("支持自更新时 updater_info 应给出包的通道");
+    expect(() => updateCardView(state({ kind: "available", update: UPDATE }, broken), CTX)).toThrow("支持自更新时 updater_info 应给出包的通道");
+  });
+});
+
+describe("更新通道选项块的取值", () => {
+  it("勾选后端给的生效偏好、标出包的通道；只在安装中整组不可用", () => {
+    expect(channelChoice(state({ kind: "idle" }, DEV_WAITS_BETA, "1.0.0-dev.60"))).toEqual({ preference: "beta", packageChannel: "dev", locked: false });
+    for (const phase of [{ kind: "checking" }, { kind: "ready", update: UPDATE }, { kind: "downloading", update: UPDATE, taskId: "t", bytes: 0, totalBytes: null, source: null }] satisfies UpdaterPhase[]) {
+      expect(channelChoice(state(phase))?.locked).toBe(false);
+    }
+    expect(channelChoice(state({ kind: "installing", update: UPDATE }))).toEqual({ preference: "stable", packageChannel: "stable", locked: true });
+  });
+
+  it("不支持自更新时没有选项块：包的通道认得出来也一样，认不出时同样", () => {
+    expect(channelChoice(state({ kind: "unsupported", reason: "missing_pubkey" }))).toBeNull();
+    expect(channelChoice(state({ kind: "unsupported", reason: "unknown_channel" }, { package_channel: null, preference: null, relation: null, channel_heads: [], refused: [] }))).toBeNull();
+  });
+
+  it("改通道前要确认的只有正在下载与已下好（含退出时安装）：带上会丢掉的那一版", () => {
+    expect(channelChangeCost({ kind: "downloading", update: UPDATE, taskId: "t", bytes: 0, totalBytes: null, source: null })).toEqual({ version: "0.3.0", downloading: true });
+    expect(channelChangeCost({ kind: "ready", update: UPDATE })).toEqual({ version: "0.3.0", downloading: false });
+    expect(channelChangeCost({ kind: "install_on_exit", update: UPDATE })).toEqual({ version: "0.3.0", downloading: false });
+    for (const phase of [
+      { kind: "idle" },
+      { kind: "checking" },
+      { kind: "up_to_date", checkedAt: NOW },
+      { kind: "check_failed", message: "x", network: null, staleChannel: null },
+      { kind: "available", update: UPDATE },
+      { kind: "download_failed", update: UPDATE, reason: "x", signature: false, network: null, sourcesTried: 1, refusal: null },
+    ] satisfies UpdaterPhase[]) {
+      expect(channelChangeCost(phase)).toBeNull();
+    }
   });
 });

@@ -1,4 +1,4 @@
-// 逐像素绘制的回落图形（实例徽记、皮肤剪影）要把 HSL 换成 RGB 写进 ImageData，
+// 逐像素绘制的回落图形（实例徽记、人偶皮肤）要把 HSL 换成 RGB 写进 ImageData，
 // 颜色由数据（色相）与固定的饱和度、明度公式决定，不经过 CSS。
 
 export type Rgb = readonly [r: number, g: number, b: number];

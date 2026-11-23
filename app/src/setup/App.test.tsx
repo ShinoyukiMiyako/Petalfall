@@ -6,34 +6,37 @@
 
 import { MotionGlobalConfig } from "framer-motion";
 import { StrictMode, type ReactElement } from "react";
-import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, stubPetalTokens } from "../art/petals/test-canvas";
-import { stubMatchMedia, stubResizeObserver } from "../test/dom";
+import { APP_NAME } from "../lib/app-info";
+import { renderWithoutAct, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import App, { BLOCKED_POLL_MS, MIN_INSTALLING_MS, UPDATE_EXIT_CHECKS, UPDATE_EXIT_POLL_MS, UPDATE_EXIT_WAIT_MS } from "./App";
-import type { Existing, ExistingKind, Failure, InstallPlan, Probe } from "./contract";
+import type { DataBlock, Existing, ExistingKind, Failure, InstallPlan, Probe } from "./contract";
 import { COPY } from "./copy";
-import { FAKE_PROBE, createFakeBridge, type FakeBridge, type FakeScenario } from "./fake-bridge";
+import { FAKE_PROBE, createFakeBridge, judgedProbe, type FakeBridge, type FakeScenario } from "./fake-bridge";
 import { replay, type SetupEvent, type SetupState } from "./model";
 
 const copy = COPY.zh;
 const WAIT = { timeout: 5000, interval: 10 };
 
-const existingOf = (kind: ExistingKind): Existing => ({ kind, version: "0.1.0", dir: "E:\\app" });
-const probeOf = (kind: ExistingKind | null, extra: Partial<Probe> = {}): Probe => ({ ...FAKE_PROBE, existing: kind === null ? null : existingOf(kind), ...extra });
+const existingOf = (kind: ExistingKind): Existing => ({ kind, version: "0.1.0", dir: "E:\\app", channel: "stable" });
+const probeOf = (kind: ExistingKind | null, extra: Partial<Probe> = {}): Probe => judgedProbe({ ...FAKE_PROBE, existing: kind === null ? null : existingOf(kind), ...extra });
+/** 已装预览版，安装包是更慢通道上更早的测试版：交互时是「换到」页，带开关的更新模式无人值守换过去。 */
+const switchProbe = (extra: Partial<Probe> = {}): Probe =>
+  judgedProbe({ ...FAKE_PROBE, payloadVersion: "1.0.0-beta.5", payloadChannel: "beta", existing: { kind: "switch", version: "1.1.0-dev.61", dir: "E:\\app", channel: "dev" }, ...extra });
+/** 已装测试版，安装包是更快通道上更新的预览版：交互时是「换到」页，确认后按升级装。 */
+const fasterProbe = (extra: Partial<Probe> = {}): Probe =>
+  judgedProbe({ ...FAKE_PROBE, payloadVersion: "1.0.0-dev.60", payloadChannel: "dev", existing: { kind: "upgrade", version: "1.0.0-beta.3", dir: "E:\\app", channel: "beta" }, ...extra });
 const FAILURE: Failure = { code: "verify_failed", detail: "uninstall.exe 不存在" };
+const TOO_NEW: DataBlock = { problem: "too_new", path: "E:\\app\\data-format.json", recorded: 3, supported: 2, reason: null, writtenBy: "1.1.0-dev.61", writtenByChannel: "dev" };
 
 const freshEvent = (fake: FakeBridge): SetupEvent => ({ type: "install_requested", mode: "fresh", running: false, check: fake.scenario.checkDir(FAKE_PROBE.defaultDir) });
 
-let root: Root | null = null;
-let host: HTMLElement | null = null;
+let view: Rendered | undefined;
 let headingLog: MutationObserver | null = null;
 
 function mount(ui: ReactElement): void {
-  host = document.createElement("div");
-  document.body.append(host);
-  root = createRoot(host);
-  root.render(ui);
+  view = renderWithoutAct(ui);
 }
 
 function start(overrides: Partial<FakeScenario> = {}, initial?: SetupState): FakeBridge {
@@ -84,10 +87,6 @@ beforeEach(() => {
 afterEach(() => {
   headingLog?.disconnect();
   headingLog = null;
-  root?.unmount();
-  host?.remove();
-  root = null;
-  host = null;
   vi.unstubAllGlobals();
   document.documentElement.removeAttribute("data-sk-reduced");
 });
@@ -192,7 +191,7 @@ describe("右键菜单", () => {
 
 describe("发起安装", () => {
   it("首装的计划带校验规整后的目录，装完到完成页", async () => {
-    const fake = start({ checkDir: (path) => ({ normalized: `${path}-规整`, issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 1 }) });
+    const fake = start({ checkDir: (path) => ({ normalized: `${path}-规整`, issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 1, dataBlock: null }) });
     await seeHeading(copy.welcome.title);
     button(copy.welcome.install).click();
     await seeHeading(copy.done.title.fresh(""));
@@ -218,7 +217,7 @@ describe("发起安装", () => {
   });
 
   it("目录没过校验时退回选目录页，不调 install", async () => {
-    const fake = start({ checkDir: (path) => ({ normalized: path, issue: "unwritable", hasConfig: false, notEmpty: false, appended: false, freeBytes: 0 }) });
+    const fake = start({ checkDir: (path) => ({ normalized: path, issue: "unwritable", hasConfig: false, notEmpty: false, appended: false, freeBytes: 0, dataBlock: null }) });
     await seeHeading(copy.welcome.title);
     button(copy.welcome.install).click();
     await seeHeading(copy.location.title);
@@ -236,6 +235,28 @@ describe("发起安装", () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(fake.callsOf("checkDir")).toHaveLength(1);
     expect(fake.callsOf("install")).toHaveLength(1);
+  });
+
+  it("「换到」更慢通道的确认按换通道计划装回登记目录，安装中与完成页都说换到", async () => {
+    const fake = start({ probe: switchProbe(), progress: [] });
+    await seeHeading(copy.installed.kind.switch.title("测试版"));
+    button(copy.installed.switchTo("测试版")).click();
+    await seeHeading("正在换到测试版 1.0.0-beta.5");
+    await seeHeading("已换到测试版 1.0.0-beta.5");
+    // 装回的是更早的版本，完成页照「换到」页说预览版里新加的设置项可能回到默认
+    expect(document.querySelector("h1")?.nextElementSibling?.textContent).toBe("账户和游戏文件都留着；预览版里新加的设置项，在测试版里改过设置后可能回到默认值。");
+    expect(fake.callsOf("install")).toEqual([[{ mode: "switch", dir: null, desktopShortcut: false }]]);
+    expect(fake.callsOf("checkDir")).toEqual([]);
+    // 交互确认的那次停在完成页，由用户自己点打开
+    expect(fake.callsOf("openLauncher")).toEqual([]);
+  });
+
+  it("「换到」更快通道的确认按升级计划发起，标题照样说换到", async () => {
+    const fake = start({ probe: fasterProbe(), outcome: "hang", progress: [] });
+    await seeHeading(copy.installed.kind.switch.title("预览版"));
+    button(copy.installed.switchTo("预览版")).click();
+    await seeHeading("正在换到预览版 1.0.0-dev.60");
+    await vi.waitFor(() => expect(fake.callsOf("install")).toEqual([[{ mode: "upgrade", dir: null, desktopShortcut: false }]]), WAIT);
   });
 
   it("已安装更新版本时没有任何安装按钮", async () => {
@@ -593,6 +614,62 @@ describe("更新模式", () => {
     expect(fake.callsOf("install")).toEqual([]);
   });
 
+  describe("带换通道开关", () => {
+    const SWITCH_PLAN: InstallPlan = { mode: "switch", dir: null, desktopShortcut: false };
+    const switching = "正在换到测试版 1.0.0-beta.5";
+    const switched = "已换到测试版 1.0.0-beta.5";
+
+    it("不经已安装页直接换过去：准备页起标题就说换到，按换通道计划装回登记目录，装完重开", async () => {
+      const seen = recordHeadings();
+      const fake = start({ probe: switchProbe({ update: { relaunch: true } }), progress: [] });
+      await seeHeading(switched);
+      await vi.waitFor(() => expect(fake.callsOf("close")).toEqual([[true]]), WAIT);
+      expect(fake.callsOf("openLauncher")).toEqual([["E:\\app"]]);
+      expect(fake.callsOf("install")).toEqual([[SWITCH_PLAN]]);
+      expect(fake.callsOf("checkDir")).toEqual([]);
+      expect(seen).toEqual([switching, switched]);
+    });
+
+    it("等启动器退出时窗口已显示着换到的准备页，还没开始装", async () => {
+      const fake = start({ probe: switchProbe({ update: { relaunch: true } }), running: true, outcome: "hang", progress: [] });
+      await vi.waitFor(() => expect(fake.callsOf("launcherRunning").length).toBeGreaterThanOrEqual(2), WAIT);
+      expect(heading()).toBe(switching);
+      expect(fake.callsOf("install")).toEqual([]);
+    });
+
+    it("装失败时失败页补上怎么回到原来的通道，重试仍按换通道计划，成功后照样重开", async () => {
+      const fake = start({ probe: switchProbe({ update: { relaunch: true } }), outcome: FAILURE, progress: [] });
+      await seeHeading(copy.failed.reason.verify_failed.title);
+      expect(document.querySelector('[role="alert"]')?.textContent).toBe(`${copy.failed.reason.verify_failed.body("", "retry")}想留在原来的通道，到${APP_NAME}的「设置 · 关于」把更新通道改回去。`);
+      expect(buttonNamed(copy.failed.standardInstaller)).toBeUndefined();
+
+      fake.scenario.outcome = "ok";
+      button(copy.failed.retry).click();
+      await seeHeading(switched);
+      expect(fake.callsOf("install")).toEqual([[SWITCH_PLAN], [SWITCH_PLAN]]);
+      await vi.waitFor(() => expect(fake.callsOf("openLauncher")).toEqual([["E:\\app"]]), WAIT);
+    });
+  });
+
+  // 数据关拦下时允许的模式为空，带不带开关都不无人值守：停在已安装页说清楚，落樱是为这次更新关掉的，要能从这里重新打开
+  it.each<[string, Probe, string]>([
+    ["不带开关", probeOf("upgrade", { update: { relaunch: true }, dataBlock: TOO_NEW }), "0.2.0"],
+    ["带开关", switchProbe({ update: { relaunch: true }, dataBlock: TOO_NEW }), "1.0.0-beta.5"],
+  ])("数据被更新的版本用过时（%s）停在已安装页并带补句，不等启动器退出、不自动安装", async (_, probe, payload) => {
+    const fake = start({ probe });
+    await seeHeading(copy.installed.dataTooNew.title);
+    expect(document.querySelector("header p")?.textContent).toBe(
+      `这台电脑上的数据已经被预览版 1.1.0-dev.61 用过，这个安装包（${payload}）读不了，所以没有安装，${APP_NAME}的程序和数据都没有改动。要接着用这些数据，装预览版 1.1.0-dev.61 或更新的版本。${APP_NAME}刚才为更新关掉了，可以从这里重新打开。`,
+    );
+    expect([...document.querySelectorAll("footer button")].map((b) => b.textContent)).toEqual([copy.installed.open]);
+    await settle();
+    expect(fake.callsOf("launcherRunning")).toEqual([]);
+    expect(fake.callsOf("install")).toEqual([]);
+
+    button(copy.installed.open).click();
+    await vi.waitFor(() => expect(fake.callsOf("openLauncher")).toEqual([["E:\\app"]]), WAIT);
+  });
+
   it("查进程被拒绝时进致命错误页并照常显示窗口", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const fake = createFakeBridge({ probe: updateProbe() });
@@ -663,8 +740,7 @@ describe("窗口", () => {
     start();
     await seeHeading(copy.welcome.title);
     expect(document.querySelector("aside")?.textContent).toContain(copy.frame.versionLine("0.2.0"));
-    root?.unmount();
-    host?.remove();
+    view?.unmount();
 
     const crashed = replay([{ type: "crashed", detail: "x" }]);
     start({}, crashed);

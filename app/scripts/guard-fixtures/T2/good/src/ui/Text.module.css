@@ -1,0 +1,8 @@
+.text {
+  padding: 2px 6px;
+  font-size: inherit;
+}
+
+.hint {
+  font-size: var(--sk-fs-caption);
+}

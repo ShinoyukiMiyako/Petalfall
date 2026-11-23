@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
+import { MotionConfig } from "framer-motion";
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../../ipc/errors";
 import { COMPLETION_HOLD_S, SPEED_REFRESH_MS } from "../../lib/progress-display";
 import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
@@ -10,12 +11,14 @@ import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import type { RouteOf } from "../../state/route";
-import { render, stubResizeObserver, type Rendered } from "../../test/dom";
+import { focusByKeyboard, render, stepFrames, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, cancelledError, deferred, emit, resetRecorder, settle, type Deferred } from "../../test/launcher";
+import type { InstanceDto } from "../../ipc/instances";
+import { bootOverrides, callsOf, cancelledError, configDto, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { PickFolderProvider } from "../discover/platform";
 import TasksPage from "./index";
 import styles from "./tasks.module.css";
+import { TASK_ROW_ATTR } from "./TaskRow";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -45,15 +48,17 @@ const advance = (ms: number) =>
     await vi.advanceTimersByTimeAsync(ms);
   });
 
-async function mount(route: RouteOf<"tasks"> = { page: "tasks" }) {
+/** reduced：整页按「减少动画」画（与外观偏好经根部 MotionConfig 生效的口径相同）。 */
+async function mount(route: RouteOf<"tasks"> = { page: "tasks" }, { reduced = false }: { reduced?: boolean } = {}) {
+  const tree = (
+    <PickFolderProvider value={() => Promise.resolve(MOCK_DOWNLOADS_DIR)}>
+      <Host />
+      <OverlayRoot />
+    </PickFolderProvider>
+  );
   view = render(
     <LauncherProvider>
-      <ShellProvider>
-        <PickFolderProvider value={() => Promise.resolve(MOCK_DOWNLOADS_DIR)}>
-          <Host />
-          <OverlayRoot />
-        </PickFolderProvider>
-      </ShellProvider>
+      <ShellProvider>{reduced ? <MotionConfig reducedMotion="always">{tree}</MotionConfig> : tree}</ShellProvider>
     </LauncherProvider>,
   );
   await flush();
@@ -157,6 +162,7 @@ function record(id: string, status: TaskRecordDto["status"], overrides: Partial<
     created_at: T0 - 120_000,
     finished_at: status === "queued" || status === "running" ? null : T0 - 60_000,
     spec: { command: "install_java", args: { requiredMajor: 21 } },
+    game_dir: "D:/Games/.minecraft",
     ...overrides,
   };
 }
@@ -210,11 +216,6 @@ beforeEach(() => {
     javaRuns.set(String(args.taskId), d);
     return d.promise;
   });
-});
-afterEach(() => {
-  view?.unmount();
-  view = undefined;
-  vi.useRealTimers();
 });
 
 describe("下载任务页：空队列", () => {
@@ -290,6 +291,27 @@ describe("下载任务页：历史", () => {
     expect(callsOf(ipc, "save_task_journal").at(-1)).toEqual({ seq: 1, tasks: [] });
   });
 
+  it("补全成功、落地重扫还没回来：这一行在已结束里，清除按钮却不算它、不可点（点了也清不掉）；重扫回来才计上", async () => {
+    await mount();
+    const repair = deferred<unknown>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    await act(() => launcher.actions.repairInstance("生存"));
+    await flush();
+    const scan = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => scan.promise);
+    repair.resolve({ reinstalled: false, libraries: 3, assets: 0, natives: 0 });
+    await flush();
+    // 收尾那一拍过去，行换到已结束
+    await advance(1000);
+    expect(launcher.state.tasks.map((t) => t.status)).toEqual(["done"]);
+    expect(headings()).toEqual(["已结束 · 1"]);
+    expect(buttonIn(header(), "清除已结束").disabled).toBe(true);
+
+    scan.resolve([instanceDto("生存"), instanceDto("创造")]);
+    await flush();
+    expect(buttonIn(header(), "清除已结束（1）").disabled).toBe(false);
+  });
+
   it("清除按钮与筛选的计数按三位数定宽：首个任务结束、计数跨位数时按钮与分段都不变宽", async () => {
     bootOverrides(ipc, { journal: HISTORY });
     await mount();
@@ -314,6 +336,107 @@ describe("下载任务页：历史", () => {
     expect(headings()).toEqual(["进行中 · 1"]);
     expect(row("failed-java").textContent).toContain("第 2 次尝试");
     expect(row("failed-java").textContent).toContain("等待数据");
+  });
+
+  it("发起于别的游戏目录的失败任务：重试置灰、聚焦写明发起于哪个目录，点了不发命令；与游戏目录无关的 Java 下载照常可点", async () => {
+    const other = "E:\\HMCL\\.minecraft";
+    bootOverrides(ipc, {
+      journal: [
+        record("failed-backup", "failed", {
+          kind: "world_backup",
+          title: "备份「旧世界」",
+          detail: "「生存」",
+          instance_id: "生存",
+          error: { code: "io", message: "磁盘已满" },
+          spec: { command: "backup_world", args: { id: "生存", world: "旧世界" } },
+          game_dir: other,
+        }),
+        record("failed-java", "failed", { error: { code: "network_failed", message: "dns" }, game_dir: other }),
+      ],
+    });
+    await mount();
+    const retry = buttonIn(row("备份「旧世界」"), "重试");
+    expect(retry.getAttribute("aria-disabled")).toBe("true");
+    act(() => focusByKeyboard(retry));
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toContain(`这个任务发起于游戏目录 ${other}，切回去再重试`);
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toEqual([]);
+    expect(launcher.state.tasks.find((t) => t.id === "failed-backup")?.status).toBe("failed");
+    expect(buttonIn(row("下载 Java failed-java"), "重试").getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("实例正在移到其他游戏目录：挂在它上面的失败任务重试置灰、聚焦写明原因，点了不发命令；别的实例照常可点；移动失败后恢复可点", async () => {
+    const backup = (id: string, instance: string, world: string) =>
+      record(id, "failed", {
+        kind: "world_backup",
+        title: `备份「${world}」`,
+        detail: `「${instance}」`,
+        instance_id: instance,
+        error: { code: "io", message: "磁盘已满" },
+        spec: { command: "backup_world", args: { id: instance, world } },
+      });
+    bootOverrides(ipc, { journal: [backup("failed-mine", "生存", "旧世界"), backup("failed-other", "创造", "主城")] });
+    const move = deferred<unknown>();
+    ipc.overrides.set("move_instance", () => move.promise);
+    await mount();
+    await act(() => launcher.actions.moveInstance("生存", "D:/Games/.minecraft", "E:\\HMCL\\.minecraft", "HMCL"));
+    await flush();
+    const retry = buttonIn(row("备份「旧世界」"), "重试");
+    expect(retry.getAttribute("aria-disabled")).toBe("true");
+    act(() => focusByKeyboard(retry));
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toContain("实例正在移到其他游戏目录");
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toEqual([]);
+    expect(launcher.state.tasks.find((t) => t.id === "failed-mine")).toMatchObject({ status: "failed", attempt: 1 });
+    expect(buttonIn(row("备份「主城」"), "重试").getAttribute("aria-disabled")).toBeNull();
+
+    move.reject(new IpcError("io", "目标盘拒绝访问"));
+    await flush();
+    expect(buttonIn(row("备份「旧世界」"), "重试").getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("移动成功后：挂在移走的实例上的失败任务记到目标目录，源目录里重试置灰写明去哪里；切到目标目录后可点，命令带目标目录", async () => {
+    const target = "E:\\HMCL\\.minecraft";
+    bootOverrides(ipc, {
+      journal: [
+        record("failed-mine", "failed", {
+          kind: "world_backup",
+          title: "备份「旧世界」",
+          detail: "「生存」",
+          instance_id: "生存",
+          error: { code: "io", message: "磁盘已满" },
+          spec: { command: "backup_world", args: { id: "生存", world: "旧世界" } },
+        }),
+      ],
+    });
+    let scanned = [instanceDto("生存"), instanceDto("创造")];
+    ipc.overrides.set("list_instances", () => scanned);
+    ipc.overrides.set("move_instance", () => {
+      scanned = [instanceDto("创造")];
+      return { id: "生存", source: "D:/Games/.minecraft", target, target_name: "HMCL", registered: false, follow_ups: [] };
+    });
+    await mount();
+    await act(() => launcher.actions.moveInstance("生存", "D:/Games/.minecraft", target, "HMCL"));
+    await flush();
+    expect(launcher.state.tasks.find((t) => t.id === "failed-mine")).toMatchObject({ status: "failed", gameDir: target });
+    const stale = buttonIn(row("备份「旧世界」"), "重试");
+    expect(stale.getAttribute("aria-disabled")).toBe("true");
+    act(() => focusByKeyboard(stale));
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toContain(`这个任务发起于游戏目录 ${target}，切回去再重试`);
+
+    ipc.overrides.set("set_game_directory", () => null);
+    ipc.overrides.set("get_config", () => configDto({ game_dir: target }));
+    scanned = [instanceDto("生存")];
+    await act(() => launcher.actions.setGameDirectory(target));
+    await flush();
+    ipc.overrides.set("backup_world", () => new Promise(() => undefined));
+    const retry = buttonIn(row("备份「旧世界」"), "重试");
+    expect(retry.getAttribute("aria-disabled")).toBeNull();
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toEqual([{ id: "生存", world: "旧世界", taskId: "failed-mine#2", gameDir: target }]);
   });
 
   it("上次关闭时中断的移动：行上写已在打开时收尾，不给重试；同样中断的下载照常给重试", async () => {
@@ -378,7 +501,7 @@ describe("下载任务页：历史", () => {
     expect(dialog().textContent).toContain("2 个文件都已找到。");
     act(() => buttonIn(dialog(), "重新安装").click());
     await flush();
-    expect(callsOf(ipc, "install_mod")).toEqual([{ ...args, taskId: "failed-mod#2" }]);
+    expect(callsOf(ipc, "install_mod")).toEqual([{ ...args, taskId: "failed-mod#2", gameDir: "D:/Games/.minecraft" }]);
     expect(row("安装 Locked").textContent).toContain("第 2 次尝试");
     expect(hasButton(row("安装 Locked"), "查看这些文件")).toBe(false);
   });
@@ -434,7 +557,7 @@ describe("下载任务页：断网", () => {
     expect(retry.getAttribute("aria-disabled")).toBeNull();
     act(() => retry.click());
     await flush();
-    expect(callsOf(ipc, "backup_world")).toEqual([{ ...args, taskId: "failed-backup#2" }]);
+    expect(callsOf(ipc, "backup_world")).toEqual([{ ...args, taskId: "failed-backup#2", gameDir: "D:/Games/.minecraft" }]);
   });
 
   it("断网：要手动下载的文件都找到后「重新安装」只提示联网后再重试，不把任务重新排进队列", async () => {
@@ -515,8 +638,8 @@ describe("下载任务页：筛选", () => {
 });
 
 describe("下载任务页：进行中", () => {
-  async function fourJavaTasks(): Promise<string[]> {
-    await mount();
+  async function fourJavaTasks(options?: { reduced?: boolean }): Promise<string[]> {
+    await mount(undefined, options);
     for (const major of [8, 17, 21, 25]) await act(() => launcher.actions.installJava(major));
     await flush();
     return launcher.state.tasks.map((t) => t.id);
@@ -649,6 +772,129 @@ describe("下载任务页：进行中", () => {
     expect(laneTitles()).toEqual([[t25], [t17], [t21]]);
   });
 
+  /** 这个任务的列表行：在场的那一行，与还在原处淡出的那些（自己或某个祖先带 inert）。 */
+  function taskRows(id: string): { present: HTMLLIElement[]; leaving: HTMLLIElement[] } {
+    const all = [...page().querySelectorAll(`ul [${TASK_ROW_ATTR}="${id}"]`)].map((mark) => {
+      const li = mark.closest("li");
+      if (li === null) throw new Error(`任务 ${id} 的标记不在列表行里`);
+      return li;
+    });
+    return { present: all.filter(live), leaving: all.filter((li) => !live(li)) };
+  }
+
+  const JAVA_8 = { component: "java-runtime-delta", version: { major: 8, minor: 0, security: 1, build: 1, raw: "1.8.0_1" }, java_executable: "C:/java8.exe" };
+
+  /** 换到已结束的新行是完成的样子；原处淡出的那份停在收尾：进度条满格，取消键留在原位但不可用，与有收尾这一拍时离开前的样子相同。 */
+  function expectLeavingAsFinishing(id: string) {
+    const { present, leaving } = taskRows(id);
+    expect([present.length, leaving.length]).toEqual([1, 1]);
+    expect(present[0].querySelector('[role="progressbar"]')).toBeNull();
+    expect(present[0].querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Java，已完成");
+    expect(leaving[0].querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("100");
+    expect(leaving[0].querySelector('button[aria-label="取消任务"]')?.getAttribute("aria-disabled")).toBe("true");
+  }
+
+  /**
+   * 「已结束」组随这次换组才出现，入场停在起点、等画出第一帧才起步；起步之前就被撤掉的还看不见，不播退场、随即移除。
+   * 要看它被清掉时留在原处淡出，清除之前先推几帧让它起步。
+   */
+  async function startEndedGroup() {
+    await stepFrames(3);
+    const group = [...page().querySelectorAll("section")].find((el) => el.querySelector("h2")?.textContent?.startsWith("已结束"))?.parentElement;
+    if (group === null || group === undefined) throw new Error("页面上没有「已结束」组");
+    expect(Number(group.style.opacity)).toBeGreaterThan(0);
+  }
+
+  it("减少动画时任务完成：不留收尾这一拍，行立即换到已结束；进行中组里淡出的那份照收尾画满格，不在淡出时换成已结束的样子", async () => {
+    const ids = await fourJavaTasks({ reduced: true });
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${ids[0]}#1`, total: 10, finished: 6, bytes: 60 * MB, total_bytes: 100 * MB, speed: 5 * MB }));
+    expect(progressOf(row("Java 8"))).toBe("60");
+    javaRuns.get(`${ids[0]}#1`)?.resolve(JAVA_8);
+    await flush();
+    expect(launcher.state.tasks.find((t) => t.id === ids[0])?.status).toBe("done");
+    expect(headings()).toEqual(["进行中 · 3", "已结束 · 1"]);
+    expectLeavingAsFinishing(ids[0]);
+  });
+
+  it("减少动画时最后一个进行中的任务完成：进行中整组在原处淡出，组里那一行同样停在收尾的满格", async () => {
+    await mount(undefined, { reduced: true });
+    await act(() => launcher.actions.installJava(8));
+    await flush();
+    const [id] = launcher.state.tasks.map((t) => t.id);
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 10, finished: 6, bytes: 60 * MB, total_bytes: 100 * MB, speed: 5 * MB }));
+    javaRuns.get(`${id}#1`)?.resolve(JAVA_8);
+    await flush();
+    expect(headings()).toEqual(["已结束 · 1"]);
+    expectLeavingAsFinishing(id);
+  });
+
+  it("减少动画时任务完成：通道立即让给排队的任务，换下的那份按完成画满格淡出，不停在完成前的进度；淡出途中清除已结束也不倒回", async () => {
+    const ids = await fourJavaTasks({ reduced: true });
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${ids[0]}#1`, total: 10, finished: 6, bytes: 60 * MB, total_bytes: 100 * MB, speed: 5 * MB }));
+    const lane = () => page().querySelectorAll("ol > li")[0];
+    expect(progressOf(lane())).toBe("60");
+    javaRuns.get(`${ids[0]}#1`)?.resolve(JAVA_8);
+    await flush();
+    const t25 = launcher.state.tasks.find((t) => t.id === ids[3])?.title;
+    expect([...lane().querySelectorAll("[title]")].filter(live).map((el) => el.getAttribute("title"))).toEqual([t25]);
+    const leavingFace = () => {
+      const faces = [...lane().querySelectorAll("[inert]")];
+      expect(faces).toHaveLength(1);
+      return faces[0];
+    };
+    expect(leavingFace().querySelector("[title]")?.getAttribute("title")).toBe(launcher.state.tasks.find((t) => t.id === ids[0])?.title);
+    expect(progressOf(leavingFace())).toBe("100");
+
+    act(() => buttonIn(header(), "清除已结束（1）").click());
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.id)).toEqual(ids.slice(1));
+    expect(progressOf(leavingFace())).toBe("100");
+  });
+
+  it("减少动画时任务完成、进行中那份还在淡出就点清除已结束：那份停在收尾的满格淡完，页面照常", async () => {
+    const ids = await fourJavaTasks({ reduced: true });
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${ids[0]}#1`, total: 10, finished: 6, bytes: 60 * MB, total_bytes: 100 * MB, speed: 5 * MB }));
+    javaRuns.get(`${ids[0]}#1`)?.resolve(JAVA_8);
+    await flush();
+    expectLeavingAsFinishing(ids[0]);
+    await startEndedGroup();
+
+    act(() => buttonIn(header(), "清除已结束（1）").click());
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.id)).toEqual(ids.slice(1));
+    expect(headings()).toEqual(["进行中 · 3"]);
+    // 已结束组里那一行也被清掉、在原处淡出；进行中组里先前那份仍是收尾的样子，不倒回完成前的进度
+    const { present, leaving } = taskRows(ids[0]);
+    expect(present).toEqual([]);
+    const bars = leaving.map((li) => li.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow"));
+    expect(bars.sort()).toEqual(["100", undefined]);
+    const fading = leaving.find((li) => li.querySelector('[role="progressbar"]') !== null);
+    expect(fading?.querySelector('button[aria-label="取消任务"]')?.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("运行中的任务被取消、进行中那份还在淡出就点清除已结束：那份停在取消后的样子淡完，页面照常", async () => {
+    const ids = await fourJavaTasks();
+    act(() => row("Java 8").querySelector<HTMLButtonElement>('button[aria-label="取消任务"]')?.click());
+    await flush();
+    expect(callsOf(ipc, "cancel_task")).toEqual([{ taskId: `${ids[0]}#1` }]);
+    javaRuns.get(`${ids[0]}#1`)?.reject(cancelledError());
+    await flush();
+    expect(headings()).toEqual(["进行中 · 3", "已结束 · 1"]);
+    expect(taskRows(ids[0]).leaving).toHaveLength(1);
+    await startEndedGroup();
+
+    act(() => buttonIn(header(), "清除已结束（1）").click());
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.id)).toEqual(ids.slice(1));
+    const { present, leaving } = taskRows(ids[0]);
+    expect(present).toEqual([]);
+    expect(leaving).toHaveLength(2);
+    for (const li of leaving) {
+      expect(li.textContent).toContain("取消于 0%");
+      expect(li.querySelector('[role="progressbar"]')).toBeNull();
+    }
+  });
+
   it("补全完成行：进度按有效字节走满，说明只写实际下载的量；一个字节没传写文件已就绪", async () => {
     const ids = await fourJavaTasks();
     const repaired = `${ids[0]}#1`;
@@ -673,7 +919,7 @@ describe("下载任务页：进行中", () => {
     expect(row("Java 17").textContent).not.toContain("701 MB");
   });
 
-  it("已下大小按节拍换字：事件到达的那一刻行内、已下载与剩余都不换，满间隔才换上最新值，剩余时间同一拍；传到总量与任务完成立即到位", async () => {
+  it("已下大小按节拍换字：从 0 开始传的第一条立即换上；之后事件到达的那一刻行内、已下载与剩余都不换，满间隔才换上最新值，剩余时间同一拍；传到总量与任务完成立即到位", async () => {
     await mount();
     await act(() => launcher.actions.installJava(8));
     await flush();
@@ -685,13 +931,13 @@ describe("下载任务页：进行中", () => {
     const remaining = () => [...page().querySelectorAll(`.${styles.flowSub}`)].filter(live)[0]?.textContent;
     const shown = () => [meta(), downloaded(), remaining()];
 
-    // 行与卡挂上还不到一个间隔：第一条事件的已下大小先不换，剩余时间按这一刻的速度估（剩 100 MB / 4 MB/s）
+    // 从 0 开始传：第一条事件的已下大小立即换上，不停在 0 B；剩余时间按这一刻的速度估（剩 90 MB / 4 MB/s）
     progress(10 * MB, 4 * MB);
-    expect(shown()).toEqual(["0 B / 100 MB4.0 MB/s · 约 25 秒", "0 B", "剩余 100 MB · 约 25 秒"]);
-    // 窗口里还没有采到这一次的速度，估速跟着瞬时速度走：已下大小没换字，剩余时间也不跟着跳（照算会是约 50 秒）
+    expect(shown()).toEqual(["10.0 MB / 100 MB4.0 MB/s · 约 25 秒", "10.0 MB", "剩余 90.0 MB · 约 25 秒"]);
+    // 窗口里还没有采到这一次的速度，估速跟着瞬时速度走：已下大小没换字，剩余时间也不跟着跳（照算会是约 45 秒）
     await advance(100);
     progress(12 * MB);
-    expect(shown()).toEqual(["0 B / 100 MB4.0 MB/s · 约 25 秒", "0 B", "剩余 100 MB · 约 25 秒"]);
+    expect(shown()).toEqual(["10.0 MB / 100 MB4.0 MB/s · 约 25 秒", "10.0 MB", "剩余 90.0 MB · 约 25 秒"]);
 
     // 走到稳态：剩余时间的平均窗口里全是 2 MB/s，上一次换字已过了很久
     await advance(4_900);
@@ -803,9 +1049,12 @@ describe("下载任务页：任务记录读取", () => {
     expect(page().textContent).toContain("下载任务记录读不出来");
     expect(page().textContent).toContain("任务日志第 0 项缺少字符串 id");
     expect(page().textContent).not.toContain("下载队列是空的");
+    // 错误卡里的说明块：重试是文字之后的幽灵小按钮
+    const retry = buttonIn(page(), "重试");
+    expect([retry.dataset.variant, retry.dataset.size]).toEqual(["ghost", "sm"]);
 
     fail = false;
-    act(() => buttonIn(page(), "重试").click());
+    act(() => retry.click());
     await flush();
     expect(callsOf(ipc, "load_task_journal")).toHaveLength(2);
     // 错误卡收起时在原处淡出（已不在场），空状态换上来

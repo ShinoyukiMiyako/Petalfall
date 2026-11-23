@@ -137,11 +137,15 @@
   font-weight: var(--sk-w-medium);
 }
 
+/*
+ * 账户类型是中文，字号取 caption，行框仍留 14：胶囊扣掉描边内高 32，正好是名称行 20 加类型行 14 再上提 2；
+ * 换成 caption 的 18 行高，两行会撑出胶囊、上下各被裁掉一截。这一行不折行，行框比字号高 2px，字照样居中
+ */
 .kind {
   margin-top: -2px;
-  font-size: var(--sk-fs-micro);
+  font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-micro);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .kind[data-expired],
@@ -212,7 +216,16 @@
 .itemLine {
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
+}
+
+/*
+ * 悬停与键盘高亮铺的叠层上 text-2 不到 4.5:1（夜樱 4.22），这一行跟着提到 text。
+ * 当前账户行的底是 accent-soft、不铺叠层；需要重新登录的那一行在叠层上仍是警示色（5.3:1 以上），都不提
+ */
+.item:hover:not([data-current]) .itemLine:not([data-expired]),
+.item:focus-visible:not([data-current]) .itemLine:not([data-expired]) {
+  color: var(--sk-text);
 }
 
 .check {

@@ -1,28 +1,27 @@
-// 关于：品牌卡、启动器更新卡、版本信息、支持入口（日志目录、协议全文、附加条款、素材许可、第三方许可、问题反馈）、
+// 关于：品牌卡、启动器更新卡、版本信息、支持入口（日志目录、使用须知、隐私说明、协议全文、附加条款、素材许可、第三方许可、问题反馈）、
 // 页尾的版权与无担保声明（AGPL 第 5(d) 条要求界面上有）、素材许可与名称商标的声明，以及商标、原版图案与数据来源的声明。
 // 更新面板由外壳挂载。版本、发布通道与构建日期取构建时注入的构建信息：它和安装包、更新器比较用的是同一个版本号。
 
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { PetalMark } from "../../../art/PetalMark";
-import { Spinner } from "../../../art/Spinner";
 import { RELEASE_CHANNEL_LABEL } from "../../../copy/flows";
+import { NOTICE_DIALOG_COPY } from "../../../copy/shell";
 import { formatDate } from "../../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
 import { APP_LICENSE, APP_NAME, APP_NAME_EN, ASSET_LICENSE, buildInfo, ISSUES_URL, REPO_URL, type BuildInfo } from "../../../lib/app-info";
-import { useLoadingGate } from "../../../lib/loading-gate";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { useLauncherActions } from "../../../state/launcher";
-import { useAdditionalTerms, useAssetLicense, useLicenseText, useThirdPartyLicenses, type ThirdPartyPackage } from "../../../state/queries/about";
+import { useAdditionalTerms, useAssetLicense, useLicenseText, usePrivacyNotice, useThirdPartyLicenses, useUsageNotice, type ThirdPartyPackage } from "../../../state/queries/about";
 import type { ResourceResult } from "../../../state/resource";
 import { Button } from "../../../ui/Button";
-import { Callout } from "../../../ui/Callout";
 import { Card } from "../../../ui/Card";
 import { CardHeader } from "../../../ui/CardHeader";
 import { CopyButton, KV } from "../../../ui/KV";
 import { Inset } from "../../../ui/Inset";
-import { Loadable } from "../../../ui/Loadable";
+import { LoadedBody } from "../../../ui/LoadedBody";
 import { Modal } from "../../../ui/Modal";
+import { NoticeDialog } from "../../../ui/NoticeDialog";
 import { SettingRow } from "../../../ui/SettingRow";
 import { Tag } from "../../../ui/Tag";
 import { useSettingsCommands } from "../commands";
@@ -37,6 +36,14 @@ function builtDate(build: BuildInfo): string {
   return formatDate(ts);
 }
 
+/**
+ * 构建信息里的通道在关于页的叫法。官方构建写它所属的发布通道，与旁边的版本号一致；本机与 fork 构建没走发布流程，
+ * 不属于任何一条发布线，按版本号标成哪条线都会误导，写「本机构建」。不把 local 加进 RELEASE_CHANNEL_LABEL：Mod 的版本档标签也引用它。
+ */
+function channelLabel(channel: BuildInfo["channel"]): string {
+  return channel === "local" ? ABOUT_COPY.localBuild : RELEASE_CHANNEL_LABEL[channel];
+}
+
 function BrandCard({ build }: { build: BuildInfo }) {
   return (
     <section className={s.brand}>
@@ -48,7 +55,7 @@ function BrandCard({ build }: { build: BuildInfo }) {
         <span className={s.brandName}>
           {APP_NAME}
           <span className={s.brandNameEn}>{APP_NAME_EN}</span>
-          <Tag tone="accent">{RELEASE_CHANNEL_LABEL[build.channel]}</Tag>
+          <Tag tone="accent">{channelLabel(build.channel)}</Tag>
         </span>
         <span className={s.brandSub}>{ABOUT_COPY.versionLine(build.version, APP_LICENSE)}</span>
       </span>
@@ -58,7 +65,7 @@ function BrandCard({ build }: { build: BuildInfo }) {
 
 function VersionCard({ build }: { build: BuildInfo }) {
   const { copyText } = useShell();
-  const channel = RELEASE_CHANNEL_LABEL[build.channel];
+  const channel = channelLabel(build.channel);
   const built = builtDate(build);
   const text = ABOUT_COPY.infoText({ name: APP_NAME_EN, version: build.version, channel, built, license: APP_LICENSE, assetLicense: ASSET_LICENSE, source: REPO_URL });
   return (
@@ -107,52 +114,6 @@ function LicenseGroup({ title, packages }: { title: string; packages: readonly T
   );
 }
 
-/**
- * 弹窗里按需读取的内容：读失败写明原因、给重试，不静默留白；读到了交给 children 渲染。
- * 读取中的转圈经加载门：随产物分发的文件通常几十毫秒就读到，那时转圈只占位不显形，内容直接淡入。
- */
-function LoadedBody<T>({ resource, loading, failed, children }: { resource: ResourceResult<T>; loading: string; failed: string; children: (data: T) => ReactNode }) {
-  const gate = useLoadingGate(resource.status === "loading");
-  if (resource.status === "error") {
-    return (
-      <Callout
-        tone="danger"
-        announce
-        action={
-          <Button size="sm" onClick={() => resource.reload()}>
-            {LOAD_COPY.retry}
-          </Button>
-        }
-      >
-        <span className={s.calloutTitle}>{failed}</span>
-        <span className={s.errorText}>{resource.error.message}</span>
-      </Callout>
-    );
-  }
-  return (
-    <>
-      {/* 骨架层对读屏隐藏，读取中的说明另放一份给读屏：区域挂载时就在、先是空的，转圈显形时才写进文字，读屏才会念出来 */}
-      <span className={s.srOnly} role="status">
-        {gate.view === "skeleton" ? loading : ""}
-      </span>
-      <Loadable
-        view={gate.view}
-        skeleton={
-          <div className={s.licensesLoading}>
-            <Spinner size={20} />
-            <span>{loading}</span>
-          </div>
-        }
-      >
-        {() => {
-          if (resource.status !== "ready") throw new Error("加载门放行内容时文件必须已经读到");
-          return children(resource.data);
-        }}
-      </Loadable>
-    </>
-  );
-}
-
 /** 清单体积大，弹窗打开时才去读；读过一次之后整个会话复用。 */
 function LicensesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const manifest = useThirdPartyLicenses(open);
@@ -160,7 +121,7 @@ function LicensesDialog({ open, onClose }: { open: boolean; onClose: () => void 
   const subtitle = manifest.status === "ready" ? ABOUT_COPY.licensesSubtitle(manifest.data.packages.length) : manifest.status === "loading" ? null : undefined;
   return (
     <Modal open={open} onClose={onClose} size="md" icon="file-text" title={ABOUT_COPY.licenses} subtitle={subtitle} className={s.licenseDialog}>
-      <LoadedBody resource={manifest} loading={ABOUT_COPY.licensesLoading} failed={ABOUT_COPY.licensesFailed}>
+      <LoadedBody resource={manifest} loading={ABOUT_COPY.licensesLoading} failed={ABOUT_COPY.licensesFailed} retry={LOAD_COPY.retry}>
         {({ packages }) => (
           <div className={s.licenses}>
             <LicenseGroup title={ABOUT_COPY.licensesNpm} packages={packages.filter((p) => p.ecosystem === "npm")} />
@@ -188,7 +149,7 @@ interface TextDialogCopy {
 function TextFileDialog({ open, onClose, text, copy }: { open: boolean; onClose: () => void; text: ResourceResult<string>; copy: TextDialogCopy }) {
   return (
     <Modal open={open} onClose={onClose} size="lg" icon="file-text" title={copy.title} subtitle={copy.subtitle} className={s.licenseDialog}>
-      <LoadedBody resource={text} loading={copy.loading} failed={copy.failed}>
+      <LoadedBody resource={text} loading={copy.loading} failed={copy.failed} retry={LOAD_COPY.retry}>
         {(value) => (
           <pre className={s.licenseText} role="region" aria-label={copy.title} tabIndex={0}>
             {value}
@@ -232,8 +193,17 @@ function AssetLicenseDialog({ open, onClose }: { open: boolean; onClose: () => v
   return <TextFileDialog open={open} onClose={onClose} text={useAssetLicense(open)} copy={ASSET_LICENSE_COPY} />;
 }
 
+/** 使用须知与隐私说明随产物分发，弹窗打开时才去读；读过一次之后整个会话复用。隐私说明与使用须知页上打开的是同一个弹窗。 */
+function UsageNoticeDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  return <NoticeDialog open={open} onClose={onClose} notice={useUsageNotice(open)} copy={NOTICE_DIALOG_COPY.usage} />;
+}
+
+function PrivacyNoticeDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  return <NoticeDialog open={open} onClose={onClose} notice={usePrivacyNotice(open)} copy={NOTICE_DIALOG_COPY.privacy} />;
+}
+
 /** 支持卡上能打开的弹窗；同一时刻只开一个。 */
-type SupportDialog = "license-text" | "additional-terms" | "asset-license" | "third-party";
+type SupportDialog = "usage-notice" | "privacy-notice" | "license-text" | "additional-terms" | "asset-license" | "third-party";
 
 function SupportCard() {
   const run = useRunner();
@@ -247,6 +217,16 @@ function SupportCard() {
       <SettingRow title={ABOUT_COPY.openLogs} description={ABOUT_COPY.openLogsDesc}>
         <Button size="sm" variant="ghost" icon="folder-open" onClick={() => void run(() => commands.openLauncherLogs(), ABOUT_COPY.openLogsFailed)}>
           {ABOUT_COPY.open}
+        </Button>
+      </SettingRow>
+      <SettingRow title={ABOUT_COPY.usageNotice} description={ABOUT_COPY.usageNoticeDesc}>
+        <Button size="sm" variant="ghost" icon="file-text" onClick={() => setDialog("usage-notice")}>
+          {ABOUT_COPY.view}
+        </Button>
+      </SettingRow>
+      <SettingRow title={ABOUT_COPY.privacyNotice} description={ABOUT_COPY.privacyNoticeDesc}>
+        <Button size="sm" variant="ghost" icon="file-text" onClick={() => setDialog("privacy-notice")}>
+          {ABOUT_COPY.view}
         </Button>
       </SettingRow>
       <SettingRow title={ABOUT_COPY.licenseText} description={ABOUT_COPY.licenseTextDesc}>
@@ -274,6 +254,8 @@ function SupportCard() {
           {ABOUT_COPY.open}
         </Button>
       </SettingRow>
+      <UsageNoticeDialog open={dialog === "usage-notice"} onClose={close} />
+      <PrivacyNoticeDialog open={dialog === "privacy-notice"} onClose={close} />
       <LicenseTextDialog open={dialog === "license-text"} onClose={close} />
       <AdditionalTermsDialog open={dialog === "additional-terms"} onClose={close} />
       <AssetLicenseDialog open={dialog === "asset-license"} onClose={close} />

@@ -2,17 +2,26 @@
 // @module-tag heavy-page
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { stubCanvas, type CanvasStub } from "../../art/illustrations/test-canvas";
+import { fallbackDrawn, mannequinFace } from "../../art/skin/test-mannequin";
+import { ART_DOWNLOAD_EVENT, type ArtStatusDto } from "../../ipc/art";
 import type { ConfigDto, GameDirectoryDto } from "../../ipc/config";
+import { IpcError } from "../../ipc/errors";
+import { APP_NAME } from "../../lib/app-info";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
+import { NO_ART, setArtStatus } from "../../mc/art";
+import { setBlockCatalog } from "../../mc/catalog";
+import { clearArtCache } from "../../mc/useArt";
+import { getArtDownloadState } from "../../state/art-download";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import type { Appearance } from "../../domain/types";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
-import { render, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
+import { resources } from "../../state/resource";
+import { render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { callsOf, resetRecorder, settle } from "../../test/launcher";
+import { accountDto, callsOf, deferred, emit, resetRecorder, settle } from "../../test/launcher";
 import OnboardingFlow from "./index";
 import { PickDirectoryProvider, type PickDirectory } from "./platform";
 
@@ -22,9 +31,9 @@ vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridg
 const DEFAULT_DIR = "D:\\Games\\Launcher\\.minecraft";
 const OFFICIAL_DIR = "C:\\Users\\player\\AppData\\Roaming\\.minecraft";
 
-let view: Rendered | undefined;
 let launcher: LauncherApi;
 let picked: string | null;
+let canvas: CanvasStub;
 
 function Harness() {
   launcher = useLauncher();
@@ -40,7 +49,7 @@ const flush = () =>
   });
 
 async function mount(appearance: Appearance = DEFAULT_APPEARANCE) {
-  view = render(
+  render(
     <AppearanceProvider initial={appearance}>
       <LauncherProvider>
         <ShellProvider>
@@ -59,9 +68,20 @@ function all<E extends Element = HTMLElement>(selector: string): E[] {
   return [...document.querySelectorAll<E>(selector)];
 }
 
+/** 读屏读得到的文字：主按钮的两条文案各放一层叠着，非当前的那层带 aria-hidden，不算。 */
+function visibleText(el: Element): string {
+  let out = "";
+  for (const child of el.childNodes) {
+    if (child instanceof Element) {
+      if (child.getAttribute("aria-hidden") !== "true") out += visibleText(child);
+    } else if (child instanceof Text) out += child.data;
+  }
+  return out.trim();
+}
+
 /** 在场的按钮：换步与增删时退场中的那一份（inert）还留在文档里淡出，假定时器下动画不走，它会一直留着。 */
 function button(name: string): HTMLButtonElement {
-  const found = all<HTMLButtonElement>("button").find((b) => b.closest("[inert]") === null && (b.getAttribute("aria-label") === name || b.textContent?.trim() === name));
+  const found = all<HTMLButtonElement>("button").find((b) => b.closest("[inert]") === null && (b.getAttribute("aria-label") === name || visibleText(b) === name));
   if (found === undefined) throw new Error(`找不到按钮「${name}」`);
   return found;
 }
@@ -102,7 +122,7 @@ beforeEach(() => {
   resetRecorder(ipc);
   stubResizeObserver();
   stubMatchMedia(false);
-  stubCanvas();
+  canvas = stubCanvas();
   picked = null;
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -110,12 +130,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  view?.unmount();
-  view = undefined;
   document.documentElement.removeAttribute("data-sk-mode");
   document.documentElement.removeAttribute("data-sk-accent");
   document.documentElement.removeAttribute("data-sk-reduced");
-  vi.useRealTimers();
+  // 桩过的取图与已取到的皮肤位图不带到下一条用例
+  clearArtCache();
+  vi.unstubAllGlobals();
 });
 
 describe("首次启动向导：第一步", () => {
@@ -216,6 +236,33 @@ describe("首次启动向导：第一步的内容不跳", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].hasAttribute("inert")).toBe(true);
     expect(text()).toContain("1/1");
+  });
+
+  it.each([false, true])("改回别的路径时接回来的文件夹行等第一帧画出来才淡入（减少动画 %s）：挂上之后的第一帧仍是透明的起点", async (reduceMotion) => {
+    await mount({ ...DEFAULT_APPEARANCE, reduceMotion });
+    const hmclRows = () => all("li").filter((li) => li.textContent?.includes("D:\\HMCL\\.minecraft"));
+    await typePath("D:\\HMCL\\.minecraft");
+    // 等那一行淡出播完、移出文档：接回来的才是新挂上的一行，不是把退场中的那一行原地拉回
+    await stepFrames(30);
+    expect(hmclRows()).toEqual([]);
+    await click(button("用回默认位置"));
+    const [row] = hmclRows();
+    expect(hmclRows()).toHaveLength(1);
+    expect(row.hasAttribute("inert")).toBe(false);
+    const start = reduceMotion ? "" : "scale(0.98)";
+    expect(row.style.opacity).toBe("0");
+    expect(row.style.transform).toBe(start);
+    await stepFrames(1);
+    expect(row.style.opacity).toBe("0");
+    expect(row.style.transform).toBe(start);
+    // 放行排在绘制之后的任务里，假时钟要再推进一帧才到点
+    await stepFrames(2);
+    const opacity = Number(row.style.opacity);
+    expect(opacity).toBeGreaterThan(0);
+    expect(opacity).toBeLessThan(1);
+    await stepFrames(60);
+    expect(row.style.opacity).toBe("1");
+    expect(row.style.transform).toBe(reduceMotion ? "" : "none");
   });
 
   it("配置还没读到：加载门内只占位不显示，到点才淡入照字段画的骨架；读到后换成输入框", async () => {
@@ -364,6 +411,54 @@ describe("首次启动向导：推进与收尾", () => {
     expect(all("button[data-kind]").some((b) => b.closest("[inert]") === null)).toBe(true);
   });
 
+  it("第三步已添加的账户在本机没有原版材质：头像画这个账户的人偶，不是空白", async () => {
+    const account = accountDto();
+    ipc.overrides.set("list_accounts", () => [account]);
+    ipc.overrides.set("current_account", () => account);
+    ipc.overrides.set("skin_info", () => ({ kind: "default", path: "entity/player/wide/steve", model: "wide" }));
+    await mount();
+    await click(button("下一步"));
+    await click(button("下一步"));
+    await flush();
+    const added = all("section").find((section) => section.textContent?.startsWith("已添加"));
+    const avatar = added?.querySelector<HTMLElement>('[data-sk-art="skin"]');
+    if (avatar === null || avatar === undefined) throw new Error("「已添加」区里没有头像");
+    expect(avatar.dataset.art).toBe("mannequin");
+    expect(fallbackDrawn(canvas, avatar)).toBe(mannequinFace(account.uuid, 24));
+  });
+
+  it("第三步已添加的账户刷新后皮肤信息重取失败：头像沿用上次读到的皮肤，不退回人偶", async () => {
+    const account = accountDto();
+    ipc.overrides.set("list_accounts", () => [account]);
+    ipc.overrides.set("current_account", () => account);
+    ipc.overrides.set("refresh_account", () => account);
+    ipc.overrides.set("skin_info", () => ({ kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true }));
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["skin"]) })));
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 64, height: 64 })));
+    await mount();
+    await click(button("下一步"));
+    await click(button("下一步"));
+    const avatar = () => {
+      const added = all("section").find((section) => section.textContent?.startsWith("已添加"));
+      if (added === undefined) throw new Error("没有「已添加」区");
+      return added.querySelector<HTMLElement>('[data-sk-art="skin"]')?.dataset.art;
+    };
+    expect(avatar()).toBe("skin");
+    const skinCalls = callsOf(ipc, "skin_info").length;
+
+    ipc.overrides.set("skin_info", () => {
+      throw new IpcError("io", "账户文件读不出来");
+    });
+    await act(async () => {
+      await launcher.actions.refreshAccount(account.uuid);
+    });
+    await flush();
+    // 重取确实发出且以失败落定：资源停在 error，而不是重取中还带着旧数据的 ready
+    expect(callsOf(ipc, "skin_info").slice(skinCalls)).toEqual([{ accountUuid: account.uuid }]);
+    expect(resources.snapshot(`skin:${account.uuid}`).status).toBe("error");
+    expect(avatar()).toBe("skin");
+  });
+
   it("第三步的选项打开同一个登录弹窗（由状态驱动）", async () => {
     await mount();
     await click(button("下一步"));
@@ -372,6 +467,109 @@ describe("首次启动向导：推进与收尾", () => {
     if (offline === undefined) throw new Error("没有离线账户选项");
     await click(offline);
     expect(launcher.state.login).toMatchObject({ kind: "offline", intent: { kind: "manual" } });
+  });
+
+  describe("第三步：下载原版材质", () => {
+    const MODERN: ArtStatusDto = { source: { version_id: "1.21.4", degraded: false, legacy_skins: false }, panorama: false };
+    const NOTE = "本机还没有原版材质，默认皮肤画不出来。";
+    let drawn: string[];
+    /** 「已添加」区下面那一行的说明；退场中（inert）的不算。 */
+    const note = () => all("p").find((p) => p.textContent === NOTE && p.closest("[inert]") === null);
+    const addedSection = () => all("section").find((section) => section.textContent?.startsWith("已添加") && section.closest("[inert]") === null);
+    const avatars = () => [...(addedSection()?.querySelectorAll<HTMLElement>('[data-sk-art="skin"]') ?? [])];
+
+    beforeEach(() => {
+      drawn = [];
+      // 下完后材质绑定接着载入方块目录，载入了下载状态才回到空闲
+      ipc.overrides.set("art_blocks", () => ({ version_id: "1.21.4", blocks: [] }));
+      vi.stubGlobal("fetch", vi.fn(async (url: string) => ({ ok: true, status: 200, blob: async () => new Blob([url]) })));
+      vi.stubGlobal(
+        "createImageBitmap",
+        vi.fn(async (blob: Blob) => {
+          drawn.push(await blob.text());
+          return { width: 64, height: 64 };
+        }),
+      );
+    });
+
+    afterEach(() => {
+      setBlockCatalog(null);
+      setArtStatus(NO_ART);
+      // 下载状态全应用只有一份：每条用例都要走完，留在下载中会带进下一条
+      expect(getArtDownloadState()).toEqual({ phase: "idle" });
+    });
+
+    it("本机没有材质源：「已添加」区下面一行说明加幽灵按钮，排在登录选项之前", async () => {
+      await mount();
+      await click(button("下一步"));
+      await click(button("下一步"));
+      const line = note();
+      if (line === undefined) throw new Error("没有下载原版材质的那一行");
+      const download = button("下载原版材质");
+      expect([download.dataset.variant, download.dataset.size]).toEqual(["ghost", "sm"]);
+      const added = addedSection() as HTMLElement;
+      const options = button("离线账户");
+      expect([added.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING, line.compareDocumentPosition(options) & Node.DOCUMENT_POSITION_FOLLOWING]).toEqual([
+        Node.DOCUMENT_POSITION_FOLLOWING,
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      ]);
+      expect(avatars().map((a) => a.dataset.art)).toEqual(["mannequin", "mannequin"]);
+    });
+
+    it("本机有材质源：没有这一行，头像直接画默认皮肤", async () => {
+      ipc.overrides.set("art_status", () => MODERN);
+      await mount();
+      await click(button("下一步"));
+      await click(button("下一步"));
+      expect(note()).toBeUndefined();
+      expect(all("button").some((b) => b.closest("[inert]") === null && b.textContent === "下载原版材质")).toBe(false);
+      expect(avatars().map((a) => a.dataset.art)).toEqual(["skin", "skin"]);
+    });
+
+    it("还没有账户：没有头像可画，不放这一行", async () => {
+      ipc.overrides.set("list_accounts", () => []);
+      ipc.overrides.set("current_account", () => null);
+      await mount();
+      await click(button("下一步"));
+      await click(button("下一步"));
+      expect(note()).toBeUndefined();
+    });
+
+    it("点下载：连点两下也只发一次 art_download，下载中换成进度；下完后头像在原节点上换上默认皮肤，这一行退场", async () => {
+      const download = deferred<ArtStatusDto>();
+      ipc.overrides.set("art_download", () => download.promise);
+      await mount();
+      await click(button("下一步"));
+      await click(button("下一步"));
+      const before = avatars();
+      const trigger = button("下载原版材质");
+      act(() => {
+        trigger.click();
+        trigger.click();
+      });
+      await flush();
+      expect(callsOf(ipc, "art_download")).toEqual([{}]);
+      act(() => emit(ART_DOWNLOAD_EVENT, { stage: "client", downloaded: 1024 * 1024, total: 4 * 1024 * 1024 }));
+      await flush();
+      expect(note()).toBeUndefined();
+      expect(text()).toContain("正在下载客户端");
+
+      ipc.overrides.set("art_status", () => MODERN);
+      await act(async () => {
+        download.resolve(MODERN);
+        await settle(20);
+      });
+      await flush();
+      expect(avatars()).toEqual(before);
+      expect(before.map((a) => a.dataset.art)).toEqual(["skin", "skin"]);
+      // 种子里两个账户按 UUID 推算的默认皮肤：Hanami_Walker 是宽臂 noor，Yozakura 是细臂 efe
+      const skins = drawn.map((url) => /\/art\/(entity\/[\w/]+)\.png\?v=1\.21\.4$/.exec(url)?.[1]).filter((path) => path !== undefined);
+      expect(skins.sort()).toEqual(["entity/player/slim/efe", "entity/player/wide/noor"]);
+      // 这一行连同进度一起退场：在场的只剩登录选项
+      expect(all("button").some((b) => b.closest("[inert]") === null && b.textContent === "下载原版材质")).toBe(false);
+      expect(all("[role='progressbar']").filter((bar) => bar.closest("[inert]") === null)).toEqual([]);
+      expect(callsOf(ipc, "art_download")).toHaveLength(1);
+    });
   });
 
   describe("构建里没有微软登录 client_id", () => {
@@ -534,11 +732,18 @@ describe("首次启动向导：推进与收尾", () => {
   it("第四步：明暗立即作用于整个窗口并写后端，「开始使用」收尾", async () => {
     await mount();
     for (let i = 0; i < 3; i++) await click(button("下一步"));
-    // 与设置页同一组件：两张明暗预览都画真实颜色（各按自己的明暗、当前强调色），三枚色块各画各的强调色
+    // 与设置页同一组件、同一组选项：日樱、夜樱各画真实颜色，跟随系统叠画两幅（各按自己的明暗、当前强调色），三枚色块各画各的强调色
     const previews = all('[role="radiogroup"][aria-label="明暗"] [data-mode]').map((p) => [p.getAttribute("data-mode"), p.getAttribute("data-tint")]);
     expect(previews).toEqual([
       ["day", "sakura"],
       ["night", "sakura"],
+      ["day", "sakura"],
+      ["night", "sakura"],
+    ]);
+    expect(all('[role="radiogroup"][aria-label="明暗"] [role="radio"]').map((r) => r.textContent)).toEqual([
+      "日樱浅粉白底，适合白天",
+      "夜樱深紫灰底与紫水晶点缀",
+      "跟随系统随 Windows 的浅色、深色模式切换",
     ]);
     expect(all('[role="radiogroup"][aria-label="强调色"] [data-tint]').map((p) => p.getAttribute("data-tint"))).toEqual(["sakura", "amethyst", "moss"]);
     const night = all<HTMLButtonElement>('[role="radio"]').find((b) => b.textContent?.startsWith("夜樱"));
@@ -549,6 +754,69 @@ describe("首次启动向导：推进与收尾", () => {
     await click(button("开始使用"));
     expect(callsOf(ipc, "complete_first_run")).toHaveLength(1);
     expect(launcher.state.firstRun).toBe(false);
+  });
+});
+
+describe("首次启动向导：选到数据格式不合的游戏目录", () => {
+  const PICKED = "D:\\Games\\.minecraft";
+  const OTHER = "E:\\Games\\Petal";
+  const tooNew = (written_by: string | null, written_by_channel: "dev" | "beta" | "stable" | null) =>
+    new IpcError("game_dir_data_too_new", `游戏目录 ${PICKED} 的数据格式 3 比这一版认得的 2 新`, { path: PICKED, found: 3, supported: 2, written_by, written_by_channel });
+  const unreadable = (reason: string) => new IpcError("data_format_unreadable", `游戏目录 ${PICKED} 的数据格式记号读不懂`, { path: PICKED, reason });
+  const commitFailsWith = (error: Error) =>
+    ipc.overrides.set("complete_first_run", () => {
+      throw error;
+    });
+
+  /** 路径框下那一行的错误；没有错误时（显示常驻提示）为 null。换下去的提示带 inert 留在原处淡出，只认在场的那一块。 */
+  const dirError = () => {
+    const message = document.querySelector("[data-step-pane]:not([aria-hidden]) [data-error] > :not([inert])");
+    return message === null ? null : message.textContent;
+  };
+
+  it.each([
+    ["被预览版用过", () => tooNew("1.1.0-dev.57", "dev"), "这个文件夹已经被预览版 1.1.0-dev.57 用过，这个版本读不了里面的实例。换一个文件夹，或者装上预览版 1.1.0-dev.57 或更新的版本再来。"],
+    ["被正式版用过", () => tooNew("1.3.0", "stable"), "这个文件夹已经被正式版 1.3.0 用过，这个版本读不了里面的实例。换一个文件夹，或者装上正式版 1.3.0 或更新的版本再来。"],
+    ["不知道是哪一版用过", () => tooNew(null, null), `这个文件夹已经被更新的${APP_NAME}用过，这个版本读不了里面的实例。换一个文件夹，或者装上更新的版本再来。`],
+    ["格式记录读不懂", () => unreadable("expected value at line 1 column 1"), "这个文件夹里的格式记录读不懂（expected value at line 1 column 1），换一个文件夹。"],
+  ])("%s：停在第一步，路径框下是不带路径的说法，配置不变", async (_, error, expected) => {
+    commitFailsWith(error());
+    await mount();
+    const config = await mockInvoke<ConfigDto>("get_config");
+    await typePath(PICKED);
+    await click(button("下一步"));
+    expect(callsOf(ipc, "complete_first_run").map((a) => a.gameDir)).toEqual([PICKED]);
+    expect(title()).toBe("游戏文件放在哪");
+    expect(dirError()).toBe(expected);
+    expect(dirInput().value).toBe(PICKED);
+    expect(dirInput().getAttribute("aria-invalid")).toBe("true");
+    expect(launcher.state.firstRun).toBe(true);
+    expect(await mockInvoke<ConfigDto>("get_config")).toEqual(config);
+    expect(await mockInvoke<boolean>("is_first_run")).toBe(true);
+  });
+
+  it("换一个文件夹：错误随改动收起，再按下一步提交新目录、向导前进", async () => {
+    commitFailsWith(tooNew("1.1.0-dev.57", "dev"));
+    await mount();
+    await typePath(PICKED);
+    await click(button("下一步"));
+    expect(dirError()).toBe("这个文件夹已经被预览版 1.1.0-dev.57 用过，这个版本读不了里面的实例。换一个文件夹，或者装上预览版 1.1.0-dev.57 或更新的版本再来。");
+    await typePath(OTHER);
+    expect(dirError()).toBeNull();
+    ipc.overrides.delete("complete_first_run");
+    await click(button("下一步"));
+    expect(callsOf(ipc, "complete_first_run").map((a) => a.gameDir)).toEqual([PICKED, OTHER]);
+    expect(title()).toBe("看看这台电脑上的 Java");
+    expect((await mockInvoke<ConfigDto>("get_config")).game_dir).toBe(OTHER);
+  });
+
+  it("别的失败不落进路径框：停在第一步，只由通知说明", async () => {
+    commitFailsWith(new IpcError("io", "文件 IO 失败: config.json"));
+    await mount();
+    await click(button("下一步"));
+    expect(title()).toBe("游戏文件放在哪");
+    expect(dirError()).toBeNull();
+    expect(launcher.state.toasts.map((t) => t.title)).toContain("首次设置没有保存");
   });
 });
 
@@ -598,6 +866,41 @@ describe("首次启动向导：换步动效", () => {
     expect(presentPane().style.transform).toContain("translateX(16px)");
   });
 
+  it.each([false, true])("换上来的一步等第一帧画出来才起步（减少动画 %s）：挂上之后的第一帧仍停在起点；挂载时就在的那一步之后重渲染也不退回起点", async (reduceMotion) => {
+    await mount({ ...DEFAULT_APPEARANCE, reduceMotion });
+    // 向导挂上之后的重渲染：挂载时就在的第一步不能因此当成新换上来的、退回起点再播一遍
+    await typePath("D:\\Games\\Petal");
+    await stepFrames(3);
+    expect(presentPane().style.opacity).toBe("1");
+    expect(presentPane().style.transform).not.toContain("translateX");
+
+    await click(button("下一步"));
+    expect(title()).toBe("看看这台电脑上的 Java");
+    const pane = presentPane();
+    const start = reduceMotion ? "" : "translateX(16px)";
+    expect(pane.style.opacity).toBe("0");
+    expect(pane.style.transform).toBe(start);
+    await stepFrames(1);
+    expect(pane.style.opacity).toBe("0");
+    expect(pane.style.transform).toBe(start);
+    // 放行排在绘制之后的任务里，假时钟要再推进一帧才到点
+    await stepFrames(2);
+    const opacity = Number(pane.style.opacity);
+    expect(opacity).toBeGreaterThan(0);
+    expect(opacity).toBeLessThan(1);
+    if (reduceMotion) {
+      expect(pane.style.transform).toBe("");
+    } else {
+      const x = /^translateX\((.+)px\)$/.exec(pane.style.transform);
+      if (x === null) throw new Error(`新的一步没有在横移的半路上：${pane.style.transform}`);
+      expect(Number(x[1])).toBeGreaterThan(0);
+      expect(Number(x[1])).toBeLessThan(16);
+    }
+    await stepFrames(60);
+    expect(pane.style.opacity).toBe("1");
+    expect(pane.style.transform).toBe(reduceMotion ? "" : "none");
+  });
+
   it("步骤条：走过的那一步序号换成勾号时勾号弹出、序号原地淡出；向导挂上时就在的序号不入场", async () => {
     const waapi = stubSpanAnimations();
     await mount();
@@ -619,45 +922,131 @@ describe("首次启动向导：换步动效", () => {
     expect(dot()?.getAttribute("data-glyph")).toBe("check");
   });
 
+  it.each([false, true])("步骤条「已跳过」（减少动画 %s）：跳过时等第一帧画出来才弹出，回到那一步时原地淡出，不一帧没了", async (reduceMotion) => {
+    await mount({ ...DEFAULT_APPEARANCE, reduceMotion });
+    const tag = () => railItem("Java").querySelector<HTMLElement>('[class*="_railSkipped_"]');
+    await click(button("下一步"));
+    await click(button("跳过"));
+    expect(title()).toBe("用什么账户进游戏");
+    const shown = tag();
+    if (shown === null) throw new Error("跳过之后步骤条上没有「已跳过」");
+    expect(shown.textContent).toBe("已跳过");
+    // 平时从 0.6 弹出；减少动画时只淡入，不缩放
+    const start = reduceMotion ? "" : "scale(0.6)";
+    expect(shown.style.opacity).toBe("0");
+    expect(shown.style.transform).toBe(start);
+    await stepFrames(1);
+    expect(shown.style.opacity).toBe("0");
+    expect(shown.style.transform).toBe(start);
+    await stepFrames(2);
+    expect(Number(shown.style.opacity)).toBeGreaterThan(0);
+    expect(Number(shown.style.opacity)).toBeLessThan(1);
+    await stepFrames(60);
+    expect(shown.style.opacity).toBe("1");
+    expect(shown.style.transform).toBe(reduceMotion ? "" : "none");
+
+    await click(railItem("Java"));
+    expect(title()).toBe("看看这台电脑上的 Java");
+    // 状态一离开「已跳过」，标签留在原处淡出，不在同一次提交里卸掉
+    expect(tag()).toBe(shown);
+    await stepFrames(3);
+    expect(shown.isConnected).toBe(true);
+    expect(Number(shown.style.opacity)).toBeGreaterThan(0);
+    expect(Number(shown.style.opacity)).toBeLessThan(1);
+    expect(shown.style.transform).toBe(reduceMotion ? "" : "none");
+    await stepFrames(60);
+    expect(shown.isConnected).toBe(false);
+    expect(tag()).toBeNull();
+  });
+
   it("底栏随步骤出现的按钮淡入，离开的原地淡出并且不可再点", async () => {
     await mount();
     await click(button("下一步"));
     // 出没包裹层是按钮外最近的 div：挂上那一刻从透明开始
     for (const name of ["上一步", "直接开始", "跳过"]) expect(button(name).closest("div")?.style.opacity).toBe("0");
+    // 入场等第一帧画出来才起步。还停在起点时撤掉的那一项与退场目标相同、没有动画在走，不播退场、随即移除；
+    // 先推几帧让淡入走起来，再后退，量的才是「已经在淡入的按钮被撤掉」
+    await stepFrames(3);
+    for (const name of ["上一步", "直接开始", "跳过"]) expect(Number(button(name).closest("div")?.style.opacity)).toBeGreaterThan(0);
     await click(button("上一步"));
     const leaving = all<HTMLButtonElement>("footer button").filter((b) => ["上一步", "直接开始", "跳过"].includes(b.textContent?.trim() ?? ""));
     expect(leaving).toHaveLength(3);
     expect(leaving.every((b) => b.closest("[inert]") !== null)).toBe(true);
   });
 
-  it("主按钮与隐形的「开始使用 →」叠在同一格：前三步的「下一步」也按它撑宽，隐形的那颗点不到、读屏读不到", async () => {
-    await mount();
-    const slot = button("下一步").closest<HTMLElement>('[class*="_primarySlot_"]');
-    if (slot === null) throw new Error("主按钮不在定宽的格里");
-    const ghost = slot.querySelector<HTMLElement>('[class*="_primaryGhost_"]');
-    if (ghost === null) throw new Error("格里没有撑宽的隐形按钮");
-    expect(ghost.getAttribute("aria-hidden")).toBe("true");
-    expect(ghost.hasAttribute("inert")).toBe(true);
-    const widest = ghost.querySelector("button");
-    expect(widest?.textContent?.trim()).toBe("开始使用");
-    expect(widest?.getAttribute("data-variant")).toBe("primary");
-    expect(widest?.querySelector("svg")).not.toBeNull();
-    for (let i = 0; i < 3; i++) await click(button("下一步"));
-    expect(button("开始使用").closest('[class*="_primarySlot_"]')).toBe(slot);
-  });
+  describe("主按钮", () => {
+    const primaries = () => all<HTMLButtonElement>('footer button[data-variant="primary"]');
+    // 每层：[文字, 是否当前, aria-hidden]
+    const faces = (primary: HTMLElement) =>
+      [...primary.querySelectorAll<HTMLElement>('[class*="_primaryFace_"]')].map((face) => [face.textContent, face.hasAttribute("data-current"), face.getAttribute("aria-hidden")]);
+    const arrows = (primary: HTMLElement) => [...primary.querySelectorAll('[class*="_primaryArrow_"]')];
+    const ON_NEXT = [
+      ["下一步", true, null],
+      ["开始使用", false, "true"],
+    ];
+    const ON_FINISH = [
+      ["下一步", false, "true"],
+      ["开始使用", true, null],
+    ];
 
-  it("点下「开始使用」后按钮文案不换（换成更长的字会撑宽按钮、推走「跳过」），进行中的说法只给读屏", async () => {
-    await mount();
-    for (let i = 0; i < 3; i++) await click(button("下一步"));
-    const primary = button("开始使用");
-    let release: () => void = () => undefined;
-    vi.spyOn(launcher.actions, "finishFirstRun").mockImplementation(() => new Promise<void>((resolve) => (release = resolve)));
-    await click(primary);
-    expect(primary.getAttribute("aria-busy")).toBe("true");
-    expect(primary.textContent?.trim()).toBe("开始使用");
-    expect(primary.getAttribute("aria-label")).toBe("正在准备…");
-    act(() => release());
-    await flush();
+    it("从头到尾是同一颗按钮，底栏里不垫隐形的按钮：两条文案各一层叠着，到第四步、退回来只换当前层，箭头常驻", async () => {
+      await mount();
+      const primary = button("下一步");
+      expect(primaries()).toEqual([primary]);
+      expect(primary.dataset.face).toBe("next");
+      expect(faces(primary)).toEqual(ON_NEXT);
+      // 后置箭头在「下一步」时也挂着（样式表让它透明）：到第四步时淡入，不随步骤一帧出没
+      const arrow = arrows(primary);
+      expect(arrow).toHaveLength(1);
+
+      for (let i = 0; i < 3; i++) await click(button("下一步"));
+      expect(title()).toBe("挑一个你喜欢的样子");
+      expect(button("开始使用")).toBe(primary);
+      expect(primaries()).toEqual([primary]);
+      expect(primary.dataset.face).toBe("finish");
+      expect(faces(primary)).toEqual(ON_FINISH);
+      expect(arrows(primary)).toEqual(arrow);
+
+      await click(button("上一步"));
+      expect(title()).toBe("用什么账户进游戏");
+      expect(button("下一步")).toBe(primary);
+      expect(primary.dataset.face).toBe("next");
+      expect(faces(primary)).toEqual(ON_NEXT);
+      expect(arrows(primary)).toEqual(arrow);
+    });
+
+    it("第一步提交还没回来时原地转圈：仍是「下一步」那层，不换文案、不亮箭头", async () => {
+      await mount();
+      const pending: (() => void)[] = [];
+      ipc.overrides.set("complete_first_run", () => new Promise<null>((resolve) => pending.push(() => resolve(null))));
+      const primary = button("下一步");
+      await click(primary);
+      expect(primary.getAttribute("aria-busy")).toBe("true");
+      expect(primary.dataset.face).toBe("next");
+      expect(faces(primary)).toEqual(ON_NEXT);
+      expect(visibleText(primary)).toBe("下一步");
+      for (const resolve of pending) act(() => resolve());
+      await flush();
+      expect(title()).toBe("看看这台电脑上的 Java");
+      expect(primary.getAttribute("aria-busy")).toBeNull();
+      expect(button("下一步")).toBe(primary);
+    });
+
+    it("点下「开始使用」后按钮文案不换（换成更长的字会撑宽按钮、推走「跳过」），进行中的说法只给读屏", async () => {
+      await mount();
+      for (let i = 0; i < 3; i++) await click(button("下一步"));
+      const primary = button("开始使用");
+      let release: () => void = () => undefined;
+      vi.spyOn(launcher.actions, "finishFirstRun").mockImplementation(() => new Promise<void>((resolve) => (release = resolve)));
+      await click(primary);
+      expect(primary.getAttribute("aria-busy")).toBe("true");
+      expect(primary.dataset.face).toBe("finish");
+      expect(faces(primary)).toEqual(ON_FINISH);
+      expect(visibleText(primary)).toBe("开始使用");
+      expect(primary.getAttribute("aria-label")).toBe("正在准备…");
+      act(() => release());
+      await flush();
+    });
   });
 
   it("减少动画：换上来的一步只淡入，不带横移（根部只会把横移改成一步到位，旧步会先跳一下）", async () => {

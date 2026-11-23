@@ -27,11 +27,13 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 
 ### 分层与依赖方向
 
-依赖只能自上而下。同层的 crate 之间可以有依赖，但不能成环。外壳与 CLI 只依赖 `petalfall-core`（另外依赖 `petalfall-base`，用来取品牌常量和定位数据目录）。
+依赖只能自上而下。同层的 crate 之间可以有依赖，但不能成环。外壳与 CLI 只依赖 `petalfall-core`（另外依赖 `petalfall-base`，用来取品牌常量和定位数据目录）。版本先后、发布通道、数据格式号这些发布规则只在 `petalfall-release` 里实现一份，`petalfall-core` 把它整个转出（`petalfall_core::release`），读更新包的载荷头也经 core（`petalfall_core::data_format::package_info`），外壳不直接依赖 `petalfall-release` 与 `petalfall-setup-payload`。这两个 crate 只带不碰系统接口的依赖：打包工具在 Linux 上跑，安装引导程序（`app/src-tauri-setup`，直接依赖这两个 crate）在 Windows 上跑，与启动器用的是同一份规则。
 
 | 层 | crate | 职责 | 依赖 |
 | --- | --- | --- | --- |
 | L0 | `petalfall-base` | reqwest + rustls 客户端工厂、官方域名到 BMCLAPI 的镜像改写、流式 sha1 校验与原子写入（写完先 flush 再 sync，后台写失败照实报错，不把半截的临时文件改名成正式文件）、数据目录定位、指数退避重试、品牌常量 | 无 |
+| L0 | `petalfall-release` | 发布规则的唯一实现：版本先后（标准 semver 优先级，`order`）、版本所属的发布通道与通道快慢、数据格式号与记号文件的读法（`data_format`）、安装引导程序的判定表（`install_policy`）、换通道交接记录的格式（`handoff`）。全是不碰磁盘与系统接口的纯函数，启动器、安装引导程序与打包工具共用 | 无 |
+| L1 | `petalfall-setup-payload` | 首装引导程序的载荷格式：载荷头 `PFSETUP2` 的读写与定位（`locate`，`PFSETUP1` 只读），打包工具 `pack-setup` 与只读的 `inspect-setup` | release |
 | L1 | `petalfall-version` | 版本清单与版本 JSON 的模型、规则求值、`inheritsFrom` 继承合并、加载器识别；纯解析，不联网也不读写磁盘 | 无 |
 | L1 | `petalfall-auth` | 微软登录（设备码、XBL、XSTS、Minecraft 令牌）、离线账户、Yggdrasil 外置登录、DPAPI 凭据存储 | base |
 | L1 | `petalfall-java` | 本机 Java 探测（托管目录、手动添加、注册表 HKLM 与 HKCU、JAVA_HOME、常见目录、PATH）与识别缓存、单次 `java -version` 限时 10 秒、运行时完整性检查、按主版本挑选（跳过不完整的）、Mojang 托管运行时的清单与安装计划 | base |
@@ -41,7 +43,7 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 | L2 | `petalfall-modplatform` | Modrinth v2（组织信息走 v3 的 `/organizations`，v2 没有组织路由）与 CurseForge v1 客户端、聚合搜索、本地 Mod 扫描与元数据缓存、CurseForge 的 CDN 下载凭据与文件指纹 | base, download |
 | L2 | `petalfall-modpack` | 读取 `.mrpack` 与 CurseForge `.zip`，统一成一份清单；把覆盖文件安全地解压到实例目录；把导出清单写成 `.mrpack` 并回读校验 | instance, version |
 | L3 | `petalfall-launch` | 启动命令拼装（参数、classpath、natives、authlib-injector、Quick Play）、游戏进程管理、会话日志、崩溃判定与退出码对照、启动前提醒的判断 | base, auth, version, instance |
-| L4 | `petalfall-core` | 门面 `Petalfall`：配置、实例、安装、下载源计划、整合包导入与导出、受限文件认领、Mod 与历史、发现、Java、账户、启动、崩溃诊断、存档备份、新实例默认设置与开局 Mod、游玩统计、新闻、服务器状态、外观、自更新包的选源 | 以上全部 |
+| L4 | `petalfall-core` | 门面 `Petalfall`：配置、实例、安装、下载源计划、整合包导入与导出、受限文件认领、Mod 与历史、发现、Java、账户、启动、崩溃诊断、存档备份、新实例默认设置与开局 Mod、游玩统计、新闻、服务器状态、外观、自更新包的选源、更新通道偏好与见过的最高版本的存取、数据格式号的把关（数据目录、游戏目录、更新包的载荷头） | 以上全部（含 release、setup-payload） |
 | 外层 | `petalfall-cli` | 调试命令行，用于端到端冒烟 | core, base |
 | 外层 | `petalfall-tauri` | 桌面外壳 | core, base |
 
@@ -93,6 +95,10 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 新凭据一到手先落盘，再做后面的联网：微软 refresh token 换出来就写库，令牌链后面（XBL、XSTS）失败也不丢；外置刷新成功后先写令牌，再查会话服务器的角色档案。这两处写回都以库里还是换出它的那一份为条件，等回音期间用户重新登录过的话新登录优先。
 
 启动器开着时还会在后台提前续期（`Petalfall::renew_current_ahead`，由外壳的 `renew_ahead_in_background` 驱动）：打开时查一次，之后每 15 分钟查一次，当前账户是微软账户、没被判定要重新登录、Minecraft 令牌 30 分钟内到期时就续。令牌只有一天的有效期，令牌链又是串行的几次 HTTPS 往返，不提前续的话一天玩一次的人每次点启动都要先等几秒。外置账户不提前续：令牌有没有失效在本地看不出来，启动时无论如何要校验一次。后台续期与启动前、手动刷新排同一把续期闸，点启动时后台正在续，启动等它落盘后直接用新令牌；后台续不了只记日志，启动时照常再续，失败按上面的失败码报给玩家。提前量（`RENEW_AHEAD_WITHIN`）与检查间隔（`RENEW_AHEAD_CHECK_EVERY`）都在 `core/auth.rs`，编译期断言提前量大于间隔，两次检查之间令牌才不会过期；两边的判定都扣同一个 60 秒余量，互相抵消。
+
+后台改写了账户记录之后，门面发一条账户变更通知（`core/auth.rs` 的 `AccountChanges`，广播通道挂在门面上随快照共享），外壳开机时在任何后台续期之前订阅，转成 `petalfall://account-changed` 推给前端，负载是改了的账户 uuid（`events.rs` 的 `forward_account_changes`）。发通知的是界面不知情的三处：后台提前续期续成了，或把账户判成要重新登录；启动前的验证与续期联网改写了记录（续出新令牌、名字与皮肤，记下验证时刻，或落成失效）；启动时外置令牌校验有效，在后台顺带取一次角色档案，名字或皮肤变了才发。账户页的刷新、登录、切换与删除由界面发起，做完就重读，不发。前端收到后重读账户列表，并让这个账户的 `skin:<uuid>` 失效重取，档案后来取到的皮肤与改过的名字不必等手动刷新、重新登录或重启。
+
+启动时的那次档案同步（`sync_authlib_profile_in_background`）不在启动的关键路径上：校验通过、记下验证时刻就往下走，同步在独立任务里跑，取不到档案、写不回去都只记 warn。校验有效时不刷新令牌，不顺带取的话，登录时没取到档案的外置账户要等令牌失效才换上真皮肤。同步只改名字与皮肤，不碰状态与验证时刻：同步期间别处的刷新判了令牌失效，也不会被它改回正常。同一账户同一时刻只跑一份（`PROFILE_SYNCS`，键与续期闸相同），连着点几次启动不会叠出几个档案请求；它不排续期闸，慢吞吞的档案接口挡不住下一次启动。
 
 后台续期因网络或登录服务故障（`Http`、`ServiceUnavailable`）失败时，原错误留在进程里，排在它后面等闸的启动拿到闸后取走直接报，不再从头重试一轮：网络卡住时一轮带退避重试的令牌链要跑上一分钟，再来一轮玩家就要等两分钟，结论多半一样。只认启动开始排队之后才失败的那一次，更早的失败那时没人在等，启动照常自己续。排队期间被取消的启动，它留在闸前的那次续期拿到闸也不开始，不取走这个错误，留给后面还在等的启动。其余失败（凭据失效等）照常返回给外壳记日志。
 
@@ -155,6 +161,10 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 | `commands/error.rs` | 门面错误到 `{ code, message, detail? }` 的映射与错误码表 |
 | `commands/update_stall.rs` | 自更新下载的卡死判定：插件的逐块回调里记字节，`commands/updater.rs` 另起定时器来问，看满一个观察窗口后窗口内收到的字节低于下限即判卡住。卡死的连接不再触发回调，所以判定靠定时器，不靠回调 |
 | `commands/update_sources.rs` | 自更新包的多源下载规则：从清单平台条目的扩展字段 `x-sources`、`x-size` 解析候选源与大小上限（`package_plan`，含 https、主机白名单 `ALLOWED_SOURCE_HOSTS`、`github.com` 上本仓库 Releases 附件的路径前缀、源名、去重与条数上限的校验，大小压在与清单无关的硬上限 `MAX_PACKAGE_SIZE` 以内），判定一个源失败后记成哪一类、换不换源（`judge`），汇总全部已试源的失败（`sources_failed`）。逐个源下载的循环在 `commands/updater.rs`，排先后在 `petalfall-core` 的 `launcher_update.rs`，见下文「自更新的清单与下载源」 |
+| `commands/update_channels.rs` | 更新通道的纯判定：两把公钥的钥表（`channel_pubkey`，两个 `.pub` 文件经 `include_str!` 编进所有构建）、按偏好要问的通道（`followed_channels`）、生效的偏好与它和本包通道的关系、一个端点与一个通道的结果、整次检查的结论与跟随规则（`conclude`）、挑中别的通道的候选之前要不要先写下偏好（`must_save_preference`）。不发请求、不读配置 |
+| `commands/update_head.rs` | 清单头核验：不下载安装包，按通道的公钥验清单里签名串的全局签名与可信注释里的版本（`verify_head`）；config.json 里记下的见过的最高版本按通道逐项重验（`read_seen_entry`） |
+| `commands/update_slot.rs` | 自更新在一次会话里的槽位：各通道最近一次取清单的结果、候选、下好的包、本次会话被拒的版本、退出时安装、偏好代号与忙碌标记。只管内存里的状态与规则，拒绝时交回原因，错误码在 `commands/updater.rs` 定 |
+| `commands/update_package.rs` | 下好并验过签的更新包能不能交给安装程序：读载荷头，头读不出或头里的版本不是清单给的那一版按签名无效报，包认得的数据格式号比本版的小报 `update_data_too_new` 并记进被拒的版本（`judge_package`、`vet_download`） |
 | `facade.rs` | 门面的读写锁与快照规矩 |
 | `tasks.rs` | 长任务登记与取消（`TaskRegistry`）、前端任务表的持久化（`TaskJournal`） |
 | `events.rs` | 门面事件转发成 Tauri 事件 |
@@ -166,41 +176,115 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 | `drop.rs` | 主窗口原生拖放：在 WebView2 的子窗口上注册自己的 `IDropTarget`，读拖入的文件列表与 authlib-injector 服务器链接，经 `petalfall://window-drop` 推给前端 |
 | `renderer.rs` | 主窗口 WebView2 渲染进程退出或无响应时自动重载页面，60 秒内最多 2 次；用完即停下并记 error，之后安静满 60 秒才重新计数。停下后网页里的标题栏与关闭键都没了，关闭请求（Alt+F4、任务栏）由后端直接销毁窗口 |
 | `exit.rs` | 正常退出（`RunEvent::Exit`）时的收尾：游戏还在跑时先让会话日志落盘（限时 2 秒），再关上外置令牌轮换的闸、等进行中的轮换落盘（限时 3 秒），补写游玩记录里待补的改动（限时 3 秒）与主窗口状态（限时 1 秒），最后按需拉起更新安装程序。中间的令牌与游玩记录两步是 `persist_before_exit`，自更新拉起安装程序之前也走它 |
+| `data_gate.rs` | 启动时的数据目录关卡：读配置之前调 core 的 `check_data_root`，数据被更新的版本用过、记号读不懂或没能记下时，在建窗口之前弹系统对话框说明，`run()` 随即返回（见「磁盘布局」下的「数据格式号」） |
+| `channel_handoff.rs` | setup 里门面就位之后，消费一次安装引导程序留下的换通道交接记录，把更新通道偏好对上（见「自更新的清单与下载源」）。只在支持自更新的构建里做 |
 | `gpu.rs` | 经 DXGI 列出本机硬件显卡，看出 Windows 按高性能与省电偏好各挑哪一块（`gpu_adapters` 命令用）；Windows 10 1803 之前没有按偏好枚举，退回系统顺序且不标首选；非 Windows 为空 |
-| `single_instance.rs`（仅 Windows） | 同一数据目录只跑一个启动器：再次启动时把已有窗口叫到前台（`window.rs` 的 `front_on_second_launch`：先还原最小化，再取得焦点），新进程随后退出。占位与唤醒是同一个具名事件 `Local\Petalfall-<小写且反斜杠换成斜杠的数据目录>`：由系统保证只有一个进程创建成功，进程退出（包括崩溃）后系统回收，下一次启动不会被残留挡住；后来者对它 `SetEvent`，先来者的监听线程醒来叫窗口，事件自动复位，先来者还没开始监听时的那次唤醒留到开始监听时生效。叫到了前台，先来者再置应答事件（占位名后加 `|answer`，手动复位，在等的后来者都看得到），后来者看到才退出。还原与取得焦点是投递给事件循环的消息，窗口已销毁时照样报成功，所以叫完再读一次可见性，读到了才应答。先来者正在退出时（窗口已关，退出收尾还要落几秒盘）不应答，后来者每 100 毫秒看一次应答、试一次占位，等它退出、占位被系统回收后自己接手，启动器日志记下等了多久；先来者退出之前不接手，两个进程不能同时写一份数据。后来者只唤醒一次，不会应答的旧版本每收到一次唤醒都会抢一次焦点；唤醒前先清掉上一回的应答。等着的后来者里有一个接手后也置上应答，其余的由它的窗口兑现，不在它关掉之后各开一个。先来者退出时要拉起安装程序的（「退出时安装」），先置上应答打发走在等的后来者，安装完由安装程序重新打开落樱；后来者占到占位之后还要复查一次应答，免得先来者刚放过行就退出时被它抢先接手、挡住安装程序替换文件。先来者 15 秒（`TAKEOVER_WAIT`，用例核对它盖住退出收尾各段时限之和）内既不应答也不退出时，后来者同样退出，不留日志。按数据目录而不是按应用标识占位，两份便携版的数据互不相干，可以各开各的。占位在日志初始化之前执行（每次启动都开一份新日志、清掉最旧的，连点几下图标会把正在用的那份挤掉）；占位失败只记 error 日志、不拦启动，拦下来就是双击后什么都没有，而这只是少了一层防重复打开 |
+| `single_instance.rs`（仅 Windows） | 同一数据目录只跑一个启动器：再次启动时把已有窗口叫到前台（`window.rs` 的 `front_on_second_launch`：先还原最小化，再取得焦点），新进程随后退出。占位与唤醒是同一个具名事件 `Local\Petalfall-<小写且反斜杠换成斜杠的数据目录>`：由系统保证只有一个进程创建成功，进程退出（包括崩溃）后系统回收，下一次启动不会被残留挡住；后来者对它 `SetEvent`，先来者的监听线程醒来叫窗口，事件自动复位，先来者还没开始监听时的那次唤醒留到开始监听时生效。叫到了前台，先来者再置应答事件（占位名后加 `|answer`，手动复位，在等的后来者都看得到），后来者看到才退出。还原与取得焦点是投递给事件循环的消息，窗口已销毁时照样报成功，所以叫完再读一次可见性，读到了才应答。先来者正在退出时（窗口已关，退出收尾还要落几秒盘）不应答，后来者每 100 毫秒看一次应答、试一次占位，等它退出、占位被系统回收后自己接手，启动器日志记下等了多久；先来者退出之前不接手，两个进程不能同时写一份数据。后来者只唤醒一次，不会应答的旧版本每收到一次唤醒都会抢一次焦点；唤醒前先清掉上一回的应答。等着的后来者里有一个接手后也置上应答，其余的由它的窗口兑现，不在它关掉之后各开一个。先来者要拉起安装程序时（「退出时安装」与「立即安装」），在更新插件的退出前钩子里（`commands/updater.rs` 的 `before_installer_launch`，插件把包解成了才调它，随后拉起安装程序）置上应答打发走在等的后来者，安装完由安装程序重新打开落樱；解包失败、没过安装前的关卡时不置，「退出时安装」照常退出，后来者照常接手；后来者占到占位之后还要复查一次应答，免得先来者刚放过行就退出时被它抢先接手、挡住安装程序替换文件。先来者 15 秒（`TAKEOVER_WAIT`，用例核对它盖住退出收尾各段时限之和）内既不应答也不退出时，后来者同样退出，不留日志。按数据目录而不是按应用标识占位，两份便携版的数据互不相干，可以各开各的。占位在日志初始化之前执行（每次启动都开一份新日志、清掉最旧的，连点几下图标会把正在用的那份挤掉）；占位失败只记 error 日志、不拦启动，拦下来就是双击后什么都没有，而这只是少了一层防重复打开 |
 
 ### 自更新的清单与下载源
 
-每个通道一份权威清单，放在香港机的 `/srv/petalfall/updates/<通道>/latest.json`，经公网 HTTPS 对外。端点按版本号选（`UpdateChannel::of`），按固定顺序逐个问，前一个没给出清单才问下一个（见下文的检查清单）：
+每个通道一份权威清单，放在香港机的 `/srv/petalfall/updates/<通道>/latest.json`，经公网 HTTPS 对外。版本号的形状与通道一一对应，版本属于哪个通道由 `petalfall-release` 的 `Channel::of` 判出：没有预发布标识的是正式版，预发布标识的第一段是 `dev` 或 `beta`（后面只跟数字，不分大小写）的分别是预览版与测试版。启动器与安装引导程序用的是同一份规则。
 
-| 通道 | 端点（按顺序） | 哪些版本 |
-| --- | --- | --- |
-| dev | `https://petalfall.org/updates/dev/latest.json`（`DEV_ENDPOINT`），再是 GitHub 滚动预发布 `dev-build` 上的 `latest.json`（`dev_endpoint()`） | 预发布标识第一段是 `dev`（后面只跟数字）的版本 |
-| beta | `https://petalfall.org/updates/beta/latest.json`（`BETA_ENDPOINT`），只有这一个 | 预发布标识第一段是 `beta`（后面只跟数字）的版本 |
-| stable | `https://petalfall.org/updates/stable/latest.json`（`PRIMARY_ENDPOINT`），只有这一个 | 没有预发布标识的版本 |
+| 通道 | 界面上叫 | 端点（通道内按顺序问） | 哪些版本 | 验签公钥 |
+| --- | --- | --- | --- | --- |
+| dev | 预览版 | `https://petalfall.org/updates/dev/latest.json`（`DEV_ENDPOINT`），再是 GitHub 滚动预发布 `dev-build` 上的 `latest.json`（`dev_endpoint()`） | 预发布标识第一段是 `dev` 的版本，形如 `1.0.0-dev.42` | `.github/dev-updater.pub` |
+| beta | 测试版 | `https://petalfall.org/updates/beta/latest.json`（`BETA_ENDPOINT`），只有这一个 | 预发布标识第一段是 `beta` 的版本，形如 `1.0.0-beta.3` | `.github/release-updater.pub` |
+| stable | 正式版 | `https://petalfall.org/updates/stable/latest.json`（`PRIMARY_ENDPOINT`），只有这一个 | 没有预发布标识的版本，形如 `1.0.0` | `.github/release-updater.pub` |
 
-- 预发布标识的第一段既不是 `dev` 也不是 `beta`（`rc`、`alpha` 等）时，`UpdateChannel::of` 认不出通道，判为不支持自更新，原因是 `unknown_channel`（见「装配与状态」的启动器更新一条），一个端点都不问。认不出就关掉，不落到 stable：落到 stable 的话，这样的包会去问正式版的清单。关于页的通道标签另由 `app/scripts/build-info.mjs` 推出，预发布标识同样只认 `dev`、`beta`，别的标识在构建时直接报错，所以 CI 出不了这种包，`unknown_channel` 只是兜底。两边只在不带预发布标识的 0.x 版本上不同：build-info 算预览版（还没有发过正式版），启动器按 stable 判。这种版本号只出现在本机构建里，本机构建不带更新公钥，自更新本来就不可用。
+- 快慢次序是 dev 最快、beta 其次、stable 最慢（`Channel::is_faster_than`）。版本号的基础号取自 `app/src-tauri/tauri.conf.json` 的 `version`，发布流水线要求它形如 X.Y.0、主版本至少为 1；同一基础号下 semver 恒有 `X.Y.0-beta.M < X.Y.0-dev.N < X.Y.0`：预发布标识按字母比，beta 排在 dev 前面，后面的序号再大也没用。所以「预览版不低于测试版、测试版不低于正式版」不会自然成立，靠发布流水线的版本先后检查挡住违规的构建（见下文的发布链路），客户端另有跟随规则兜底（见下文）。
+- 预发布标识的第一段既不是 `dev` 也不是 `beta`（`rc`、`alpha` 等）时认不出通道，判为不支持自更新，原因是 `unknown_channel`（见「装配与状态」的启动器更新一条），一个端点都不问。认不出就关掉，不落到 stable：落到 stable 的话，这样的包会去问正式版的清单。关于页的通道标签另由 `app/scripts/build-info.mjs` 推出，预发布标识同样只认 `dev`、`beta`，别的标识在构建时直接报错，所以 CI 出不了这种包，`unknown_channel` 只是兜底；没设 `PETALFALL_OFFICIAL_BUILD` 的本机与 fork 构建标成 `local`，关于页写「本机构建」，不按版本号推。
 - 清单端点不探测，也不看「文件下载源」设置：清单只有几百字节，测速省不下时间，反倒多一轮请求。dev 清单先问香港机，国内连 GitHub 常常不通。
 - dev 清单在香港机与 GitHub 两处发布，是同一个文件、字节相同：dev.35 及更早的客户端只认 GitHub 那一份。
 - beta 清单只认香港机这一处，不设 GitHub 后备。清单本身不签名，而 GitHub Releases 能被 dev 的 `publish` 作业与 CLA 作业改写（两者都有 `contents: write`）；只有一个来源时，香港机挂了只是暂时收不到更新，不影响启动和游戏，出了坏版本也只要撤这一处。这个地址编进了每个测试版，要长期保持可用。每版的预发布 `v<版本>` 上也附一份 `latest.json`，客户端不读它。
 - dev 与 beta 两个通道由 CI 发布：dev 经 `.github/workflows/dev-build.yml`（见下文的发布链路），beta 经 `.github/workflows/beta-release.yml`。stable 还没有发布链路。
 
+**按偏好问哪几个通道。** 本机存一个更新通道偏好（存法见下文「通道偏好与交接记录」），没选过时等于安装包自己的通道。每次检查只问偏好通道和比它慢的通道（`followed_channels`），各通道的清单与安装包只用这个通道的公钥验：
+
+| 偏好 | 问哪些清单 | 验签公钥 |
+| --- | --- | --- |
+| dev | dev（先香港机，再 GitHub `dev-build`）、beta、stable | dev 清单用 `.github/dev-updater.pub`，beta、stable 清单用 `.github/release-updater.pub` |
+| beta | beta、stable | `.github/release-updater.pub` |
+| stable | stable | `.github/release-updater.pub` |
+
+- 比偏好快的通道一律不问：偏好是用户要的最快那条线，更快通道的版本不该自己找上门来。更慢的通道都问：正式版发布时测试版用户要拿得到它；快通道停发或撤回、慢通道有更高的版本时也要跟得过去。
+- 两把公钥由 `commands/update_channels.rs` 的钥表（`channel_pubkey`）经 `include_str!` 无条件编进所有构建，不加构建开关。每个检查器都显式设上所问通道的那一把，插件下载后验签用的也是它，不沿用插件配置里注入的那一把：注入的只属于本包的通道，跟随别的通道时拿它验必然对不上。发布钥同时管测试版与正式版，所以偏好预览版的用户也会用它验跟随来的测试版、正式版的包。
+- 能不能自更新多一条判断：注入的 `plugins.updater.pubkey` 去掉首尾空白后必须等于钥表给本包通道的那一把，否则判为不支持，原因是 `pubkey_mismatch`。fork 构建注入了自己的公钥、却没换两个 `.pub` 文件时就是这样；本机构建不注入公钥，照旧是 `missing_pubkey`。编进去的两把都不会让它们能自更新。
+
+**清单头核验**（`commands/update_head.rs` 的 `verify_head`）。清单本身不签名，但本平台条目的 `signature` 是安装包的 minisign 签名，其中的「全局签名」只盖住 64 字节的文件签名与可信注释，不盖安装包，凭公钥就能验；CI 签名时把版本写进可信注释（见下文的发布链路）。所以每个给出清单的端点都当场核验它的清单头（清单的 `version` 加本平台条目的签名串），不用下载安装包：
+
+1. 形状：`version` 按通道规则判出的通道就是所问的通道。测试版与正式版共用一把钥，只看签名分不出别的通道的合法包被放进了这份清单。
+2. 签名：签名行的密钥号等于这个通道公钥的密钥号；用这把公钥验得过全局签名；验过之后，可信注释里恰好有一个 `version:` 字段，按 semver 等于清单的 `version`。
+
+任何一条不过，这个端点算清单异常，记 error 日志，问通道内的下一个端点。验过的清单头说明这个版本号确实由这个通道的钥签发过、形状又属于这个通道：伪造的高版本号进不了界面，也记不进见过的最高版本。清单里的 `notes`、`pub_date` 仍未签名，只作显示。
+
+**见过的最高版本。** 每次取清单结束，某个通道验过的清单头高于本机记录（或记录缺失、作废）时，记进 `config.json` 的顶层键 `seen_update_versions`，形如 `{"beta": {"version": "1.0.0-beta.4", "signature": "<清单里原样的签名串>"}}`，没见过的通道不写。每次检查只读这次要问的那几个通道的项，逐项按上面两条重验（`read_seen_entry`）：某一项不过只废这一项，当这个通道没有记录、记 error 日志，下次取到这个通道的清单时覆盖；整个值不是对象时当作都没有记录，同样记 error 日志，下次写入时换成新对象；不认识的通道键与这次没问的通道的项原样写回。所以本机程序只能把记录删掉或改低，改不高。写不进去只记 error 日志，不挡检查与下载，这次照样用内存里验过的清单头判定。正在运行的版本不并进这份记录：手动安装的包没经过更新公钥校验，一个带官方公钥、版本号夸大的非官方构建跑一次，就会把真实的更新全部冻住。
+
+**端点与通道的结果**（`EndpointOutcome`、`ChannelOutcome`）。验过的清单头低于这个通道见过的最高版本时，多半是回放的旧清单：这个端点判为旧于本机记录，记 warn 日志，接着问通道内的下一个端点。回放旧清单压不低本机记录，也就引不到更旧的版本；等于记录的照常可用。一个通道这次的结果是下面四种之一，连同验过的版本与清单里的发布时间记进 `updater_info` 的 `channel_heads`（整次检查失败时也记）：
+
+| 结果 | 什么时候 |
+| --- | --- |
+| `published` | 某个端点给出了验过、且不低于本机记录的清单头，以第一个为准 |
+| `not_published` | 所有端点都确认 404：这个通道还没有发布。正式版首发之前就是这样，不算失败 |
+| `stale` | 每个端点都给出了清单头，且全都低于本机记录 |
+| `failed` | 其余情形，含清单异常；有端点失败或 404、其余端点低于本机记录的也算，没给出清单的那个端点上说不定有更新的版本 |
+
+**整次检查的结论**（`conclude`）：
+
+- 偏好通道 `failed` 报 `update_check_failed`（`detail` 的形状见下文的检查清单）；偏好通道 `stale` 报 `update_source_stale`，`detail` 是 `{ channel, offered: [{ endpoint, version }], seen }`，界面不说已是最新。两种都是整次失败，候选与已下好的包不动，也不看更慢的通道：偏好通道的清单被挡住时拿慢通道的结果顶上，挡清单的人就能把用户带去慢通道。
+- 更慢通道的 `failed`、`stale` 只记 warn 日志，那个通道这次没有候选。
+- 其余情形在 `published` 的通道里挑候选：要严格新于当前版本、不低于本机记下的那个通道的最高版本、满足下文的跟随规则、不在本次会话被拒的版本里，取余下里版本最大的那个；不同通道的版本号形状不同，不会并列。挑不出时，偏好通道 `published` 为已是最新，`not_published` 为还没有发布（不算失败，处理同下文检查清单里的 404）。
+
+**跟随与「等它追上来」。** 生效的偏好与本包通道的关系（`updater_info` 的 `relation`）有三种：`same`，偏好就是本包的通道；`waiting`，偏好更慢，例如预览版用户选了测试版；`following`，偏好更快，例如测试版用户跟随装上了正式版的包。
+
+- 跟随须核心号前进：关系是 `same` 或 `following`、而候选来自比本包更慢的通道时，它的核心号（去掉预发布段的 X.Y.Z）必须大于当前版本的核心号，否则不当候选，记 warn 日志。同一基础号下正式版按 semver 最大，没有这一条，预览版清单被冻住、或发版漏了先抬基础号时，偏好预览版的用户会被「升级」到核心号相同、内容却更旧的正式版。例外是测试版跟随同号正式版：正式版与本基础号最后一个测试版的源码相同。
+- 等它追上来（`waiting`）不受这一条约束：用户已经选了接受慢通道的内容。后台照常按偏好检查，不问本包所在的更快通道，不下载、不重装、不动数据。同一基础号下测试版总低于预览版（`1.0.0-beta.999 < 1.0.0-dev.1`），所以从 `1.0.0-dev.N` 换到测试版的人，要等到正式版 `1.0.0` 发布才会收到候选，期间收不到任何更新；装上之后本包的通道变成慢通道，等待自然结束。
+- 候选来自别的通道、而偏好是缺省（键不存在、为 `null` 或认不出）时，同一次检查里先把偏好写成本包当时的通道，再报有更新（`must_save_preference`）：不写的话，测试版用户跟随装上正式版之后本包的通道变成正式版，缺省的偏好跟着变，他会悄悄成为正式版用户，再也收不到下一班测试版。写之前在门面的写锁里确认偏好仍是缺省，检查期间用户选过就不写；写不进去时把这一版记进本次会话被拒的版本（原因 `preference_unsaved`），在其余候选里再挑；同一次检查里不再重写，再挑出别的通道的候选也照样记进被拒的版本，最后挑出的要么来自本包的通道，要么没有候选。
+
+**代号与忙碌标记**（`commands/update_slot.rs`）。`set_update_channel` 只收 `dev`、`beta`、`stable`，别的报 `invalid_argument`；有下载或安装在进行时报 `update_busy`，什么都不写。它先把偏好写进配置，写成之后生效值变了才动槽位：偏好代号加一，清掉按旧偏好得来的候选、已下好的包、`channel_heads` 与原因为 `preference_unsaved` 的被拒记录，关掉「退出时安装」。生效值没变时只写盘；写不进配置时报错，槽位不动。先清槽位再写配置的话，夹在两步之间开始的检查会拿着新号读到旧偏好。检查与下载开始时取号，落槽位时号变了就什么都不落，报 `update_superseded`，前端据此作废这次检查。下载与安装进行中置上忙碌标记，这期间再开一次下载、立即安装、改偏好都报 `update_busy`；退出时安装占不到这个标记（「立即安装」正在落盘，或还在下载）就不装，只记 warn 日志。立即安装与退出时安装都先过同一道关卡（`installable`）：槽位里要有下好的普通更新包，版本又严格新于正在运行的版本，否则报 `update_not_ready`，不交给安装程序；退出路径上没有前端，没过只记 error 日志。
+
+**下载验签之后读包头**（`commands/update_package.rs`）。插件下载并验签、交回字节之后，收进槽位之前，经 core 的 `package_info` 读包里的载荷头（格式见「装配与状态」的启动器更新一条）。更新包就是引导程序本身，载荷头在签名的覆盖范围里，读出的内容可信：
+
+- 头读不出，或头里的版本不是清单给的那一版：报 `update_signature_invalid`，立即停。字节已验过签，换个源下到的也是同一份。
+- 包认得的数据格式号比本版的 `DATA_FORMAT` 小（不带这个号的旧包按 0 算）：装上读不了现有数据。丢掉字节，报 `update_data_too_new`，`detail` 是 `{ version, channel }`；本次会话把这一版记进被拒的版本（原因 `data_too_new`），之后的检查不再把它当候选。
+
+两种都要在交给安装程序之前判：交出去之后插件会拉起引导程序并结束启动器，引导程序再拦下，用户回到落樱，下一轮检查又是同一版，绕成一个圈。清单里没有数据格式号，被挡只能在下载验签之后才知道，所以被挡的版本每个会话会白下一次包；按发版规矩正常发出的版本不会撞上这道关。
+
+**通道偏好与交接记录。** 偏好存在 `config.json` 的顶层键 `update_channel`，取值 `dev`、`beta`、`stable`，键不存在表示按安装包自带的通道。它与 `seen_update_versions` 都按原样的 JSON 值收下（`PetalfallConfig` 里是 `Option<serde_json::Value>`，缺省时不写出），不登记进 `ENUM_FIELDS`：整份配置按类型严格解析，声明成有类型的字段的话，值写成数字、对象这类对不上的类型，整份 `config.json` 就会被改名重置，游戏目录登记和首次启动状态跟着丢。所以值认不出只影响这一项：本次按安装包的通道走，记 warn 日志，原值留在配置里随整份写回。读写都经 core 的 `update_prefs` 模块，不走 `update_config`。偏好只在三种时候写：
+
+- 用户在「设置 · 关于」的更新卡上选，经命令 `set_update_channel`；
+- 检查挑中别的通道的候选、偏好又是缺省时（见上文的跟随）；
+- 消费安装引导程序留下的交接记录。
+
+不在启动时顺手写：首次运行时还没有 `config.json`，启动就写会提前把它建出来，而引导程序判断卸载留下的目录算不算数据，看的正是它在不在。卸载时勾了「删除应用程序数据」，偏好随 `config.json` 一起删。
+
+交接记录让偏好跟上手动换通道的安装：用户在安装引导程序的「换到{通道}」页上亲手确认时，引导程序写 `%LOCALAPPDATA%\Petalfall-Setup\channel-handoff.json`，内容形如 `{"channel": "beta", "version": "1.0.0-beta.5", "written_at": 1794000000}`（`written_at` 是 Unix 秒，只进日志）；结构与文件名在 `petalfall-release` 的 `handoff`，读写两端用同一份。启动器在 setup 里、门面就位之后同步消费一次（`channel_handoff.rs`），只在支持自更新的构建里做，开发构建不碰这台机器上正式安装留下的记录：
+
+| 记录 | 动作 |
+| --- | --- |
+| 不存在 | 什么都不做 |
+| 读不懂：不是约定形状的 JSON，`channel` 不是三个通道名之一，或 `version` 不是合法版本号 | 删掉，记 warn 日志 |
+| `version` 与本程序的版本不同 | 删掉，记 info 日志：装失败，或之后又装了别的版本，记录自然作废 |
+| `version` 与本程序的版本相同 | 偏好写成 `channel`（覆盖任何已有的值），写成之后删掉记录；写不进去时留着记录、记 error 日志，下次启动再试 |
+| 读不出来（被占用、没有权限） | 留着，下次启动再看 |
+
+删不掉只记 warn 日志，下次启动再处理。哪一步出错都不拦启动：最坏是偏好没跟上，用户还能在设置里自己选。
+
 检查清单（`commands/updater.rs` 的 `fetch_conclusion`，`check_update` 与下载前的重查共用）：
 
-- 每个端点各建一个只问它的检查器（`manifest_checker`），由 `check_in_order` 按上表的先后逐个问；签名公钥、`requireSignedVersion` 与版本比较照旧由插件状态带上。不把几个端点一次性交给插件：插件 2.12.0 遇到 2xx 而正文读不出（不是 JSON、读到一半断开、撞上总时限）时直接返回错误，清单里没有本平台的条目时也不再问下一个端点；非 2xx 只打一行不带地址与状态码的日志、不记成错误，最后只报最近记下的那一个错误。那样香港机的清单一坏，GitHub 上字节相同的那份就问不到，香港机回的状态码也进不了 `detail`。
-- 某个端点给出了清单（有新版本，或已是最新）就以它为准，后面的端点不再问，前面没给出清单的端点也不再追问状态码。端点回 204 时插件直接当作已是最新，同样到此为止。
-- 其余结果都记下、接着问下一个：连不上、超时（每个端点的总时限是 `CHECK_TIMEOUT`，10 秒）、非 2xx、2xx 而正文读不出、清单不成形、没有本平台的条目。
-- 一个端点都没给出清单时，回了非 2xx 的端点各再 GET 一次读状态码：插件把非 2xx 报成不带状态码的 `ReleaseNotFound`，503、403 这类服务器故障也是这个样子。这次 GET 用 `petalfall_base` 的 HTTP 客户端，不经插件，只读状态码。全部端点都答 404 才算这个更新源上还没有发布，不算失败（见「装配与状态」的启动器更新一条）；否则报 `update_check_failed`。
-- `update_check_failed` 的 `detail` 总有 `endpoints`（问的先后）与 `attempts`。`attempts[i]` 是 `{ endpoint, status?, network?, message, causes? }`：`status` 只出现在回了非 2xx、再 GET 问出了状态码的端点上，答 404 时 `message` 是「更新服务器上没有这份清单」，答别的状态时是「更新服务器返回了异常状态」；`network` 是败在网络层的种类；`causes` 是原因链，为空时不写。
-- 只问一个端点（beta、stable）时，除了多出 `attempts`，形状与逐端点检查之前一致：`message` 是那个端点的原文，状态码在 `detail.status`，原因链在 `detail.causes`。问多个端点（dev）时 `message` 逐行写成「端点：原文」，问出状态码的那行末尾带「（状态码）」，顶层不放 `status` 与 `causes`：前端 `describeError` 会把 `detail.status` 补在整段 `message` 的末尾，多个端点时分不清是哪个的。
+- 要问的几个通道同时问，通道内按上表的先后逐个问端点。每个端点各建一个只问它的检查器（`check_checker`）；外壳代码里只有它底下的 `channel_builder` 调插件的 `updater_builder()`，设上所问通道的公钥，沿用插件客户端的配置与单端点的时限，比较器也只设在 `check_checker` 上（`commands/updater.rs` 的单测按源码钉住）。比较器按 semver 优先级比（`compare_versions`，与挑候选时判「比当前新」是同一个比较），清单版本严格新于当前版本才为真，只差构建元数据的两个版本算同一版；返回之前把插件交来的清单记下：插件只为比较器返回真的版本造出更新，自动更新这条路上仍然只认比当前新的版本；比当前旧的清单头也拿得到，用于核验、见过的最高版本与等待中的显示。`requireSignedVersion` 照旧由插件状态带上。不把几个端点一次性交给插件：插件 2.12.0 遇到 2xx 而正文读不出（不是 JSON、读到一半断开、撞上总时限）时直接返回错误，清单里没有本平台的条目时也不再问下一个端点；非 2xx 只打一行不带地址与状态码的日志、不记成错误，最后只报最近记下的那一个错误。那样香港机的清单一坏，GitHub 上字节相同的那份就问不到，香港机回的状态码也进不了 `detail`。
+- 某个端点给出了验过、且不低于本机记录的清单头就以它为准，这个通道后面的端点不再问，前面没给出清单的端点也不再追问状态码。插件回「没有更新」时分两种：比较器记下了清单（清单版本不比当前新），照常核验；没记下，是端点回了 204：插件不读正文、也不调比较器，记成这个端点失败（`status` 为 204），问下一个。
+- 其余结果都记下、接着问下一个：检查器建不起来、连不上、超时（每个端点的总时限是 `CHECK_TIMEOUT`，10 秒）、非 2xx、2xx 而正文读不出、清单不成形、没有本平台的条目、清单头核验不过、旧于本机记录。
+- 一个通道的端点都没给出可用的清单头时，回了非 2xx 的端点各再 GET 一次读状态码：插件把非 2xx 报成不带状态码的 `ReleaseNotFound`，503、403 这类服务器故障也是这个样子。这次 GET 用 `petalfall_base` 的 HTTP 客户端，不经插件，只读状态码。全部端点都答 404 才算这个通道还没有发布，不算失败（见「装配与状态」的启动器更新一条）；否则这个通道算 `failed`，是偏好通道时报 `update_check_failed`。
+- `update_check_failed` 说的是偏好通道，`detail` 总有 `channel`（偏好通道）、`endpoints`（问的先后）与 `attempts`。`attempts[i]` 是 `{ endpoint, status?, network?, message, causes? }`：`status` 只出现在回了 204 的端点（直接记 204）与回了非 2xx、再 GET 问出了状态码的端点上，答 404 时 `message` 是「更新服务器上没有这份清单」，其余状态（含 204）是「更新服务器返回了异常状态」；`network` 是败在网络层的种类；`causes` 是原因链，为空时不写。
+- 偏好通道只有一个端点（beta、stable）时，除了多出 `channel` 与 `attempts`，形状与逐端点检查之前一致：`message` 是那个端点的原文，状态码在 `detail.status`，原因链在 `detail.causes`。有多个端点（dev）时 `message` 逐行写成「端点：原文」，问出状态码的那行末尾带「（状态码）」，顶层不放 `status` 与 `causes`：前端 `describeError` 会把 `detail.status` 补在整段 `message` 的末尾，多个端点时分不清是哪个的。
 - `detail.network` 只在所有端点都败在网络层时才给：全是超时为 `timeout`，否则为 `connect`；再 GET 一次时连不上也算败在网络层。有一个端点回了状态码，或败在正文与格式上，就不给。
-- 建检查器本身失败是本机的问题，一个端点都不问，直接报 `update_check_failed`，`detail` 只有 `endpoints` 与有才写的 `network`、`causes`，没有 `attempts`。
+- 检查器是每个端点各建一个，建不起来（本机的问题）只记成那一个端点失败，进 `attempts`，接着问下一个端点；所有端点都没给出可用的清单头时照上面的规则报错。
 
 清单是插件 2.12.0 的标准格式，平台条目里多两个扩展字段；插件和旧客户端都忽略多余的键（插件的清单结构没有 `deny_unknown_fields`）。以 dev 通道为例（`<VERSION>` 是版本号，`<RUN_ID>` 与 `<RUN_ATTEMPT>` 是 CI 这次运行的运行号 `GITHUB_RUN_ID` 与重跑序号 `GITHUB_RUN_ATTEMPT`）：
 
 ```json
 {
-  "version": "0.1.0-dev.N",
+  "version": "1.0.0-dev.N",
   "notes": "...",
   "pub_date": "...",
   "platforms": {
@@ -290,14 +374,23 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 - 已试的源全败在网络层（`connect` 或 `timeout`）时给 `detail.network`：全是 `timeout` 报 `timeout`，否则报 `connect`；有一个源败在别处就不给。
 - 只试了一个源时 `message` 就是那个源的原文，原因链另放一份在 `detail.causes`（为空不写），与多源下载上线前相同；试了多个时 `message` 逐行写成「cn：原文」，不写 `detail.causes`，原因链各自留在 `detail.sources[i].causes`，混在一起就分不清是哪个源的底层原因。
 
-dev 的发布链路在 `.github/workflows/dev-build.yml` 里：自托管机上的 `build` 只构建，之后拆成 `publish` 与 `publish-hk` 两个作业，都跑在 GitHub 托管机（`ubuntu-24.04`）上，自托管的构建机不碰任何发布凭据。`publish` 取 `build` 传出的引导程序与 NSIS 包，依次：
+两条流水线都在编译之前读出各通道真正发布过的最高版本，据此做版本先后检查与数据格式号的检查，构建之后再从产物读回载荷头与内嵌的公钥核对。共用的脚本是 `.github/scripts/release-heads.mjs`，只用 node 自带模块、全局 `fetch` 与 `git`，取网络与跑 git 的函数可以注入，测试不联网；给 shell 读的输出一行一条、字段用 tab 分隔，检查不过时打 `::error::` 并以非零退出。子命令：
+
+- `read`：读出各通道已发布的最高版本，写成 heads 文件，形如 `{"dev": {"version": "1.0.0-dev.57", "source": "hk"}, "beta": {"version": "1.0.0-beta.3", "source": "release:v1.0.0-beta.3"}, "stable": null}`，`source` 取 `hk`、`dev-build` 或 `release:<tag>`。只采信用该通道公钥验得过签名的清单或 Release 附件，tag 名只用来定位。一份清单算验过：取 `platforms.windows-x86_64.signature`，签名的密钥号等于该通道公钥的，全局签名验得过，可信注释里恰好一个 `version` 与一个 `file`；`version` 是该通道的形状、等于清单正文的 `version`，来自 `v*` Release 时还等于 tag 去掉开头的 `v`；`file` 等于 `Petalfall-Installer-<version>-x64.exe`。先读香港清单（dev 再加 `dev-build` 上那一份），得到香港这一处验过的版本；beta、stable 再用匿名的 `git ls-remote` 列出本通道形状（主版本至少为 1）、高于它的 `v*` tag，从高到低取那个 Release 上的 `latest.json`，取到第一个验过的就停，正常情况下一个 Release 都不用取。伪造的 tag、乱写的清单都抬不高也压不低结果，最多让构建失败。香港清单 404、Release 上没有 `latest.json` 算这一处没有；Release 上的附件验不过、或正文超过 64 KiB，记 warning 跳过，接着取下一个。其余取不到的情形都让构建失败：香港清单回了 200 却验不过或超过 64 KiB（与 `put-manifest` 收清单的上限相同），回了 404 以外的非 2xx，重试 3 次仍连不上；Release 下载回了 404 以外的非 2xx 或连不上；某个通道有来源回了清单，却一处都验不过。跳过会让结果偏低，低出来的结果会放行本该挡住的版本。
+- `gate`：版本先后检查。预览版的包：基础号形如 X.Y.0、主版本至少为 1；高于已发布的测试版与正式版；核心号等于三个通道已发布的最高核心号，或者是它的后继 X.(Y+1).0、(X+1).0.0。基础号一次只能抬一格：把 1.1.0 手误写成 1.10.0 的版本一发出，所有更快通道的用户都会接收，只能往前修；补丁段留给正式版补丁。测试版的包：低于已发布的预览版（预览版还没有验得过的发布时不比，打 notice）；核心号高于已发布的正式版；基础号形如 X.Y.0、主版本至少为 1。
+- `data-format`：数据格式号不倒退。`crates/petalfall-release/src/data_format.rs` 里的 `DATA_FORMAT` 不能小于本通道上一次发布的那个提交里的值：dev 取 `dev-build` tag 所指的提交，beta 取 `v<已发布的最高测试版>` 所指的提交；tag 不存在、或那个提交里还没有这个文件时跳过，打 notice。测试版另查一条：dev 第一父链上第一次把号改成现在这个值的提交，必须是 HEAD 的祖先，dev 上找不到这个提交同样失败。加号的提交只能随晋级合并进入测试版：单独摘进 beta 的是摘出来的新提交，dev 上那个提交不在 HEAD 的历史里。
+- `payload`：核对 `inspect-setup` 从引导程序读回的载荷头：magic 是 `PFSETUP2`，版本等于本包，`data_format` 等于源码里的 `DATA_FORMAT`，`caps` 第 0 位为 1。源码里的常量按行匹配 `pub const DATA_FORMAT: u32 = <正整数>;` 这种写法，必须恰好命中一行：改了写法 CI 会挂，不会悄悄跳过。
+
+这些都是防手误的闸，不是安全边界。真正挡住读不了本机数据的包的，是启动器下载验签之后读包头，与安装引导程序的数据格式关。
+
+dev 的发布链路在 `.github/workflows/dev-build.yml` 里：先在 GitHub 托管机（`ubuntu-24.04`）上跑 `release-heads` 作业，算出 dev 版本号（基础号加 `-dev.<运行序号>`），依次跑 `read`、`gate dev`、`data-format dev`。它只读、不挂环境、不引用任何机密与仓库令牌，时限 10 分钟：检查不过时不用先白编十几分钟，也不放在内网自托管机上，那台机器不该多一条外网依赖。dev 每次推送都发布，没有只打 notice 的演练。`build` 要等它通过，把它交出的版本号原样写进安装包，发出去的就是查过的那一个。自托管机上的 `build` 只构建：构建首装引导程序时 Rust 测试跑 `-p petalfall-setup-payload -p petalfall-release`，之后紧接着无条件「核对载荷头」（`inspect-setup` 读回四项，交给 `release-heads.mjs payload`）与「核对内嵌的更新公钥」（在 `Petalfall.exe` 里逐把找两个 `.pub` 文件去掉首尾空白后的内容，缺一把就失败：构建缓存里旧的编译产物没随 `.pub` 文件重编时，包里缺了哪一把，偏好那个通道的用户就收不到更新）。之后拆成 `publish` 与 `publish-hk` 两个作业，都跑在 GitHub 托管机（`ubuntu-24.04`）上，自托管的构建机不碰任何发布凭据。`publish` 取 `build` 传出的引导程序与 NSIS 包，依次：
 
 1. 版本号不倒退：GitHub 与香港机上已发布的清单都要比，新客户端先读香港那份；预发布上还没有 `latest.json`、香港机上还没有清单（404）时各自跳过，读香港清单连不上或回了 200、404 以外的状态时失败（见下文的停发）。这一步排在签名与上传之前：会在这里失败的运行（运行序号被重数，或整体重跑了已发布的运行）不该先往三个桶各传两个包、再跨境读回一遍，传上去的对象还会留在一个新目录里。检查之后要隔着上传与读回才重建预发布，这段时间别的运行改不了预发布：重建只在 `publish` 里做，各运行的 `publish` 在同一个并发组里串行（见下文的并发）。与已发布的版本相同也在这里停下，报错按情形给出走得通的补法：
    - GitHub 上已是这个版本，而这是本运行的第一次尝试：发布它的是另一个同号的运行，运行序号被重数了（工作流改名或重建），dev 包不会更新过去。
    - GitHub 上已是这个版本，不是第一次尝试，香港也已是这个版本：本运行在之前的尝试里已经发布完，这次整体重跑（Re-run all jobs）多余，不用再补。
    - GitHub 上已是这个版本，不是第一次尝试，香港落后或还没有清单：之前那次尝试重建了预发布、没推上香港，接着被整体重跑。`build` 已重编并覆盖了引导程序产物，`publish-hk` 读回 GitHub 一般会对不上；这次尝试里失败的又是 `publish`，再点 Re-run failed jobs 也只会在这里再停一次。这次运行补不了香港：往 dev 推新提交出新版本，或者手工把发布过的那次尝试留下的 `latest.json` 产物（与预发布上的 `latest.json` 字节相同，产物保留 14 天）推到香港。
    - 只有香港上已是这个版本：运行序号被重数，或推送香港之后预发布被手工删改过。
-2. 给引导程序签名（`tauri signer sign --app-version`），再按仓库里的公钥验签。
+2. 给引导程序签名，再按仓库里的公钥验签。签名用的 Tauri CLI 按锁文件取：`.github/scripts/locked-cli.mjs` 从 `app/pnpm-lock.yaml` 读出锁定版本的 `@tauri-apps/cli` 与 Linux 原生绑定 `cli-linux-x64-gnu` 两条 integrity，只下这两个 tarball，核对 integrity 后直接解开，不执行任何脚本；这一步不拿私钥。之后才在持钥的那一步跑 `signer sign --app-version`。持钥的作业里不跑 `npm exec`、`pnpm install` 这类包管理器：它们按 registry 当下给的元数据取包，还会跑安装脚本，拿到的不一定是锁文件里那一份。beta 的 `sign` 作业用同一个脚本取 CLI。
 3. 上传：引导程序与 NSIS 包按同一个对象键 `dev/<VERSION>-<RUN_ID>-<RUN_ATTEMPT>/<文件名>` 传进三个桶（`.github/scripts/upload-to-mirrors.sh`，aws-cli 2 的 `s3api put-object`，带 `Content-MD5`，`Cache-Control` 标一年、immutable）。键里带运行号与运行次数（工作流传 `$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT`）：`dev/` 下的对象不能覆盖（各桶的保护范围见上文），重跑时运行次数加一、换一个目录，不会撞上上次传了一半的对象；运行号对 dev 不是必需的，是与 beta 共用的键规则（见上文）。`put-object` 报错时（例如服务端已经写成、响应却在跨境路上丢了，aws-cli 自动重试同一个键，撞上不能覆盖的对象），按客户端会用的公网地址匿名读回（同样经 `check-download.sh`），大小与 sha256 和本地一致就算已传上，否则失败：不靠凭据去查，OSS 的凭据只能写，OSS 的 S3 兼容层与 R2 对「已存在」各报什么码也核实不了，比字节不依赖错误码。排在签名之后，传上去的就是最终发出去的字节。
 4. 读回三个桶：不带凭据、按客户端会用的公网地址下载，比对大小与 sha256（`.github/scripts/check-download.sh`）。公共读没开、自定义域名配错时上传照样成功，只有这一步看得出来。
 5. 生成清单并从文件读回校验（`.github/scripts/dev-distribution.mjs` 的 `build` 与 `validate`）：键集合一字不差（拼错的键插件只会忽略，不会在任何地方报错）；四个源齐全、不重复，每个源名只认自己那台主机（比白名单更严）；https、规范形式的地址、带版本的路径；`url` 等于 `github`（旧客户端只认它，桶里的对象 30 天后过期，见上文）；`x-size` 等于引导程序的实际字节数，且不超过 256 MiB；`pub_date` 与 `toISOString` 往返后逐字相等，即 `build` 写出的 `YYYY-MM-DDTHH:mm:ss.sssZ` 形状、真实存在的 UTC 时刻（插件按 RFC 3339 严格解析，2 月 30 日、24 点这类会让整份清单作废，`Date.parse` 却把它们滚到下一天）。`github` 源的地址按工作流传入的 `$GITHUB_REPOSITORY` 拼出，`validate` 只要求它等于这样拼出的地址，没有另外钉死仓库前缀，在本仓库里跑时与客户端、`put-manifest` 钉的前缀相同。桶、端点、公网主机、对象键与清单里的地址都出自这个脚本的同一张表，传进哪个桶、从哪里读回、清单写哪个地址不会各算各的。
@@ -348,7 +441,7 @@ dev 的发布链路在 `.github/workflows/dev-build.yml` 里：自托管机上�
 
 代价是：客户端本来容得下单个源的故障（换下一个源就是），发布这一侧却会因为一个桶或香港机出问题挡下整次发版，所有客户端都收不到这一版，dev.35 及更早只读 GitHub 的也一样，要等修好再重跑。
 
-dev 的发布凭据放在 GitHub 环境 `updates-dev` 里，`publish` 与 `publish-hk` 两个作业都声明了这个环境才拿得到，每样只进用到它的那一步：存储桶凭据只进 `publish` 的上传，`HK_MANIFEST_SSH_KEY` 只进 `publish-hk` 的推送。环境的部署分支限制必须只放行 dev，挡住别的分支拿机密靠的是它。dev 的更新签名私钥照旧是仓库密钥 `DEV_UPDATER_PRIVATE_KEY`。
+dev 的发布凭据放在 GitHub 环境 `updates-dev` 里，`publish` 与 `publish-hk` 两个作业都声明了这个环境才拿得到，每样只进用到它的那一步：存储桶凭据只进 `publish` 的上传，`HK_MANIFEST_SSH_KEY` 只进 `publish-hk` 的推送。环境的部署分支限制必须只放行 dev，挡住别的分支拿机密靠的是它。dev 的更新签名私钥 `DEV_UPDATER_PRIVATE_KEY` 与它的口令 `DEV_UPDATER_KEY_PASSWORD` 也放在环境 `updates-dev` 里，只进 `publish` 的「给更新包签名」那一步，不建仓库级的同名机密：仓库级的机密任何分支的工作流都拿得到，而每个官方包都认 dev 钥（偏好为预览版时用它验包）。
 
 beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布分进两个环境，发布凭据（签名私钥、桶凭据、香港推送钥）都放在环境里，不建仓库级的：仓库级的机密任何分支的工作流都拿得到。
 
@@ -361,6 +454,7 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 - 每发一版，在签名之前审批一次。更新签名是分离的 `.sig` 文件，批准之前从构建产物里下载到的引导程序就是最终发出去的字节，可以先装一遍再批。不开 Prevent self-review（禁止自审）：只有一个维护者，批准人就是触发人。
 - 发布签名钥不复用 dev 那把，公钥是 `.github/release-updater.pub`，打包时注入，编进每个测试版。这把钥由维护者在首个测试版之前生成，`.github/scripts/beta-release-contract.test.mjs` 钉住了它的密钥号：首个测试版发出之后，已装的用户只认这把，换钥必须是有意的，连测试一起改。main 留给以后的正式版，正式版与测试版共用这把钥。
 - `updates-beta` 里的名称沿用 dev 的，`upload-to-mirrors.sh` 与 `push-hk-manifest.sh` 两个通道共用，不用改变量名；值是另一套，不复用 `updates-dev` 的：OSS 子用户按通道限前缀，复用就等于让 dev 链路能往 `beta/` 传包；R2 凭据本来就不限前缀，分开只是让两个通道的凭据各自轮换、泄露时各自吊销，挡不住 dev 的 R2 凭据往 `beta/` 写没用过的键（已有的对象有锁）。
+- 构建作业在「确定版本号」之后、编译之前跑「读出各通道已发布的版本」：`release-heads.mjs` 的 `read`、`gate beta`、`data-format beta`（见上文）。测试版低于预览版、核心号高于已发布的正式版都在这里查，正式版有没有发布同样只采信验得过签名的清单，不再读未验签的正式版清单。不在 beta 分支上的手动演练（`workflow_dispatch`）照常读取、照常验签，读取出错照样失败，检查不过只打 notice：演练的包本来就不发布。构建首装引导程序之后同样无条件核对载荷头与内嵌的更新公钥；载荷头的 magic、数据格式号与能力位，上一个测试版的数据格式号（不倒退的检查跳过时照实写跳过）与各通道已发布的版本写进签名前审批看的 job summary，同一份内容存成 `build-info.json` 随 Release 发出去留档。
 
 两个环境里同名的几样：
 
@@ -372,6 +466,64 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 | `R2_ACCOUNT_ID` | 变量 | 拼 R2 的 S3 端点。它是环境变量，不是仓库变量，两个环境各配一份 |
 
 发版前可以在 dev 分支上手动跑 `.github/workflows/dist-trial.yml` 空跑分发链路：用同一套脚本往三个桶各传一个 1 MiB 的随机文件（放在 `dev/trial-<运行号>-<运行次数>/` 下，即 `GITHUB_RUN_ID` 与 `GITHUB_RUN_ATTEMPT`：重跑时运行号不变，`dev/` 下的对象又不能覆盖；随 `dev/` 前缀 30 天后删掉）并读回，再把香港机上现有的 dev 清单原样重推一次（字节相同，`put-manifest` 视为无变化），验凭据、跨境上传和香港机的 22 端口，不改客户端会读到的任何内容。香港机上还没有 dev 清单时（装好香港机之后、第一次 `publish-hk` 成功之前，正是发版前最想试跑的时候），重推这一步读到 404 只打一条 notice 就跳过，整个试跑照样显示成功：`HK_MANIFEST_SSH_KEY`、香港机 `authorized_keys` 里的强制命令、钉住的主机公钥和 22 端口都没验到，要等第一次 `publish-hk` 才第一次用上，那时 GitHub 预发布已经重建。
+
+### 发出后不能改的格式
+
+装在用户电脑上的落樱只按它发出时的规则取清单、验签、收更新包、拉起安装程序，也只按那时的规则读本机留下的记录。下面这些格式一改，已装的版本就收不到更新、装不上更新包或者读不了数据，只能让用户手动重装，所以只能由以后的发布去迁就已发出的包：要么不动，要么只做已装的版本会忽略的加法。规则本身多半已在上文与「磁盘布局」里，这里按不能动与只能加归拢，写明改之前看哪条测试；没有测试钉住的也照实写出。
+
+**版本号。** 形如 `X.Y.Z`、`X.Y.Z-dev.N`、`X.Y.Z-beta.N`，先后一律按标准 semver（`petalfall-release` 的 `order`，见「自更新的清单与下载源」开头）。已发出的启动器与引导程序按这套规则认通道，它们与更新插件都按 semver 比新旧，换一种比法就和它们各判各的；新的预发布标识它们一律认不出，带它的包判为 `unknown_channel`，放进哪份清单都过不了清单头核验。几处实现按共用版本向量对拍，见「测试与守卫」。
+
+**清单的地址。**
+
+- 三个香港机端点（`commands/updater.rs` 的 `PRIMARY_ENDPOINT`、`BETA_ENDPOINT`、`DEV_ENDPOINT`）的域名、路径与 https 不改；dev 在 GitHub 上的那份，tag 名 `dev-build`（`DEV_RELEASE_TAG`）与文件名 `latest.json` 不改：每个包只问编进去的这几个地址。`commands/updater.rs` 的用例 `endpoints_are_https_on_brand_domains`、`dev_endpoint_is_where_ci_uploads_the_manifest` 把它们钉成字面量，`release-heads.test.mjs` 另读这几个常量。
+- 「还没有发布」只用 404 表示：一个通道的端点全都答 404 才算没有发布、不算失败（见「自更新的清单与下载源」的端点与通道的结果）。要撤下一个通道的版本，就让它的清单地址回 404；还没有发布的通道（正式版首发之前的 stable，偏好预览版、测试版的包每次检查都问它）也一直回 404。回 403、503、204 或一张网页时，偏好这个通道的用户检查失败，两条流水线的 `release-heads.mjs read` 也让构建失败。也不拿更低版本的清单顶替：见过更高版本的客户端判这个通道为 `stale`，偏好它的报 `update_source_stale`。
+
+**清单的格式。** 清单由更新插件解析。已发出的包里有插件 2.10.1 与 2.12.0 两个版本，下面前四条两者相同（插件 `updater.rs` 里 `RemoteRelease` 的反序列化与 `get_urls`），违反了，读到这份清单的已装版本就整份解析失败或整次检查报错：
+
+- 顶层只写 `version`、`notes`、`pub_date`、`platforms`。`name` 是 `version` 的别名，两个同时出现整份作废；顶层的 `url`、`signature` 是没有 `platforms` 时的单平台写法。这三个键都不往顶层加。
+- `notes` 只写字符串或 `null`；`pub_date` 可以不写，写了就必须是合法的 RFC 3339（CI 怎么写、怎么查见上文 dev 发布链路的第 5 步）。
+- `platforms` 里的每一条，别的平台的也算，都要有合法的 `url` 与字符串 `signature`。
+- 每一份会被读到的清单都要有 `windows-x86_64` 条目：插件不管版本新旧都要找本平台的条目，找不到整次检查报错；启动器核验清单头时（`commands/updater.rs` 的 `manifest_signature`）照同样的顺序找。偏好预览版、测试版的包每次都问更慢通道的清单，将来的正式版清单同样要带它。
+- 不加 `windows-x86_64-nsis` 条目，真要加就与 `windows-x86_64` 写同一个 `url` 与 `signature`：插件与 `manifest_signature` 都先找它，CI（`dev-distribution.mjs`、`release-heads.mjs`）只写、只读 `windows-x86_64`。
+- 新内容只放进 `x-` 开头的键：插件的清单结构收下多余的键不报错，不带前缀的键却可能撞上插件已有的字段（顶层的 `name`、`url`、`signature` 就是）。以后的客户端读新键时照 `x-sources` 的先例，缺这个键就按加键之前的行为走（`listed_sources` 对缺失的 `x-sources` 只记 info）：已发出的清单都没有它。`dev-distribution.mjs` 的 `validate` 要求键集合一字不差，加键时先改它。数据格式号不进清单（见「数据格式号」）。
+- `x-sources`、`x-size` 照上文「读扩展字段」的读法写：只写在插件选中的那个平台条目里；`x-sources` 的源名只用四个之一，不超过 6 条（`MAX_SOURCES`，多出的已发出的版本不看）。`x-size` 是下载时的字节上限，不能小于更新包的真实大小：写小了，读它的客户端在每个源上都以 `too_large` 失败。
+- 每份清单只放本通道的版本（见「自更新的清单与下载源」的清单头核验第 1 条）；dev 的两份清单字节相同，`url` 等于 `github` 源（见上文）。
+
+**签名与公钥。**
+
+- 签名照「自更新的清单与下载源」的清单头核验与「装配与状态」的启动器更新一条：CI 用 `tauri signer sign --app-version` 签，签进可信注释的版本与清单的 `version` 逐字相同，可信注释里恰好一个 `version:` 字段；`requireSignedVersion` 为 true，不打开 `allowDowngrades`。签名之后 `.github/scripts/verify-update-signature.mjs` 按这几条硬查，`dev-build-contract.test.mjs` 与 `beta-release-contract.test.mjs` 钉住签名命令带 `--app-version`。升级 `app/pnpm-lock.yaml` 里锁定的 `@tauri-apps/cli` 时，先确认这一步照样通过。
+- 两把公钥（`.github/dev-updater.pub`、`.github/release-updater.pub`）不换：已装的版本只认编进去的那一把，签名行的密钥号必须等于它。密钥号由 `update_head.rs` 的 `key_ids_of_the_shipped_and_test_public_keys` 与上面两份契约测试钉住。
+- 正式版与测试版共用发布钥：偏好预览版、测试版的包问 stable 清单时用发布钥验（`channel_pubkey` 给 beta 与 stable 的是同一把），将来正式版的清单与安装包也要用这把钥签；另起一把的话，已发出的包都跟不上正式版。
+
+**下载源。**
+
+- 现有四个源名与它们的主机不删、不改（`commands/update_sources.rs` 的 `ALLOWED_SOURCE_HOSTS`、`SOURCE_REGIONS` 编在每个包里）：已发出的版本跳过认不得的源名与主机，`github` 源还只认编进去的仓库前缀（见上文）。以后的清单至少要留一个它们认得的源，否则这些版本下不了包；新增的源名只对认得它的新包有用。源表有三份，一起改（见上文）。
+- 更新包不超过 256 MiB（`MAX_PACKAGE_SIZE`）。这个硬上限编在每个已发出的版本里、与清单无关，调大只对新包生效；包超过它时，已发出的版本在每个源上都以 `too_large` 失败。
+
+**更新包。**
+
+- 更新包永远是带 `PFSETUP2` 载荷头的引导程序，不换成单独的 NSIS 包、MSI 或别的形态：启动器下载验签之后读载荷头（`commands/update_package.rs` 的 `judge_package`），读不出就报 `update_signature_invalid`，不带数据格式号的旧头按 0 算（见上文「下载验签之后读包头」）。头里的版本与清单的 `version` 按 semver 相等，不超过 48 字节（版本字段定长，`pack-setup` 写不下时报错）。
+- 头的格式只能加能力位：magic、各字段的偏移、144 字节的头长与 `caps` 第 0 位（`CAP_CHANNEL_SWITCH`）的含义都不改。不发 `PFSETUP3`：已发出的版本认不得新 magic，读头失败。新增的能力只占 `caps` 里还没定义的位，读者忽略认不得的位；读者按 magic 定头长，magic 不变时加长的部分已发出的版本看不到。偏移由 `petalfall-setup-payload` 的编译期断言钉住，启动器怎么读头由 `update_package.rs` 的用例钉住（`a_v1_package_counts_as_format_zero`、`header_versions_match_like_signed_versions` 等）。
+
+**安装程序的命令行。**
+
+- 以后每一版引导程序都要认更新插件 2.12.0 与 2.10.1 的两种拼法，`/ARGS` 之后的参数原样带回启动器（见「装配与状态」的启动器更新一条）：用旧插件的已装版本照样会拉起新包。`app/src-tauri-setup/src/cli.rs` 的用例钉住两种（`relaunch_after_update_is_recognised_like_the_old_order` 等）。
+- `/CHANNELSWITCH` 的名字与规则（不带值、整个记号相等才算、只认 `/ARGS` 之前的、只在带 `/UPDATE` 时生效）不改：换到更慢的通道时要拉起的是那个通道上版本更低的包，多半是更早发出的引导程序，它们都按这套规则认它。`cli.rs` 里名字带 `channel_switch` 的用例钉住这几条。
+- 检查器不配 `installer_args`、不关装完重开，`tauri.conf.json` 与流水线的公钥注入行不出现 `installerArgs`（见「装配与状态」的启动器更新一条，由 `commands/updater.rs` 的单测与 `release-heads.test.mjs` 钉住）。
+
+**单实例与安装身份。**
+
+- 单实例的事件名不改：启动器的占位名与应答名见上文 `single_instance.rs` 一行（`event_name`、`answer_name`），引导程序是 `Local\Petalfall-Setup`（`boot.rs` 的 `INSTANCE_EVENT`）。不同版本之间靠同一个名字互斥：启动器的名字换了，新旧两个版本就可能在同一个数据目录上同时运行、同时写一份数据。换用别的单实例实现也要沿用这两个名字。引导程序的名字由 `the_real_event_name_is_in_the_session_namespace` 钉成字面量，启动器的占位名与应答名由 `the_name_is_spelled_the_way_released_versions_spell_it` 钉成字面量。
+- 卸载项与安装身份不改：卸载项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Petalfall` 与其中的 `InstallLocation`、`DisplayVersion`，记安装目录的 `Software\Shinoyuki_Miyako\Petalfall` 与 dev.10 及更早的包写的 `Software\petalfall\Petalfall`，主程序名 `Petalfall.exe`，以及拼出这些名字的 `productName`、`mainBinaryName`、`publisher`、`identifier` 与 currentUser 安装模式。引导程序凭卸载项与目录键认出已装的版本和目录，凭 `Petalfall.exe` 认程序文件、判断落樱开着没有（`existing.rs`、`launcher.rs`）；卸载项改了，它就找不到已装的版本，按首装处理。引导程序的 `registry_paths_match_what_the_nsis_template_writes`、启动器的 `product_name_is_consistent_across_config_html_and_frontend` 与 `app/scripts/build-target.test.ts` 连起来钉住这些值，安装模式由 `installer-hooks.nsh` 在编译期检查。卸载项与目录键实际由 Tauri CLI 内嵌的 NSIS 模板写，这些用例只钉得住仓库这一侧：升级 `@tauri-apps/cli` 时要对照新模板核对一遍。
+
+**本机的数据与记录。**
+
+- 数据目录的选法：启动器（`petalfall-base` 的 `choose_data_root`）与引导程序（`app/src-tauri-setup/src/datamark.rs`）各一份，两边一起改、不单边改（见「数据目录」与「数据格式号」的四处把关）。已发出的引导程序那一份改不了，启动器单边换了规则，它们就会读错数据目录、漏看记号。`datamark.rs` 的 `the_data_gate_keeps_the_registered_dir_exactly_where_the_launcher_does` 按几类目录核对两边的结论。
+- 数据格式号：只升不降、不跳号，`DATA_FORMAT` 那一行的写法固定，加号的提交只随 dev 整体晋级，关卡不给「仍然打开」、不自动重置，引导程序从不写记号，都见「数据格式号」。记号的文件名与两处位置、没有记号算 1、不带号的旧包算 0 是已发出的版本的读法，不改；记号只能加键（`STAMP_FILE` 由 `stamp_file_name_is_fixed` 钉住）。
+- 换通道交接记录 `%LOCALAPPDATA%\Petalfall-Setup\channel-handoff.json`（格式见「自更新的清单与下载源」的通道偏好与交接记录）：位置与 `channel`、`version`、`written_at` 三个键的名字和含义不改，`channel` 的取值就是通道名；只能加键，读的一方忽略多出来的键。`petalfall-release` 的 `handoff.rs` 的用例 `file_location_is_fixed`、`writes_exactly_the_three_keys`、`extra_keys_are_ignored` 钉住这几条，引导程序的 `the_handoff_lands_where_the_launcher_looks_for_it` 核对两边拼出的目录相同。
+- 半装记录 `%LOCALAPPDATA%\Petalfall-Setup\journal.json`：引导程序下次运行时读它认出上次没装完的安装，下次运行的可能是别的版本。现有五个键 `instdir`、`was_fresh`、`version`、`payload_pid`、`started_at` 不改名、不删、不改类型，只能加带 `#[serde(default)]` 的可选字段：加一个不带默认值的字段，已发出的引导程序留下的记录就读不出，被当成读不懂删掉，认不出上次的半装（`journal.rs` 的 `a_switch_install_writes_the_same_five_fields`）。
+- `config.json` 的 `update_channel` 与 `seen_update_versions`：键名、取值与形状不改，按原样的 JSON 值收下、不登记 `ENUM_FIELDS`，启动时不顺手写偏好（见「自更新的清单与下载源」的通道偏好与交接记录、见过的最高版本）。
+- 凭据库 `credentials.bin` 的 DPAPI 参数（按当前用户加密、不带 entropy，`petalfall-auth` 的 `dpapi.rs`）不改：已发出的版本解不开换了参数加密的凭据库，会把它改名留存（见「启动提示」），这台电脑上的账户都要重新登录。这是号更低的版本读不了的改动，按「数据格式号」的规则处理；快照比对的是加密之前的明文，抓不到它。
 
 ## IPC 约定
 
@@ -408,10 +560,17 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 | `world_backups_not_moved` | 改名已完成，只差存档备份没挪过去，前端照成功处理再提示 | `{ id, renamed_to, path }`，`path` 是留在旧名下的备份目录 |
 | `server_not_pinned` | 要改的服务器不在固定列表里 | `{ address }` |
 | `quick_play_unsupported` | 实例的版本不支持这种直达方式 | `{ version_id, mode }`，`mode` 取 `singleplayer`、`multiplayer` |
+| `game_dir_changed` | 按实例名动手的任务命令带来的 `game_dir`（入队那一刻的游戏目录）已经不是当前目录，什么都没动（见「长任务」） | `{ expected, current }`：`expected` 是命令带来的目录，`current` 是此刻的当前目录 |
 | `java_path_invalid` | 手动添加的路径不是可用的 java 可执行文件 | `{ path, reason }` |
 | `java_runtime_incomplete` | 手动添加的 Java 缺运行时文件 | `{ path, missing }` |
 | `gpu_query_failed` | 枚举显卡失败 | `{ hresult, causes }` |
 | `feed_invalid` | 资讯内容认不出，或正文超过读取上限（`FeedTooLarge`） | `{ url }` |
+| `game_dir_data_too_new` | 游戏目录的数据格式记号比这一版的号大：这个目录被更新的落樱用过，没有打开它（见「数据格式号」） | `{ path, found, supported, written_by, written_by_channel }`：`path` 是游戏目录，`found`、`supported` 是记号里的与这一版的号；`written_by` 只给经 `trusted_written_by` 认可的版本号，记号里没写或形状不对时为 null，`written_by_channel` 是它所属的通道（`dev`、`beta`、`stable`），同时为 null。界面不显示号码 |
+| `data_format_unreadable` | 游戏目录的数据格式记号读不懂，为了不弄坏里面的实例，没有打开它 | `{ path, reason }`，`path` 是游戏目录，`reason` 是读不懂的原因（只描述出了什么错，不照抄文件内容） |
+| `update_busy` | 已有更新包正在下载或安装，这时开始下载、立即安装、设置更新通道都报它 | 无 |
+| `update_superseded` | 检查或下载开始之后更新通道的生效值改过，这次的结果作废、没有落下（见「自更新的清单与下载源」的代号） | 无 |
+| `update_source_stale` | 偏好通道的每个端点都给出了验过的清单头，版本却全都低于这台电脑记下的这个通道见过的最高版本 | `{ channel, offered: [{ endpoint, version }], seen }`，前端读 `channel` |
+| `update_data_too_new` | 下载并验过签的更新包认得的数据格式号比正在运行的这一版小（不带这个号的旧包按 0 算），装上读不了现有数据；包已丢弃，这一版记进 `updater_info` 的 `refused` | `{ version, channel }` |
 
 前端的 `ipc/errors.ts` 把所有 rejection 统一成 `IpcError`。Tauri 自身产生的纯字符串错误归为 `unknown`。
 
@@ -421,10 +580,12 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 需要较长时间的命令（新建实例、补全、导入与导出整合包、装 Mod 与资源、更新 Mod、装 Java、备份、恢复与导出存档、启动游戏）都带一个由前端分配的 `task_id`。启动游戏的 `task_id` 只作为加载阶段的取消句柄使用，不进入前端的下载队列，阶段进度经 `petalfall://launch-phase` 推送。
 
+按实例名动手的任务命令（新建、补全与重装加载器、导入与导出整合包、装 Mod 与资源、更新 Mod、备份、恢复与导出存档）另带必填的 `game_dir`：前端入队那一刻的游戏目录。任务记录只存实例名，同名实例在别的游戏目录里是另一个实例，切换目录之后重试就会作用到它身上。命令取快照之后、占锁与登记任务之前，用同一份快照按 `same_path` 比对（`commands::tasks::ensure_game_dir`），对不上报 `game_dir_changed`，什么都不动；再取一份快照来比的话，两次之间切换了目录就漏过去。前端重试前已按同一口径比对（`state/tasks.ts` 的 `retryGameDirReason`，`domain/paths.ts` 的 `sameGameDir`），目录对不上或不知道（旧任务日志）的不进「全部重试」与断网恢复的计数，单条重试拒绝并写明发起于哪个目录；后端这道核对兜的是切换与重试撞在一起的窗口。重试「全部更新」前按工程重新对一遍的检查更新（`check_updates`）也带上任务的 `game_dir`，同样先核对再占锁：它按名字查、还会给反查到身份的文件写卷宗，不核对的话排队期间切了目录就读写到新目录里的同名实例，那边没有可更新的时组合任务零项做完、原任务被误记为完成；Mod 页的检查更新不带，查当前目录。移动实例另有 `source`，执行时它已不是当前目录就报 `instance_move_blocked`（拦截项 `source_changed`）；装 Java 与游戏目录无关，不带。移动与同一实例上的一切互斥，移动期间排进来的任务都等在它后面；移动成功时实例已不在发起时的目录里，这些任务一开工就报 `version_not_installed`，切到目标目录又因 `game_dir` 对不上不能重试，所以前端在把移动记为完成的同一次更新里把它们记为取消（`state/tasks.ts` 的 `strandedByMove`，新建与导入不算），随后补一条通知列出它们；移动失败或取消时它们照常开工。同一次更新里，这个实例上已结束的失败与取消任务（连同刚取消的这些）把 `game_dir` 换成目标目录（`followMove`，与改名时迁移任务参数同一个思路），切到目标目录就能照常重试，命令带的也是目标目录；只迁已知发起于源目录的，新建与导入、移动本身（参数自带 `source`）、已完成的与不知道目录的旧记录不迁。移动进行期间（排着的移动也算），挂在这个实例上的失败任务不让重试：单条重试与通知上的重试拒绝并说明，任务行的重试置灰，「全部重试」与断网恢复的计数跳过它们（`retryBlockedReason`，先看目录再看移动），免得排进去又在移动成功时被取消。
+
 1. 命令开头调用 `TaskRegistry::register`。同一个 id 已在运行时报 `task_conflict`。
 2. 进度通过 `petalfall://core-event` 推送，负载里带 `task_id`，前端的下载队列据此把进度归到对应任务。作为组合任务的一项调用时（见下文），命令另收可选参数 `step`（第几项，从 0 计），原样标在这次调用的每条事件上。
-3. `cancel_task(taskId)` 触发令牌，命令必须在 1000 ms（`CANCEL_DEADLINE`）内以 `cancelled` 返回。个别不观察令牌的阶段，由 `TaskHandle::run` 在宽限期满后放弃。失败或被放弃的整合包导入按命令层占住的实例名清理半成品（`discard_modpack_import`），不看未完成标记里记的是哪个任务；删不掉时把标记落成 `failed` 或 `cancelled`（`settle_modpack_import`），不留 `pending`。还没占到实例名就失败的导入不碰任何实例。
-4. 前端任务表通过 `save_task_journal` / `load_task_journal` 整份原子写入 `<数据目录>/tasks.json`。后端不解读任务表本身，只比序号：`save_task_journal` 带从 1 起单调递增的 `seq`，后端在写锁内读盘上那份的序号，不比它大的丢弃（仍返回成功，`seq` 为 0 报 `invalid_argument`），两次几乎同时到达的写入不会让较早的那份盖掉较新的。`load_task_journal` 返回 `{ seq, tasks }`，与写入共用一把锁，前端从读到的序号之后接着编（取它与内存序号的较大者，不倒退）。读回时还在进行的导出任务按落点调一次 `discard_export_leftovers`：进程没了收尾代码跑不到，写到一半的临时文件留在玩家选的目录里，这个命令只删导出自己的命名。没有 `seq` 的旧文件按 0 读；盘上文件损坏或版本不符时其中的序号按 0 处理，前端照常写回覆盖。任务记录里的 `detail` 仍是任务行显示的整句文案；实例改名时只替换其中写实例名的那一段（「<名字>」），字段含义和任务日志的格式版本都不变。不按新名字重新生成，是因为版本号与前置数没有全都留在命令参数里，重启后恢复的任务也没有入队上下文。任务记录另有可缺的 `transferred_bytes`（这一次尝试网络上实际读到的字节，含重传），较早写入的记录没有这一项，读回为 null，完成行不写量；后端不解读这个字段，任务日志的格式版本不变。
+3. `cancel_task(taskId)` 触发令牌，命令必须在 1000 ms（`CANCEL_DEADLINE`）内以 `cancelled` 返回。个别不观察令牌的阶段，由 `TaskHandle::run` 在宽限期满后放弃。失败或被放弃的整合包导入按命令层占住的实例名清理半成品（`discard_modpack_import`），不看未完成标记里记的是哪个任务；删不掉时把标记落成 `failed` 或 `cancelled`（`settle_modpack_import`），不留 `pending`。半成品目录已不在（删掉了或本来就不在）时，命令层趁占住这个名字的守卫还在，在门面上按导入所在的游戏目录去掉配置里对这个名字的引用：那个目录仍是当前目录时去掉侧栏固定、当前选中与固定服务器记住的实例，已切走时只改它收起的固定与选中（`forget_moved_instance`，与移走实例同一个规则）。守卫还占着，别的命令不能在这个名字下新建实例，清掉的只会是旧引用；按导入所在的目录清，是因为后端不拦导入途中切换当前目录。去不掉只记日志，返回给前端的仍是导入本身的错误。还没占到实例名就失败的导入不碰任何实例。
+4. 前端任务表通过 `save_task_journal` / `load_task_journal` 整份原子写入 `<数据目录>/tasks.json`。后端不解读任务表本身，只比序号：`save_task_journal` 带从 1 起单调递增的 `seq`，后端在写锁内读盘上那份的序号，不比它大的丢弃（仍返回成功，`seq` 为 0 报 `invalid_argument`），两次几乎同时到达的写入不会让较早的那份盖掉较新的。`load_task_journal` 返回 `{ seq, tasks }`，与写入共用一把锁，前端从读到的序号之后接着编（取它与内存序号的较大者，不倒退）。读回时还在进行的导出任务按落点调一次 `discard_export_leftovers`：进程没了收尾代码跑不到，写到一半的临时文件留在玩家选的目录里，这个命令只删导出自己的命名。没有 `seq` 的旧文件按 0 读；盘上文件损坏或版本不符时其中的序号按 0 处理，前端照常写回覆盖。任务记录里的 `detail` 仍是任务行显示的整句文案；实例改名时只替换其中写实例名的那一段（「<名字>」），字段含义和任务日志的格式版本都不变。不按新名字重新生成，是因为版本号与前置数没有全都留在命令参数里，重启后恢复的任务也没有入队上下文。任务记录另有可缺的 `transferred_bytes`（这一次尝试网络上实际读到的字节，含重传），较早写入的记录没有这一项，读回为 null，完成行不写量；后端不解读这个字段，任务日志的格式版本不变。可缺的 `game_dir` 同理：入队那一刻的游戏目录，较早写入的记录没有它，读回为 null（不知道发起于哪个目录，不拿开机时的目录去补），这样的任务不能重试；旧记录里的移动按 `source` 认发起时的目录。
 
 ### 实例互斥
 
@@ -435,12 +596,13 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 | `installing` | 新建实例、导入整合包（实例名确定后、建目录前就占住，直到半成品清理完） | 互斥 |
 | `repairing` | 补全实例 | 互斥 |
 | `renaming` / `deleting` | 改名（新旧两个名字都占）、删除 | 互斥 |
+| `moving` | 移到其他游戏目录（`move_instance`），继承链上的基底一并以 `inherited` 占住：要读它们的版本 JSON 与客户端 jar 补到目标里 | 互斥 |
 | `launching` -> `running` | 启动命令（Quick Play 直达同样走 `launch_game`），从启动一直持有到游戏退出 | 只与 `modifying` 兼容 |
 | `backing_up` | 备份、导出、恢复存档（都不占基底，基底的删除、改名由依赖检查挡着）；开着自动备份时，游戏退出后由启动命令把 `running` 转成它，基底当即放开（备份只读实例自己的版本 JSON、设置与存档，不碰基底的目录），备份做完才放开实例 | 只与 `modifying`、`inherited` 兼容 |
 | `modifying` | 装、删、启停、更新、回滚 Mod，批量启停、添加本地 Mod、更新检查设置，装资源包、光影、数据包，写实例设置，检查 Mod 更新（会回写卷宗），打开文件夹时创建缺失的工作子目录，导出整合包，删除存档备份，把实例存为新实例的默认设置 | 与自身、`launching`、`running`、`backing_up`、`inherited` 兼容 |
-| `inherited` | 继承链上的基底版本：别的实例启动到游戏退出（之后的自动备份不再占）、补全、导入整合包期间（导入时占将要继承的原版与要写的加载器自然版本目录），以那个实例的名义占住 | 与 `backing_up`、`modifying` 及别的 `inherited` 兼容，与基底自己的 `launching`、`running` 互斥：游戏映射着 natives，补全或导入要重写它们时会中途报 IO 错误，提前报 `instance_busy` 比让任务半路失败好 |
+| `inherited` | 继承链上的基底版本：别的实例启动到游戏退出（之后的自动备份不再占）、补全、移到其他游戏目录、导入整合包期间（导入时占将要继承的原版与要写的加载器自然版本目录），以那个实例的名义占住 | 与 `backing_up`、`modifying` 及别的 `inherited` 兼容，与基底自己的 `launching`、`running` 互斥：游戏映射着 natives，补全或导入要重写它们时会中途报 IO 错误，提前报 `instance_busy` 比让任务半路失败好 |
 
-写成集合就是四条：`modifying` 与 `{modifying, launching, running, backing_up, inherited}` 兼容；`inherited` 与 `{modifying, backing_up, inherited}` 兼容；`backing_up` 与 `{modifying, inherited}` 兼容；`launching`、`running` 只与 `modifying` 兼容；`installing`、`repairing`、`renaming`、`deleting` 与一切互斥。这张表在后端（`InstanceActivity::compatible_with`）、前端的禁用判断（`domain/instance-locks.ts` 的 `instanceLocks`）与模拟后端（`ipc/mock/handlers/instances.ts` 的 `compatible`）三处保持一致。
+写成集合就是四条：`modifying` 与 `{modifying, launching, running, backing_up, inherited}` 兼容；`inherited` 与 `{modifying, backing_up, inherited}` 兼容；`backing_up` 与 `{modifying, inherited}` 兼容；`launching`、`running` 只与 `modifying` 兼容；`installing`、`repairing`、`renaming`、`deleting`、`moving` 与一切互斥。这张表在后端（`InstanceActivity::compatible_with`）、前端的禁用判断（`domain/instance-locks.ts` 的 `instanceLocks`）与模拟后端（`ipc/mock/handlers/instances.ts` 的 `compatible`）三处保持一致。
 
 游戏运行时仍然可以改动 Mod。被游戏占用的文件由门面在动手前检测，检测到时报 `mod_file_busy`。`list_instances` 返回的 `activity` 就来自这张表，前端刷新之后也能据此知道哪个实例正在安装；几件事并行时按 `report_rank` 报排在最前的那件：实例自己的事 0，`modifying` 1，`inherited` 2。
 
@@ -454,20 +616,20 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 不隔离的实例共用游戏目录的 saves，实例锁只管自己这个实例，所以这些检查还要看共用同一份存档的别的实例：别的实例正开着游戏时备份、导出或恢复这份存档，或者带存档导出整合包；别的实例占着 `backing_up` 时启动、带存档导出整合包或装数据包；别的实例正把存档读进整合包时恢复或启动；别的实例正在装数据包时备份、导出或恢复，都报 `instance_busy`，`detail.id` 指向挡路的那个实例。
 
-前端的 `instanceLocks(busy, installing, modifying, usedBy, backingUp, baseBusy)` 六个参数都必填，按这个顺序给出禁用原因：运行 > 安装中（删除除外）> 本实例的活动（备份优先于改动）> 被别的实例当作基底 > 依赖的实例正忙（`baseBusy`）。最后一项只进补全的锁（补全与重新安装加载器才要占基底，改名、删除、启动与 Mod 操作都不碰基底），排在最后是因为后端先占实例自己、再占基底，报的顺序也是这样。备份与改动都不挡 Mod 操作，只挡改名、补全、删除。被别的实例当作基底另外挡启动：返回值里的 `launch` 只有这一种原因会让它非空，存档正忙另由 `savesBusy` 判定。前端的 `usedBy` 只来自 `list_instances`，而占用只有后端知道，所以任务开工后要主动重扫：启动在第一条 `petalfall://launch-phase` 阶段事件到达时重扫一回（下载进度也走这个事件，一次启动只扫一回）；补全与导入整合包的每条阶段事件都重扫一回（导入下载整合包的那几条阶段早于占住基底，只扫第一条会漏）；任务结束、启动被拒或取消时经 `rescanHeld` 再读一遍，把放开的占用读回来。`base_busy`（见下文）随基底启动、结束时已有的 `list_instances` 重扫更新，不另加刷新。
+前端的 `instanceLocks(busy, installing, modifying, usedBy, backingUp, baseBusy, moving)` 七个参数都必填，按这个顺序给出禁用原因：运行 > 安装中（删除除外）> 移到其他游戏目录（`moving`）> 本实例的活动（备份优先于改动）> 被别的实例当作基底 > 依赖的实例正忙（`baseBusy`）。最后一项只进补全与移动的锁（补全、重新安装加载器与移动要占基底，改名、删除与 Mod 操作都不碰基底），排在最后是因为后端先占实例自己、再占基底，报的顺序也是这样。启动经 `reserve_launch` 同样以 `inherited` 占住基底，但启动锁不看 `baseBusy`：基底正被补全、改名、删除或移走时，启动它上面的实例只能等后端报 `instance_busy`（`detail.id` 是那个基底）。备份与改动都不挡 Mod 操作，只挡改名、补全、移动、删除。被别的实例当作基底另外挡启动：返回值里的 `launch` 只有它与 `moving` 两种原因会让它非空，存档正忙另由 `savesBusy` 判定。前端的 `usedBy` 只来自 `list_instances`，而占用只有后端知道，所以任务开工后要主动重扫：启动在第一条 `petalfall://launch-phase` 阶段事件到达时重扫一回（下载进度也走这个事件，一次启动只扫一回）；补全与导入整合包的每条阶段事件都重扫一回（导入下载整合包的那几条阶段早于占住基底，只扫第一条会漏）；任务结束、启动被拒或取消时经 `rescanHeld` 再读一遍，把放开的占用读回来。`base_busy`（见下文）随基底启动、结束时已有的 `list_instances` 重扫更新，不另加刷新。
 
-基底占用只经 `InstanceLocks::acquire_with_bases` 与 `acquire_with_chain` 建立，`acquire` 不收 `inherited`。两者都先占实例自己、再依次占基底，与实例同名或彼此只差大小写的只占一次，任何一处冲突时已占到的一并放开，得到的 `ChainGuard` 把实例自己与基底的占用一起持有、一起放开。`acquire_with_chain` 给基底要读盘才知道的场合用（启动的 `reserve_launch`、`repair_instance`）：占住实例自己之后才读 `Petalfall::inheritance_chain`（只沿链读各环的版本 JSON；断在哪一环就停在那里，原因交给启动与补全照原有失败码报出）。实例正被安装、补全、改名或删除时它的版本 JSON 可能正被替换，先读的话报出来的会是读文件的错误，而不是 `instance_busy`。导入整合包时实例的版本 JSON 还没写出来，用 `acquire_with_bases` 占 `PreparedModpack::natural_versions()` 给出的原版与加载器自然版本（id 由 `LoaderChoice::natural_version_id` 按各加载器写法提前算出，早期 Forge 的 legacy 安装器可能算不中，那时占的名字不对应任何目录，无碍）。基底被占时对它的启动、删除、改名、补全报 `instance_busy`，正文为「实例 <id> 正在被实例 <使用者> 使用，请稍后再试」，`detail` 为 `{ id, activity: "inherited", used_by }`；其余活动的 `detail` 不带 `used_by`。实例列表与删除预览的 `used_by` 给出正以它为基底的实例（几个时取最早占到的那个，与报错的是同一个），前端据此提前禁用启动、改名、补全、删除并写明是谁在用。依赖版本记录里的基底（见下文 `hide_base_versions`）不列在实例库里，占用照算，只是列表里没有地方显示这条提示。反方向同样互斥：基底自己启动或运行时，补全它上面的实例、导入以它为基底的整合包也报 `instance_busy`，`detail` 为 `{ id: 基底, activity }`（`activity` 取 `launching` 或 `running`），导入在建目录之前就被拒；导入要写的加载器版本自己正在运行时同样被拒，`detail.id` 是那个加载器版本。占用槽全局只跑一个游戏，基底运行时启动加载器实例本来就走不到，被挡住的只有补全与导入。新建实例是合并后的自包含版本 JSON（不继承原版），不占基底。
+基底占用只经 `InstanceLocks::acquire_with_bases` 与 `acquire_with_chain` 建立，`acquire` 不收 `inherited`。两者都先占实例自己、再依次占基底，与实例同名或彼此只差大小写的只占一次，任何一处冲突时已占到的一并放开，得到的 `ChainGuard` 把实例自己与基底的占用一起持有、一起放开。`acquire_with_chain` 给基底要读盘才知道的场合用（启动的 `reserve_launch`、接回游戏的 `hold_reattached`、`repair_instance`、`move_instance`）：占住实例自己之后才读 `Petalfall::inheritance_chain`（只沿链读各环的版本 JSON；断在哪一环就停在那里，原因交给启动与补全照原有失败码报出；移动的预检要合并出完整的版本 JSON，自己沿链再读一遍，缺环、版本 JSON 坏了或成环报 `version_json_invalid`，超过 16 层报 `instance_failed`，原件不动）。实例正被安装、补全、改名、删除或移走时它的版本 JSON 可能正被替换或挪走，先读的话报出来的会是读文件的错误，而不是 `instance_busy`。接回游戏时记录里的游戏目录不是当前目录，或连同基底占不住，就只占实例自己。导入整合包时实例的版本 JSON 还没写出来，用 `acquire_with_bases` 占 `PreparedModpack::natural_versions()` 给出的原版与加载器自然版本（id 由 `LoaderChoice::natural_version_id` 按各加载器写法提前算出，早期 Forge 的 legacy 安装器可能算不中，那时占的名字不对应任何目录，无碍）。基底被占时对它的启动、删除、改名、补全、移动报 `instance_busy`，正文为「实例 <id> 正在被实例 <使用者> 使用，请稍后再试」，`detail` 为 `{ id, activity: "inherited", used_by }`；其余活动的 `detail` 不带 `used_by`。实例列表与删除预览的 `used_by` 给出正以它为基底的实例（几个时取最早占到的那个，与报错的是同一个），前端据此提前禁用启动、改名、补全、移动、删除并写明是谁在用。依赖版本记录里的基底（见下文 `hide_base_versions`）不列在实例库里，占用照算，只是列表里没有地方显示这条提示。反方向同样互斥：基底自己启动或运行时，补全或移动它上面的实例、导入以它为基底的整合包也报 `instance_busy`，`detail` 为 `{ id: 基底, activity }`（`activity` 取 `launching` 或 `running`），导入在建目录之前就被拒；导入要写的加载器版本自己正在运行时同样被拒，`detail.id` 是那个加载器版本。占用槽全局只跑一个游戏，基底运行时启动加载器实例本来就走不到，被挡住的只有补全、移动与导入；移动只读基底的版本 JSON 与客户端 jar，被挡是因为它同样以 `inherited` 占基底。新建实例是合并后的自包含版本 JSON（不继承原版），不占基底。
 
-`used_by` 只说谁在以这个实例为基底；基底自己在运行时，它上面那个实例的 `used_by` 是空的，界面反查不出补全这个实例会撞上谁，所以实例列表另带 `InstanceDto.base_busy`：继承链上第一个此刻容不下基底占用的基底与它的活动，形状同这时 `instance_busy` 的 `detail`（`{ id, activity }`）；版本 JSON 用不了的实例读不出链，补全也不占基底，为 null。判定入口是 `InstanceLocks::blocking_base`，与占用共用 `compatible_with` 这张表，所以基底被补全、改名时也算，不只是运行；补全与重新安装加载器沿继承链依次占基底时停在它上面报 `instance_busy`，报的就是这一份。链由核心的列表按这次扫描结果算（`ReadyVersion::bases`，除实例自己以外的版本 id，由近及远），口径同 `Petalfall::inheritance_chain`：不分大小写判环，断在哪一环就停在哪一环，那一环的 id 也收进结果；列表走的是热路径，不为每个实例再逐个读版本 JSON。
+`used_by` 只说谁在以这个实例为基底；基底自己在运行时，它上面那个实例的 `used_by` 是空的，界面反查不出补全这个实例会撞上谁，所以实例列表另带 `InstanceDto.base_busy`：继承链上第一个此刻容不下基底占用的基底与它的活动，形状同这时 `instance_busy` 的 `detail`（`{ id, activity }`）；版本 JSON 用不了的实例读不出链，补全也不占基底，为 null。判定入口是 `InstanceLocks::blocking_base`，与占用共用 `compatible_with` 这张表，所以基底被补全、改名时也算，不只是运行；补全、重新安装加载器与移动沿继承链依次占基底时停在它上面报 `instance_busy`，报的就是这一份，前端补全与移动的锁都据它提前禁用。链由核心的列表按这次扫描结果算（`ReadyVersion::bases`，除实例自己以外的版本 id，由近及远），口径同 `Petalfall::inheritance_chain`：不分大小写判环，断在哪一环就停在哪一环，那一环的 id 也收进结果；列表走的是热路径，不为每个实例再逐个读版本 JSON。
 
 `set_activity` 不重新检查冲突，只用于转向兼容集合不比原来窄的事，这时不会新出冲突：进程起来后 `launching` 转 `running`（集合相同），游戏退出后 `running` 转 `backing_up`（集合变宽）。`ChainGuard::set_activity` 只改实例自己那一份。转备份改走 `ChainGuard::into_backup`：实例自己原地转成 `backing_up`，基底的 `inherited` 当即放开；自动备份只读实例自己的版本 JSON、设置与存档，基底留到备份做完的话，这段时间里基底启动不了。
 
-`launch_game` 的占用顺序：先取快照，再 `reserve_launch`（先占同一时间只跑一个游戏的占用槽，再 `acquire_with_chain`），然后 `ensure_shared_worlds_settled`。不隔离的实例先占住自己再查别的实例有没有在备份共用存档，查完之后别的实例再想备份，会被占用槽那一侧的 `ensure_shared_world_free` 挡住。
+`launch_game` 的占用顺序：先取快照，再 `reserve_launch`（先占同一时间只跑一个游戏的占用槽，再 `acquire_with_chain`：占住实例自己之后先过游戏目录的数据格式关卡，过了才读继承链），然后 `ensure_saves_free_for_launch`（先 `ensure_shared_worlds_settled`，再查存档有没有正被读进整合包）。不隔离的实例先占住自己再查别的实例有没有在备份共用存档，查完之后别的实例再想备份，会被占用槽那一侧的 `ensure_shared_world_free` 挡住。
 
 `list_instances` 只有 `versions/` 目录本身读不出才整体失败；单个实例的附属文件（设置、未完成标记、整合包信息、崩溃记录、游玩记录）、工作目录、实例目录、版本 JSON 读不出都只标在该实例上，一个实例不该让整张列表打不开。`InstanceDto` 为此带原因字段，界面据此写「读不到」而不是 0 或空：
 
 - `play_error`：`playtime.json` 读不懂（解析失败、格式版本比本版本新）时，每个实例都带它，`playtime_min`（可空）与 `last_played_at` 为 null；文件修好后下一次列表恢复。没玩过仍是 `playtime_min` 为 0。
-- `dir_error`：实例目录读不出时 `created_at` 为 null；工作目录读不出（`mods/`、`saves/` 打不开）时 `mod_count`、`world_count`、`isolated` 为 null。原因经 `error_with_causes` 连同原因链给出，同时写 warn 日志。
+- `dir_error`：实例目录读不出时 `created_at` 为 null；工作目录读不出（`mods/`、`saves/`、`resourcepacks/` 打不开）时 `mod_count`、`world_count`、`resource_pack_count`、`isolated` 为 null。原因经 `error_with_causes` 连同原因链给出，同时写 warn 日志。
 - 版本发现：`discover_versions` 把单个版本 JSON 的 IO 故障（被占用、没有权限）记成 `BrokenReason::Unreadable`，实例在列表里是损坏项，原因写「版本 JSON 读不出来：…」；`probe_version`、`discover_version` 要回答的就是那一个版本，仍向上报错。连带口径：改名、删除判依赖时看不到读不出的实例，与 JSON 损坏的实例相同。
 
 `list_instances` 与 `match_instances` 不列玩家没建过的依赖版本目录（`hide_base_versions`）：安装器把加载器装在自己的版本目录里（`neoforge-21.1.265`），整合包导入也会落下原版与加载器的版本目录，这些层玩家没建过，列出来就像凭空多了一个实例。两种目录算这一类：一是依赖版本记录里的，记录是游戏目录元数据区的 `.petalfall/base-versions.json`（内容 `{"versions": [...]}`，见「磁盘布局」），没人用了也算；二是记录之外的加载器版本：继承着别的版本、目录名里带着加载器的版本号、又被别的版本继承；没有实例继承它的照常列出（别的启动器的游戏目录里，这样的目录就是玩家在玩的版本）。两种都要求目录上没有实例痕迹：没有 `.petalfall` 元数据目录，也没有 `mods`、`saves` 里的本地数据（与隔离判定的强制隔离同一口径），记录里的名字日后被玩家拿来建了实例就不再隐藏。这只改这一次的扫描结果：目录不删，继承链、依赖检查、实例占用与重名检查都照常看得到它。
@@ -482,7 +644,9 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 `match_instances` 给出某工程对实例库里的全部实例的落位矩阵，实例的范围与 `list_instances` 同一过滤（不含依赖版本记录里的版本目录，也不含只给别的实例当基底的加载器版本），入参带资源类型：Mod 看加载器与 MC 版本，资源包、光影、数据包只看 MC 版本。Quilt 能加载 Fabric 的 Mod，而平台上大量 Fabric Mod 从不标 quilt，所以装着 Quilt、没装 Fabric 的实例同时接受只标 fabric 的版本（`compat.rs` 的 `runnable_loaders`，判定与向平台下推过滤共用这一处；不兼容的原因仍只说实例真正装的加载器）。同一发布（版本号去掉 fabric、quilt 字样后各段相同）里有 quilt 构建时取 quilt 那份；不是带 quilt 标的一律优先，不少 Mod 后来不再标 quilt，一律优先会把 Quilt 玩家钉在旧版上。整合包与插件不装进已有实例，报 `invalid_argument`。候选版本整场只拉一次：Modrinth 的版本列表不分页，一次即全量；CurseForge 的文件列表按 `index` / `pageSize` 翻页取全，最多 10 页（500 个文件），翻不完时标 `truncated`。只有不过滤的列表截断时，才再按实例用到的每个 MC 版本各拉一份（`gameVersion` 过滤，最多 4 个请求同时在途），按版本 id 去重合并。缓存里有完整（没截断）的不过滤列表时，带过滤的查询直接在它上面本地过滤，不再请求。结果都进 5 分钟的版本列表缓存。`list_mod_versions` 的出参是 `{ versions, truncated }`，资源详情的版本标签与版本下拉在截断时说明列表不全。资源包、光影、数据包没有卷宗，盘上同时留着几个版本时认发布最新的那个。
 
-`skin_info` 回答账户的皮肤：远程皮肤就绪时给取图键与模型；离线账户给它进游戏后显示的原版默认皮肤（`petalfall-core` 的 `art::default_skin`：Java 的 `UUID.hashCode` 对 18 取非负余数，先 9 套细臂、后 9 套宽臂），经材质协议从本机游戏文件读；正版与外置账户档案没有皮肤或下载失败时为 null，界面画剪影。
+`skin_info` 回答账户的皮肤：远程皮肤就绪时给取图键与模型；拿不到时（离线账户永远如此，正版与外置账户档案里没有皮肤、档案没取到或皮肤下载失败）给它进游戏后显示的原版默认皮肤（`petalfall-core` 的 `art::default_skin`：按 Java 的 `UUID.hashCode` 选，材质源是 1.19.3 起的 18 款时对 18 取非负余数，先 9 套细臂、后 9 套宽臂，更早的材质源按最低位在 steve 与 alex 里选），经材质协议从本机游戏文件读，本机没有材质源时界面画人偶。默认皮肤只是这一次的回答，不写回账户：档案后来取到皮肤、下载后来成功时，下一次查询就是真实皮肤。后台改写了账户记录（`petalfall://account-changed`）时前端让这个账户的 `skin:<uuid>` 失效，换上的档案皮肤随即重查。断网恢复时前端让全部 `skin` 查询失效重查一次（`state/store.ts` 的 `onNetworkRecovered`）：后端不记下载失败，断网时没下下来、画着默认皮肤的正版与外置账户这时再下；远程皮肤按地址的 SHA-1 缓存在缓存目录的 `skins/` 下，已经拿到真皮肤的账户重查只读本机缓存，不重新下载。正版与外置账户的 UUID 不是 32 位十六进制时为 null（画人偶），离线账户则报 `internal`。外置登录待选角色的皮肤按同一规则给。
+
+人偶是前端在内存里按账户色相生成的 64 × 64 标准布局皮肤（`app/src/art/skin/mannequin.ts`），不落盘、不进素材清单，也不来自任何游戏文件。皮肤图读不到（本机没有材质源、图被删、尺寸不对、下载失败）、皮肤信息为 null、或还在读又没有上一张可留时，头像与立绘都画它；它和真皮肤走同一条头像与立绘管线，在立绘可以拖动的位置同样能转身，换成真皮肤时沿用同一套交叉淡化。
 
 `list_news` 带必填参数 `retry`。启动器资讯（GitHub Releases）取不到之后按 1、5、15、60 分钟退避，之后一直 60 分钟：退避期内不请求，有上次取到的发布就给它并标 `offline`，没有就给上次那次失败；取到一次即清零，官方资讯不受它拖累。`retry` 为 true 时不等退避期满立即重取一次，主页资讯卡的「重试」与恢复联网后的重取这样调，首挂与失效重取不带。
 
@@ -586,7 +750,7 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 诊断不只看会话日志，还扫这一局留下的两份文件（`crashdiag.rs`）：工作目录下 pid 对得上、修改时间不早于会话开始的 `hs_err_pid<pid>.log`，以及 `crash-reports/` 下会话开始后最新的一份崩溃报告。Forge 崩溃报告的 Suspected Mods 段并入可疑 Mod，对到 mods 目录里的文件。文件损坏线索（`corrupted_jar`）的命中行里写着路径时同样：路径落在 mods 目录下、且文件名紧跟在路径分隔符之后对得上已装文件的（不分大小写，停用态的文件也认；子串匹配会把 `pfbad-1.0.0.jar` 认成 `bad-1.0.0.jar`，所以文件名要紧跟分隔符；盘上没有的不猜），该文件也并入可疑 Mod 并排在最前，已被点名并对上同一个文件时不重复；点名为空时也去 mods 目录认，损坏的 jar 读不出 mod id，日志本身点不了它的名。这样的 jar 没有元数据时 `mod_id` 用去掉 `.jar` 后缀的文件名。`last_crash` 的报告带 `exit_code_note`（退出码对照：`0xC0000005`、`0xC0000409` 与 1，表外的码为 null）与 `scanned_files`（参与扫描的文件），线索带来源。规则一条都没命中时按顺序兜底：先看 JVM 致命错误头（`#  EXCEPTION_ACCESS_VIOLATION (0xc0000005) at …`，`jvm_exception_clue`）。JVM 自己接住原生异常时写完 hs_err 就以退出码 1 结束，退出码看不出它死在原生代码里，异常码只留在错误头里，所以给出类别 `native_crash` 的线索，`detail` 是十六进制异常码并指到那一行；没有错误头再看退出码，是访问冲突或紧急中止时给出同一类别的线索；退出码 1 太笼统，只给说明不给线索。规则表的写法：每条规则取第一条命中、且没被更高优先级规则占用的行，并占下它命中的全部行，免得 Fabric 一次版本不符报错的好几行再被算成一条「缺少前置」；新增类别 `jvm_args_invalid`（Java 不接受自定义的 JVM 参数，虚拟机没能起来；一个开关没写 `-` 时 Java 把它当成主类，报的是找不到主类，主类名不带点的才算，真缺主类是文件问题）；新增类别 `loopback_unavailable`（Java 建不起本机回环连接，用到网络选择器的 Mod 起不来）：Windows 上 NIO 的 Selector 靠 TEMP 下的 AF_UNIX 套接字建回环管道，TEMP 缺失、不可写或路径过长时绑定失败，JDK 退回 TCP，不会走到这条报错；产生它的是绑定成功、连接失败（`Invalid argument: connect`），来自带文件系统写虚拟化的打包应用把写进 AppData 的套接字文件重定向了，它的子进程都一样。所以建议指向启动方式（从开始菜单直接打开，或把 TEMP 改到 AppData 之外），不让玩家去查 TEMP 存不存在。Fabric Loader 给玩家看的说明按系统语言翻译，规则认不出，所以也认它同一次失败写的不翻译的原因行（`HARD_DEP_INCOMPATIBLE_PRESELECTED sodium 0.8.13 {depends minecraft @ …}`）：依赖方是游戏或加载器的归版本不符，是 Java 的归 Java 版本不匹配，Mod 之间版本不对的归 `dependency_version_mismatch`，没装的归缺少前置；另认 Fabric 现行的措辞（`Incompatible mods found!`、`Some of your mods are incompatible`，说不清是哪一类不兼容时它们是唯一的线索）、中文系统上的详情行（`模组 'X' (id) 需要 …`）与入口崩溃时的 `provided by 'id'`，后者用来点名 Mod。Fabric Loader 的 `HARD_DEP_NO_CANDIDATE` 在没装和版本不对时写法相同，要看同一次失败的 `Fix:` 行：`add` 是没装，`replace` 且被原因行点名的才是版本不对，这两行都不翻译。`Incompatible mod set`、`Missing or unsupported mandatory dependencies` 和加载不了的连带行，在已有版本线索时让位，不再算一条缺少前置。Quilt Loader 把加载器版本不够也写成 `requires version … of quilt_loader, which is missing`，归为版本不符，不当成缺少前置。Forge 的依赖报错里 `Mod ID: 'fml'` 与 `forge`、`neoforge`、`minecraft` 一样是平台自己，要求没满足归版本不符（加载器版本不够，到发现页搜不到，不是缺前置；没登记成 Mod 时实际版本写 `[MISSING]`，同样如此）；要求方（`Requested by`）是平台 id 时线索不点名它，点名了界面就会让玩家去找 Minecraft 这个 Mod 的新版本，往下取得到 Mod 就取，取不到 `detail` 为空。缺少前置的 `which is missing` 只认 `requires`：Fabric Loader 解析成功之后打的 `recommends` 警告（`Warnings were found!`）游戏照常启动，没装的推荐项不算缺少前置，提取 `detail` 时跳过它，也不会被当成日志指向的 Mod，别的原因崩溃时同样不会因此多出一条缺少前置。Fabric 的 `Mod 'X' (id)` 与中文系统上的 `模组 'X' (id)` 里显示名可能带撇号（`Xaero's Minimap`），点名用懒惰匹配，一行里的依赖方和前置都取得到，不因前置的显示名带撇号让线索消失。崩溃判定（`detect_crash`）里，退出码 1 且输出里有 `Someone is closing me!` 的算玩家关窗，不算崩溃：1.5.2 这一代的窗口关闭回调打这一行再 `System.exit(1)`；日志里另有明确的崩溃标记（崩溃画面关闭时也打这一行）或退出码不是 1 时不开脱。`CrashReport.max_memory_mb` 是这一局实际生效的最大堆，不再是内存设置：自定义 JVM 参数排在启动器的内存参数之后，同一参数 JVM 取最后一次，所以取自定义参数里最后一个写法合法的 `-Xmx`，没写才用内存设置（`effective_max_heap_mb`），启动日志里的「最大内存」同口径，诊断解释内存耗尽时说的是这一局真正用上的数。`last-crash.json` 的格式版本是 2，旧的 1 版照常读。
 
-启动前的几项判断只提醒、不阻断（`petalfall_launch::precheck`），写进启动日志，也记进这一局的崩溃报告（`warnings`）：`game_path`（游戏目录含 `!`，或含非 ASCII 且实例是 1.17 之前的 Forge）、`instance_name`（实例名含同样的字符，且名字落在路径上：隔离实例的工作目录 `versions/<实例名>`，以及继承链根的 client jar 与 natives；不隔离的实例工作目录就是游戏目录，路径上只剩继承链根的名字）、`onedrive_folder`、`icloud_folder`（工作目录在同步文件夹里）、`long_player_name`（角色名超过 16 个字符而游戏是 1.20.3 或更新）、`jvm_memory_unit`、`jvm_min_over_max`、`jvm_max_too_low`（自定义 JVM 参数里 `-Xmx` / `-Xms` 的写法不对、最小堆大于最大堆、最大堆低于 512 MB）。这三项只看堆参数：`-Xmx` / `-Xms` 后紧跟字母的（OpenJ9 的线程栈大小 `-Xmso`）是另一个选项，不参与检查，既不当成写错单位的堆参数，也不把它的值算进最小堆；后面不是字母的（如 `-Xmx=4g`）仍按写错了的堆参数报。
+启动前的几项判断只提醒、不阻断（`petalfall_launch::precheck`），写进启动日志，也记进这一局的崩溃报告（`warnings`）：`game_path`（游戏目录含 `!`，或含非 ASCII 且实例是 1.17 之前的 Forge）、`instance_name`（实例名含同样的字符，且名字落在路径上：隔离实例的工作目录 `versions/<实例名>`，以及继承链根的 client jar 与 natives；不隔离的实例工作目录就是游戏目录，路径上只剩继承链根的名字）、`onedrive_folder`、`icloud_folder`（工作目录在同步文件夹里）、`long_player_name`（角色名超过 16 个字符而游戏是 1.20.3 或更新）、`player_name_chars`（角色名含码值 32 及以下或 127 及以上的字符，即空格与非 ASCII 字符，而游戏是 1.20.2、1.20.3 或它们的预发布与 RC；周快照与 1.20.4 起不算）、`jvm_memory_unit`、`jvm_min_over_max`、`jvm_max_too_low`（自定义 JVM 参数里 `-Xmx` / `-Xms` 的写法不对、最小堆大于最大堆、最大堆低于 512 MB）。`player_name_chars` 是数据格式号为 1 之后新增的取值，落盘时另存在 `added_warnings`，见「数据格式号」的启动提醒另存约定。这三项只看堆参数：`-Xmx` / `-Xms` 后紧跟字母的（OpenJ9 的线程栈大小 `-Xmso`）是另一个选项，不参与检查，既不当成写错单位的堆参数，也不把它的值算进最小堆；后面不是字母的（如 `-Xmx=4g`）仍按写错了的堆参数报。
 
 路径提醒的两项分开报，因为玩家要改的地方不同：游戏目录里的字符要换游戏目录才消得掉，实例名里的字符改个名就够了；两处都有就各报一条，只改一处另一处下一局还会冒出来。`instance_name` 只看真正落在路径上的名字，没落在路径上的改了也不起作用。非 ASCII 字符只对 1.17 之前的 Forge 提醒（版本号解析不出、含周快照时不提醒），`!` 与加载器无关，Java 的 jar URL 解析会把路径段末尾的它当成分隔符。系统代码页表示不了的字符不走这两条提醒，启动前以 `path_unsupported` 拦下（见「安装、补全与启动的约定」）。
 
@@ -600,6 +764,7 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 | `petalfall://game-exit` | 游戏退出（收尾记账已写完）：退出码、是否崩溃、是否由启动器结束 |
 | `petalfall://world-backup` | 游戏退出后的自动备份做完了：`{ instance_id, backed_up, failed }`，`failed` 的元素为 `{ world, error }`；开着自动备份时每局都推 |
 | `petalfall://device-code` | 微软设备码登录的 user_code 与验证网址 |
+| `petalfall://account-changed` | 后台改写了账户记录（后台提前续期、启动前的验证与续期、启动时顺带同步的外置档案）：`{ uuid }`，前端重读账户列表并让这个账户的皮肤查询失效；界面自己发起的账户操作不推，见「账户续期」 |
 | `petalfall://art-changed` | 原版材质源或全景的可用性变化，前端据此清空位图缓存并重绘 |
 | `petalfall://window-drop` | 拖进、拖出、松开在主窗口上：`{ type: "enter" \| "drop", content }` 或 `{ type: "leave" }`，`content` 为 `{ kind: "files", paths }` 或 `{ kind: "auth_server", url }` |
 
@@ -625,7 +790,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 
 主窗口的能力文件（`capabilities/default.json`）不用 `core:default`，只逐条授予前端实际调用的命令：事件的 listen、unlisten；窗口的 is_maximized、is_minimized、is_focused、minimize、toggle_maximize、internal_toggle_maximize（拖动区双击）、close、destroy、start_dragging、show、request_user_attention；webview 的 internal_toggle_devtools（只编译进调试构建）；opener 与 dialog 见下文。其余命令都会被拒（`<plugin>.<cmd> not allowed`）：新调用 `@tauri-apps/api` 的其他接口（例如 setTitle、emit、path、app.getVersion）时要在能力文件里加上对应的 allow 项，并同步 `window.rs` 的能力测试：它把能力文件的全集与期望清单（现为 18 条）比对，多一条少一条都挂。`window.rs` 另有一条策略回归测试，删掉策略或误放开时必挂。
 
-真机验证时不碰本机的真实数据：把 `LOCALAPPDATA`（数据目录）、`APPDATA`（默认游戏目录）与 `WEBVIEW2_USER_DATA_FOLDER`（WebView2 用户数据目录；Tauri 定位它用的是已知文件夹 API，不认 `LOCALAPPDATA`）都指到系统临时目录；需要远程调试时经 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<端口>` 追加参数。
+真机验证时不碰本机的真实数据：把 `LOCALAPPDATA`（数据目录，默认游戏目录 `<数据目录>\.minecraft` 也在它下面）、`APPDATA`（官方启动器的 `%APPDATA%\.minecraft` 与别的启动器的 Java 在它下面，启动器只读不写：探测其他游戏文件夹的 `discover_game_directories`、找原版材质源的 `art_candidates`、探测 Java 的 `default_search_roots` 读它）与 `WEBVIEW2_USER_DATA_FOLDER`（WebView2 用户数据目录；Tauri 定位它用的是已知文件夹 API，不认 `LOCALAPPDATA`）都指到系统临时目录；需要远程调试时经 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<端口>` 追加参数。
 
 ### 首次启动的提交
 
@@ -633,9 +798,13 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 
 游戏退出后，输出读取器最多再等 2 秒（`petalfall_launch::OUTPUT_DRAIN_DEADLINE`）读完管道：游戏拉起的辅助进程会继承输出管道，等它关闭可能永远等不到。超时就结束还没收回的读取器（已交出结果的不再动），`petalfall://game-exit` 照常发出，会话日志与启动器日志各记一条警告。等待游戏进程本身失败、或读取任务异常结束时，`petalfall-launch` 照样等输出读完或到限时，写下原因行与结局行（玩家点过结束记 killed，拿不到退出码按崩溃判定的规则记）并落盘，退出报告连同那次失败一并交出（`SessionEnd::failure`），不单独报错。门面照常收尾：记游玩时长，按崩溃判定从已落盘的会话日志诊断并存下这一局的崩溃报告；`petalfall://game-exit` 的 `killed` 照玩家有没有点过结束给出，那次失败排在收尾问题的第一项，只写进启动器日志。
 
+### 使用须知的确认
+
+须知正文与版本号只在随产物分发的 `usage-notice.md` 文首（`lib/legal-notice` 拆出版本号），后端不知道当前是第几版，只在 `config.json` 的 `usage_notice` 里记下用户同意的那一版与时刻（`usage_notice_acceptance` 读、`accept_usage_notice` 写，版本号 0 报 `invalid_argument`）。前端启动时与外观偏好一起读须知文件与这条记录，两者有一样读不出来（文件不在、文首不合约定、命令失败）就进启动失败页，不当成这次不用展示。记下的版本不等于文件里的版本（从没确认过、须知改版、装回旧版本）时，`shell/UsageNoticeGate` 在首次启动向导与主界面之前整窗展示须知全文：同意后落盘再放行，不同意先写一次任务记录、再销毁窗口退出，什么都不记。关口挂在状态容器之内、外壳核心之外：须知展示期间状态容器照常读本机的切片，外壳核心（全局快捷键、文件拖放）、启动器更新检查、主页的资讯与服务器状态都不挂；同意时首次启动与否还没读到就先留着须知，读到再放行，向导或主界面一次就挂对。同意之后须知整页淡出，外壳已经挂在它底下。外壳的通知容器这时还没挂，须知页自己的失败写在底栏上方。
+
 ### 启动提示
 
-`config.json` 解析失败时，启动不中断：坏文件改名为 `config.json.broken-<本地时间>`（重名时追加 `-2`、`-3`）留作现场，按默认配置启动，首次启动向导会重新出现。只有枚举设置（文件下载源、版本列表源、版本隔离、外观明暗与强调色、游戏启动后、界面语言）的取值这个版本不认识时（例如降级后读到新版本写的值），不算损坏：这几项按默认值启动，其余设置照常读入。之后整份落盘时，这一项只要还是暂用的默认值就写回原值，用户改成别的取值才按新值写；改过并落过盘后再改回默认，就按默认写。类型对不上（例如枚举写成数字）仍按损坏处理。这个版本不认识的顶层设置（例如新版本才有的项）与外观、内存、存档备份这类嵌套段里不认识的键，读入时原样收下，落盘时原样写回，不算启动处置。顶层的收在 `PetalfallConfig.unrecognized`（flatten），嵌套段的连同退回默认的枚举原值收在 `carried_over`（不进 IPC 出参，也不被整份替换的设置冲掉）。`set_world_backup` 整段替换存档备份设置时，段里不认识的键同样留着。落盘先序列化成 JSON 树再写出，`config.json` 的键按字母序排列。
+`config.json` 解析失败时，启动不中断：坏文件改名为 `config.json.broken-<本地时间>`（重名时追加 `-2`、`-3`）留作现场，按默认配置启动，首次启动向导会重新出现。只有枚举设置（文件下载源、版本列表源、版本隔离、外观明暗与强调色、游戏启动后、界面语言）的取值这个版本不认识时（例如降级后读到新版本写的值），不算损坏：这几项按默认值启动，其余设置照常读入。之后整份落盘时，这一项只要还是暂用的默认值就写回原值，用户改成别的取值才按新值写；改过并落过盘后再改回默认，就按默认写。类型对不上（例如枚举写成数字）仍按损坏处理。例外是界面形状缓存 `ui_shape`（见「数据目录」）：这一段读不懂（类型对不上、取值越界、更新的版本换了写法）时只这一段退回默认、记一条警告，不算损坏，不改名留存，也不报启动提示，之后落盘写出的是默认形状。这个版本不认识的顶层设置（例如新版本才有的项）与外观、内存、存档备份这类嵌套段里不认识的键，读入时原样收下，落盘时原样写回，不算启动处置。顶层的收在 `PetalfallConfig.unrecognized`（flatten），嵌套段的连同退回默认的枚举原值收在 `carried_over`（不进 IPC 出参，也不被整份替换的设置冲掉）。`set_world_backup` 整段替换存档备份设置时，段里不认识的键同样留着。落盘先序列化成 JSON 树再写出，`config.json` 的键按字母序排列。
 
 `credentials.bin` 读到了却还原不出账户库时（数据目录搬到了另一台机器或另一个 Windows 用户下，或文件被改坏：只认 DPAPI 解密失败与 JSON 解析失败），账户相关命令不报错：原文件原样改名为 `credentials.bin.broken-<本地时间>`（重名时追加 `-2`、`-3`，不覆盖先前的留存），按空凭据库继续，离线账户照常可用；当前账户原本在凭据库里时留存后就没有当前账户，不自动改选离线账户。读文件本身失败、改名失败仍照实报错。
 
@@ -656,7 +825,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | 目录 | 内容 | 允许引入 |
 | --- | --- | --- |
 | `pages/` | 七个页面：home、library、instance、discover、accounts、tasks、settings | pages、ui、art、launch、shell（仅 `useShell`、`useNav`、`useRunner`）、state、domain、copy、lib |
-| `flows/` | 跨页面的流程：登录、新建实例、首次启动向导 | flows、ui、art、launch、shell（仅 `useShell`、`useNav`、`useRunner`）、state、domain、copy、lib。不能引入 pages：两边共用的规则放进 `domain/` |
+| `flows/` | 跨页面的流程：登录、新建实例、首次启动向导 | flows、ui、art、launch、shell（仅 `useShell`、`useNav`、`useRunner`）、state、domain、copy、lib、`pages/shared`。不能引入各页面自己的目录：两边共用的规则放进 `domain/`，共用的部件放进 `pages/shared/`（例如「下载原版材质」，账户页、外观页与向导的账户步、设备码登录的成功区是同一个） |
 | `shell/` | 外壳：标题栏、侧栏、命令面板、通知、下载速览、错误边界、浮层机制、窗口行为 | shell、ui、art、launch、state、ipc、mc、domain、copy、lib、dev、styles |
 | `launch/` | 启动胶囊与启动视图 | launch、state、ui、art、domain、copy、lib |
 | `state/` | 状态容器、查询缓存、任务表、通知、路由 | state、ipc、domain、copy、lib |
@@ -673,14 +842,23 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 
 ### 装配与状态
 
-- `main.tsx`：主窗口以不可见状态创建。前端先检查 WebView2 能力、加载字体、读取外观偏好并把明暗模式与强调色写到 `<html>`，画完第一帧后才显示窗口。任何一步失败都渲染错误页并照常显示窗口；后端另有 3 秒的兜底显示。
-- `App.tsx`：按 `AppearanceProvider -> LauncherProvider -> ShellProvider -> AppShell` 的顺序装配。页面和流程模块在这里按目录约定收集后传给外壳，外壳本身不引用 `pages/` 和 `flows/`。
+- `main.tsx`：主窗口以不可见状态创建。前端先检查 WebView2 能力、加载字体，并行读取外观偏好、界面形状（`state/ui-shape`，首帧占位用，见「动效与布局稳定」）与使用须知（`state/usage-notice`，见「使用须知的确认」），把明暗模式与强调色写到 `<html>`，画完第一帧后才显示窗口。明暗选了跟随系统时按 `prefers-color-scheme` 写日樱或夜樱，系统切换浅色、深色时当场跟着换：WebView2 里这个媒体查询跟着 Tauri 窗口的主题走，窗口不指定主题时 tao 按系统的应用模式定主题、设置变化后重判，tauri-runtime-wry 再把它写进 WebView2 的 `PreferredColorScheme`。任何一步失败都渲染错误页并照常显示窗口；后端另有 3 秒的兜底显示。
+- `App.tsx`：按 `AppearanceProvider -> UiShapeProvider -> LauncherProvider -> UsageNoticeGate -> ShellProvider -> AppShell` 的顺序装配。页面和流程模块在这里按目录约定收集后传给外壳，外壳本身不引用 `pages/` 和 `flows/`。主页模块在渲染前预载，首帧就有内容；其余页面由外壳在首屏画完之后的第一个空闲时段预载：等「是否首次启动」读回、首屏画完、显示窗口的命令应答（`useRevealWindow` 的返回值，显示失败也算落定）再登记空闲回调，回调带 500 ms 超时兜底（`PAGE_PRELOAD_IDLE_TIMEOUT_MS`）。不更早，是因为页面块与命令都经宿主的 UI 线程应答，页面块的请求排在显示窗口前面时，窗口要等这一批都应答完才显示；不更晚，是因为点进还没加载的页面时，内容区至少要空过 React 对 Suspense 占位的 300 ms 节流。
 - `state/store.ts`：启动器的状态容器，与 React 解耦，测试里可以直接实例化。事件订阅在 `start()` 时建立；动作返回 Promise，失败时原样抛出。
 - 组件按片订阅状态：`useLauncherSelector(selector, isEqual)` 只在选出的值变了时重渲染，`useLauncherActions()` 只取动作、不订阅。整份订阅的 `useLauncher()` 会随每 100 ms 的下载进度与每批游戏日志重渲染：外壳根与常驻部件（含窗口行为与启动提示的钩子）、`useRunner`、主页、实例库与发现页（含资源详情）都不用它。发现页的结果卡包着 `memo`。`pages/subscriptions.test.tsx` 与 `shell/shell-renders.test.tsx` 数着渲染次数守住这一点。
 - 窗口拖放：外壳经窗口端口的 `onDrop` 订阅 `petalfall://window-drop`。页面或弹窗登记了接收方（`registerFileDrop`，例如本地整合包导入的投放区）时，最后登记的那个独占文件拖放，服务器链接不处理；没有接收方时，拖进整合包显示放置提示、松开导航到发现页并带上 `importFile`，拖进服务器链接显示放置提示、松开经 `openAuthlibServer` 打开外置登录弹窗，弹窗填好地址并自动执行一次「下一步」。首次启动向导期间与有浮层打开时外壳不处理也不提示。页面还可以登记 .jar 接收方（`registerJarDrop`，只有实例的 Mod 页这么做）：它不独占，只拿走拖进来的 .jar，整合包、别的文件和服务器链接仍按上面的规则走，也和外壳一样受首次启动向导与浮层的限制；它排在 `registerFileDrop` 的独占接收方之后，有独占接收方时 .jar 也归那一个。.jar 与整合包同时拖到收 .jar 的页面时 .jar 优先，整合包不处理。收 .jar 的页面此刻改不了 Mod（与页面上 Mod 文件操作的禁用原因同一条，原版实例也算）时不显示放置提示，松开后只说明这条原因。没有页面收 .jar 时，松开 .jar 说明要到实例的 Mod 页。
 - 窗口可见性：WebView2 窗口最小化时 `document.visibilityState` 仍是 `visible`，判断窗口此刻看不看得见要同时看 `WindowPort.isMinimized`。最小化与还原都会让窗口尺寸变化，外壳在尺寸变化时读一次，`shown = visible && !minimized`；通知暂停计时、运行呼吸窗口与花瓣暂停都按 `shown`，最小化期间到点的通知不消失，还原后按剩余时长继续走完。浏览器里的端口（`browserWindowPort`）用 `visibilityState` 代答；读不出窗口状态经外层统一错误处理报告。
 - 联网状态：`state/online.ts` 的 `NetworkMonitor` 全应用一份。浏览器报告断网，或某个请求以 `detail.network` 标明的连接类错误失败、随后 `probe_network` 也探测不通时判为离线；离线期间定时探测，通了即恢复。`probe_network` 按当前下载源的候选地址并行发 HEAD，任一地址有响应即算连通，量的是后端实际下载用的网络路径。
-- 启动器更新：状态机与控制器在 `state/updater/`，更新面板是外壳级浮层（`shell/UpdatePanel.tsx`），任何页面与通知经 `openUpdatePanel` 打开。首次启动向导走完、配置开着自动检查、当前构建支持更新时，启动后延迟一次、之后定时自动检查；查到的新版本每个版本只提示一次。去哪取清单由版本号决定：预发布标识第一段是 `dev`（后面只跟数字）的包先问香港机上的 dev 清单，再问 GitHub 滚动预发布 `dev-build` 上的同一份 `latest.json`；第一段是 `beta`（后面只跟数字）的包只问香港机上的 beta 清单；没有预发布标识的只问 stable 清单；别的预发布标识（`rc`、`alpha` 等）判为不支持自更新（`unknown_channel`，见下文），一个清单都不问。清单端点顺序固定、不探测，「文件下载源」策略只给更新包的几个下载源排先后；清单位置、扩展字段、选源、换源与发布链路见「Tauri 外壳」下的「自更新的清单与下载源」。`check_update` 逐个端点问清单，前一个没给出清单才问下一个。没有一个端点给出清单时，回了非 2xx 的端点（插件报 `ReleaseNotFound`，不带状态码，503、403 这类服务器故障也是这个样子）再各 GET 一次读状态码：所有端点都答 404 才算这个更新源上还没有发布，不算失败，不改写本次会话记着的版本、已下载的包和退出时安装，有记着的版本时返回它，否则返回 null，并打 warn 日志；其余情形（有端点回了 404 以外的状态、连不上、超时、正文读不出或不成形，再 GET 一次时失败也算）都报 `update_check_failed`，`detail` 的形状（`attempts`、只问一个端点时的 `detail.status`、全败在网络层时的 `detail.network`）见「自更新的清单与下载源」的检查清单。`check_failed` 阶段带 `network`（后端标在 `detail.network` 里的种类，其余失败为 null），更新卡按它写中文主句（`connect` 写「连不上更新服务器」，`timeout` 写「更新服务器没有响应」，其余仍是「检查更新失败」），后端原文放在可选中的次句。`updater_error` 的 `message` 只放原因，不带动作前缀：哪个动作失败由界面的主句或通知标题说。`download_failed` 阶段同样带 `network`（来源与 `check_failed` 相同，读 `detail.network`）：更新卡的次句与更新面板的说明块写「下载失败：连不上更新服务器」「下载失败：更新服务器没有响应」，其余写「下载失败」，后端原文另放一行可选中；说法集中在 `downloadFailureCopy`，卡片与面板共用。试过不止一个下载源、又不是签名不符时（个数取 `detail.sources` 的条数，经 `sourceFailuresOf` 读：没有这一项按 1 个源算；有却不成形，包括空数组，是后端违约，先落进失败阶段再抛出）主句改写「下载失败：所有下载源都连不上或没有响应」（`connect`：后端只要有一个源连不上就报它，别的源可能是连上过的超时）「下载失败：所有下载源都没有响应」（`timeout`），不全败在网络层时写「下载失败：N 个下载源都没能下完」，另放的原文逐行是各源的原文。下载中收到 `source` 事件时进度清零、总量等新源的第一条进度；换到第二个及以后的源时更新卡的次句与更新面板的进度下方多写一句「已换用备用下载源（第几个/共几个）」（`sourceSwitchedCopy`），不写源名与地址，不然进度从 0 重来看着像倒退。面板上这一句放在下载阶段一直挂着的 `role="status"` 节点里，没换源时节点是空的，换源时只换里面的文字：读屏对已有 live 区域换文字念得可靠，对新插进来的节点常常不念。签名不符写固定原因，包已丢弃，原文对用户没有用，不另放。清单本身不签名，签名只盖住更新包：伪造的清单可以给旧版本的合法包配上更高的版本号诱导降级（CVE-2026-95625），所以签名要带版本号。CI 签名时用 `tauri signer sign --app-version` 把版本写进 minisign 的可信注释（受全局签名保护），打包时给 `plugins.updater` 注入 `requireSignedVersion: true`；插件下载完验签后核对签名里的版本与清单版本，对不上或签名没带版本都按签名不符报 `update_signature_invalid`。发行构建有公钥、却没把 `requireSignedVersion` 设为 true（缺这一项、值不是 true，或驼峰与短横线两种键名同时出现）时判为不支持自更新，原因是 `signed_version_not_required`，插件不注册，各命令报 `updater_unsupported`；打开了 `allowDowngrades`（插件见到它就只要求清单版本与当前不同，伪造清单可以直接指向旧版本的合法包）时同样判为不支持，原因是 `downgrades_allowed`；版本号的预发布标识认不出通道时同样判为不支持，原因是 `unknown_channel`：认不出就关掉，不再默认去问 stable 清单；debug 构建与没有公钥照旧是 `debug_build`、`missing_pubkey`。给插件建的客户端（检查清单与下载更新包共用，经插件的 `configure_client`）套上连接与读取超时（复用 `petalfall_base::http::HttpConfig` 的默认值）并只走 https（`https_only`，见「自更新的清单与下载源」），下载不设总时限，慢网下的正常下载不会被掐断；另有卡死检测（`commands/update_stall.rs`，每个源各起一份）：从收到第一块正文起看满一个观察窗口后，窗口内收到的字节低于下限就中止这个源的下载，记作 `timeout` 换下一个源；源都试完仍没下成时按「自更新的清单与下载源」的汇总规则报错，试过的源全是卡死或超时时报 `update_download_failed`，`detail.network` 为 `timeout`，界面照网络超时提示。Windows 上的更新包是首装引导程序（`app/src-tauri-setup`，NSIS 包作为载荷拼在它尾部），不是 NSIS 包：插件把下载到的任何 PE 都当 NSIS 包，以 `/P /UPDATE /R /ARGS <逐个转义的启动器参数>` 拉起后立即退出（插件 2.12.0 的拼法：`plugins.updater` 没配 `windows.installMode`，取默认的 passive，即 `/P`；装完重开（`restart_after_install`，默认开着）时才在 `/UPDATE` 之后接 `/R /ARGS` 和启动器参数，关掉时到 `/UPDATE` 为止）。插件拉起之前先跑 tauri 的 `cleanup_before_exit`，窗口都已藏起；安装程序没拉起来（`ShellExecuteW` 失败）时进程接着跑，「立即安装」先把主窗口重新显示出来再报错，退出时安装的那条路上进程本来就在退出，不重新显示。引导程序在 `/ARGS` 之前见到 `/UPDATE`（不分大小写）才进更新模式，否则照常走交互向导；`/ARGS` 之前的开关不看顺序，还在用插件 2.10.1 的旧启动器拼的 `/P /R /UPDATE /ARGS` 同样认得。更新模式下，现有安装判定为升级时不显示欢迎页与已安装页，直接按升级装回登记目录，桌面快捷方式保持原状；落樱还没退出时先等一会儿，等不到停在「请先关闭落樱」页，关掉后自动继续；装完带 `/R` 且不是提权运行时重开启动器，`/ARGS` 之后的参数原样带回，否则停在完成页；失败走失败页。已装的版本相同或更新、安装损坏或没有安装时退回交互向导。WebView2 不可用或建窗失败时，引导程序以插件默认会带的开关和照样转义的启动器参数（`/P[ /R] /UPDATE /ARGS <…>`，开关顺序与 2.12.0 不同，NSIS 模板逐个找开关、不看顺序）拉起内嵌的 NSIS 包，走它的被动模式。
+- 启动器更新：状态机与控制器在 `state/updater/`，更新面板是外壳级浮层（`shell/UpdatePanel.tsx`），任何页面与通知经 `openUpdatePanel` 打开。首次启动向导走完、配置开着自动检查、当前构建支持更新时，启动后延迟一次、之后定时自动检查；查到的新版本每个版本只提示一次。去哪取清单由更新通道的偏好决定：没选过时按安装包自己的通道（由版本号判出），问偏好通道与比它慢的通道；预览版的清单先问香港机，再问 GitHub 滚动预发布 `dev-build` 上的同一份 `latest.json`，测试版、正式版的只问香港机；版本号的预发布标识认不出通道（`rc`、`alpha` 等）时判为不支持自更新（`unknown_channel`，见下文），一个清单都不问。更新卡（「设置 · 关于」）上可以选更新通道（`set_update_channel`），卡片按 `updater_info` 的 `relation`、`channel_heads` 与 `refused` 说明在等哪条线追上来、哪条线还没有发布或更新源还没跟上、哪一版因为什么没有装。清单端点顺序固定、不探测，「文件下载源」策略只给更新包的几个下载源排先后；通道与公钥、清单头核验、清单位置、扩展字段、选源、换源与发布链路见「Tauri 外壳」下的「自更新的清单与下载源」。`check_update` 在每个通道内逐个端点问清单，前一个没给出可用的清单头才问下一个。一个通道没有一个端点给出清单时，回了非 2xx 的端点（插件报 `ReleaseNotFound`，不带状态码，503、403 这类服务器故障也是这个样子）再各 GET 一次读状态码：所有端点都答 404 才算这个通道还没有发布。偏好通道还没有发布、更慢的通道里也挑不出候选时不算失败，不改写本次会话记着的版本、已下载的包和退出时安装，有记着的版本时返回它，否则返回 null，并打 warn 日志；偏好通道的其余情形（有端点回了 204 或 404 以外的状态、连不上、超时、正文读不出或不成形、清单头核验不过，再 GET 一次时失败也算）都报 `update_check_failed`，`detail` 的形状（`channel`、`attempts`、只有一个端点时的 `detail.status`、全败在网络层时的 `detail.network`）见「自更新的清单与下载源」的检查清单；偏好通道给出的清单头全都低于本机记录时报 `update_source_stale`。`check_failed` 阶段带 `network`（后端标在 `detail.network` 里的种类，其余失败为 null），更新卡按它写中文主句（`connect` 写「连不上更新服务器」，`timeout` 写「更新服务器没有响应」，其余仍是「检查更新失败」），后端原文放在可选中的次句。`updater_error` 的 `message` 只放原因，不带动作前缀：哪个动作失败由界面的主句或通知标题说。`download_failed` 阶段同样带 `network`（来源与 `check_failed` 相同，读 `detail.network`）：更新卡的次句与更新面板的说明块写「下载失败：连不上更新服务器」「下载失败：更新服务器没有响应」，其余写「下载失败」，后端原文另放一行可选中；说法集中在 `downloadFailureCopy`，卡片与面板共用。试过不止一个下载源、又不是签名不符时（个数取 `detail.sources` 的条数，经 `sourceFailuresOf` 读：没有这一项按 1 个源算；有却不成形，包括空数组，是后端违约，先落进失败阶段再抛出）主句改写「下载失败：所有下载源都连不上或没有响应」（`connect`：后端只要有一个源连不上就报它，别的源可能是连上过的超时）「下载失败：所有下载源都没有响应」（`timeout`），不全败在网络层时写「下载失败：N 个下载源都没能下完」，另放的原文逐行是各源的原文。下载中收到 `source` 事件时进度清零、总量等新源的第一条进度；换到第二个及以后的源时更新卡的次句与更新面板的进度下方多写一句「已换用备用下载源（第几个/共几个）」（`sourceSwitchedCopy`），不写源名与地址，不然进度从 0 重来看着像倒退。面板上这一句放在下载阶段一直挂着的 `role="status"` 节点里，没换源时节点是空的，换源时只换里面的文字：读屏对已有 live 区域换文字念得可靠，对新插进来的节点常常不念。签名不符写固定原因，包已丢弃，原文对用户没有用，不另放。清单本身不签名，签名只盖住更新包：伪造的清单可以给旧版本的合法包配上更高的版本号诱导降级（CVE-2026-95625），所以签名要带版本号。CI 签名时用 `tauri signer sign --app-version` 把版本写进 minisign 的可信注释（受全局签名保护），打包时给 `plugins.updater` 注入 `requireSignedVersion: true`；插件下载完验签后核对签名里的版本与清单版本，对不上或签名没带版本都按签名不符报 `update_signature_invalid`。发行构建有公钥、却没把 `requireSignedVersion` 设为 true（缺这一项、值不是 true，或驼峰与短横线两种键名同时出现）时判为不支持自更新，原因是 `signed_version_not_required`，插件不注册，各命令报 `updater_unsupported`；打开了 `allowDowngrades`（插件见到它就只要求清单版本与当前不同，伪造清单可以直接指向旧版本的合法包）时同样判为不支持，原因是 `downgrades_allowed`；版本号的预发布标识认不出通道时同样判为不支持，原因是 `unknown_channel`：认不出就关掉，不再默认去问 stable 清单；注入的公钥与编进去的钥表给本包通道的那一把对不上时同样判为不支持，原因是 `pubkey_mismatch`（见「自更新的清单与下载源」）；debug 构建与没有公钥照旧是 `debug_build`、`missing_pubkey`。给插件建的客户端（检查清单与下载更新包共用，经插件的 `configure_client`）套上连接与读取超时（复用 `petalfall_base::http::HttpConfig` 的默认值）并只走 https（`https_only`，见「自更新的清单与下载源」），下载不设总时限，慢网下的正常下载不会被掐断；另有卡死检测（`commands/update_stall.rs`，每个源各起一份）：从收到第一块正文起看满一个观察窗口后，窗口内收到的字节低于下限就中止这个源的下载，记作 `timeout` 换下一个源；源都试完仍没下成时按「自更新的清单与下载源」的汇总规则报错，试过的源全是卡死或超时时报 `update_download_failed`，`detail.network` 为 `timeout`，界面照网络超时提示。Windows 上的更新包是首装引导程序（`app/src-tauri-setup`，NSIS 包作为载荷拼在它尾部），不是 NSIS 包：插件把下载到的任何 PE 都当 NSIS 包，以 `/P /UPDATE /R /ARGS <逐个转义的启动器参数>` 拉起后立即退出（插件 2.12.0 的拼法：`plugins.updater` 没配 `windows.installMode`，取默认的 passive，即 `/P`；装完重开（`restart_after_install`，默认开着）时才在 `/UPDATE` 之后接 `/R /ARGS` 和启动器参数，关掉时到 `/UPDATE` 为止）。插件解包成功之后、拉起之前调退出前钩子，外壳换上的钩子（`before_installer_launch`）先放走等这个进程退出的后来者（见「Tauri 外壳」下 `single_instance.rs` 一行），再跑插件原本就跑的 tauri `cleanup_before_exit`，窗口都已藏起；安装程序没拉起来（`ShellExecuteW` 失败）时进程接着跑，「立即安装」先把主窗口重新显示出来再报错，退出时安装的那条路上进程本来就在退出，不重新显示。安装引导程序这一侧：
+  - 命令行（`app/src-tauri-setup/src/cli.rs`）。引导程序在 `/ARGS` 之前见到 `/UPDATE`（不分大小写）才进更新模式，否则照常走交互向导；`/ARGS` 之前的开关不看顺序，还在用插件 2.10.1 的旧启动器拼的 `/P /R /UPDATE /ARGS` 同样认得。`/ARGS` 之前另认一个开关 `/CHANNELSWITCH`（不分大小写、不带值，整个记号相等才算），表示这次是启动器替用户发起、换到更慢通道的安装。它只在带 `/UPDATE` 时生效：交互安装的同意只来自页面上的按钮，带着这个开关的快捷方式绕不过页面。解析结果把开关与启动方式分开记，`commands.rs` 再把两者折成判定看的发起方式（`install_policy` 的 `Initiation`）。插件把检查器配的 `installer_args` 原样接在整串最后：关掉装完重开（`restart_after_install`）时整串到 `/UPDATE` 为止，追加的开关紧跟其后、仍在 `/ARGS` 之前（如 `/P /UPDATE /R /CHANNELSWITCH`），引导程序认得出；开着时追加的参数排在启动器参数之后，只会被当成启动器参数带回去。现在启动器的检查器都不配 `installer_args`、也都不关装完重开（`commands/updater.rs` 的单测按源码钉住），它拉起的引导程序都不带这个开关。插件会把配置里的 `plugins.updater.windows.installerArgs` 抄进每一个检查器，所以 `app/src-tauri/tauri.conf.json` 与两条流水线的公钥注入行都不能出现 `installerArgs`，否则普通更新也会带着这个开关（`.github/scripts/release-heads.test.mjs` 钉住这一条）。开关只表示「用户同意了」，不是身份凭证：能从磁盘核实的条件（两边的通道、安装包严格更慢、已装的确实更新、数据格式兼容）每次都重查。原生回退拼参数时不转发它，NSIS 不认它。
+  - 判定分三步，先后不能换，规则是 `petalfall-release` 的 `install_policy`（`judge_kind`、`judge_modes`）：Rust 算好种类、允许的模式、更新模式下无人值守装的模式与要不要写交接记录，前端只照着显示。第一步是数据格式关（见「磁盘布局」下的「数据格式号」）：数据目录的记号高于安装包认得的号、或记号读不懂时，三种发起方式都不装，允许的模式为空，看起来是升级也一样；首装时在最终的目标目录上判同一件事，问题记为 `data_incompatible`，界面退回选目录页。第二步比两边的版本与通道：已装的版本取卸载项的 DisplayVersion，按 semver 比，构建元数据不参与，一侧解析不了时能解析的那一侧更大，两侧都解析不了算相等；两边的通道用与启动器同一份规则认出。第三步看发起方式：用户双击（交互）、启动器自动更新（`/UPDATE`）、启动器带 `/UPDATE` 与 `/CHANNELSWITCH` 拉起。数据关放行时：
+    - 已装的更旧：交互时升级，更新模式下无人值守升级。安装包的通道比已装的快时（例如已装测试版、双击预览版的包），已安装页用「换到{通道}」的说法，用户确认时写交接记录；比已装的慢时（例如测试版用户装同号的正式版），这类版本多半是启动器跟随本来就会送来的，是普通升级，不写交接记录。更新模式一律不写。
+    - 版本相同、程序文件不完好（缺失、读不懂 PE 头或短于节表声明的末端）或卸载项没有版本：交互时给修复（重新安装），更新模式退回交互。没有安装：首装，更新模式同样退回交互。
+    - 已装的更新：装回较早的版本只有一格，安装包的通道严格比已装的慢，并且由用户在「换到{通道}」页上亲手确认（写交接记录），或由启动器带 `/CHANNELSWITCH` 拉起（无人值守装，不写交接记录）。其余一律判 newer，只能打开落樱，原因给界面挑说明：同一个通道（`same_channel`）、安装包的通道更快（`faster_channel`）、更慢通道的旧包却由不带开关的自动更新拉起（`slower_channel`）、任一侧通道认不出（`unknown_channel`）。更快通道的旧包在任何发起方式下都没有正当用途：想换到更快的通道，装它最新的包就是升级。自动更新只收严格新于当前版本的包，不带开关的自动路径上不会合法地出现更旧的包，不能让一次没人发起的安装去讨换通道的同意。
+  - 更新模式下判为无人值守装时不显示欢迎页与已安装页，直接装回登记目录，桌面快捷方式保持原状；落樱还没退出时先等一会儿，等不到停在「请先关闭落樱」页，关掉后自动继续；装完带 `/R` 且不是提权运行时重开启动器，`/ARGS` 之后的参数原样带回，否则停在完成页；失败走失败页。其余情形退回交互向导。半装恢复（上次没装完）只会把种类改成修复或首装，换到更慢的通道与 newer 保持原判，否则「重新安装」就绕过了不让装旧包的判定与换通道的确认。界面送来的安装计划在真正开装之前由后端再复核一次：模式必须在探测时允许的集合里，数据格式关按要装进去的目录重读一遍；不过时整个命令以字符串拒绝，不写半装记录、不写交接记录、不启动载荷。失败页的「改用标准安装程序」不经这道复核、直接交给 NSIS，所以先拒两种：探测允许的模式里没有首装、升级或修复；按磁盘现状照下面原生回退的判定再判一次，结论不让交给 NSIS（例如探测之后数据被更新的版本用过）。装完核对卸载项的 DisplayVersion 等于载荷头里的版本，NSIS 不肯往低版本覆盖时这里报失败，不会谎称换好了。
+  - 交接记录（格式与启动器怎么读见「自更新的清单与下载源」）只在交互安装、用户在「换到{通道}」页上点了主按钮时写，写在半装记录之前：先写临时文件、刷盘、再改名，写不成按读写失败报给失败页，载荷不启动，安装目录还没动。首装不写（卸载时保留下来的偏好是用户选过的，不能被冲掉），普通升级、修复与更新模式都不写。
+  - 载荷头（`petalfall-setup-payload`，放在引导程序可执行文件的节末端之后，其后是 NSIS 包的原样字节）现在是 144 字节的 `PFSETUP2`：在 `PFSETUP1` 的 136 字节（magic、两个长度、两个 SHA-256、48 字节的版本号）之后追加 `data_format`（偏移 136，u32 小端，不小于 1：这个安装包认得的数据格式号）与 `caps`（偏移 140，u32 小端，能力位；第 0 位 `CAP_CHANNEL_SWITCH` 表示认得 `/CHANNELSWITCH`、按上面的判定表执行并做数据格式关；未定义的位写 0，读者忽略）。magic 的末位数字兼作格式版本，读的时候先看 magic 再定头长；`PFSETUP1` 的旧包只读，按「数据格式号 0、没有任何能力」算，`PFSETUP2` 头里的号为 0 按头损坏处理。号由 `pack-setup` 取自 `DATA_FORMAT`、能力位取 `SHIPPED_CAPS`，都不走参数，CI 传不进别的值。整个文件都在更新签名的覆盖范围里，启动器下载验签之后读它（见「自更新的清单与下载源」）；引导程序启动时核对自己的头：magic 是 `PFSETUP2`、号等于编进壳的 `DATA_FORMAT`、能力位等于 `SHIPPED_CAPS`，任一项不对只能是打包出错，按安装包不完整处理。
+  - WebView2 不可用或建窗失败时，引导程序先用同一套判定算出结论（`commands.rs` 的 `fall_back`），不做半装恢复；没有登记安装时，数据格式关读卸载留下的目录，没有就读默认目录，用户在 NSIS 向导里另选的目录由启动器启动时那一关兜底。只有首装、升级与修复交给内嵌的 NSIS 包：交互启动时是无参的原生向导，更新模式下带上插件默认会带的开关和照样转义的启动器参数（`/P[ /R] /UPDATE /ARGS <…>`，开关顺序与 2.12.0 不同，NSIS 模板逐个找开关、不看顺序）走它的被动模式。其余不拉起 NSIS，用三种系统对话框之一说明后退出：被数据格式关拦下；newer，按原因挑说明；换到更慢的通道，这要用安装程序的窗口，请先装好或修复 WebView2。更新模式下点完按原参数重开登记目录里的启动器，只在程序文件完好时重开。
 - 实例 id 就是目录名，改名、删除后同一个 id 可能落到另一个实例上：状态容器在 id 换到新实例时丢掉旧 id 下没人订阅的按需缓存（Mod、内容、设置、历史、崩溃、日志、可更新项、安装计划、内存建议），游玩统计失效重取。侧栏固定的读改写（切换固定、整组写入、新实例落地自动固定）排成一条链串行执行，并发切换不互相覆盖。同一实例（键不分大小写）的设置读改写也排成一条链（连着改两项、Java 落地固定、新实例落地写封面），后写的不会把先写的那一项冲回去；前一次失败照常交给它自己的调用方，不挡后面排着的。通知动作里的实例引用同样跟着 id 走：改名时就地迁到新 id，路由是数据，直接改写，闭包经 `instanceAction` 用新 id 重造，不保留旧名到新名的映射；实例删除时只摘掉通知的动作、留下正文，之后有实例用上这个名字，点它不会落到新实例上。
 - 重叠的读取：实例重扫、账户读取、全局设置与侧栏固定的读取都可能被几处同时发起，先发出的那次可能后回来，只采纳比已采纳的那次更晚发出的结果（实例重扫晚到的旧结果仍把它的收尾动作套在新列表上）。写入同样要防读取：`writePins` 采纳后端返回的整份固定列表，并把写入发出之前已在路上的读取一并作废（已采纳序号推到写入发出时的 `pinsIssued`），写入之后才发出的读取照常按序号采纳。`selectInstance` 的写入不返回整份配置，晚到的旧读取里可能有改设置之后读到的别的字段，不能整份丢掉，所以记下 `selectionWrite`（写入的实例 id，与写入发出时设置读取已发出到第几次）：发出序号不晚于它的读取照常采纳，只把当前实例按写入改正。账户列表与当前账户分两条命令读，中间夹着另一路的增删时可能对不上，对不上就重读，连读 3 次仍对不上才报错。
 - 游戏退出与启动失败后的重读：游戏退出时除日志、内容外还失效 `mods:<id>`。玩家常常在资源管理器里往 mods 目录放了文件就直接启动，诊断页要拿日志点名的 Mod 对列表，旧列表里没有它，开关与「停用」就出不来。启动报 `version_not_installed`（版本 JSON 在启动器之外被删掉）时重扫实例列表，入口随之换成「修复并启动」，不然列表还当它完好，玩家只能对着通知一遍遍点启动。
@@ -689,8 +867,9 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 - 改名：后端改名成功（含带 `renamed_to` 的 `play_records_failed` 与 `world_backups_not_moved`）就在同一次状态更新里迁走全部引用（`migrateRenamed`：会话、任务（含任务行详情里的实例名与补全任务的标题）、任务元数据、留着的通知动作、启动替换确认、登录弹窗里等登录后继续的启动（`login`，意图是启动的那种：弹窗开着时落盘的改名，登录后要启动的是新名字）、`lastRename`），并就地把实例列表、侧栏固定与当前实例里的旧 id 换成新 id，作废改名之前发出的重扫与读取，固定服务器的查询一并失效；之后再读固定、设置与实例列表，这三项读取失败不算改名失败，改名照常返回新 id，另以「实例列表没能刷新」通知。
 - 任务的附带记录（入队上下文 `taskMeta`、未读失败）随任务离开任务表或落地交接而清掉，在状态写入的一处收口。
 - 资源缓存（`state/resource.ts`）：出错的条目手里还有上一次成功的数据时，重试期间转成 ready 加 refreshing 照常给出它，再失败时 error 里仍带着它；从没成功过的重试时回到 loading。出错的条目没人订阅了（包括订阅者在加载期间就离开、命令式读取失败），延后一个宏任务后丢掉，再有人要时从头请求；同一轮内退订再订阅（组件交接）不重取。`refresh(key)` 是不作废在途请求的后台重读：已有请求在路上时不再发，没有才发。`reload` 会作废在途的那次，初次加载的骨架要从头等，回到前台与切页撞在一起时也多读一遍，所以不是玩家点的重读（切回页面看看盘上变了没有）走 `refresh`，「重试」这类玩家点的走 `reload`。
-- 按钮的三种不可用：只传 `disabled` 是原生禁用（离开 Tab 序列）；`disabledReason` 保持可聚焦、悬停与聚焦显示原因；按下后会在聚焦着时变成不可用的（动作进行中、挡住重复触发）用 `disabled` 加 `focusableWhenDisabled`，或 `loading`，以 `aria-disabled` 代替原生禁用，焦点不随原生禁用丢回 body。`Button` 与 `IconButton` 都支持，拦截统一经 `ui/Button.tsx` 的 `softDisabledProps`。`Button` 接受 `ref`（随其余属性落到 `button` 元素上，穿过常驻的提示包裹层）：相邻的控件消失时，调用方靠它把焦点交给这个按钮。
+- 按钮的三种不可用：只传 `disabled` 是原生禁用（离开 Tab 序列）；`disabledReason` 保持可聚焦、悬停与聚焦显示原因；按下后会在聚焦着时变成不可用的（动作进行中、挡住重复触发）用 `disabled` 加 `focusableWhenDisabled`，或 `loading`，以 `aria-disabled` 代替原生禁用，焦点不随原生禁用丢回 body。`Button` 与 `IconButton` 都支持，拦截统一经 `ui/Button.tsx` 的 `softDisabledProps`。`Button` 接受 `ref`（随其余属性落到 `button` 元素上，穿过常驻的提示包裹层）：相邻的控件消失时，调用方靠它把焦点交给这个按钮。`IconButton` 另认调用方自己传的 `aria-disabled`：外观同禁用（变淡、不铺悬停叠层、按下不缩），点击照常交给调用方，用在点了要给说明的入口（侧栏固定满时的图钉，点了弹上限提示）。
 - 焦点归还（`ui/focus-return.tsx`）：浮层（弹窗、浮层面板）关闭时把焦点还给打开前的焦点元素。它已不在文档中时（打开它的按钮被关闭这一步换掉了），从最近的、还在文档里的祖先里取第一个可 Tab 的控件；到弹窗或内容区滚动容器这一层就停，落到容器本身，不进浮层根。祖先链要在打开时记下，元素被移除后从它身上走不回文档。叠着的弹窗里不能越过底层弹窗退到内容区滚动容器：它在底层弹窗的圈定之外，焦点会被圈定拉到底层弹窗的第一个控件，也就是头部的「关闭」，再按一下回车就把整个流程关了。
+- 浮层面板的初始聚焦（`ui/Popover.tsx`）：面板定位之前是 `visibility: hidden`，浏览器不让隐藏的元素获得焦点，而内容的 layout effect 先于面板自己的定位执行，挂载时就聚焦会落空，焦点留在触发器上，键盘打开的菜单按键全落在触发器上。`autoFocus` 与内容打开时的聚焦（菜单容器、下拉的过滤框、账户切换菜单的当前账户）都在面板变为可见的那次提交里执行；`Popover` 的内容要在打开时聚焦，用 `usePopoverInitialFocus`，不在挂载的 effect 里直接 `focus()`，也不用元素的 `autoFocus`。面板 portal 在浮层根里、排在文档末尾，打开时焦点不进面板的话，Tab 从触发器走到它在文档里的下一个元素，面板一直开着，键盘到不了面板里的控件：内容自带 menu / listbox 的（菜单、下拉、账户切换）按内容自己的键盘模式处理（不带过滤框的下拉焦点留在触发器上，经 `aria-activedescendant` 指向高亮项），其余 dialog 面板（下载快览、筛选条件、状态岛详情、换封面、选择加入实例）一律开 `autoFocus`，落在面板容器上。不落在第一个控件上：第一个控件随内容而变，下载快览有任务时是首行的「取消任务」，一个回车就可能把下载取消了；落在容器上读屏也先念出面板的名称，再按 Tab 才进第一个控件。
 - 单选选项块（`RadioTile`）守 2 到 6 个选项的上限；选项来自本机扫描这类运行时数据（默认 Java 列表）时开 `openEnded`，只查下限。
 - 通知栈：指针或焦点在栈内时全部暂停计时；指针下方那条被关掉、收不到 pointerleave 时，在卸载后的微任务里按指针最后的位置做命中测试，已不在栈上就恢复计时。文档里存在弹窗层（`data-sk-modal-layer`，含退场中的）或首次启动向导外框（`data-sk-onboarding`）时，通知容器经 `:root:has()` 挪到标题栏下方的左上角（距左 16、距上 120），让过底栏右侧的主按钮、头部的关闭、新建向导的步骤条和资源详情的返回，节点卸载后回右下角；落点只看节点是否在文档里，不走状态容器，所以弹窗要等退场播完才回位。滑入滑出的方向跟着落点：样式表经 `--toast-enter-side` 给方向，通知容器每次渲染读出后传给 `Toast`；退场的通知已摘出列表、收不到新属性，方向由 `AnimatePresence` 的 `custom` 给，取的是关闭那一刻的落点。
 - 更新控制器（`state/updater/controller.ts`）在检查、下载、安装进行中再发起同一步时按阶段不对报错，不重复调后端。
@@ -711,35 +890,46 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | `tabPanel` | 标签面板与分区面板的新内容，从导航的那一侧进来 |
 | `stepPane` / `stepPaneFade` | 向导换步 |
 | `insertItem` / `insertItemFade` | 流内块的增删 |
-| `popMark`（`dot` / `glyph` / `tag` / `reduced`） | 角标、提醒点、计数、标签这类小标记的出没 |
+| `popMark`（`dot` / `glyph` / `tag` / `check` / `reduced`） | 角标、提醒点、计数、标签这类小标记的出没；`check` 是一组互斥格子里选中那一格的勾标，退场缩回 0.6，换格时看得出勾从哪一格收走 |
+| `successMark` | 成功的大勾（登录成功、安装完成） |
 | `faceSwap`、`lineSwap` / `lineSwapFade` | 同一格里换一枚小控件、同一行换一句文字 |
 | `shake`、`nudge` | 否定抖动、原位弹一下 |
 
-**减少动画。** 外观偏好里的「减少动画」经根部的 `MotionConfig` 生效，它只会把位移与缩放改成一步到位，带位移或缩放的退场会先跳一下再淡出。所以凡是带位移或缩放的进出场，组件自己读 `useReducedMotionConfig()`，减少动画时换成只动透明度的那一份（上表里带 `Fade`、`reduced` 的，或 `lib/useInsertItem` 按生效值给出的增删参数）。
+**减少动画。** 外观偏好里的「减少动画」经根部的 `MotionConfig` 生效，它只会把位移与缩放改成一步到位，带位移或缩放的退场会先跳一下再淡出。所以凡是带位移或缩放的进出场，组件自己读 `useReducedMotionConfig()`，减少动画时换成只动透明度的那一份（上表里带 `Fade`、`reduced` 的，或 `lib/useInsertItem` 按生效值给出的增删参数）。让位在减少动画时一步到位，抽出布局淡出的退场项会压在当场顶上来的内容上，所以 `ui/Appear` 在减少动画时只撤不进的那一次把撤掉的子项留在布局里淡完再拿掉（见下表）。
 
 **共用件**（页面与流程直接用，不在各处再写一份）：
 
 | 共用件 | 解决什么 |
 | --- | --- |
-| `lib/reflow` 的 `useReflow(spring?)` / `observeReflow` | 兄弟让位：容器的直接子项里有一个变高变矮、增删或换序时，其余子项从旧位置沿弹簧滑到新位置。它观察 DOM 尺寸与子节点增删，不依赖哪个组件重渲染，数据在子组件内部晚到也接得住。`ui/Page` 与 `ui/Bento` 已经自带 |
-| `ui/Loadable` | 加载门（`lib/loading-gate`）三种状态的画法：等待期骨架不可见地占位，超过才淡入；内容到达时交叉淡化。可选的 `busyLabel` 在加载期间向读屏播报 |
-| `ui/Appear` | 条件出现的块：出现时淡入并落到位，消失时抽出布局原地淡出 |
+| `lib/reflow` 的 `useReflow(spring?)` / `observeReflow` | 兄弟让位：容器的直接子项里有一个变高变矮、增删或换序时，其余子项从旧位置沿弹簧滑到新位置。它观察 DOM 尺寸与子节点增删，不依赖哪个组件重渲染，数据在子组件内部晚到也接得住。`ui/Page`、`ui/Bento` 与 `ui/RadioTile` 的 `openEnded` 组已经自带，调用方不要再挂 |
+| `ui/Card` 的 `reflowEdge` | 卡片外框跟着卡内的让位走：卡片高度变了，底色、描边与阴影所在的外框层以上沿为原点，从旧高度沿 `settle` 弹簧缩放到新高度，与卡内 `useReflow` 的让位同一帧起步，四角的圆角逐帧按缩放反向校正；宽度变化与减少动画时一步到位。不开时外框一步到位，卡片变矮时末行先画到卡片外面。只给最下面一块只会被挤开、自己不变高的卡片开（设置页卡头下面的 `RowFlow`），不与 `onClick`、`selected`、`clip` 同用 |
+| `ui/Loadable` | 加载门（`lib/loading-gate`）三种状态的画法：等待期骨架不可见地占位，超过才淡入；内容到达时交叉淡化。可选的 `busyLabel` 在加载期间向读屏播报。放进段落这类只收短语内容的地方时传 `as="span"`，根与骨架、内容两层都换成 span，交叉淡化照旧；这时要由 `className` 把根排成网格这类让两层成为块级盒子的布局（实例库页头的副标题用网格把两层叠在同一格）：根只排成块的话两层仍在行内，`popLayout` 量到的宽高是 `auto`，退场的那一层抽不出布局，与进来的那一层并排挤在一行里 |
+| `ui/Appear` | 条件出现的块：出现时淡入并落到位，消失时抽出布局原地淡出（减少动画时只撤不进的那一次留在布局里淡完，见下）。`enterDelay` 让入场晚起步：还没开始入场的子项画出第一帧之后再等这么多秒，透明度与缩放一起晚，它出现的地方还有内容正在让开时，等让开了再淡入，不半透明地叠在上面。`exitTransition` 让这一次撤掉的子项改用别的退场过渡：同一次变化里后面的内容已经整批换上、排到了它的位置上时传 `fade.none`，不在新内容上原地淡出；撤掉的子项还按撤掉之前那次渲染的属性画，这条过渡经 `AnimatePresence` 的 `custom` 递给它。`exitInLayout` 让撤掉的子项留在布局里淡完再拿掉，不按 `popLayout` 抽出布局：要穿过这一格的兄弟让位等它拿掉那一刻才起步，不从淡出中的它上面压过去；减少动画时同样留在布局里，只淡出、不缩放，淡完即拿掉；退场途中被拉回时这一格一直没让出去，入场不再带 `enterDelay`，从当前的值直接回到位。抽不抽出布局在开始退场那一刻定下，中途改它只管之后撤掉的子项。减少动画时不开 `exitInLayout` 也这样退场，只要撤掉的那次渲染里没有新子项进来：让位在那里一步到位，抽出布局的话下方内容同一帧顶上来，退场项从接近不透明开始压在上面淡完；留在布局里时下方内容等它拿掉那一刻一步到位。同一次有子项进来（换一块内容、提示换成错误）照常抽出布局，新旧在原处交叉淡化，不上下叠着占两份高度。有子项进来的渲染一律按 `popLayout`：`AnimatePresence` 只在 `popLayout` 下把量尺寸的 `ref` 递给子项，`motion.div` 的 ref 回调只在挂上时调一次，在 `sync` 下挂上的子项之后抽不出布局；只撤不进的渲染里没有子项挂上。这次退场按哪种方式走，与 `exitTransition` 一起经 `custom` 递给撤掉的子项，被拉回时带不带 `enterDelay` 只认开始退场那次的决定。`enterStart` 定入场（连同 `enterDelay`）从哪一刻起算：默认 `painted` 是画出第一帧之后；`commit` 是插进来的那次提交，与传 `morph` 的让位同一个时钟，要等这种让位让开、按它的弹簧算延迟时用（新建实例底栏的「上一步」同时开着这两项），代价是不带够长的延迟时长提交会吃掉淡入的开头 |
 | `ui/LabelSlot` | 会换的文案按最宽的候选定宽，换字不改宽度 |
 | `lib/useMounted` | 区分「挂载时就在」（跟着所在页面入场，自己不播）与「之后才出现」（播入场） |
+| `lib/usePaintedOnce` | 自己播入场的内容先停在起点，画出第一帧之后才换成目标：入场在挂载那次提交里就建的话，framer-motion 从建的那一刻计时，一整块新内容挂上的那一帧又可能很长，第一帧画出来时入场已走掉一截。自己播入场时在用的有：`Loadable` 的内容层、`Appear` 的子项（条件出现的块，`Field` 的提示与错误也经它出没）、列表行（`ListRow`，逐行入场的与整批换上的都是）、下载快览的行、状态岛、首次启动向导的换步窗格、接回的文件夹行与步骤条上的「已跳过」标签；`TabPanel` 只在不归页面管、自己播入场的第一次挂载时用。换标签不等画：旧面板按 `key` 硬换、同一帧撤下，没有退场，新面板停在起点等一帧的话，那一帧画出来的是空白的内容区。`Loadable` 的骨架层也用它，淡出等这一帧画出来再起步，与内容层的淡入同一刻开始 |
 | `lib/progress-display`、`ui/SmoothPercent` | 下载类进度的统一节拍：速度文字与累计量按固定间隔刷新，百分数与进度条走同一条平滑，任务完成后先推满、停一拍再退场 |
 | `lib/slide` | 不经 framer-motion 的弹簧位移与一次性进出场，由 Web Animations 在合成线程上播 |
 | `lib/scroll-hold` | 外壳在换标签、换分区之后托住页面高度，新内容较短时滚动不被夹回 |
 
+两件事只有一种写法：视觉隐藏（只给读屏、不占位）只用全局类 `sk-sr-only`，不在模块样式里各写一份；加载说明的读屏播报只用 `Loadable` 的 `busyLabel`，不在旁边另挂 `role="status"` 节点。
+
+按候选文案留宽：按钮文案、状态词这类单行短文案用 `LabelSlot`，不垫隐形的整颗按钮。换文案时图标也跟着换的按钮（新建实例的主按钮）让前置图标位常驻，在样式表里按图标位的 `data-glyph` 控制显隐，宽度由图标位加 LabelSlot 撑出。LabelSlot 的候选是不可见的真实文字，按最宽的一条撑开、不收缩，只收字符串，换文案时只切显隐；用不上它的几处各自叠了不可见的占宽层：`Select` 的 `reserveWidth` 把候选画在伪元素上，因为触发器给了宽度时当前文字要能缩短出省略号，候选也不该进触发器的文字内容；实例设置页补全、重装加载器按钮的文案（`SwapLabel`）同样画在伪元素上，不进按钮的文字内容；启动胶囊与状态岛换行时新旧两行要上下交接，下载浮窗的状态列带着逐帧走的百分数，这几处把候选文字叠在同一格。首次启动向导（`flows/onboarding`）的主按钮同样不垫：「下一步」与「开始使用」差一枚后置箭头，宽度差在图标上，LabelSlot 只管文字，所以「开始使用」与箭头在按钮的文字位里排成一行撑出宽度，箭头常驻、在样式表里按按钮的 `data-face` 控制显隐，两条文案各一层交叉淡化。
+
 让位的几条边界：
 
 - 能预留就不要靠让位。让位只接「被挤开的兄弟」，变高的那一块自己是瞬间变高的，新出现的内容要自己淡入。
+- 从静止起步的让位先停在起点，等新排布画出来再计时：增删引起的隔两帧、尺寸变化引起的隔一帧再播。提交发生在某一帧的动画帧回调里时，新排布就在这一帧画出，增删引起的让位也只等一帧：挂上等待时容器的尺寸观察撤下重挂，在这一帧的渲染步骤里报到，把还没经过回调的等待改成一帧（容器没有尺寸时报不出来，仍等两帧）。一次提交要画一整片新内容时那一帧很长，从提交就计时的话弹簧开头一截没上屏就过去了，第一步跳一大截。途中再被挤的让位（被顶替的那段已在播，刚开播、速度还是 0 的也算）分两截：旧轨迹不停，停下等就是在动的东西顿一下，接着走的这一截起步时刻钉在文档时间轴上读旧轨迹的那一刻（`document.timeline.currentTime`：旧轨迹走了多久就是相对它读的，它在帧与帧之间停在上一帧的帧时间上，比 `performance.now()` 早）；这一趟的新位移原样留着、不先走，与从静止起步的一样等新排布画出来（等几帧、少等一帧的校正同上），到期时与同一批从静止起步的在同一个回调里，按那一刻的位置与速度换成整段。有要换成整段的那一批整批钉同一个起步时刻（这一帧的时间轴时间）：换上的整段不能等引擎定，定在下一帧的话接着走的旧轨迹在那一帧停住；只钉它又不行，同一批里没钉的（只在主线程上播的叠加模式）要晚一帧才定，里外两层错开一帧。只有从静止起步的一批照常交给引擎定。各容器的等待挂在 `lib/reflow` 的同一个等待队列上，同一帧到期的在同一个回调里开播（`tick`），别的模块要与让位同一帧起步的动画也挂进来。卡片外框（`ui/Card` 的 `reflowEdge`）只在尺寸观察里起步：从静止起步时用 `holdUntilPainted` 挂进去，与卡内从静止起步的让位在同一个回调里开播；途中再变时照上面分两截，`playContinuing` 让旧轨迹接着走（起步时刻钉在文档时间轴此刻，这次的高度差原样留着），`startWhenPainted` 挂进队列，到期在同一个回调里拿到这一批钉的时刻、换成整段，与卡内的行同一刻起步。`holdUntilPainted` 与 `startWhenPainted` 照传入的帧数等，没有上面少等一帧的校正。任务页换组行的飞行用 `followReflow` 跟着新行所在分组这一趟的让位起步：分组这一趟的新位移还在队列里等（从静止起步，或途中再被挤、留着位移的那一截在走），飞行就当场暂停、挂进它的那一项等待，到期在同一个回调里开播（那一项改成只等一帧时一起少等，那一批钉了起步时刻时也钉同一刻）；分组刚在这一帧的回调里开播或换成整段、时钟还没走，飞行建好就播，那一批钉了时刻的钉同一刻；分组没有让位、或它的让位早已在走（这一趟没挪动它），飞行按从静止起步排队。传 `morph` 的（与 framer-motion 的布局形变同拍：浮层与弹窗的外框、启动胶囊）不等，起步时刻钉在让位建好的那一刻（这一趟读到的 `performance.now()`，同一趟的几段钉同一刻）：增删引起的让位报在提交后的微任务里，当场钉下，与形变同拍；尺寸变化引起的让位要到提交之后那一帧的渲染步骤才报，要在形变起步时当场补跑才同拍：调 `useReflow` 返回值的 `sync(startedAt)`（或 `syncReflow(容器, startedAt)`），形变节点交来自己的起步时刻，这一趟就钉在它上面。启动胶囊的 `onMorphStart` 在它的 `onLayoutAnimationStart` 里调，交的是 framer-motion 冲刷布局时写下的帧时间 `frameData.timestamp`（形变的 `startTime` 就取它），所在动作行把 `sync` 直接交给它；不交时刻时钉在补跑这一刻的 `performance.now()`，比形变晚零点几到几毫秒，整段跟着落后这么多。没接补跑的仍比形变晚一帧以上。传 `morph` 还有一种用法是借它的时钟：新建实例底栏传 `morph`，是因为增删引起的让位把起步时刻钉在提交后的微任务里，framer-motion 的入场也从提交后建动画的那一刻计时（`Appear` 的 `enterStart="commit"`，不等首帧画出；建好到解析隔了 40 ms 以上时改从解析那一帧起，只会更晚），可以用入场的 `delay` 在同一个时钟上排先后（「上一步」等「取消」让开它那一格再淡入；退场途中被拉回时不带这段延迟，从当前值直接回到 1：这一格一直留在布局里，「取消」没动过，没有要等的）；`settle` 要等新排布画出来才起步，落后量随提交长度变。
+- 「新出现的内容要自己淡入」的例外：传 `morph` 的容器长高 Δh、新插入的项开了新的一行（顶边低于原有各项）时，它们沿 `morph` 跟着外框下沿下来，不先在终点被还没跟上的下沿裁掉半截；起点不高于原有最低一项的下沿，补的位移也不超过 Δh，不从上一行的位置出发压在上一行上。紧贴着上一项的（列表末尾追加一行）就地淡入，由长高的外框下沿逐步露出，所以外框要裁切内容（浮层的外框与主体都裁切）。`settle` 的容器（页面、没开 `reflowEdge` 的卡片）下沿一步到位；开了 `reflowEdge` 的卡片外框下沿跟着让位走，从旧高度沿 `settle` 弹簧缩放到新高度，与卡内的让位同一帧起步。两种容器里新的一行照旧就地淡入，不跟着下沿下来，所以 `reflowEdge` 只给最下面一块只会被挤开、自己不变高的卡片开。
 - 子项不超过 40 个时被挤动的都滑；超过 40 个时只有起点或终点落在可见范围附近的才滑，每趟至多 40 个，其余直接到位；超过 400 个整趟不读位置。一批变化不该滑时（键入过滤、整批换数据），在同一次渲染里给容器打上 `data-reflow-paused`（`REFLOW_PAUSED_ATTR`），之后任何时刻去掉。
 - 容器的直接子项是 `display: contents` 的包裹层（每个带提示的按钮外面都有一层）时，让位越过它移动里面的元素。
 - 容器宽度或窗口尺寸变化、减少动画时不动。容器自己按内容定宽并整体右对齐、或靠外边距贴底与居中的，不要挂让位；一组元素跟着其中一个伸缩一起平移用 `LayoutGroup` 加 `layout="position"`（标题栏右侧一组是这样做的）。
 
-退场中的节点还在 DOM 里。`Appear` 的包裹层、列表行、`Loadable` 退回加载时的旧内容层在退场期间带 `inert`：按选择器找行、找块的代码与测试写 `:not([inert])`。`AnimatePresence mode="popLayout"` 的直接子项是函数组件时，要把 `ref` 接住并挂到根元素上，否则退场项不会被抽出布局。包住一片子树的 `AnimatePresence` 不要写 `initial={false}`：它会让子树里之后才挂载的元素也永远跳过入场，要跳过首屏的入场就在那个元素自己身上判断（`useMounted`）。
+退场中的节点还在 DOM 里。`Appear` 的包裹层、列表行、`Loadable` 退回加载时的旧内容层在退场期间带 `inert`：按选择器找行、找块的代码与测试写 `:not([inert])`。`ui/Modal` 的弹窗层退场一开始整层带 `inert`（随父级退场时也一样），指针、键盘与读屏都到不了退场中的面板，焦点当场归还；叠着的确认框与底层弹窗一起关掉时，确认框的归还点不再往外落，留给底层弹窗自己的归还（`ui/focus-return.tsx`）。入场还停在起点、等着第一帧画出来时就被撤掉的，退场目标就是它停着的起点时不播退场，马上移除：framer-motion 认出值已在目标上、又没有动画在走，不建退场，它本来也看不见。`Appear` 子项、`Loadable` 内容层、逐行入场的列表行、下载快览的行、首次启动向导接回的文件夹行与「已跳过」标签都是这样；停着的起点与退场目标差在缩放或位移上的照建一段退场，透明地播完才移除：状态岛（停着的缩放与退场的不同）、整批换上只淡入的列表行（之后不是整批换掉时被撤，退场要缩一点）、向导往同一个方向接着换步时还停着的那一步（退场在另一侧）。减少动画时这几处的退场只剩透明度，同样马上移除。`AnimatePresence mode="popLayout"` 的直接子项是函数组件时，要把 `ref` 接住并挂到根元素上，否则退场项不会被抽出布局。包住一片子树的 `AnimatePresence` 不要写 `initial={false}`：它会让子树里之后才挂载的元素也永远跳过入场，要跳过首屏的入场就在那个元素自己身上判断（`useMounted`）。
 
-**弹窗与浮层。** `ui/Modal` 与 `ui/Popover` 的外框可以随内容形变，由调用方传 `layoutKey` 打开：只有它变了才量布局、才形变，进度回调、倒计时、逐字输入这类高频重渲染不会触发测量。同一个弹窗开着时换成另一件事，换 `requestKey`，不要换组件的 `key`。
+**首帧按记下的形状。** 有几处形状要等异步数据才知道，首帧又没法照真实尺寸预留：主页「最近游玩」列几张卡（一张都没有时整段不在）、实例库有没有修复横幅。上次读完时的形状记在配置的顶层键 `ui_shape`（`recent_cards` 是按最宽一档算的张数，显示时取它与当前档上限的较小值；`repair_banner`），启动时与外观偏好并行读出，经 `state/ui-shape` 的 `UiShapeProvider` 往下发，首帧照它占位，读完后的出入由 `Appear` 与让位接住；占位与真实内容用同一个 key、同一个外框，数据到了只换里面。页面只在数据落定（读完、没出错）时 `report`：与已写下的相同不写，变化攒 1 秒合并成一次写入，写不进去只记诊断日志、不弹通知，下次形状变化再写。它是丢了能再记一次的缓存，不加数据格式号，旧版本把它当未知顶层键原样保留。
+
+**弹窗与浮层。** `ui/Modal` 与 `ui/Popover` 的外框可以随内容形变，由调用方传 `layoutKey` 打开：只有它变了才量布局、才形变，进度回调、倒计时、逐字输入这类高频重渲染不会触发测量。同一个弹窗开着时换成另一件事，换 `requestKey`，不要换组件的 `key`。确认框还是同一件事、只是内容晚到（点了马上开框，要等的数据到了再填）时，用外壳 `openConfirm` 交回的句柄 `update` 原地换内容，不要再发一次 `confirm`：那会按顶替处理，重做聚焦、标题与正文淡入。`ConfirmDialog` 自带 `LayoutGroup`，正文里自己换外形的块（数据在子组件里晚到、确认框这一层不重渲染）挂 `layout`，以自己的外形作 `layoutDependency`，经布局组带着面板一起形变（删除实例的正文是这样做的）。
 
 **页面入场。** `ui/Page` 给一级区块分配入场序号并错开入场；`EntranceBoundary` 让一棵子树不参加编号；空的 `Appear` 与空的横幅槽不占序号。等过加载才挂上的内容由 `Loadable` 整层淡入，里面的区块不再各自入场。带导航锚点（`NAV_ANCHOR_ATTR`）的页面在 `replace` 时由外壳把锚点滚回视口并托住页面高度。
 
@@ -751,20 +941,30 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 
 写入探针失败不等于数据不在这里：杀软锁文件、受控文件夹、磁盘写满、外接盘只读都只说明这一次写不进去，这时换目录，用户看到的是全新的启动器和首次向导，下次探针通过又翻回来。所以探针失败时看目录里有没有读得进来的 `config.json`：有就短暂重试（总等待 600 ms），写通了照常便携，仍写不进去也不换数据根，原因记进 `DataDirResolution::write_failure`，经启动提示 `data_dir_unwritable` 告诉用户；没有就和以前一样立刻回落。`config.json` 读不进来（读取失败、不是合法 JSON）时不算有，走回落，两个原因一起记进 `fallback_reason`：坏配置要先改名留存才能按默认配置启动，这个目录改不了名，留下来启动就终止了，没有窗口，日志也写不进去。类型对不上的合法 JSON 这里认不出来，它要核心的配置结构才认得，撞上目录写不进去时仍然终止。
 
+建得了文件、删不掉的目录，启动器与安装引导程序的结论不同，这是有意留下的。启动器的 `probe_writable`（`crates/petalfall-base/src/fs.rs`）写进探针就判可写，删探针失败只记一条 debug 日志，留下的空文件下次探针照样覆盖再删；引导程序的数据关探针（`app/src-tauri-setup/src/datamark.rs` 的 `probe_data_root`）照它的判据写，结论相同。引导程序选目录、发起安装前的复核与安装失败后的诊断更严（`app/src-tauri-setup/src/target.rs` 的 `probe_file` 与 `probe_write`）：先在最近的已存在目录里建一层临时子目录、往里写文件再整个删掉，目标目录已在时还要在这一层建一个临时文件再删掉，建不了或删不掉都判写不进，拒绝安装。安装要把 exe 写在这一层，卸载要把这一层的文件删干净，删不掉的目录装上了也卸不干净，所以在装之前就拦下。启动器若也改严：这种目录里已有读得进来的 `config.json` 时数据根不变，但每次启动都报 `data_dir_unwritable`，而这个目录其实写得进；还没有 `config.json` 时落到 `%LOCALAPPDATA%\Petalfall`，用户看到的是全新的启动器；数据关探针也得一起改。所以两边不统一。差别只落在不经安装程序、手动拷进这种目录的便携副本上，它仍被选作便携数据根；更早的安装包只在下面建子目录试写，拦不住只有这一层删不掉的目录，用它装进这种目录的安装也一样。
+
 | 路径 | 内容 |
 | --- | --- |
 | `config.json` | 全局配置 |
 | `config.json.broken-<本地时间>` | 解析失败的配置原样留存（见「启动提示」） |
+| `data-format.json` | 数据格式号的记号：打开过这份数据的落樱里最大的号（见下文「数据格式号」）。号为 1 的版本不写它，只有号更高的版本打开过这里才会出现；启动器读配置之前先核对它。卸载时勾了「删除应用程序数据」，它与 `config.json` 一起删 |
 | `credentials.bin` | 账户令牌，DPAPI 加密 |
 | `credentials.bin.broken-<本地时间>` | 解不开的凭据库原样留存（见「启动提示」）；回到原来的机器与 Windows 用户下改回 `credentials.bin` 即可恢复 |
 | `offline_accounts.json` | 离线账户 |
 | `tasks.json` | 前端任务表 |
 | `playtime.json` | 游玩时长，按游戏目录分开记（格式版本 2，旧版读到时归到第一次读到它时的当前游戏目录，没改写成也不随之后切换的游戏目录走）；实例改名、删除时只改当前游戏目录下的记录。记录没跟上时命令报 `play_records_failed`，改动留在进程内待补，之后读写时补上；启动器正常退出时、立即安装更新拉起安装程序之前也各补写一次。文件读得出、替换不了时，只读调用（实例列表、游玩统计）照常给出补上改动后的结果，落盘留到下一次；写入调用照实报错。文件读不懂（解析失败、格式版本比本版本新）时，实例列表照常返回：每个实例带 `play_error`，`playtime_min` 为 null，上次游玩同样为 null；`play_stats` 与写入调用照实报错。新建实例与导入整合包在实例目录建成后清掉当前游戏目录下同名的残留记录（属于在启动器之外被删掉的旧实例），撞名时不动现有实例的记录 |
 | `java-probe-cache.json` | Java 识别缓存，按可执行文件指纹记录识别结果与识别失败的原因（`exec` / `timeout` / `parse`）。全量探测时，指纹没变、失败不到 10 分钟的候选不再拉起 JVM；单个识别（启动取 Java、添加 Java）不看失败记录。运行时文件是否齐全不进缓存，每次现查 |
+| `window-state.json` | 主窗口记下的大小、位置与是否最大化（自带格式版本 1）。只有外壳的 `window_state.rs` 读写：窗口停止变化 1 秒后写一次、退出时再补一次，启动时在窗口显示之前读它摆回去；读不出或内容不对按首次启动处理，不拦启动 |
+| `running-game.json` | 接回游戏的记录（格式版本 `RECORD_FORMAT`，现为 1）：认进程用的 pid、创建时刻与映像路径，以及接着记账要用的实例、启动时的游戏目录、会话日志与账户。图形界面在游戏进程起来后原子写下（`commands/launch.rs`），这一局收尾记账做完再删；启动器启动时在后台读它（`reattach_in_background`），进程对得上就接回，已不在或对不上就删掉。命令行不读也不写 |
+| `running-game.broken.json` | 接回记录读不出（坏 JSON、缺字段、认不得的格式版本）时改名留下的现场，不删也不重试，再有读不出的就覆盖这一份；这次启动经 `running_game` 交给前端提示 |
 | `runtime/<主版本>/` | 托管 Java 运行时 |
-| `logs/<unix 秒>.log` | 启动器日志，每次启动一个文件 |
-| `cache/` | 下载缓存。`modpacks/<平台>-<版本 id>-<8 位十六进制随机后缀>/` 是平台整合包的下载缓存，每次导入一个（同一版本同时导入两次时，先结束的一路不能删掉另一路手里的包），导入结束或下载失败即删；进程被杀或取消宽限期满留下的目录，在下次下载平台整合包时按七天清掉（修改时间比七天老的算残留，认领暂存位不动）。`modpacks/claims/curseforge-<文件 id>/<文件名>` 是认领到的受限文件，导入后不删。设了 `cache_directory` 时改在那里 |
+| `authlib-injector/authlib-injector-<构建号>.jar` | 第三方验证服务器账户启动时注入的 javaagent。每次用这类账户启动都先查最新构建，本地没有这个构建或校验不过就下到这里；每个构建一个文件、不覆盖旧的，另一局游戏可能正占着旧的那份；查不到最新构建时沿用本地最新的一份 |
+| `logs/<unix 秒>.log` | 启动器日志，每次启动一个文件，只保留最近 10 份（含本次，`logging.rs` 的 `KEEP_SESSIONS`）：开新的一份之前按文件名删掉最老的，删不掉不拦启动 |
+| `cache/` | 缓存。`modpacks/<平台>-<版本 id>-<8 位十六进制随机后缀>/` 是平台整合包的下载缓存，每次导入一个（同一版本同时导入两次时，先结束的一路不能删掉另一路手里的包），导入结束或下载失败即删；进程被杀或取消宽限期满留下的目录，在下次下载平台整合包时按七天清掉（修改时间比七天老的算残留，认领暂存位不动）。`modpacks/claims/curseforge-<文件 id>/<文件名>` 是认领到的受限文件，导入后不删。`meta/` 是版本清单与加载器列表的元数据缓存，拉取失败时新建实例页退回它。这两项在设了 `cache_directory` 时改在那里；其余几项始终在数据目录下：`vanilla-art/` 是从原版客户端 jar 抽出的材质，`skins/` 与 `thumbs/` 是下载来的远程皮肤与缩略图，`news.json` 是主页资讯，`server-history.json` 是固定服务器最近一次连通的时刻与在线人数 |
 | `templates/default/` | 新实例的默认设置：白名单里的文件加元数据 `template.json`（来源实例、保存时刻） |
+| `moves/<token>.json` | 移实例的日志（`move_journal.rs`），token 形如 `<unix 毫秒>-<序号>`：这次移动走到了哪一步，以及两边游戏目录里暂存与旧目录的位置。`move_instance` 开工时写下、每过一步改写，调用方改好配置确认之后、残留也清完才删；启动时后台的 `recover_instance_moves` 按它与盘面把中断的移动回滚或补完，移动的预检见到同一实例、涉及同一游戏目录的未收尾日志就拦下。启动收尾读不懂的日志改名为 `<token>.json.broken` 留着、不删：里面可能有人工收尾要用的路径 |
+| `.minecraft/` | 默认游戏目录（`default_game_dir`）：配置没设 `game_directory` 时用它，首次启动向导也把它作为默认位置给出，布局见「游戏目录」。卸载时勾了「删除应用程序数据」也不删 |
+| `.<文件名>.<16 位十六进制>.tmp`、`.petalfall-write-probe` | 原子写入的临时文件（写完改名成目标）与判数据目录可不可写的探针（写进就删）。只有进程在两步之间被结束、或探针删不掉时才留下；卸载时勾了「删除应用程序数据」一并删 |
 
 `config.json` 里新增的字段都带默认值，旧文件照常读入：
 
@@ -773,10 +973,14 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | `extra_java_paths` | 空 | 手动添加的 Java，一律存成规范化后的 java.exe 路径，只经 `add_java_path` / `remove_java_path` 改 |
 | `prefer_dedicated_gpu` | `false` | 启动前把这次用的 Java 设为 Windows 图形设置里的高性能 |
 | `skip_accessibility_onboarding` | `true` | 启动前在缺 `onboardAccessibility:` 这一行的 `options.txt` 里补 `onboardAccessibility:false`，跳过 Minecraft 第一次进游戏时的讲述人与无障碍引导（做法见上文启动前补全 `options.txt` 的一段）；关掉时不写，也不改已有的值。只对还没有这一行的 `options.txt` 起作用：不隔离的实例共用游戏目录里的一份，这一行写过之后，关掉开关再新建的不隔离实例也不会出现引导。老配置缺这个键按 `true` 读入。经 `get_config` / `update_config` 读写，设置页「常规」分区「启动」卡里的开关叫「跳过首次无障碍引导」 |
-| `new_instance_template` | `true` | 新实例是否沿用默认设置。不进 `ConfigDto`，读取经 `template_info.enabled`，没有写入命令 |
+| `new_instance_template` | `true` | 新实例是否沿用默认设置。经 `get_config` / `update_config` 读写（`newInstanceTemplate`），`template_info.enabled` 给出的是同一项；设置页「游戏」分区「新实例」卡里的开关叫「沿用默认设置」，改了以后前端让默认设置的查询失效，实例页与新建确认步跟着换说法 |
 | `world_backup` | `{ auto: true, keep_per_world: 5, max_total_gb: 20 }` | 存档备份。段里不认识的键读入时保留、落盘时写回 |
 | `pinned_servers[].instance` | 无 | 「加入」时记住的实例 id。条目层不认识的键不保留 |
 | `parked_directories` | 空 | 非当前游戏目录留下的侧栏固定与当前选中，按游戏目录各存一份（`path`、`sidebar_pins`、`selected_version`）。它们是实例名，只在所在目录里有意义，`sidebar_pins` 与 `selected_version` 只属于当前目录。切换游戏目录时把当前目录的收起、把目标目录上次留下的放回，两样都为空的不留记录，切回来的目录不留第二份；不收起的话，在新目录里固定一个实例（新建实例也会自动固定）就把原目录的固定整份冲掉了 |
+| `update_channel` | 无，不写出 | 用户选的启动器更新通道，取值 `dev`、`beta`、`stable`；不存在表示按安装包自带的通道。按原样的 JSON 值收下、不登记 `ENUM_FIELDS`，值认不出只影响这一项。只经 `set_update_channel`、检查时的跟随与安装引导程序的交接记录写，不进 `ConfigDto`、不经 `update_config`，见「自更新的清单与下载源」 |
+| `seen_update_versions` | 无，不写出 | 各通道见过的最高版本，形如 `{通道: {version, signature}}`，读时逐项按公钥重验，坏了只废那一项，见「自更新的清单与下载源」 |
+| `ui_shape` | `{ recent_cards: 0, repair_banner: false }` | 界面形状缓存，前端首帧按它占位，见「动效与布局稳定」。`recent_cards` 取 0 到 6。只经 `get_ui_shape` / `set_ui_shape` 读写，不进 `ConfigDto`；`set_ui_shape` 只收要改的字段，未知键、`null`、类型不对或越界报 `invalid_argument`。段里不认识的键不保留；读不懂时只这一段退回默认，见「启动提示」 |
+| `usage_notice` | 无，不写出 | 用户同意过的使用须知，`{ version, accepted_at }`（版本从 1 起，时刻为 Unix 毫秒），见「使用须知的确认」。只经 `usage_notice_acceptance` / `accept_usage_notice` 读写，不进 `ConfigDto`。旧配置没有这一项按没确认过读入；读不懂（类型对不上、版本号是 0、缺了时刻）时同样按没确认过、记一条警告，不算配置损坏，下次启动重新展示须知。记录里不认识的键不保留。旧版本把它当未知顶层键原样保留，不加数据格式号 |
 
 ### 游戏目录
 
@@ -791,7 +995,7 @@ versions/<实例名>/
     ├── settings.json      实例设置
     ├── incomplete.json    未完成标记：新建、补全或整合包导入没有完成时存在
     ├── install-record.json 装好时记下的 InstallSpec（实际装上的游戏版本与加载器版本，不记 use_template）：版本 JSON 不可用时修复照它重装
-    ├── logs/              每局的会话日志（日志页与崩溃报告读它；游戏自己写的 logs 在工作目录下）
+    ├── logs/              每局的会话日志，只保留最近 5 份（含本局的 latest.log，`logfile.rs` 的 `KEEP_SESSIONS`；日志页与崩溃报告读它；游戏自己写的 logs 在工作目录下）
     ├── ledger.json        Mod 卷宗：mods 目录里每个 jar 的平台来源与版本
     ├── history.json       Mod 变更历史，只追加，作为回滚的凭据
     ├── modpack.json       从整合包导入的实例记录的整合包信息
@@ -817,8 +1021,97 @@ versions/<实例名>/
 
 游戏目录根下的元数据区里另有 `.petalfall/base-versions.json`，内容是 `{"versions": [...]}`：整合包导入新落下的原版与加载器版本目录的 id（依赖版本记录），实例库据此不把这些目录当实例列出，见 `hide_base_versions`。它跟着游戏目录走，换一个游戏目录就是另一批版本。
 
+同一个元数据区里还可能有 `.petalfall/data-format.json`，即 `<游戏目录>\.petalfall\data-format.json`：这个游戏目录的数据格式号记号，用到这个目录之前先核对它（见下文「数据格式号」）。实例不单独记，跟着所在的游戏目录算。卸载时游戏目录不在删除范围内，记号随目录留着。
+
 - **未完成标记**：新建实例、补全和整合包导入都使用同一种格式（`kind` 为 `install`、`repair` 或 `modpack`，另有 `outcome`、`started_at`、`error`）。列表据此显示「安装没有完成」之类的原因。补全据此决定怎么处理：`install` 按记下的内容重装，`repair` 补齐文件，`modpack` 报不可补全并提示重新导入。标记不存在时的方案、版本 JSON 不可用时的退路与重新安装加载器见「实例补全」。
 - **Mod 备份与回滚**：更新 Mod 时，旧文件改名为 `<文件名>.old` 保留在 mods 目录。同名备份已存在时取 `<文件名>.2.old`、`.3.old`，依次类推。实际的备份名记在历史事件的 `backup_file` 里。一个 Mod 连续更新形成一条链，只能从最近的一次往回滚。启用状态跟着 Mod 走：回滚时新文件是停用的，旧文件也恢复成 `<文件名>.disabled`。
+
+### 数据格式号
+
+落樱维护一个整数，叫数据格式号：常量 `DATA_FORMAT`，在 `crates/petalfall-release/src/data_format.rs` 里。只有「较早的版本读不了新数据」的改动才给它加一。每个安装包把自己的号写进载荷头（见「装配与状态」的启动器更新一条），数据目录与每个游戏目录各放一个记号文件，记着打开过这份数据的落樱里最大的号。程序或安装包的号比数据记着的号小，就不打开、不安装，说明原因，绝不重置数据。
+
+这道关与版本号、通道完全分开，自动更新、跟随、手动装包一视同仁。按版本号算是升级，不说明数据读得了：同一基础号下正式版 `1.0.0` 大于所有 `1.0.0-dev.N`，共用的游戏目录也可能被别处更新的落樱打开过。号只来自签过名的安装包与本机文件，清单里没有它。
+
+**登记表。** 每个号一行，与 `FORMAT_HISTORY` 一一对应，三列逐字照抄它的 `format`、`change`、`reason`（`crates/petalfall-release/tests/format_history_docs.rs` 逐行对拍）：
+
+| 号 | 改了什么 | 为什么要加号 |
+| --- | --- | --- |
+| 1 | 基线：第一个带数据格式号的版本写出的数据形态。 | 基线，没有更低的号可比。 |
+
+**记号文件。** 文件名是 `data-format.json`（`STAMP_FILE`），两处同名、同格式：
+
+- 数据目录：`<数据目录>\data-format.json`。
+- 游戏目录：`<游戏目录>\.petalfall\data-format.json`。数据目录只属于一个启动器，游戏目录却可能被共用（两份便携版共用一个游戏目录，游戏目录放在移动硬盘或网络盘上给几台电脑用，卸载时也不删它），所以两处各记一份。实例不单独记，跟着所在的游戏目录算。
+
+内容形如：
+
+```json
+{ "data_format": 2, "written_by": "1.1.0-dev.57" }
+```
+
+- `data_format`：打开过这份数据的落樱里最大的号，1 到 u32 上限之间的 JSON 整数。
+- `written_by`：把号抬到这个值的那个落樱的版本号，只用来提示用户该装哪一版。可以没有：门面没有应用版本时（调试命令行）写出的记号不带它。游戏目录可能在共用盘上，这段文字可能出自别人的机器，拿给人看之前经 `trusted_written_by`：形状恰好是 `X.Y.Z`、`X.Y.Z-dev.N`、`X.Y.Z-beta.N` 之一，数字段不带前导零、不带构建元数据，不超过 48 字节，才交回版本与它所属的通道；否则界面改说「更新的落樱」，原文只转义后进日志。
+- 读的一方忽略不认识的键，以后的版本可以加键。
+
+读法（`parse_stamp`）：文件不存在算 1，号为 1 的版本一个记号都不写，没有记号的数据就是 1 号的形态。读文件出错（不存在以外的错误）、不是 JSON、不是对象、缺 `data_format`、`data_format` 不是 1 到 u32 上限之间的整数，都算「记号读不懂」，一律拦下，不当作缺失，也不当作 1：无从知道数据是哪一版写的。写法：只在读到的号小于程序自己的号时写，把整个文件原子写成程序的号与版本（`stamp_contents`），所以号只升不降。号为 1 的版本在哪里都不写记号；号升到 2 以后，被打开过的数据目录与游戏目录才会出现记号。
+
+**四处把关**，比的都是同一件事（`judge_stamp`）：
+
+- 启动器启动时，读配置之前，核对数据目录：`data_gate.rs` 调 core 的 `check_data_root`，排在单实例的等待之后。读配置可能把坏配置改名，那已经是一次写入，所以这道关必须在它之前；排在等待之后，同一数据目录上就不会有两个进程同时抬号。号比本版大、或记号读不懂时，一个数据文件都不动，在建窗口之前弹系统对话框说明，点完退出：这时还没有窗口，setup 里报错只会变成一个看不见的 panic。不给「仍然打开」，也不自动重置；对话框里写出的版本与下载页地址只取经过 `trusted_written_by` 认可的版本与编译进来的常量。号比本版小时把记号抬上去，写不进去按 100、200、300 毫秒的间隔重试三次（`PROBE_RETRY_DELAYS`），仍不成同样拒绝：这次启动接下来会写出新形态的数据，记号没记上，号更低的版本以后会读错它。数据目录整个写不进去（启动提示 `data_dir_unwritable` 那种情形）时不抬号，照常启动：这次什么都写不下，数据仍是记号所记的形态。门面的 `Petalfall::load` 与 `load_recovering` 读配置之前也过这道关，不放行时报 `CoreError::DataRootRefused`，调试命令行同样绕不过去。
+- 启动器用到游戏目录时：门面的 `guard_game_dir`（当前游戏目录）与 `guard_game_dir_at`（别的目录）在一个阻塞任务里先看目录在不在、再读记号，两步共用 2 秒的时限（`DIR_PROBE_TIMEOUT`）。时限内没有结论时按暂时连不上报 `invalid_game_directory`（`problem` 为 `unavailable`），不扫描、不读写这个目录，用户重试即可；目录本身不存在时放行，不建目录、不写记号。「使用」方式（`GuardMode::Use`）下号更低就抬号，写不进去照实报读写错误；号更高报 `game_dir_data_too_new`，读不懂报 `data_format_unreadable`。「只判断」方式（`GuardMode::Inspect`）什么都不写，把结论交回调用方。列实例、启动、新建实例、导入整合包、切换当前游戏目录、首次启动向导选定目录都先以「使用」方式核对。启动的这一关在外壳的 `launch_game` 里，占住实例自己之后（`reserve_launch`）、读继承链上的版本文件与实例数据之前：这些读取没有时限，排在关卡前面的话，游戏目录在断开的网络共享上时会先卡在读取上，记号比这一版新或读不懂时也先读了这个目录；core 的 `launch` 在写游戏目录之前再核对一次。新建实例与导入整合包遇到原本不存在的游戏目录，在目录建出来之后再核对一次。移动实例的预检以「只判断」方式看目标目录，太新、读不懂分别列为拦截项 `data_too_new`、`data_format_unreadable`；执行时在建好目标的 `versions/` 之后、写任何实例数据之前再以「使用」方式核对。每次都重新核对、不缓存：两台电脑共用一个目录时，另一台随时可能把号抬上去。Mod、实例设置、存档备份、改名、删除都只能从实例列表进入，列实例那一关已经核对过。
+- 安装引导程序安装之前，核对数据目录：`app/src-tauri-setup/src/datamark.rs` 照启动器选数据目录的规则（`petalfall-base` 的 `choose_data_root`）另写一份，两边要一起改。已有安装时，登记目录写得进（与启动器的 `probe_writable` 同一判据：直接在这一层写 `.petalfall-write-probe` 再删掉；不用选目录时先建子目录的那个探针，`C:\` 根这类许建子目录、不许建文件的目录上两者结论相反，测试按七类目录钉住两边应得的结论），或写不进但里面有读得进来的 `config.json`，只读登记目录；两样都不成时，启动器会落到 `%LOCALAPPDATA%\Petalfall`，而一次探针失败证明不了数据不在登记目录，所以两处都读，取较大的号，任一个读不懂就拦。首装只读最终的目标目录。引导程序从不写记号，号低于安装包认得的号与相等一样放行；它也不读游戏目录，游戏目录由启动器在用到时把关。拦下之后的处理见「装配与状态」的启动器更新一条。
+- 启动器下载验签之后，核对更新包：载荷头里的号比本版的 `DATA_FORMAT` 小就丢掉，报 `update_data_too_new`，见「自更新的清单与下载源」。
+
+**什么改动要加一。** 设现在的号是 N。改动之后新版本可能写出的任何数据，号为 N 的旧版本读到时，只要出现下面任一情况，就必须加一：
+
+1. 报错、拒绝，或者把文件当作损坏而改名留存、删除；
+2. 读成别的意思，并据此行事；
+3. 写坏或丢掉用户找不回来的信息。
+
+旧版本读到不认识的字段会忽略，但保存时多数文件会把它丢掉。例外只有 `config.json`：顶层，以及外观、内存、存档备份三段，都原样保留不认识的键（见「启动提示」）；实例设置等别的文件不保留。所以新字段是一项用户能再设一次的设置时，丢了等于回到默认值，不加一；新字段承载用户找不回来的内容（记录、历史、来源信息、凭据）时，放到会被原样保留的位置，做不到就加一。拿不准时按「要加」处理，并在 `FORMAT_HISTORY` 里写明理由。
+
+**启动提醒的另存约定。** 崩溃记录 `last-crash.json` 与接回记录 `running-game.json` 都带这一局的启动提醒（`warnings`）。号为 1 的版本按封闭的枚举读它，碰上不认识的取值就把整份记录当作读不懂：崩溃页打不开，接回记录被改名留存。所以两份记录的 `warnings` 里只写号为 1 的版本认得的八个取值（`LaunchWarning::known_to_format_1`），之后新增的取值按落盘拼写写进同一层的 `added_warnings`（字符串数组，没有这类取值时不写出）。号为 1 的版本忽略这个键，照常读整份记录，只是不显示这几条。读的时候（`WithAddedWarnings::restore`）把它们并回 `warnings`，按查出它的启动阶段归位，同一阶段里排在 `warnings` 已有的取值之后；这一版也认不得的取值（更新的版本写的）跳过，只记一条 info 日志；`added_warnings` 不是字符串数组时仍按记录读不懂处理。界面经 `last_crash` 拿到的是并回之后的 `warnings`，没有 `added_warnings`。以后新增提醒取值都照此办理：`known_to_format_1` 对它答 false，不加数据格式号；号以后加上去了，`known_to_format_1` 也不改，新增的取值不挪回 `warnings`。`data_format_snapshot.rs` 按号为 1 的版本的结构反序列化这两份样本（提醒是封闭的八个取值，没有 `added_warnings`），读不了就挂。
+
+| 改动 | 加一 | 为什么 |
+| --- | --- | --- |
+| 新增可选的设置项：带 `#[serde(default)]`，取默认值时不写出 | 否 | 旧版本忽略它，保存时丢掉也只是回到默认 |
+| 新增承载找不回内容的可选字段，所在文件不保留未知字段 | 是 | 旧版本保存一次，内容就永久丢失 |
+| `config.json` 新增顶层键 | 否 | 原样写回 |
+| `config.json` 里已登记在 `ENUM_FIELDS` 的枚举新增取值 | 否 | 有字段级的容忍：认不出的取值按默认值启动，原值写回 |
+| 实例卡面的背景新增取值 | 否 | 认不出的取值被丢掉（`drop_unknown_background`），回到默认 |
+| 崩溃记录与接回记录的启动提醒（`LaunchWarning`）新增取值 | 否 | 照上面的另存约定写进 `added_warnings`，旧版本忽略这个键 |
+| Mod 卷宗的平台（`Platform`）新增取值 | 是 | 没有容忍，旧版本读 `ledger.json` 整份失败 |
+| 账户类型、账户状态、凭据种类新增取值 | 是 | 凭据库整份读失败，被改名留存 |
+| 未完成标记、Mod 历史、整合包信息里的枚举新增取值 | 是 | 整份读失败 |
+| 已知字段改类型或改含义 | 是 | `config.json` 整份被改名重置，其他文件读失败或读错 |
+| 自带格式版本的文件升版本 | 是 | 旧版本报错、覆盖或改名留存 |
+| 文件改名、搬位置、把信息挪到新文件 | 是 | 旧版本看不到，像数据丢了 |
+| 新增一个与旧文件无关的新文件 | 否 | 旧版本不读它 |
+| 派生缓存或 `window-state.json` 改格式 | 否 | 旧版本当作过期重建，或按首次启动处理 |
+| 只让新版本读得更宽松 | 否 | 写出的数据没有变 |
+
+**加号的步骤：**
+
+1. 对照上面的规则判断；能改成不加号的写法就改：能加可选字段就不改类型；新枚举取值能登记容忍就登记（登记进 `ENUM_FIELDS`，或照 `drop_unknown_background` 的做法；启动提醒照另存约定写进 `added_warnings`）；同一个发版周期里有几处破坏性改动，合成一次加号。每加一次，较慢的通道晋级到同一个号之前，用户就换不回那个通道（安装引导程序的数据格式关会拦下），所以加号要克制。
+2. 给 `DATA_FORMAT` 加一，在 `FORMAT_HISTORY` 末尾追加一行，写明这个号改了什么、号更低的版本为什么读不了。
+3. 把每个有快照的位置（见下面的防忘守卫）的 `testdata/data-format/current/` 复制成 `testdata/data-format/<旧号>/` 冻结，再更新 `current/`。
+4. 确保新代码读得了所有冻结的快照，需要时写读时迁移，照 `playtime.json` 从格式版本 1 升到 2 的做法。
+5. 在上面的登记表末尾加一行，三列逐字照抄 `FORMAT_HISTORY` 新加的那一行；`cargo test -p petalfall-release` 会跑 `format_history_docs.rs`，两处对不上就挂。
+6. 加号的提交只能随 dev 整体晋级进入测试版，不能单独摘进 beta：测试版流水线的 `data-format beta` 会挡下（见「自更新的清单与下载源」的发布链路）。这次改动晋级到测试版或正式版时，更新说明里写一句「装上之后不能再换回更早的版本」。
+
+**防忘守卫：**
+
+- 快照绊线：每种落盘类型都有一份完整的样本（每个字段都填上非默认值，每个持久化枚举的每个取值都出现），按生产代码的写法序列化，与所在包根下 `testdata/data-format/current/` 里的样本逐字节比对。落盘形状一变测试就挂，失败信息里写着上面的判断规则与新内容：不需要加号就把新内容存进样本，需要就按上面的步骤做。很多落盘类型是私有的，所以快照都写在各自包内的测试模块里，共四处：
+  - `crates/petalfall-core/src/data_format_snapshot.rs`：`config.json`、`playtime.json`、`running-game.json`、模板元数据 `template.json`、移动日志、`.petalfall/base-versions.json`，以及实例元数据里的 `last-crash.json`、`modpack.json`、`ledger.json`、`history.json`；
+  - `crates/petalfall-auth/src/data_format_snapshot.rs`：凭据库（比对的是 DPAPI 加密之前的明文）与 `offline_accounts.json`；
+  - `crates/petalfall-instance/src/data_format_snapshot.rs`：实例设置、未完成标记、安装记录与存档备份清单 `index.json`；
+  - `app/src-tauri/src/tasks.rs` 测试模块里的 `data_format_snapshot`：`tasks.json`。
+- 枚举穷举：样本里用不带通配分支的 match 列出每个持久化枚举的全部取值，新增取值时先编译不过；补上分支、把新取值加进样本，再按上面的规则判断。
+- 自带格式版本的常量登记：`PLAYTIME_FORMAT`、`RECORD_FORMAT`（`running-game.json`）、`CRASH_REPORT_FORMAT`、`MODPACK_INFO_SCHEMA`、`BACKUP_INDEX_VERSION`、`TASK_JOURNAL_VERSION` 各自要等于快照模块里的登记值。改了常量就是升了文件自带的版本，旧版本会拒读，按上面的步骤加号之后再改登记值。
+- 号连续：`petalfall-release` 断言 `FORMAT_HISTORY` 的号恰好是 1 到 `DATA_FORMAT` 的连续整数，`format_history_docs.rs` 断言上面的登记表与它逐行相同；四处快照各自断言 `testdata/data-format/` 下的冻结目录恰好是 1 到 `DATA_FORMAT - 1`。号不能悄悄变小，也不能跳号。
+- 载荷头两端一致：`pack-setup` 的测试断言写出的号等于 `DATA_FORMAT`，流水线的「核对载荷头」从产物读回再比一次（见「自更新的清单与下载源」的发布链路）。
+
+新增一种落盘文件却忘了给它做样本时，快照绊线抓不到，只能靠上文的磁盘布局表与代码评审。
 
 ## 测试与守卫
 
@@ -826,13 +1119,21 @@ versions/<实例名>/
 - **前端**：`pnpm test`（vitest + jsdom）。测试覆盖 DTO 适配、状态容器、页面与外壳组件、模拟后端，并有一个整应用冒烟测试：紧凑、常规、宽三档窗口宽度各配日樱、夜樱两种外观，逐个页面与主要弹窗渲染一遍，任何组合抛错即失败。
   - 进程数取逻辑处理器的一半（`vitest.config.ts` 的 `maxWorkers`）：一核一进程会和负责模块转换的主进程抢同一批物理核，满载时用例慢到超时。
   - 挂载 `LauncherProvider` 渲染整页、流程弹窗或外壳的测试文件在 `// @vitest-environment jsdom` 的下一行写 `// @module-tag heavy-page`，单例超时放到 30 秒（`HEAVY_PAGE_TEST_TIMEOUT_MS`）；标签名写错时 vitest 直接报错。一次超时的用例不会停下，它余下的异步步骤会落进同一文件的下一个用例，把后面整串带挂。
-  - 等 framer-motion 的动画用 `test/dom.ts` 的 `waitForFrames(assertion)`：按条件等真实帧（3 秒上限），不睡固定时长，在假定时器下调用直接抛错。假定时器下要逐帧采样一段动画用 `stepFrames(count)`（假定时器必须连 `setInterval` 一起假掉）。换计时器之前旧计时器上可能还排着一帧，会把同文件后面的用例带歪：用例收尾固定为先卸载，再 `drainFrames()`，再换回真实计时器。
-  - 断言「退场播完、节点移除」的用例放进单独的测试文件、全程真实计时器；其余用例断言挂载那一刻的初始样式与 `inert`、`data-*` 标记。不要先等一轮宏任务再去断言一个 120 ms 就结束的过渡状态：`act` 里的事件是同步提交的，在提交那一刻断言。
+  - 等 framer-motion 的动画用 `test/dom.ts` 的 `waitForFrames(assertion)`：按条件等真实帧（3 秒上限），不睡固定时长，在假定时器下调用直接抛错。假定时器下要逐帧采样一段动画用 `stepFrames(count)`（假定时器必须连 `setInterval` 一起假掉）。换计时器之前旧计时器上可能还排着一帧，会把同文件后面的用例带歪，所以换之前要先卸载，再 `drainFrames()`。用例结束时这件事由 `test/setup.ts`（`vitest.config.ts` 的 `setupFiles`）统一做：先卸载经 `render` 挂上、还没卸载的组件，停在假定时器上的再 `drainFrames()`，等测试文件自己的收尾都跑完再换回真实计时器；`sequence.hooks` 设成 `list`，它的 `afterEach` 才排在测试文件顶层的 `afterEach` 之前。测试文件自己的收尾不用再写卸载、排空与换回真实计时器。关掉了 act 环境、按真实时间自行调度的整页测试（`App.test.tsx`、`setup/App.test.tsx`）用 `renderWithoutAct` 挂载，同样登记进这份收尾。用例中途换计时器、`beforeEach` 里由真实计时器换成假时钟、在 `describe` 里的 `afterEach` 换回真实计时器（它先于全局收尾跑）的，仍要自己先卸载、再 `drainFrames()`。全局收尾不在真实计时器上排空，同一文件里前面的用例在真实计时器上等动画、后面的用例一开头就换上假时钟的，在文件自己的 `afterEach` 里再 `drainFrames()`（`test/dom.test.tsx`、`ui/Toast.test.tsx`）。
+  - 断言「退场播完、节点移除」的用例走真实计时器；同一文件里取退场途中某一刻值的用例可以走假时钟逐帧推进，换上假时钟之前按上一条先排空（`ui/ConfirmDialog.test.tsx`、`ui/Loadable.exit.test.tsx` 的 `startFrameClock`）。其余用例断言挂载那一刻的初始样式与 `inert`、`data-*` 标记。不要先等一轮宏任务再去断言一个 120 ms 就结束的过渡状态：`act` 里的事件是同步提交的，在提交那一刻断言。
   - jsdom 没有 Web Animations。按钮的图标位在这种环境下换内容时直接到位；要断言换图标的交接过程，在用例里装 `stubSpanAnimations()`（只装在 `span` 上，不能装到 `Element.prototype`：framer-motion 按它决定走不走 Web Animations）。让位在 jsdom 里是空操作，测它要像 `lib/reflow.test.ts` 那样桩上布局与动画。
+  - 只需要记下 `animate` 的调用、元素又可能碰上让位时（让位只在容器有 `animate`、环境有 `ResizeObserver` 时启动），用 `test/dom.ts` 的 `fakeAnimate(record?)`：作为 `Object.defineProperty` 的 `value` 装到某类元素的原型或单个元素上，每次调用先把元素、关键帧与时间参数交给 `record`，再返回一个停在起点、正在播、时间不自己走的 Animation，`currentTime`、`playState`、`onfinish`、`oncancel` 与 `cancel`、`finish`、`pause`、`play` 都在。让位从静止起步时先 `pause`、隔几帧再 `play`，被顶替时 `cancel`，接续时读 `currentTime`，缺哪一样一起步就抛 `TypeError`，所以不要再手写只有一两样的返回值。它不触发 `onfinish`，要由用例决定何时播完、断言交接过程的仍用 `stubSpanAnimations()`；同样不要装到 `Element.prototype` 上。
   - 外观偏好的 `AppearanceProvider` 自己包着根部的 `MotionConfig`：整页或外壳级的用例要测减少动画，用初始外观打开它，在外面再包一层 `MotionConfig` 会被内层盖掉。
-  - jsdom 缺的只有「聚焦着的元素被禁用时焦点落回 body」：元素被移除时 `activeElement` 本来就回到 body，不用补。测焦点留在禁用按钮上的用例用 `test/focus-fixup.ts` 的 `emulateFocusFixup()` 补上禁用这一种，并以原生禁用作对照确认替身生效。
-- **守卫**：`pnpm lint:tokens` 运行 `app/scripts/check-tokens.mjs`，规则 T0 到 T12 依次检查：豁免缺少理由、字面色值、页面写死样式、Tailwind 任意值与数字间距、颜色透明度修饰、视口断点、依赖方向、原版材质、动效参数、Emoji、产品名字面量、富文本注入、令牌覆盖。确有必要豁免时，在违规行或它的上一行写 `sk-guard-allow <规则>: <理由>`，理由必须填写。每条规则在 `app/scripts/guard-fixtures/` 下都有正反例，由 `check-tokens.test.ts` 验证。
+  - jsdom 在焦点上缺「聚焦着的元素被禁用时焦点落回 body」：元素被移除时 `activeElement` 本来就回到 body，不用补。测焦点留在禁用按钮上的用例用 `test/focus-fixup.ts` 的 `emulateFocusFixup()` 补上禁用这一种，并以原生禁用作对照确认替身生效。jsdom 也不实现 `inert`：inert 子树里聚焦着的元素不会被挪回 body，聚焦的按钮收到回车或空格也不会触发点击；测退场中的弹窗挡住键盘的用例（`ui/Modal.test.tsx`、`flows/login/LoginFlow.test.tsx`）在用例里补上这两件事，并先在弹窗开着时按一次，确认替身确实会触发按钮。jsdom 还不算可见性：藏在 `visibility: hidden` 里的元素照样拿得到焦点。测浮层打开时初始聚焦的用例用 `test/focus-fixup.ts` 的 `refuseHiddenFocus()`，按浏览器的规则让这种聚焦落空，并断言每次聚焦调用时元素都已可见。
+- **守卫**：`pnpm lint:tokens` 运行 `app/scripts/check-tokens.mjs`，规则 T0 到 T13 依次检查：豁免缺少理由、字面色值、写死样式（pages、flows、setup 查间距、圆角、阴影、颜色、字号与字重，launch、ui、shell、art 只查字号）、Tailwind 任意值与数字间距、颜色透明度修饰、视口断点、依赖方向、原版材质、动效参数、Emoji、产品名字面量、富文本注入、令牌覆盖、阴影令牌（`tokens.css` 里值是阴影列表的令牌，如 `--sk-focus`、`--sk-shadow-*`，只能写进 `box-shadow`，`text-shadow` 只收每层都不带扩展与内阴影的；写进 `outline` 等属性时整条声明作废，浏览器不报错）。确有必要豁免时，在违规行或它的上一行写 `sk-guard-allow <规则>: <理由>`，理由必须填写。每条规则在 `app/scripts/guard-fixtures/` 下都有正反例，由 `check-tokens.test.ts` 验证。
 - **品牌一致性**：`petalfall-tauri` 的测试检查 `tauri.conf.json`、`index.html`、`app/src/lib/app-info.ts` 三处的产品名与 `petalfall-base::brand` 是否一致；`identifier` 发布后就成为兼容契约，测试里单独写死。
+- **版本规则与发布流水线的契约**：几处测试读别处的文件，改了被读的那一侧，就要跑读它的那一侧。
+  - 共用版本向量 `crates/petalfall-release/testdata/version-order.json`：版本先后（`order`，含 `1.0.0-beta.999 < 1.0.0-dev.1 < 1.0.0` 与 2^53 附近的序号）与认通道（`channel`）的标准例子。四处各自的比较与认通道都按它对拍：`petalfall-release` 的 `order` 单元测试、`.github/scripts/release-heads.test.mjs`、`.github/scripts/dev-distribution.test.mjs`、`app/scripts/build-info.test.ts`。改了这份向量或任何一处的版本规则，四处都跑：`cargo test -p petalfall-release`，在 Git Bash 里于仓库根目录跑 `node --test .github/scripts/*.test.mjs`，在 `app/` 下跑 `pnpm exec vitest run scripts/build-info.test.ts`。
+  - `.github/scripts` 下的 node 测试读 Rust 源码与工作流。`release-heads.test.mjs` 读 `app/src-tauri/src/commands/update_channels.rs` 钥表里的两行 `include_str!`（编进的正是两个 `.pub`，且与两条流水线注入、`release-heads.mjs` 验清单用的公钥文件一致），`app/src-tauri/src/commands/updater.rs` 的三个清单地址常量与 `DEV_RELEASE_TAG`，`crates/petalfall-release/src/data_format.rs` 里 `DATA_FORMAT` 那一行（流水线的正则必须恰好命中一行），以及 `app/src-tauri/tauri.conf.json` 与两条流水线的公钥注入行（不含 `installerArgs`）。`dev-build-contract.test.mjs` 与 `beta-release-contract.test.mjs` 分别读两条工作流，核对作业与步骤的先后、`release-heads` 作业只读不挂环境、构建后的两步核对无条件执行、Rust 测试带 `-p petalfall-release`、签名用的 CLI 经 `locked-cli.mjs` 按锁文件取；beta 那份还读 `updater.rs` 的 `BETA_ENDPOINT`。改了这几处 Rust 源码、`tauri.conf.json`、`app/pnpm-lock.yaml` 里的 Tauri CLI 或两条工作流，都要在 Git Bash 里跑 `node --test .github/scripts/*.test.mjs`。两条流水线都在编译之前跑这组测试；流水线上的 Rust 测试只跑 `-p petalfall-setup-payload -p petalfall-release`，跨启动器与流水线两侧的约定因此都写成 node 测试，才能每次发版都跑到。
+- **数据格式号的守卫**（规则与挂了怎么办见「磁盘布局」下的「数据格式号」）：
+  - 改了写进数据目录或游戏目录的类型、持久化枚举的取值，或文件自带的格式版本常量：跑 `cargo test -p petalfall-core data_format_snapshot`、`cargo test -p petalfall-auth data_format_snapshot`、`cargo test -p petalfall-instance data_format_snapshot` 与 `cargo test -p petalfall-tauri --lib data_format_snapshot`。快照比对挂了不要直接把新内容存进样本，先按规则判断要不要加号。
+  - 改了 `FORMAT_HISTORY` 或「数据格式号」里的登记表：跑 `cargo test -p petalfall-release`，其中 `tests/format_history_docs.rs` 读 `docs/architecture.md`，两处要逐行相同。这组测试随两条流水线的 Rust 测试跑。
+  - 改了 `STAMP_FILE`：`app/scripts/installer-hooks.test.ts` 读它，核对卸载时勾了「删除应用程序数据」会连记号一起删，在 `app/` 下跑 `pnpm exec vitest run scripts/installer-hooks.test.ts`。
 
 ## 品牌常量
 

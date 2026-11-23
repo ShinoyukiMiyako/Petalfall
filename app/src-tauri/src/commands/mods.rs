@@ -24,6 +24,7 @@ use tauri::{AppHandle, State};
 use crate::commands::discover::parse_resource_type;
 use crate::commands::error::code::MOD_FILE_BUSY;
 use crate::commands::instances::{InstanceActivity, InstanceLocks};
+use crate::commands::tasks::ensure_game_dir;
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
@@ -332,22 +333,30 @@ pub(crate) async fn remove_mod_with(
 
 /// 检查该实例可更新的 Mod（无身份的文件先按哈希反查补身份）。反查到的身份会回写卷宗，所以与其它
 /// Mod 改动一样占住实例：改名、删除进行中报 `instance_busy`，免得卷宗按旧路径写回、建出空目录。
+///
+/// `game_dir`（前端传 `gameDir`）只有重试「全部更新」前的预检传，是那个任务入队时的游戏目录：当前目录已经不是它
+/// 就报 `game_dir_changed`，不去查、也不给新目录里同名实例写卷宗。Mod 页的检查更新不传，查当前目录。
 #[tauri::command]
 pub async fn check_updates(
     version_id: String,
+    game_dir: Option<String>,
     facade: State<'_, Facade>,
     locks: State<'_, InstanceLocks>,
 ) -> Result<Vec<UpdateCandidate>, CommandError> {
-    check_updates_with(&facade, &locks, &version_id).await
+    check_updates_with(&facade, &locks, &version_id, game_dir.as_deref()).await
 }
 
 pub(crate) async fn check_updates_with(
     facade: &Facade,
     locks: &InstanceLocks,
     version_id: &str,
+    game_dir: Option<&str>,
 ) -> Result<Vec<UpdateCandidate>, CommandError> {
-    let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
     let petalfall = facade.snapshot().await;
+    if let Some(expected) = game_dir {
+        ensure_game_dir(&petalfall, expected)?;
+    }
+    let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
     Ok(petalfall.check_updates(version_id).await?)
 }
 
@@ -357,11 +366,15 @@ pub(crate) async fn check_updates_with(
 ///
 /// 作为组合任务（全部更新）的一项调用时传 `step`（第几项，从 0 计），它原样标在这次调用的每条事件上；
 /// 单独调用不传。
+///
+/// `game_dir`（前端传 `gameDir`）是入队那一刻的游戏目录，当前目录已经不是它（切换目录后重试）就报
+/// `game_dir_changed`，什么都不动。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn update_mod(
     app: AppHandle,
     task_id: String,
+    game_dir: String,
     step: Option<u32>,
     version_id: String,
     file_name: String,
@@ -378,6 +391,7 @@ pub async fn update_mod(
         &tasks,
         &locks,
         &task_id,
+        &game_dir,
         &version_id,
         &file_name,
         &mod_version_id,
@@ -399,15 +413,18 @@ pub(crate) async fn update_mod_with(
     tasks: &TaskRegistry,
     locks: &InstanceLocks,
     task_id: &str,
+    game_dir: &str,
     version_id: &str,
     file_name: &str,
     mod_version_id: &str,
     events: Option<&EventSink>,
 ) -> Result<ModUpdateOutcomeDto, CommandError> {
     validate_update_args(file_name, mod_version_id)?;
+    let snapshot = facade.snapshot().await;
+    ensure_game_dir(&snapshot, game_dir)?;
     let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
     let task = tasks.register(task_id)?;
-    let petalfall: Petalfall = facade.snapshot().await.with_cancel(task.token().clone());
+    let petalfall: Petalfall = snapshot.with_cancel(task.token().clone());
     let outcome = task
         .run(async {
             petalfall
@@ -681,6 +698,7 @@ fn parse_loader(name: &str) -> Result<ModLoader, CommandError> {
 mod tests {
     use super::*;
     use crate::commands::error::code;
+    use crate::commands::tasks::{assert_game_dir_changed, current_game_dir, disk_state};
     use petalfall_core::{
         HistoryEvent, IsolationPolicy, Ledger, LedgerEntry, PetalfallConfig, ResourceType,
     };
@@ -843,6 +861,7 @@ mod tests {
             &tasks,
             &InstanceLocks::default(),
             "t-1",
+            &current_game_dir(&facade).await,
             VERSION_ID,
             "a.jar",
             " ",
@@ -876,6 +895,7 @@ mod tests {
             &tasks,
             &InstanceLocks::default(),
             "t-2",
+            &current_game_dir(&facade).await,
             VERSION_ID,
             "manual.jar",
             "v2",
@@ -967,6 +987,7 @@ mod tests {
                 &tasks,
                 &locks,
                 "t-busy",
+                &current_game_dir(&facade).await,
                 VERSION_ID,
                 "sodium.jar",
                 "v2",
@@ -976,7 +997,7 @@ mod tests {
             .unwrap_err();
             assert_eq!(err.code, code::INSTANCE_BUSY);
             assert!(!tasks.is_running("t-busy"));
-            let err = check_updates_with(&facade, &locks, VERSION_ID)
+            let err = check_updates_with(&facade, &locks, VERSION_ID, None)
                 .await
                 .unwrap_err();
             assert_eq!(err.code, code::INSTANCE_BUSY);
@@ -1650,5 +1671,161 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, code::MOD_PLATFORM_FAILED);
         assert_eq!(err.detail.unwrap()["network"], json!("connect"));
+    }
+
+    /// 切换目录后重试更新 Mod：报 game_dir_changed，当前目录里同名实例的旧文件原样、没有改名出 .old、新版本也没落进
+    /// mods，盘上什么都没动，平台一次没问；实例与任务 id 随之放开。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_retried_after_switching_directories_is_refused() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/version/v2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "v2", "project_id": "AANobbMI", "name": "Sodium", "version_number": "0.6.0",
+                "version_type": "release", "date_published": "2026-01-01T00:00:00Z",
+                "game_versions": [VERSION_ID], "loaders": [], "dependencies": [],
+                "files": [{"hashes": {}, "url": format!("{}/sodium-v2.jar", server.uri()),
+                           "filename": "sodium-v2.jar", "primary": true, "size": 3}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/sodium-v2.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"new".to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"id": "AANobbMI", "title": "Sodium", "description": "d", "project_type": "mod", "downloads": 1}
+            ])))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        // 实例照 facade_with_instance 建；门面另开一个，平台接口指向模拟端点。
+        let (_, mods_dir) = facade_with_instance(tmp.path()).await;
+        let mut petalfall = Petalfall::open(
+            PetalfallConfig::default(),
+            tmp.path().to_path_buf(),
+            tmp.path().join("config.json"),
+        )
+        .unwrap()
+        .with_platform_bases(server.uri(), server.uri());
+        petalfall.set_game_dir(tmp.path().join(".minecraft"));
+        petalfall.set_isolation_policy(IsolationPolicy::All);
+        let facade = Facade::new(petalfall);
+        let jar = mods_dir.join("sodium.jar");
+        tokio::fs::write(&jar, b"old").await.unwrap();
+        let mut ledger = Ledger::default();
+        ledger.upsert(LedgerEntry {
+            file_name: "sodium.jar".to_owned(),
+            platform: Platform::Modrinth,
+            project_id: "AANobbMI".to_owned(),
+            version_id: "v1".to_owned(),
+            version_number: Some("0.5.3".to_owned()),
+            title: Some("Sodium".to_owned()),
+            icon_url: None,
+            sha1: None,
+            installed_at: 1_700_000_000,
+            installed_as_dependency_of: None,
+            update_hold: None,
+        });
+        facade
+            .snapshot()
+            .await
+            .ledger_store(VERSION_ID)
+            .save(&ledger)
+            .await
+            .unwrap();
+        let before = disk_state(tmp.path());
+        let elsewhere = tempfile::tempdir().unwrap();
+        let expected = elsewhere.path().join(".minecraft").display().to_string();
+        let tasks = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+
+        let err = update_mod_with(
+            &facade,
+            &tasks,
+            &locks,
+            "t-up",
+            &expected,
+            VERSION_ID,
+            "sodium.jar",
+            "v2",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &tmp.path().join(".minecraft"));
+        assert_eq!(tokio::fs::read(&jar).await.unwrap(), b"old");
+        let left: Vec<String> = std::fs::read_dir(&mods_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            left,
+            vec!["sodium.jar".to_owned()],
+            "不该有 .old 备份或新版本"
+        );
+        assert_eq!(disk_state(tmp.path()), before);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        // 同名实例此刻正被改名也先报目录换了：核对在占锁之前，不让新目录里的占用盖过它。
+        let renaming = locks
+            .acquire(VERSION_ID, InstanceActivity::Renaming)
+            .unwrap();
+        let err = update_mod_with(
+            &facade,
+            &tasks,
+            &locks,
+            "t-up",
+            &expected,
+            VERSION_ID,
+            "sodium.jar",
+            "v2",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &tmp.path().join(".minecraft"));
+        drop(renaming);
+        drop(tasks.register("t-up").unwrap());
+        drop(
+            locks
+                .acquire(VERSION_ID, InstanceActivity::Modifying)
+                .unwrap(),
+        );
+    }
+
+    /// 「全部更新」重试前的检查更新带着发起时的目录来：当前目录已经换了就报 game_dir_changed，不按名字去查新目录里
+    /// 同名实例、不给它的文件反查身份写卷宗，实例也不占。核对在占锁之前：同名实例此刻被改名占着，也先报目录换了。
+    #[tokio::test]
+    async fn check_updates_for_a_retry_refuses_another_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (facade, mods_dir) = facade_with_instance(tmp.path()).await;
+        tokio::fs::write(mods_dir.join("sodium.jar"), b"jar")
+            .await
+            .unwrap();
+        let before = disk_state(tmp.path());
+        let elsewhere = tempfile::tempdir().unwrap();
+        let expected = elsewhere.path().join(".minecraft").display().to_string();
+        let locks = InstanceLocks::default();
+
+        let renaming = locks
+            .acquire(VERSION_ID, InstanceActivity::Renaming)
+            .unwrap();
+        let err = check_updates_with(&facade, &locks, VERSION_ID, Some(&expected))
+            .await
+            .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &tmp.path().join(".minecraft"));
+        drop(renaming);
+        let err = check_updates_with(&facade, &locks, VERSION_ID, Some(&expected))
+            .await
+            .unwrap_err();
+        assert_game_dir_changed(&err, &expected, &tmp.path().join(".minecraft"));
+        assert_eq!(disk_state(tmp.path()), before);
+        assert_eq!(locks.activity(VERSION_ID), None);
     }
 }

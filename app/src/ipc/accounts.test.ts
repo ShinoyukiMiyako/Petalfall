@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { defaultSkin as previewSkin } from "../flows/login/default-skin";
 import {
   authlibLogin,
   cancelMicrosoftLogin,
@@ -7,19 +8,21 @@ import {
   currentAccount,
   listAccounts,
   microsoftLogin,
+  onAccountChanged,
   onDeviceCode,
   probeAuthServer,
   refreshAccount,
   removeAccount,
   selectAuthlibProfile,
   setCurrentAccount,
+  type AccountChangedEvent,
   type AccountDto,
   type DeviceCode,
 } from "./accounts";
 import { IpcError, isCancelled } from "./errors";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
-import { MOCK_MICROSOFT_LOGIN_MS } from "./mock/handlers/accounts";
+import { changeMockAccountInBackground, MOCK_MICROSOFT_LOGIN_MS } from "./mock/handlers/accounts";
 import { defaultSkin } from "./mock/handlers/art";
 import { onCoreEvent, type CoreEvent } from "./tasks";
 
@@ -96,7 +99,7 @@ describe("账户 mock：两库仲裁", () => {
     for (const uuid of uuids) expect(new Set([0, 8, 16, 24].map((at) => uuid.slice(at, at + 8))).size).toBe(4);
     expect(new Set(uuids).size).toBe(names.length);
     // 四段相同时 Java 的 UUID.hashCode 恒为 0，每个离线账户都会落到同一套默认皮肤上
-    expect(new Set(uuids.map((uuid) => defaultSkin(uuid).path)).size).toBeGreaterThan(1);
+    expect(new Set(uuids.map((uuid) => defaultSkin(uuid, false).path)).size).toBeGreaterThan(1);
   });
 
   it("离线用户名：16 个字符可以、17 个不行，空名与双引号直接拒绝，非标准字符只告警", async () => {
@@ -112,7 +115,11 @@ describe("账户 mock：两库仲裁", () => {
     expect(await listAccounts()).toHaveLength(3);
 
     await createOfflineAccount("玩家");
-    expect(warnings).toEqual([{ kind: "warning", task_id: null, message: "用户名包含非标准字符，可能无法进入 1.18+ 世界" }]);
+    await createOfflineAccount("Petal-1.0");
+    expect(warnings).toEqual([
+      { kind: "warning", task_id: null, message: "用户名含空格或非 ASCII 字符，Minecraft 1.20.2 与 1.20.3 进不了存档与服务器" },
+      { kind: "warning", task_id: null, message: "用户名含英文字母、数字与下划线以外的符号，部分服务器可能不接受" },
+    ]);
   });
 
   it("切到凭据账户会清掉离线选中项；未知 uuid 报 AccountNotFound 并带上 uuid", async () => {
@@ -221,9 +228,10 @@ describe("账户 mock：外置登录", () => {
     const result = await authlibLogin("skin.example", "multi@example.com", "pw");
     if (result.status !== "select_profile") throw new Error(`应进入选角色，实为 ${result.status}`);
     expect(result.server_name).toBe("skin.example");
+    // 浏览器里拿不到角色的远程皮肤：与后端一样按角色 UUID 给默认皮肤，与离线弹窗预览同一规则
     expect(result.profiles.map((p) => [p.name, p.skin])).toEqual([
-      ["multi_main", null],
-      ["multi_alt", null],
+      ["multi_main", previewSkin(result.profiles[0].uuid, "modern")],
+      ["multi_alt", previewSkin(result.profiles[1].uuid, "modern")],
     ]);
 
     const again = await authlibLogin("skin.example", "multi@example.com", "pw");
@@ -261,6 +269,20 @@ describe("账户 mock：刷新", () => {
     const missing = await rejection(refreshAccount("0".repeat(32)));
     expect(missing.code).toBe("AccountNotFound");
     expect(missing.detail).toEqual({ uuid: "0".repeat(32) });
+  });
+});
+
+describe("账户 mock：后台改写", () => {
+  it("改了记录再推 account-changed，带账户 uuid；后台只碰凭据账户，离线账户直接报错", async () => {
+    const received: AccountChangedEvent[] = [];
+    await onAccountChanged((event) => received.push(event));
+    changeMockAccountInBackground(SEED_MICROSOFT, { name: "Hanami_Renamed", last_verified_at: 42 });
+    expect(received).toEqual([{ uuid: SEED_MICROSOFT }]);
+    expect((await listAccounts()).find((a) => a.uuid === SEED_MICROSOFT)).toMatchObject({ name: "Hanami_Renamed", last_verified_at: 42 });
+
+    const offline = await createOfflineAccount("Steve");
+    expect(() => changeMockAccountInBackground(offline.uuid, { name: "Alex" })).toThrow(`mock 里没有凭据账户 ${offline.uuid}`);
+    expect(received).toHaveLength(1);
   });
 });
 

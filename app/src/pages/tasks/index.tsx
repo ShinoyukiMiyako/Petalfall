@@ -14,8 +14,9 @@ import { ACTION_ERROR, BOOT_SLICE_ERROR, PAGE_LABEL, SLOW_LOADING_HINT } from ".
 import { TASK_HISTORY_LIMIT } from "../../domain/limits";
 import type { Task } from "../../domain/types";
 import { useLoadingGate } from "../../lib/loading-gate";
-import { useCompletionHold, useDisplaySpeed, useFinishing } from "../../lib/progress-display";
-import { observeReflow, REFLOW_MAX_ITEMS, useReflow } from "../../lib/reflow";
+import type { SpringName } from "../../lib/motion";
+import { useCompletionHold, useFinishing } from "../../lib/progress-display";
+import { followReflow, HOLD_AFTER_RESIZE, observeReflow, REFLOW_MAX_ITEMS, useReflow } from "../../lib/reflow";
 import { playTrack, springTrack } from "../../lib/slide";
 import { cssVars } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
@@ -24,8 +25,9 @@ import { describeError } from "../../state/errors";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useOnline } from "../../state/online";
 import type { PageProps, TaskFilter } from "../../state/route";
+import { clearableFinishedCount } from "../../state/selectors";
 import type { BlockedFileDto } from "../../state/store";
-import { isActiveTask, queuePosition } from "../../state/tasks";
+import { isActiveTask, movingKeys, queuePosition, retryBlockedReason } from "../../state/tasks";
 import { Appear } from "../../ui/Appear";
 import { Banner, BannerSlot } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
@@ -74,12 +76,27 @@ const COUNT_DIGITS = String(TASK_HISTORY_LIMIT).length;
 /** 总览行至少与骨架一样高：骨架换成内容时下面的筛选与列表不动。 */
 const OVERVIEW_STYLE = cssVars({ "--tasks-overview-h": `${OVERVIEW_HEIGHT}px` });
 
+/**
+ * 换组的行的飞行与分组之间的让位共用这条弹簧。最后一个进行中的任务完成时，进行中那组整块退场、已结束组被让位带上去，
+ * 组里新来的那一行又从旧位置飞过来：量飞行终点时已带上分组的位移，两段方向相反、起点几乎抵消。弹簧不同就衰减得不同步，
+ * 叠起来行先偏出去再折回（让出一行任务的高度时约 20 px）。取 settle：内容区、组内与列表行的让位都走它，
+ * 飞行跟它一致，套在哪一层里都同步。
+ * 两层还要同一帧起步：起步差一帧，露出的就是单层弹簧在这一帧走的那一截，60 Hz 下偏出约 20 px，与弹簧不同时同一量级。
+ * 分组的让位从静止起步时停在起点、等新排布画出来才计时，上一段没走完又被挤时旧轨迹接着走、这一趟的位移原样留着等新排布画出来；
+ * 飞行跟着分组这一趟走，见 flyAcross。
+ */
+const TASK_MOVE_SPRING: SpringName = "settle";
+
 export default function TasksPage({ route }: PageProps<"tasks">) {
   // 运行中任务的对象在这里停在上一次结构变化时：它们的进度只由下面的进度部件读
   const tasks = useLauncherSelector((s) => s.tasks, sameTaskLayout);
   const slice = useLauncherSelector((s) => s.status.tasks);
   const unseenFailures = useLauncherSelector((s) => s.unseenFailures);
   const instanceIds = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
+  const movingIds = useLauncherSelector((s) => [...movingKeys(s.instances)], shallowArrayEqual);
+  const gameDir = useLauncherSelector((s) => (s.settings === null ? null : s.settings.gameDir));
+  // 「清除已结束」的计数按点了真能清掉的算：落地中的任务清除会留着，不计
+  const finishedCount = useLauncherSelector(clearableFinishedCount);
   const actions = useLauncherActions();
   const nav = useNav();
   const { confirm, openCreateInstance } = useShell();
@@ -124,7 +141,6 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
     await run(() => actions.cancelAllTasks(), ACTION_ERROR.cancelTask);
   };
 
-  const finishedCount = buckets.finished.length;
   const header = (
     <PageHeader
       key="header"
@@ -169,7 +185,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
         <Callout
           tone="danger"
           action={
-            <Button variant="secondary" size="sm" onClick={() => void run(() => actions.reload("tasks"), BOOT_SLICE_ERROR.tasks)}>
+            <Button variant="ghost" size="sm" onClick={() => void run(() => actions.reload("tasks"), BOOT_SLICE_ERROR.tasks)}>
               {TASKS_COPY.loadError.retry}
             </Button>
           }
@@ -202,6 +218,8 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
             tasks={tasks}
             now={now}
             hasInstance={(id) => instanceIds.includes(id)}
+            gameDir={gameDir}
+            moving={new Set(movingIds)}
             retryBlocked={online ? undefined : TASKS_COPY.offline.retryReason}
             onCancel={(task) => void cancel(task)}
             onRetry={(task) => void run(() => actions.retryTask(task.id), ACTION_ERROR.install)}
@@ -308,10 +326,9 @@ function TasksOverview({ finishing }: { finishing: ReadonlySet<string> }) {
   const frame = useChartFrame(history);
   const buckets = bucketTasks(active);
   const overview = overviewOf(buckets);
-  const speed = useDisplaySpeed(overview.speed);
   return (
     <EntranceBlock className={styles.overview} style={OVERVIEW_STYLE}>
-      <ThroughputCard overview={overview} speed={speed} track={overviewTrack(active)} history={history} frame={frame} />
+      <ThroughputCard overview={overview} track={overviewTrack(active)} history={history} frame={frame} />
       <LanesCard running={buckets.running} finishing={shown.filter((t) => !isActiveTask(t))} queued={buckets.queued} />
     </EntranceBlock>
   );
@@ -321,6 +338,10 @@ function TasksOverview({ finishing }: { finishing: ReadonlySet<string> }) {
 
 interface RowHandlers {
   hasInstance(id: string): boolean;
+  /** 此刻的当前游戏目录，设置没读到时为 null：发起于别的目录（或不知道发起于哪里）的任务，重试按钮置灰并说明。 */
+  gameDir: string | null;
+  /** 正在移到别的游戏目录的实例（见 movingKeys）：挂在它们上面的失败任务，重试按钮置灰并说明。 */
+  moving: ReadonlySet<string>;
   /** 重试眼下必然失败（断网）时的原因；能重试为 undefined。 */
   retryBlocked: string | undefined;
   onCancel(task: Task): void;
@@ -346,16 +367,28 @@ interface TaskListProps extends RowHandlers {
  */
 function TaskListRow({ task: placed, finishing, queuePosition, now, handlers }: { task: Task; finishing: boolean; queuePosition: number | null; now: number; handlers: RowHandlers }) {
   const running = placed.status === "running";
-  const task = useLauncherSelector((s) => (running ? s.tasks.find((t) => t.id === placed.id) : placed));
+  // 读不到时沿用上一次读到的。任务从表里拿掉是结构变化，在场的行随即被页面撤走，碰上这种情况的只有退场副本（见下）：
+  // 淡出途中任务被「清除已结束」拿掉，照拿掉前的样子淡完。不退回 placed：运行中的 placed 停在上一次结构变化时，
+  // 进度会倒回去、收尾的满格会换回运行中。行已带 inert，只剩这一百多毫秒；挂载时就读不到仍是列表的错，照样抛
+  const task = useLauncherSelector(
+    (s) => (running ? s.tasks.find((t) => t.id === placed.id) : placed),
+    (prev, next) => next === undefined || prev === next,
+  );
   if (task === undefined) throw new Error(`任务 ${placed.id} 已不在任务表里，列表却还在画它`);
-  const speed = useDisplaySpeed(task.speedBps);
+  // 退场中的行 props 停在离开前的那次渲染（AnimatePresence 冻结），任务却照样按实时订阅读。减少动画时没有收尾这一拍
+  // （useCompletionHold 为 0），完成的那一刻行就离开进行中，原处淡出的那份拿着 finishing=false 读到已完成，会在淡出时
+  // 换成已结束的样子：进度条、百分数与取消键撤掉，整行变淡。在场的行换状态时页面总会给新的对象，运行中的 placed
+  // 碰上已完成的任务只会是这样的退场副本（行离开分组或整组退场都是），按收尾画，与有收尾这一拍时离开前的样子相同。
+  const holding = finishing || (running && task.status === "done");
+  // 目录对不上是切回去之前一直成立的原因，先说它；实例在移动要等移动有结局；断网只是眼下
+  const blockedReason = task.status === "failed" ? retryBlockedReason(task, handlers.gameDir, handlers.moving) : null;
   return (
     <TaskRow
       task={task}
-      finishing={finishing}
-      meta={{ queuePosition, etaSpeed: running ? etaSpeed(readThroughputHistory(), task) : 0, speed, now }}
+      finishing={holding}
+      meta={{ queuePosition, etaSpeed: running ? etaSpeed(readThroughputHistory(), task) : 0, now }}
       hasInstance={task.instanceId !== null && handlers.hasInstance(task.instanceId)}
-      retryBlocked={retryNeedsNetwork(task) ? handlers.retryBlocked : undefined}
+      retryBlocked={blockedReason !== null ? blockedReason : retryNeedsNetwork(task) ? handlers.retryBlocked : undefined}
       onCancel={() => handlers.onCancel(task)}
       onRetry={() => handlers.onRetry(task)}
       onViewBlocked={() => handlers.onViewBlocked(task)}
@@ -374,10 +407,16 @@ function centerOf(el: Element): { x: number; y: number } {
 }
 
 /**
- * 换组的行：旧组里那一行已经脱离布局、在原处淡出，新组里同一个任务的新行从它的位置沿 morph 弹簧飞到自己的位置，
+ * 换组的行：旧组里那一行已经脱离布局、在原处淡出，新组里同一个任务的新行从它的位置沿 TASK_MOVE_SPRING 飞到自己的位置，
  * 两者叠着交接，看上去是同一行换了地方。
  * 量的时机放在下一次尺寸观察的回调里：所在分组被挤开后的让位在那一轮观察里才起步，这个观察者建得晚、回调排在它们之后，
  * 量到的新位置已经带着分组的让位，飞的距离不会把分组的位移再算一遍。都在绘制之前，新行不会先在终点露一帧。
+ * 建好的飞行跟着新行所在分组包裹层这一趟的让位起步（lib/reflow 的 followReflow），起步时刻与它同一帧定下：
+ * - 分组从静止起步、停在起点等新排布画出来（增删观察报出的隔两帧、尺寸观察报出的隔一帧）：飞行也停在起点，挂进同一个等待，
+ *   在同一个动画帧回调里开播。建好就播的话比分组早一到两帧。
+ * - 分组上一段还没走完又被挤：旧轨迹接着走，这一趟的位移原样留着、等新排布画出来；飞行也停在起点，挂进分组这一趟的同一项等待，
+ *   到期时分组换上从那一刻的位置与速度起步的整段，飞行在同一个回调里开播，两段钉同一个起步时刻。
+ * - 分组没被挪动：飞行按从静止起步处理，等量的这一帧把新排布画出来，下一帧再播。
  */
 function flyAcross(root: HTMLElement, ids: readonly string[]): void {
   if (typeof root.animate !== "function" || typeof ResizeObserver === "undefined") return;
@@ -395,10 +434,16 @@ function flyAcross(root: HTMLElement, ids: readonly string[]): void {
       if (leaving === null || arriving === null) continue;
       const from = centerOf(leaving);
       const to = centerOf(arriving);
-      playTrack(arriving, springTrack("morph", from.x - to.x, 0, from.y - to.y, 0));
+      followReflow(playTrack(arriving, springTrack(TASK_MOVE_SPRING, from.x - to.x, 0, from.y - to.y, 0)), groupItemOf(root, arriving), HOLD_AFTER_RESIZE);
     }
   });
   probe.observe(root);
+}
+
+/** el 所在的分组包裹层：root 的直接子项，分组之间的让位挪的是它。 */
+function groupItemOf(root: HTMLElement, el: HTMLElement): HTMLElement {
+  for (let node: HTMLElement | null = el; node !== null; node = node.parentElement) if (node.parentElement === root) return node;
+  throw new Error("换组的行不在分组容器里");
 }
 
 function TaskList({ groups, filter, finishing, tasks, now, ...handlers }: TaskListProps) {
@@ -409,7 +454,7 @@ function TaskList({ groups, filter, finishing, tasks, now, ...handlers }: TaskLi
   const attach = useCallback((el: HTMLDivElement | null) => {
     root.current = el;
     if (el === null) return;
-    const stop = observeReflow(el);
+    const stop = observeReflow(el, TASK_MOVE_SPRING);
     return () => {
       root.current = null;
       stop();

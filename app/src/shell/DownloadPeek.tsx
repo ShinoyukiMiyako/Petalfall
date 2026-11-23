@@ -9,7 +9,7 @@
 // 任务完成时行先留在原处把进度推满、停一拍，再退场。
 
 import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
-import { useEffect, useReducer, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useReducer, useState, type ReactNode } from "react";
 import { Icon } from "../art/Icon";
 import { ACTION_ERROR, CONFIRM_COPY, taskPhaseText } from "../copy/flows";
 import { formatSpeed, percent } from "../domain/format";
@@ -20,10 +20,11 @@ import { useCompletionHold, useDisplaySpeed, useFinishing, type FinishedItem } f
 import { useReflow } from "../lib/reflow";
 import { useInsertItem } from "../lib/useInsertItem";
 import { useMounted } from "../lib/useMounted";
+import { usePaintedOnce } from "../lib/usePaintedOnce";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
-import { findInstance } from "../state/selectors";
+import { clearableFinishedCount, findInstance } from "../state/selectors";
 import type { LauncherState } from "../state/store";
-import { isActiveTask, isFinishedTask, progressTrack } from "../state/tasks";
+import { isActiveTask, progressTrack } from "../state/tasks";
 import { Appear } from "../ui/Appear";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
@@ -152,7 +153,8 @@ export function DownloadPeek() {
   const finishing = useFinishing(completions(tasks), useCompletionHold());
   const rows = peekRows(tasks, finishing);
   const failedCount = tasks.filter((t) => t.status === "failed").length;
-  const finishedCount = tasks.filter(isFinishedTask).length;
+  // 「清除已结束」的计数按点了真能清掉的算：落地中的任务清除会留着，不计
+  const finishedCount = useLauncherSelector(clearableFinishedCount);
   const layoutKey = peekLayoutKey(rows, settled, failedCount, finishedCount);
 
   // 快览开着的时候，失败即被看到（包括开着期间新出现的）
@@ -222,11 +224,14 @@ export function DownloadPeek() {
           )}
         </AnimatePresence>
       </motion.button>
+      {/* 面板 portal 在文档末尾：焦点不进来的话 Tab 从入口走到账户胶囊，面板一直开着，键盘到不了里面的按钮。
+          落在面板容器而不是第一个按钮：有任务时第一个按钮是首行的「取消任务」，一个回车就可能把下载取消了 */}
       <Popover
         open={open}
         anchor={anchor}
         onClose={close}
         placement="bottom-end"
+        autoFocus
         aria-label={PEEK_COPY.title}
         className={styles.popover}
         layoutKey={layoutKey}
@@ -255,7 +260,8 @@ function PeekHead({ activeCount }: { activeCount: number }) {
 function PeekList({ rows, finishing, onCancel, onSettled }: { rows: readonly Task[]; finishing: ReadonlySet<string>; onCancel: (task: Task) => void; onSettled: () => void }) {
   const mounted = useMounted();
   // 走 morph：外框、主体下沿与底栏随同一次变化沿 morph 形变，行若走更快的 settle，删中间一行时下面的行先到位、
-  // 与还在收的下沿之间空出一道缝，插入时末行先滑出、被主体裁掉半截
+  // 与还在收的下沿之间空出一道缝，插入时末行先滑出、被主体裁掉半截。
+  // 行的位移只来自行的增删（行里没有自己变尺寸的布局节点），增删观察报在提交后的微任务里，与外框的形变同一刻起步，不用补跑（sync）
   const list = useReflow<HTMLUListElement>("morph");
   return (
     // 列表与空态先退后进：最后一行跟着列表一起淡出，空态再淡入；退场的列表不脱离布局，外框在换手的那一刻才形变
@@ -289,15 +295,18 @@ function PeekList({ rows, finishing, onCancel, onSettled }: { rows: readonly Tas
   );
 }
 
+/** 列表那一层正在退场：里面的行跟着整块淡出，行自己的 useIsPresent 却仍是在场（见 ListLayer）。 */
+const ListLeaving = createContext(false);
+
 /**
  * 列表那一层。最后一行走掉时不是行自己退场，而是整块列表冻结在最后一帧、跟着这一层淡出：里面的行仍算在场，
- * 所以退场期间 inert 要打在这一层上，跟着淡出的行同样点不到、聚焦不到。
+ * 所以退场期间 inert 要打在这一层上，跟着淡出的行同样点不到、聚焦不到；行要知道自己在退场，也看这一层（ListLeaving）。
  */
 function ListLayer({ enter, children }: { enter: boolean; children: ReactNode }) {
   const present = useIsPresent();
   return (
     <motion.div inert={!present} initial={enter ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }} exit={{ opacity: 0, transition: fade.out }}>
-      {children}
+      <ListLeaving.Provider value={!present}>{children}</ListLeaving.Provider>
     </motion.div>
   );
 }
@@ -365,46 +374,49 @@ function ActiveGlyph({ tasks }: { tasks: readonly Task[] }) {
 /**
  * finishing：刚完成、还在收尾。仍按进行中的样子画（同一个行、同一个 track），进度条与百分数推到满格；
  * 取消键留在原位、尾部不变宽，但已不可用（任务已经完成）。焦点可能正停在它上面，所以保持可聚焦。
+ *
+ * 退场中的行 props 停在离开前的那次渲染（AnimatePresence 冻结）。减少动画时没有收尾这一拍（useCompletionHold 为 0），
+ * 任务完成的那一刻行就离开列表，冻结下来的是完成前的样子：运行中、进度停在最后一次上报、取消键可按。所以退场中按任务 id
+ * 读实时任务，已完成就按收尾画，详情也取实时任务，与有收尾这一拍时离开前的样子相同。在场的行不读：页面每次都给最新的任务。
  */
-function PeekRow({ task, finishing, enter, onCancel }: { task: Task; finishing: boolean; enter: boolean; onCancel: () => void }) {
+function PeekRow({ task: placed, finishing, enter, onCancel }: { task: Task; finishing: boolean; enter: boolean; onCancel: () => void }) {
   // ul 的直接子项只能是 li，不能再包一层 Appear；减少动画时进出只留透明度，删掉的行不先缩一下再淡出
   const insert = useInsertItem();
+  // 冻结挂载那一刻的值：快览打开之后每次渲染给的 enter 都为真，打开时就在的行不能因此退回起点
+  const [entering] = useState(enter);
+  // 自己入场的行先停在起点，画出第一帧之后才换成目标，与 Appear 的子项同一做法：新行挂上的那一帧连同同一刻别的数据引起的渲染
+  // 可能很长，入场从提交就计时的话第一帧画出来时淡入已走掉一截。停着的目标与 initial 是同一个对象，挂载时 framer-motion 不建一段原地不动的动画
+  const painted = usePaintedOnce("row", entering);
   // 退场时行留在流里淡出、播完才移除：这段时间带 inert，取消键点不到、聚焦不到，读屏也不再读它
   const present = useIsPresent();
+  const listLeaving = useContext(ListLeaving);
+  const leaving = !present || listLeaving;
+  // 读不到时沿用上一次读到的：淡出途中任务被「清除已结束」拿掉，照拿掉前的样子淡完。不退回冻结的 placed，那是完成前
+  // 运行中的样子，取消键会变回可按、详情换回完成前那句。在场时取页面给的任务，退场前总有上一次；连上一次都没有是状态坏了，照样抛
+  const live = useLauncherSelector(
+    (s) => (leaving ? s.tasks.find((t) => t.id === placed.id) : placed),
+    (prev, next) => next === undefined || prev === next,
+  );
+  if (live === undefined) throw new Error(`任务 ${placed.id} 已不在任务表里，快览却还在画它`);
+  const landed = leaving && live.status === "done";
+  const task = landed ? live : placed;
+  const holding = finishing || landed;
   const queued = task.status === "queued";
-  // 写出来的速度是平滑过、每秒最多换两次字的那个，不是每 100 ms 一跳的瞬时值
-  const live = useDisplaySpeed(task.speedBps);
-  // 任务一完成，状态层就把速度清零：收尾这一拍留着完成前最后显示的速度，行在原处推满、淡出，不在最后一拍跳成 0。
-  // 下载任务页的收尾行换成完成摘要，是因为那一行收尾后还留在已结束里；快览的行收尾完就走，这时换一次字只会闪一下
-  const [lastLive, setLastLive] = useState(live);
-  if (!finishing && live !== lastLive) setLastLive(live);
-  const speed = finishing ? lastLive : live;
-  const progress = finishing ? 1 : task.progress;
+  const progress = holding ? 1 : task.progress;
   const track = progressTrack(task);
-  const [beforePercent, afterPercent] = aroundPercent(PEEK_COPY.progress(PERCENT_SLOT, formatSpeed(speed)));
   return (
-    <motion.li className={styles.row} inert={!present} initial={enter ? insert.initial : false} animate={insert.animate} exit={insert.exit}>
+    <motion.li className={styles.row} inert={!present} initial={entering ? insert.initial : false} animate={painted ? insert.animate : insert.initial} exit={insert.exit}>
       <div className={styles.rowHead}>
         <span className={styles.rowTitle} title={task.title}>
           {task.title}
         </span>
-        <IconButton icon="x" size="sm" label={PEEK_COPY.cancel} tooltipSide="left" disabled={finishing} focusableWhenDisabled onClick={onCancel} />
+        <IconButton icon="x" size="sm" label={PEEK_COPY.cancel} tooltipSide="left" disabled={holding} focusableWhenDisabled onClick={onCancel} />
       </div>
       <ProgressBar value={queued ? 0 : progress} tone={queued ? "muted" : "accent"} size="sm" track={track} label={PEEK_COPY.rowProgress(task.title)} />
       <div className={styles.rowMeta}>
         <span className={styles.rowDetail}>{queued || task.phase === null ? task.detail : taskPhaseText(task.phase, "short")}</span>
         <span className={styles.rowState}>
-          <span className={styles.rowStateText}>
-            {queued ? (
-              PEEK_COPY.queued
-            ) : (
-              <>
-                {beforePercent}
-                <SmoothPercent value={progress} track={track} />
-                {afterPercent}
-              </>
-            )}
-          </span>
+          <RowStateText task={task} finishing={holding} progress={progress} track={track} />
           {ROW_STATE_WIDEST.map((sample) => (
             <span key={sample} className={styles.rowStateSample} aria-hidden="true">
               {sample}
@@ -413,5 +425,28 @@ function PeekRow({ task, finishing, enter, onCancel }: { task: Task; finishing: 
         </span>
       </div>
     </motion.li>
+  );
+}
+
+/**
+ * 行右侧正在显示的状态文字。速度的换字节拍放在这一小段里（与下载任务页的 TaskMeta 同一做法）：平滑后的速度到点补字时
+ * 只重画这一段，整行的标题、进度条与取消键不跟着重渲染。排队中也挂着它，轮到运行时速度接着同一份平滑。
+ */
+function RowStateText({ task, finishing, progress, track }: { task: Task; finishing: boolean; progress: number; track: string }) {
+  // 写出来的速度是平滑过、每秒最多换两次字的那个，不是每 100 ms 一跳的瞬时值
+  const live = useDisplaySpeed(task.speedBps);
+  // 任务一完成，状态层就把速度清零：收尾这一拍留着完成前最后显示的速度，行在原处推满、淡出，不在最后一拍跳成 0。
+  // 下载任务页的收尾行换成完成摘要，是因为那一行收尾后还留在已结束里；快览的行收尾完就走，这时换一次字只会闪一下
+  const [lastLive, setLastLive] = useState(live);
+  if (!finishing && live !== lastLive) setLastLive(live);
+  const speed = finishing ? lastLive : live;
+  if (task.status === "queued") return <span className={styles.rowStateText}>{PEEK_COPY.queued}</span>;
+  const [beforePercent, afterPercent] = aroundPercent(PEEK_COPY.progress(PERCENT_SLOT, formatSpeed(speed)));
+  return (
+    <span className={styles.rowStateText}>
+      {beforePercent}
+      <SmoothPercent value={progress} track={track} />
+      {afterPercent}
+    </span>
   );
 }

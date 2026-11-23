@@ -65,6 +65,17 @@ export type AuthErrorCode =
 
 export const DEVICE_CODE_EVENT = "petalfall://device-code";
 
+/**
+ * 后端在后台改写了账户记录时推送：后台提前续期、启动前的验证与续期、启动时顺带同步的外置角色档案。名字、皮肤、
+ * 状态与验证时刻都可能变了，收到后重读账户列表并让这个账户的皮肤重取。账户页的刷新、登录、切换与删除由界面自己发起，
+ * 后端不为它们推这个事件。
+ */
+export const ACCOUNT_CHANGED_EVENT = "petalfall://account-changed";
+
+export interface AccountChangedEvent {
+  uuid: string;
+}
+
 /** 微软登录进入设备码阶段时推送，供界面展示待输入短码与验证网址。 */
 export interface DeviceCode {
   user_code: string;
@@ -88,7 +99,7 @@ export interface AuthServerDto {
 export interface AuthlibProfileDto {
   uuid: string;
   name: string;
-  /** 取不到皮肤时为 null，画剪影。 */
+  /** 拿不到远程皮肤时是按角色 UUID 选的默认皮肤；UUID 不是 32 位十六进制时为 null，画人偶。 */
   skin: SkinInfoDto | null;
 }
 
@@ -116,6 +127,9 @@ export const cancelMicrosoftLogin = (): Promise<boolean> => invoke<boolean>("can
 
 export const onDeviceCode = (handler: (code: DeviceCode) => void): Promise<UnlistenFn> =>
   listen<DeviceCode>(DEVICE_CODE_EVENT, handler);
+
+export const onAccountChanged = (handler: (event: AccountChangedEvent) => void): Promise<UnlistenFn> =>
+  listen<AccountChangedEvent>(ACCOUNT_CHANGED_EVENT, handler);
 
 /**
  * 探测验证服务器（总时限 10 秒）。没写协议头时按 https 补全。地址不合法报 invalid_argument，

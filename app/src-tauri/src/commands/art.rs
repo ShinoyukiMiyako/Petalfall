@@ -7,7 +7,7 @@ use std::path::Path;
 use petalfall_core::art::BlockCatalog;
 use petalfall_core::{
     default_skin, Account, AccountType, ArtDownloadProgress, ArtDownloadStage, ArtStatus,
-    DownloadedClient, SkinInfo, SkinModel, TextureService, ThumbError,
+    DefaultSkinSet, DownloadedClient, SkinInfo, SkinModel, TextureService, ThumbError,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -39,6 +39,10 @@ impl ArtDownloadSlot {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ArtSourceDto {
     pub version_id: String,
+    /// 本机的降级集（1.13 到 1.19）：预设里较新的方块缺材质，前端照样给「下载原版材质」入口，下载来的最新正式版盖过它。
+    pub degraded: bool,
+    /// 材质源早于 1.19.3，默认皮肤只有 steve 与 alex：离线账户弹窗按旧版规则预览，与 `skin_info` 给的一致。
+    pub legacy_skins: bool,
 }
 
 /// 材质服务状态 DTO，也是 `petalfall://art-changed` 的负载。
@@ -53,7 +57,11 @@ pub struct ArtStatusDto {
 impl From<ArtStatus> for ArtStatusDto {
     fn from(status: ArtStatus) -> Self {
         ArtStatusDto {
-            source: status.source.map(|version_id| ArtSourceDto { version_id }),
+            source: status.source.map(|version_id| ArtSourceDto {
+                version_id,
+                degraded: status.degraded,
+                legacy_skins: status.default_skins == DefaultSkinSet::Legacy,
+            }),
             panorama: status.panorama,
         }
     }
@@ -140,8 +148,9 @@ pub async fn art_blocks(
     Ok(textures.catalog())
 }
 
-/// 本机没有原版游戏时，从官方源（按文件下载源设置，镜像回退）下载最新正式版的客户端，抽方块材质、
-/// 方块状态、模型与名称进缓存，然后重选材质源并返回新状态（状态变了同时推送 `petalfall://art-changed`）。
+/// 本机没有原版游戏、或只有 1.20 之前的版本（材质源是降级集）时，从官方源（按文件下载源设置，镜像回退）下载
+/// 最新正式版的客户端，抽方块材质、方块状态、模型与名称进缓存，然后重选材质源并返回新状态（状态变了同时推送
+/// `petalfall://art-changed`）。下载缓存排在本机降级集之前，下完就换成它。
 ///
 /// 只在玩家点下载时跑。上一次还没下完时报 `task_conflict`。暂存目录只在抽取成功后删：下载或抽取失败时
 /// 已下好的分片与 jar 留着，重试时续传、校验通过就不再重下；成功一次就连同旧版本残留一起清掉。
@@ -203,15 +212,15 @@ where
 }
 
 /// 启动时第一轮选源之后清掉没人再用的下载暂存 `dir`：下载成功后暂存被杀软短暂占着没删掉，或下到一半
-/// 失败后玩家改去装了游戏，有了材质源前端就不再给下载入口，暂存再没有人清（选源时的旧缓存清理特意跳过它）。
-/// 没有材质源时留着，重试要续传；有下载在跑时暂存归它，它成功后自己删。清理期间占住下载位，免得刚开始的
-/// 下载往正被删的目录里写。暂存本来就不在时什么都不做。
+/// 失败后玩家改去装了新版游戏，有了完整的材质源前端就不再给下载入口，暂存再没有人清（选源时的旧缓存清理特意
+/// 跳过它）。没有材质源或只有降级集时留着：前端还给下载入口，重试要续传。有下载在跑时暂存归它，它成功后自己删。
+/// 清理期间占住下载位，免得刚开始的下载往正被删的目录里写。暂存本来就不在时什么都不做。
 pub(crate) async fn discard_staging(
     slot: &ArtDownloadSlot,
     status: &ArtStatus,
     dir: &Path,
 ) -> std::io::Result<()> {
-    if status.source.is_none() {
+    if status.source.is_none() || status.degraded {
         return Ok(());
     }
     let Ok(_running) = slot.claim() else {
@@ -228,8 +237,8 @@ pub(crate) async fn discard_staging(
     }
 }
 
-/// 账户当前皮肤：远程皮肤就绪时返回取图键与模型；离线账户返回它进游戏后显示的原版默认皮肤；
-/// 正版与外置账户档案没有皮肤或下载失败时为 null，界面画剪影。
+/// 账户当前皮肤：远程皮肤就绪时返回取图键与模型；拿不到远程皮肤时返回它进游戏后显示的原版默认皮肤（见
+/// [`account_skin`]），默认皮肤图在本机也读不到时界面画人偶。正版与外置账户的 UUID 不是 32 位十六进制时为 null。
 #[tauri::command]
 pub async fn skin_info(
     account_uuid: String,
@@ -242,28 +251,63 @@ pub async fn skin_info(
         .ok_or_else(|| {
             CommandError::from(petalfall_core::AuthError::AccountNotFound(account_uuid))
         })?;
-    let Some(skin) = account.skin.as_ref() else {
-        return skin_without_profile(&account);
+    let remote = match account.skin.as_ref() {
+        Some(skin) => textures.skin_info(skin).await,
+        None => None,
     };
-    Ok(textures.skin_info(skin).await.as_ref().map(skin_info_dto))
+    account_skin(&account, remote.as_ref(), textures.status().default_skins)
 }
 
-/// 账户记录里没有远程皮肤时画什么。离线账户永远没有自定义皮肤，进游戏看到的必是按 UUID 选出的默认皮肤；
-/// 正版与外置账户没有皮肤也可能只是档案还没取到，按默认皮肤画会冒充它的真实外观，所以留给界面画剪影。
-fn skin_without_profile(account: &Account) -> Result<Option<SkinInfoDto>, CommandError> {
-    if account.account_type != AccountType::Offline {
-        return Ok(None);
+/// 账户画哪张皮肤。`remote` 是下载校验好的远程皮肤，就绪时用它。拿不到时（离线账户永远没有；正版与外置账户
+/// 档案里没有皮肤、档案没取到、皮肤下载失败）按 UUID 选原版默认皮肤：游戏里拿不到玩家皮肤时显示的就是这一套，
+/// 界面与游戏一致，不画一个游戏里见不到的人偶。按材质源里的那一套（`set`）选，选出的图才读得到。
+///
+/// 默认皮肤只是这一次的回答，不写回账户，也不记「下载失败过」：档案后来取到皮肤、或下载后来成功了，下一次查询
+/// 给的就是真实皮肤，前端换了取图地址，按新地址取图。
+fn account_skin(
+    account: &Account,
+    remote: Option<&SkinInfo>,
+    set: DefaultSkinSet,
+) -> Result<Option<SkinInfoDto>, CommandError> {
+    if remote.is_none() && account.account_type == AccountType::Offline {
+        // 离线账户的 UUID 是启动器按名字算出来的，选不出默认皮肤就是启动器自己的缺陷
+        let skin = default_skin_info(&account.uuid, set).ok_or_else(|| {
+            CommandError::new(
+                code::INTERNAL,
+                format!("离线账户的 UUID 不是 32 位十六进制：{}", account.uuid),
+            )
+        })?;
+        return Ok(Some(skin));
     }
-    let skin = default_skin(&account.uuid).ok_or_else(|| {
-        CommandError::new(
-            code::INTERNAL,
-            format!("离线账户的 UUID 不是 32 位十六进制：{}", account.uuid),
-        )
-    })?;
-    Ok(Some(SkinInfoDto::Default {
+    Ok(remote_or_default(&account.uuid, remote, set))
+}
+
+/// 正版与外置账户（含外置登录待选的角色）的皮肤：远程皮肤就绪时用它，拿不到时按 UUID 给默认皮肤（理由见
+/// [`account_skin`]）。UUID 来自登录服务器，启动器改不了；不是 32 位十六进制时选不出默认皮肤，为 None，
+/// 界面画人偶，原因记进日志。
+pub(crate) fn remote_or_default(
+    uuid: &str,
+    remote: Option<&SkinInfo>,
+    set: DefaultSkinSet,
+) -> Option<SkinInfoDto> {
+    if let Some(info) = remote {
+        return Some(skin_info_dto(info));
+    }
+    let skin = default_skin_info(uuid, set);
+    if skin.is_none() {
+        tracing::warn!(
+            uuid,
+            "账户 UUID 不是 32 位十六进制，选不出默认皮肤，界面画人偶"
+        );
+    }
+    skin
+}
+
+fn default_skin_info(uuid: &str, set: DefaultSkinSet) -> Option<SkinInfoDto> {
+    default_skin(uuid, set).map(|skin| SkinInfoDto::Default {
         path: skin.path,
         model: skin.model,
-    }))
+    })
 }
 
 /// 登记一张远程缩略图：下载并缓存后返回取图键，前端再经 `/thumb/<键>` 取图。
@@ -290,10 +334,32 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ArtStatusDto::from(ArtStatus {
                 source: Some("1.21.1".into()),
+                degraded: false,
+                default_skins: DefaultSkinSet::Modern,
                 panorama: true,
             }))
             .unwrap(),
-            json!({ "source": { "version_id": "1.21.1" }, "panorama": true })
+            json!({ "source": { "version_id": "1.21.1", "degraded": false, "legacy_skins": false }, "panorama": true })
+        );
+        assert_eq!(
+            serde_json::to_value(ArtStatusDto::from(ArtStatus {
+                source: Some("1.16.5".into()),
+                degraded: true,
+                default_skins: DefaultSkinSet::Legacy,
+                panorama: false,
+            }))
+            .unwrap(),
+            json!({ "source": { "version_id": "1.16.5", "degraded": true, "legacy_skins": true }, "panorama": false })
+        );
+        assert_eq!(
+            serde_json::to_value(ArtStatusDto::from(ArtStatus {
+                source: Some("1.19.4".into()),
+                degraded: true,
+                default_skins: DefaultSkinSet::Modern,
+                panorama: false,
+            }))
+            .unwrap(),
+            json!({ "source": { "version_id": "1.19.4", "degraded": true, "legacy_skins": false }, "panorama": false })
         );
     }
 
@@ -389,7 +455,9 @@ mod tests {
             "Steve",
             petalfall_core::AccountCredentials::Offline,
         );
-        let dto = skin_without_profile(&steve).unwrap().unwrap();
+        let dto = account_skin(&steve, None, DefaultSkinSet::Modern)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             serde_json::to_value(dto).unwrap(),
             json!({ "kind": "default", "path": "entity/player/wide/efe", "model": "wide" })
@@ -401,7 +469,7 @@ mod tests {
             petalfall_core::AccountCredentials::Offline,
         );
         assert_eq!(
-            skin_without_profile(&alex).unwrap(),
+            account_skin(&alex, None, DefaultSkinSet::Modern).unwrap(),
             Some(SkinInfoDto::Default {
                 path: "entity/player/slim/makena",
                 model: SkinModel::Slim,
@@ -409,18 +477,192 @@ mod tests {
         );
     }
 
+    /// 材质源早于 1.19.3 时只有 steve 与 alex 两张：Steve 的离线 UUID 哈希是奇数，原版里是细臂 alex。
     #[test]
-    fn online_account_without_skin_stays_a_silhouette() {
-        let account = petalfall_core::Account::new(
+    fn offline_account_on_a_legacy_source_gets_steve_or_alex() {
+        let steve = petalfall_core::Account::new(
             "5627dd98e6be3c21b8a8e92344183641",
             "Steve",
+            petalfall_core::AccountCredentials::Offline,
+        );
+        assert_eq!(
+            account_skin(&steve, None, DefaultSkinSet::Legacy).unwrap(),
+            Some(SkinInfoDto::Default {
+                path: "entity/alex",
+                model: SkinModel::Slim,
+            })
+        );
+        let alex = petalfall_core::Account::new(
+            "36532b5ec4423dbba24cc7e55d0f979a",
+            "Alex",
+            petalfall_core::AccountCredentials::Offline,
+        );
+        assert_eq!(
+            serde_json::to_value(account_skin(&alex, None, DefaultSkinSet::Legacy).unwrap())
+                .unwrap(),
+            json!({ "kind": "default", "path": "entity/steve", "model": "wide" })
+        );
+    }
+
+    fn microsoft(uuid: &str, name: &str) -> Account {
+        petalfall_core::Account::new(
+            uuid,
+            name,
             petalfall_core::AccountCredentials::Microsoft(petalfall_core::MicrosoftCredentials {
                 refresh_token: "r".into(),
                 minecraft_token: None,
                 minecraft_expires_at: None,
             }),
+        )
+    }
+
+    fn authlib(uuid: &str, name: &str) -> Account {
+        petalfall_core::Account::new(
+            uuid,
+            name,
+            petalfall_core::AccountCredentials::AuthlibInjector(
+                petalfall_core::YggdrasilCredentials {
+                    api_root: "https://skin.example/api/yggdrasil/".into(),
+                    access_token: "a".into(),
+                    client_token: "c".into(),
+                    username: None,
+                },
+            ),
+        )
+    }
+
+    fn default_dto(path: &'static str, model: SkinModel) -> Option<SkinInfoDto> {
+        Some(SkinInfoDto::Default { path, model })
+    }
+
+    /// 三种拿不到远程皮肤的情况各取一个 UUID（哈希分别为 -369792882、1946714239、1277771483，与
+    /// `default_skin` 测试里由 JDK 算出的哈希向量同一组），按材质源的两套各选一次：与离线账户同一个选取实现。
+    #[test]
+    fn online_accounts_without_a_remote_skin_get_the_default_for_their_uuid() {
+        // 微软档案里没有可用的皮肤：档案记录的 skin 为空
+        let no_skin = microsoft("069a79f444e94726a5befca90e38aaf5", "Notch");
+        // 外置登录时会话服务器没答上来：登录照样成功，skin 为空
+        let unfetched = authlib("853c80ef-3c37-49fd-aa49-938b674adae6", "jeb_");
+        // 档案里有皮肤地址，下载失败：没有就绪的远程皮肤
+        let mut failed = microsoft("5627dd98e6be3c21b8a8e92344183641", "Steve");
+        failed.skin = Some(petalfall_core::SkinRef {
+            url: "https://textures.minecraft.net/texture/unreachable".into(),
+            model: SkinModel::Slim,
+        });
+        for (account, modern, legacy) in [
+            (
+                &no_skin,
+                default_dto("entity/player/slim/alex", SkinModel::Slim),
+                default_dto("entity/steve", SkinModel::Wide),
+            ),
+            (
+                &unfetched,
+                default_dto("entity/player/slim/ari", SkinModel::Slim),
+                default_dto("entity/alex", SkinModel::Slim),
+            ),
+            (
+                &failed,
+                default_dto("entity/player/wide/efe", SkinModel::Wide),
+                default_dto("entity/alex", SkinModel::Slim),
+            ),
+        ] {
+            assert_eq!(
+                account_skin(account, None, DefaultSkinSet::Modern).unwrap(),
+                modern,
+                "{}",
+                account.name
+            );
+            assert_eq!(
+                account_skin(account, None, DefaultSkinSet::Legacy).unwrap(),
+                legacy,
+                "{}",
+                account.name
+            );
+        }
+        // 体型跟着默认皮肤走，不跟档案里那张没下下来的皮肤
+        assert_eq!(
+            serde_json::to_value(account_skin(&failed, None, DefaultSkinSet::Modern).unwrap())
+                .unwrap(),
+            json!({ "kind": "default", "path": "entity/player/wide/efe", "model": "wide" })
         );
-        assert_eq!(skin_without_profile(&account).unwrap(), None);
+    }
+
+    /// 默认皮肤不写回账户也不缓存：档案后来取到了皮肤、下载也成了，这一次给的就是真实皮肤。
+    #[test]
+    fn a_real_skin_that_arrives_later_replaces_the_default() {
+        let mut account = authlib("853c80ef3c3749fdaa49938b674adae6", "jeb_");
+        assert_eq!(
+            account_skin(&account, None, DefaultSkinSet::Modern).unwrap(),
+            default_dto("entity/player/slim/ari", SkinModel::Slim)
+        );
+        account.skin = Some(petalfall_core::SkinRef {
+            url: "https://skin.example/textures/jeb".into(),
+            model: SkinModel::Wide,
+        });
+        let real = SkinInfo {
+            sha1: "a9993e364706816aba3e25717850c26c9cd0d89d".into(),
+            model: SkinModel::Wide,
+            hat: false,
+        };
+        assert_eq!(
+            serde_json::to_value(
+                account_skin(&account, Some(&real), DefaultSkinSet::Modern).unwrap()
+            )
+            .unwrap(),
+            json!({ "kind": "remote", "sha1": "a9993e364706816aba3e25717850c26c9cd0d89d", "model": "wide", "hat": false })
+        );
+    }
+
+    /// 外置登录待选的角色与账户同一条规则：远程皮肤就绪用它，拿不到按角色 UUID 给默认皮肤。
+    #[test]
+    fn authlib_profiles_fall_back_to_their_default_skin() {
+        assert_eq!(
+            remote_or_default(
+                "069a79f4-44e9-4726-a5be-fca90e38aaf5",
+                None,
+                DefaultSkinSet::Modern
+            ),
+            default_dto("entity/player/slim/alex", SkinModel::Slim)
+        );
+        assert_eq!(
+            remote_or_default(
+                "853c80ef3c3749fdaa49938b674adae6",
+                None,
+                DefaultSkinSet::Legacy
+            ),
+            default_dto("entity/alex", SkinModel::Slim)
+        );
+        let real = SkinInfo {
+            sha1: "a9993e364706816aba3e25717850c26c9cd0d89d".into(),
+            model: SkinModel::Slim,
+            hat: true,
+        };
+        assert_eq!(
+            remote_or_default(
+                "853c80ef3c3749fdaa49938b674adae6",
+                Some(&real),
+                DefaultSkinSet::Modern
+            ),
+            Some(skin_info_dto(&real))
+        );
+    }
+
+    /// 正版与外置账户的 UUID 来自登录服务器：不合规时选不出默认皮肤，画人偶，不当成启动器的错误报出去。
+    #[test]
+    fn online_account_with_a_broken_uuid_is_a_mannequin() {
+        for account in [
+            microsoft("not-a-uuid", "Steve"),
+            authlib("5627dd98-e6be", "Steve"),
+        ] {
+            assert_eq!(
+                account_skin(&account, None, DefaultSkinSet::Modern).unwrap(),
+                None
+            );
+            assert_eq!(
+                account_skin(&account, None, DefaultSkinSet::Legacy).unwrap(),
+                None
+            );
+        }
     }
 
     #[test]
@@ -431,7 +673,9 @@ mod tests {
             petalfall_core::AccountCredentials::Offline,
         );
         assert_eq!(
-            skin_without_profile(&account).unwrap_err().code,
+            account_skin(&account, None, DefaultSkinSet::Modern)
+                .unwrap_err()
+                .code,
             code::INTERNAL
         );
     }
@@ -567,6 +811,8 @@ mod tests {
     fn with_source() -> ArtStatus {
         ArtStatus {
             source: Some("1.21.1".into()),
+            degraded: false,
+            default_skins: DefaultSkinSet::Modern,
             panorama: false,
         }
     }
@@ -592,6 +838,23 @@ mod tests {
             .await
             .unwrap();
         assert!(dest.join("client.jar").is_file());
+    }
+
+    /// 只有降级集时前端照样给下载入口：上次下到一半的暂存留着续传。
+    #[tokio::test]
+    async fn staging_stays_with_only_a_degraded_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = staged(tmp.path());
+        let slot = ArtDownloadSlot::default();
+        let degraded = ArtStatus {
+            source: Some("1.16.5".into()),
+            degraded: true,
+            default_skins: DefaultSkinSet::Legacy,
+            panorama: false,
+        };
+        discard_staging(&slot, &degraded, &dest).await.unwrap();
+        assert!(dest.join("client.jar").is_file());
+        assert!(slot.claim().is_ok(), "没动暂存也不占着下载位");
     }
 
     #[tokio::test]

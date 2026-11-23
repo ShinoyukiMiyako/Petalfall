@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { StrictMode, type ReactNode } from "react";
+import { act, StrictMode, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
@@ -74,17 +74,20 @@ function mount(port: WindowPort, ui: ReactNode, strict: boolean) {
 }
 
 describe("useRevealWindow", () => {
-  it("开发构建的 StrictMode 先装、拆、再装一次布局 effect：仍在下一帧显示窗口，且只显示一次", () => {
+  // show() 应答后钩子记下「显示已落定」，那次状态更新要落在 act 里，所以推帧都包一层异步 act
+  const flushFramesInAct = () => act(async () => flushFrames());
+
+  it("开发构建的 StrictMode 先装、拆、再装一次布局 effect：仍在下一帧显示窗口，且只显示一次", async () => {
     const port = fakePort();
     mount(port, <RevealWindow>{null}</RevealWindow>, true);
     expect(port.show).not.toHaveBeenCalled();
-    flushFrames();
+    await flushFramesInAct();
     expect(port.show).toHaveBeenCalledTimes(1);
-    flushFrames();
+    await flushFramesInAct();
     expect(port.show).toHaveBeenCalledTimes(1);
   });
 
-  it("ready 为假时不显示；第一次变真后的下一帧显示，之后再变化不重复显示", () => {
+  it("ready 为假时不显示；第一次变真后的下一帧显示，之后再变化不重复显示", async () => {
     const port = fakePort();
     mount(port, <Reveal ready={false} />, false);
     flushFrames();
@@ -95,7 +98,7 @@ describe("useRevealWindow", () => {
       </WindowPortProvider>,
     );
     expect(port.show).not.toHaveBeenCalled();
-    flushFrames();
+    await flushFramesInAct();
     expect(port.show).toHaveBeenCalledTimes(1);
     view?.rerender(
       <WindowPortProvider port={port}>
@@ -109,6 +112,33 @@ describe("useRevealWindow", () => {
     );
     flushFrames();
     expect(port.show).toHaveBeenCalledTimes(1);
+  });
+
+  it("返回显示这一步落定了没有：show() 应答之前为假，应答之后为真；显示失败进控制台，同样落定", async () => {
+    for (const outcome of ["resolve", "reject"] as const) {
+      const port = fakePort();
+      const answers: { resolve: () => void; reject: (error: Error) => void }[] = [];
+      port.show.mockImplementation(() => new Promise<void>((resolve, reject) => void answers.push({ resolve, reject })));
+      const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const seen: boolean[] = [];
+      function Probe() {
+        seen.push(useRevealWindow(true));
+        return null;
+      }
+      mount(port, <Probe />, false);
+      act(() => flushFrames());
+      expect(port.show).toHaveBeenCalledTimes(1);
+      expect(seen.at(-1)).toBe(false);
+      await act(async () => {
+        if (outcome === "resolve") answers[0].resolve();
+        else answers[0].reject(new Error("显示失败"));
+      });
+      expect(seen.at(-1)).toBe(true);
+      expect(error.mock.calls.map((call) => call[0])).toEqual(outcome === "reject" ? ["窗口没能显示"] : []);
+      error.mockRestore();
+      view?.unmount();
+      view = undefined;
+    }
   });
 
   it("那一帧到来前就卸载：不显示（窗口交给后端兜底）", () => {

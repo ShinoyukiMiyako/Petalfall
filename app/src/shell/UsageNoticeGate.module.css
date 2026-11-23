@@ -1,0 +1,142 @@
+/*
+ * 使用须知：整窗铺在外壳之上（同意之后外壳才挂到它底下），底色加静态晕染，顶上一条带徽记与窗口三键的标题条，
+ * 中央一块读须知的面板。面板宽度按 <html data-sk-tier> 分档，高度撑满标题条以下的空间、留出四周边距，正文在面板里滚动。
+ * 排在外壳之后，同为定位元素、都不设层级，按文档顺序画在外壳上面：退场淡出时露出的就是底下已经挂好的外壳。
+ */
+
+.root {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--sk-bg);
+}
+
+.ambience {
+  position: absolute;
+  inset: 0;
+  background: var(--sk-ambience);
+  pointer-events: none;
+}
+
+.strip {
+  position: relative;
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  height: 56px;
+  padding-left: var(--sk-space-20);
+}
+
+.logo {
+  color: var(--sk-text);
+  transition: color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.strip[data-blurred] .logo {
+  color: var(--sk-text-2);
+}
+
+.stage {
+  position: relative;
+  display: grid;
+  flex: 1;
+  place-items: center;
+  min-height: 0;
+  padding: 0 var(--sk-space-24) var(--sk-space-24);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: 720px;
+  max-width: 100%;
+  height: 100%;
+  max-height: 760px;
+  min-height: 0;
+  padding: var(--sk-space-28) var(--sk-space-32) var(--sk-space-24);
+  overflow: hidden;
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-xl);
+  background: var(--sk-surface);
+  box-shadow: var(--sk-shadow-lg);
+}
+
+:global(:root[data-sk-tier="wide"]) .panel {
+  width: 800px;
+  padding: var(--sk-space-40) var(--sk-space-40) var(--sk-space-28);
+}
+
+.head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  margin-bottom: var(--sk-space-18);
+}
+
+.version {
+  margin: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.title {
+  margin: 0;
+  font-size: var(--sk-fs-title);
+  line-height: var(--sk-lh-title);
+  font-weight: var(--sk-w-title);
+  letter-spacing: var(--sk-ls-title);
+  color: var(--sk-text);
+}
+
+.lead {
+  margin: 0;
+  font-size: var(--sk-fs-small);
+  line-height: 1.6;
+  color: var(--sk-text-2);
+}
+
+/* 须知一定比面板长：滚动条槽常驻并伸进面板的右内边距，正文右缘仍与标题、底栏对齐 */
+.scroll {
+  flex: 1;
+  min-height: 0;
+  margin-right: calc(-1 * var(--sk-scrollbar-size));
+  padding-bottom: var(--sk-space-16);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  border-radius: var(--sk-r-sm);
+  outline: none;
+}
+
+.scroll:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.failure {
+  margin-bottom: var(--sk-space-12);
+}
+
+.failureTitle {
+  display: block;
+  font-weight: var(--sk-w-medium);
+}
+
+.footer {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sk-space-10);
+  padding-top: var(--sk-space-16);
+  border-top: 1px solid var(--sk-line);
+}
+
+/* 底栏最左的辅助动作（打开隐私说明），与弹窗底栏左侧的幽灵按钮同一种放法：两个决定按钮仍靠右 */
+.footerStart {
+  margin-right: auto;
+}

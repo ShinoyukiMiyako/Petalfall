@@ -51,6 +51,22 @@ export const isFirstRun = (): Promise<boolean> => invoke<boolean>("is_first_run"
 export const completeFirstRun = (gameDir: string, extraDirectories: NamedDirectoryDto[]): Promise<void> =>
   invoke<void>("complete_first_run", { gameDir, extraDirectories });
 
+// ---- 使用须知 ----
+
+/** 本机确认过的使用须知。 */
+export interface UsageNoticeAcceptanceDto {
+  /** 确认的是第几版：须知文首「版本：N」的 N，从 1 起。 */
+  version: number;
+  /** 确认的时刻，Unix 毫秒。 */
+  accepted_at: number;
+}
+
+/** 本机确认过的使用须知；没确认过（含旧配置没有这一项、这一项读不懂）为 null。 */
+export const usageNoticeAcceptance = (): Promise<UsageNoticeAcceptanceDto | null> => invoke<UsageNoticeAcceptanceDto | null>("usage_notice_acceptance");
+
+/** 记下用户此刻确认了第 version 版并落盘；version 不是正整数时报 invalid_argument。 */
+export const acceptUsageNotice = (version: number): Promise<void> => invoke<void>("accept_usage_notice", { version });
+
 // ---- 启动提示 ----
 
 /** 启动时发生、要让用户知道的事，按 kind 区分。 */
@@ -204,7 +220,7 @@ export interface ListNewsOptions {
 
 /**
  * 官方资讯 6 小时内用缓存；联网失败退回缓存并标 offline，连缓存都没有才报错（network_failed / feed_invalid，detail.url）。
- * 启动器资讯（launcher）进程内缓存 1 小时，正式版不含预发布；它的失败不让命令报错，只放进 launcher_error。
+ * 启动器资讯（launcher）进程内缓存 1 小时，偏好的更新通道与安装包的通道都是正式版时不含预发布；它的失败不让命令报错，只放进 launcher_error。
  * 启动器资讯取不到之后按 1、5、15、60 分钟退避：退避期内不请求，照样给上次的失败（或上次取到的发布并标 offline）。
  */
 export const listNews = (options: ListNewsOptions = { retry: false }): Promise<NewsFeedDto> =>
@@ -212,7 +228,45 @@ export const listNews = (options: ListNewsOptions = { retry: false }): Promise<N
 
 // ---- 启动器自更新 ----
 
-export type UpdaterUnsupportedReason = "debug_build" | "missing_pubkey" | "signed_version_not_required" | "downgrades_allowed" | "unknown_channel";
+export type UpdaterUnsupportedReason = "debug_build" | "missing_pubkey" | "signed_version_not_required" | "downgrades_allowed" | "unknown_channel" | "pubkey_mismatch";
+
+/** 更新接口里的发布通道名，与清单路径 /updates/<通道>/ 同名。界面用的 ReleaseChannel（lib/app-info）把 dev 叫作 preview。 */
+export type UpdateChannel = "dev" | "beta" | "stable";
+
+/** 生效的通道偏好与本包通道的关系：same 是两者相同，waiting 是偏好更慢（等那个通道追上来），following 是偏好更快。 */
+export type ChannelRelation = "same" | "waiting" | "following";
+
+/**
+ * 一个通道最近一次取清单的结果。published：有端点给出了验过的清单头；not_published：所有端点都确认 404；
+ * stale：每个端点都给出了清单头，但全都旧于本机记下的这个通道的最高版本；failed：其余情况。
+ */
+export type ChannelHeadState = "published" | "not_published" | "stale" | "failed";
+
+export interface ChannelHeadDto {
+  channel: UpdateChannel;
+  state: ChannelHeadState;
+  /** 验过的清单头的版本，比当前版本新旧都有可能；没取到清单头时为 null。 */
+  version: string | null;
+  /** 清单里的发布时间（清单不签名，只作显示），毫秒时间戳；没有时为 null。 */
+  date: number | null;
+}
+
+/** 下载的用意：普通更新，或换到另一个通道。 */
+export type UpdateIntent = "update" | "switch";
+
+/**
+ * 一个版本为什么被拒。data_too_new：包认得的数据格式比正在运行的这一版旧，两种用意都有；
+ * target_unsupported：包认不得换通道安装，只随 switch；preference_unsaved：跟随别的通道时没能保存偏好，只随 update。
+ */
+export type RefusalReason = "data_too_new" | "target_unsupported" | "preference_unsaved";
+
+/** 本次会话里不再作为候选的版本。 */
+export interface RefusedUpdateDto {
+  version: string;
+  channel: UpdateChannel;
+  reason: RefusalReason;
+  intent: UpdateIntent;
+}
 
 export interface UpdateDto {
   version: string;
@@ -220,16 +274,32 @@ export interface UpdateDto {
   notes: string | null;
   /** 发布时间，毫秒时间戳。 */
   date: number | null;
+  /** 这一版取自哪个通道的清单。 */
+  channel: UpdateChannel;
 }
 
 export interface UpdaterInfoDto {
   current_version: string;
   supported: boolean;
   unsupported_reason: UpdaterUnsupportedReason | null;
+  /** 本包的通道；版本号认不出通道时为 null。 */
+  package_channel: UpdateChannel | null;
+  /** 生效的通道偏好；package_channel 为 null 时也为 null。 */
+  preference: UpdateChannel | null;
+  /** package_channel 为 null 时也为 null。 */
+  relation: ChannelRelation | null;
   /** 本次会话最近一次检查到的更新。 */
   available: UpdateDto | null;
+  /** 要看的每个通道最近一次取清单的结果；本次会话没取过清单时为空数组。 */
+  channel_heads: ChannelHeadDto[];
+  /** 本次会话里被拒的版本。 */
+  refused: RefusedUpdateDto[];
   /** 已下载并通过签名校验、等待安装的版本。 */
   downloaded_version: string | null;
+  /** 已下载的包所属的通道；没有时为 null。 */
+  downloaded_channel: UpdateChannel | null;
+  /** 已下载的包的用意；没有时为 null。 */
+  downloaded_intent: UpdateIntent | null;
   install_on_exit: boolean;
 }
 
@@ -241,6 +311,9 @@ export const updaterInfo = (): Promise<UpdaterInfoDto> => invoke<UpdaterInfoDto>
  * 不支持时报 updater_unsupported（detail.reason），失败报 update_check_failed：全部端点都败在网络层时带 detail.network；
  * detail.attempts 按顺序列出每个端点的结果。只有一个端点、它回了 404 以外的非 2xx 时带 detail.status；
  * 有多个端点时状态码只写在各自那一条里，顶层不带，免得分不清是哪个端点的。
+ * 看的是生效的偏好通道与比它慢的通道，各自的结果记进 updater_info 的 channel_heads。偏好通道的每个端点给出的版本
+ * 都旧于这台电脑记下的这个通道见过的最高版本时报 update_source_stale（detail.channel），不拿更慢通道的结果顶上；
+ * 检查期间改了更新通道报 update_superseded，这次的结果作废、没有落下。
  */
 export const checkUpdate = (): Promise<UpdateDto | null> => invoke<UpdateDto | null>("check_update");
 
@@ -271,6 +344,8 @@ export interface UpdateSourceFailureDto {
  * 试了多个时逐行写成「源名：原文」。
  * 下载期间再次检查换了版本或已无更新时同样报 update_not_available（message 写明新旧版本），这次下载的包已作废，
  * 按最新的检查结果重新下载即可。
+ * 已有更新包正在下载或安装时报 update_busy。验过签的包认得的数据格式比这台电脑上的数据旧时报 update_data_too_new：
+ * 包已丢弃，这一版记进 updater_info 的 refused，本次会话不再作为候选。
  */
 export const downloadUpdate = (taskId: string): Promise<UpdateDto> => invoke<UpdateDto>("download_update", { taskId });
 
@@ -279,3 +354,11 @@ export const installUpdate = (): Promise<void> => invoke<void>("install_update")
 
 /** 开关「退出时安装」；打开前须已下载好（否则 update_not_ready）。 */
 export const setInstallOnExit = (enabled: boolean): Promise<void> => invoke<void>("set_install_on_exit", { enabled });
+
+/**
+ * 写下用户选的更新通道，返回写完之后的更新信息。channel 不是 dev、beta、stable 之一报 invalid_argument；不支持自更新报
+ * updater_unsupported（detail.reason）；有更新包正在下载或安装报 update_busy，所以下载中要改通道得先取消、等下载命令返回再调。
+ * 生效的偏好变了时，本次会话按旧偏好得出的结果全部作废：候选、已下好的包、各通道的结果、refused 里 preference_unsaved
+ * 的条目都清掉，「退出时安装」随之关闭；没变时只写盘。
+ */
+export const setUpdateChannel = (channel: UpdateChannel): Promise<UpdaterInfoDto> => invoke<UpdaterInfoDto>("set_update_channel", { channel });

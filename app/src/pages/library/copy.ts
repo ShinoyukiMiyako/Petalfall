@@ -61,7 +61,7 @@ export const LIBRARY_COPY = {
   },
 
   createTileTitle: "新建实例",
-  createTileBody: "选版本、加载器和封面，装好后自动固定到侧栏",
+  createTileBody: "选版本、加载器和封面，新实例自动固定到侧栏",
 
   emptyTitle: "实例库还是空的",
   emptyBody: "新建一个实例，选好版本、加载器和封面；或者去发现页把整合包导入成实例。",
@@ -76,6 +76,9 @@ export const LIBRARY_COPY = {
   loadErrorTitle: "读不到实例列表",
   retry: "重试",
   openGameDir: "打开游戏目录",
+  /** 游戏目录被更新的版本用过、或记数据格式的文件读不懂时的标题：正文说清原因，出路是换一个目录。 */
+  blockedTitle: "这个游戏目录现在打不开",
+  changeGameDir: "换一个游戏目录",
 
   gridLabel: "实例",
   loadingLabel: "正在读取实例列表",

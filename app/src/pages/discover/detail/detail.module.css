@@ -34,30 +34,9 @@
   overflow: hidden;
   font-size: var(--sk-fs-small);
   line-height: var(--sk-lh-small);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/*
- * 安装主按钮的文案槽：当前文案与最长的「安装到 n 个实例」叠在同一格，宽度取后者，勾选数变化时按钮不变宽。
- * 占宽的那份是伪元素，不进文字内容；数字等宽，位数不变时宽度不变
- */
-.installLabel {
-  display: inline-grid;
-  justify-items: center;
-  font-variant-numeric: tabular-nums;
-}
-
-.installLabel > span,
-.installLabel::after {
-  grid-area: 1 / 1;
-  white-space: nowrap;
-}
-
-.installLabel::after {
-  content: attr(data-widest);
-  visibility: hidden;
 }
 
 /* ---- 头图 ---- */
@@ -176,7 +155,7 @@
   gap: var(--sk-space-4);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .statValue {
@@ -237,7 +216,7 @@
 .sourceLabel {
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 /* 来源切换的加载指示常驻这一格：指示出没时分段控件不横移；进出的两份叠在格里 */
@@ -322,7 +301,7 @@
 .moreVersions {
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .pageLink {
@@ -413,7 +392,7 @@
   margin: 0;
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .errorTitle {
@@ -461,7 +440,7 @@
   overflow: hidden;
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -498,7 +477,7 @@
 .previewFor {
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .previewRow {
@@ -511,8 +490,9 @@
   color: var(--sk-text);
 }
 
+/* 已满足的行仍是要读到的信息（哪个前置被跳过），只退到次要文字；与待下载行的区分另由圆点与右端说明承担 */
 .previewRow[data-satisfied] {
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .previewDot {
@@ -539,7 +519,7 @@
   flex: none;
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
   font-variant-numeric: tabular-nums;
 }
 

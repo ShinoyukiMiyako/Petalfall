@@ -9,7 +9,7 @@ import { AnimatePresence, motion, useIsPresent } from "framer-motion";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { Icon } from "../../art/Icon";
 import { serverHue } from "../../art/illustrations/seed";
-import { ACTION_ERROR, LOADER_NAME, SLOW_LOADING_HINT } from "../../copy/flows";
+import { ACTION_ERROR, LAUNCH_COPY, LOADER_NAME, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { formatRelative } from "../../domain/format";
@@ -446,10 +446,11 @@ interface ServerRowViewProps {
 }
 
 /**
- * 不能拿来加入的原因：占着游戏进程的实例再启动是空操作，加载阶段写「正在启动」；存档在备份或恢复、别的实例正以它
- * 为基底时后端拒绝启动。
+ * 不能拿来加入的原因：占着游戏进程的实例再启动是空操作，加载阶段写「正在启动」；正在移到别的游戏目录、存档在备份或恢复、
+ * 别的实例正以它为基底时后端拒绝启动。移动与启动胶囊、存档行「进入」说同一句。
  */
 function blockReason(instanceId: string, block: JoinBlock): string {
+  if (block.kind === "moving") return LAUNCH_COPY.moving;
   if (block.kind === "backingUp") return HOME_COPY.joinBackingUp(instanceId);
   if (block.kind === "inherited") return HOME_COPY.joinInherited(instanceId, block.usedBy);
   return block.phase === "running" ? HOME_COPY.joinRunning(instanceId) : HOME_COPY.joinLaunching(instanceId);

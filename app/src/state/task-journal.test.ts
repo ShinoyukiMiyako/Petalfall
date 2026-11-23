@@ -32,6 +32,7 @@ function record(id: string, status: TaskRecordDto["status"]): TaskRecordDto {
     error: null,
     created_at: T0 - 60_000,
     finished_at: status === "queued" || status === "running" ? null : T0 - 1000,
+    game_dir: "D:/Games/.minecraft",
     spec: { command: "install_java", args: { requiredMajor: 21 } },
   };
 }

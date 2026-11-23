@@ -10,19 +10,28 @@ import {
   applyCompositeDownload,
   applyTaskDownload,
   applyTaskPhase,
+  batchRetryable,
+  commandGameDir,
   compositeProgress,
   completeCompositeStep,
+  dropSuperseded,
   findDuplicate,
+  followMove,
+  inGameDir,
   markDone,
   markRunning,
   modFilesBeingUpdated,
+  movingKeys,
   newTask,
   PHASE_WEIGHT,
   progressTrack,
   queuePosition,
+  retryBlockedReason,
+  retryGameDirReason,
   retryTask,
   sharedSavesKeys,
   startComposite,
+  strandedByMove,
   trimHistory,
   tasksToStart,
   type CompositeProgress,
@@ -39,7 +48,7 @@ const start = (tasks: readonly Task[], shared: readonly string[] = []) => tasksT
 
 function task(id: string, overrides: Partial<Task> = {}): Task {
   return {
-    ...newTask({ id, kind: "java", title: `Java ${id}`, detail: "", instanceId: null, spec: { command: "install_java", args: { requiredMajor: Number(id.replace(/\D/g, "")) } } }, T0),
+    ...newTask({ gameDir: "D:/Games/.minecraft", id, kind: "java", title: `Java ${id}`, detail: "", instanceId: null, spec: { command: "install_java", args: { requiredMajor: Number(id.replace(/\D/g, "")) } } }, T0),
     ...overrides,
   };
 }
@@ -60,6 +69,7 @@ function record(id: string, status: TaskRecordDto["status"], overrides: Partial<
     error: null,
     created_at: T0 - 60_000,
     finished_at: status === "queued" || status === "running" ? null : T0 - 1000,
+    game_dir: "D:/Games/.minecraft",
     spec: { command: "install_java", args: { requiredMajor: 21 } },
     ...overrides,
   };
@@ -638,6 +648,149 @@ describe("下载队列：纯函数", () => {
     expect(() => modFilesBeingUpdated([update({ items: [{ fileName: null }] }, "update_mods")], "Survival")).toThrow("update_mods 任务的 fileName 不是字符串：null");
     // 已结束的任务不看参数
     expect([...modFilesBeingUpdated([task("h", { kind: "mod", instanceId: "Survival", status: "done", spec: { command: "update_mods", args: {} } })], "Survival")]).toEqual([]);
+  });
+});
+
+describe("下载队列：发起时的游戏目录", () => {
+  const A = "D:\\Games\\.minecraft";
+  const B = "E:\\HMCL\\.minecraft";
+  const backup = (gameDir: string | null, overrides: Partial<Task> = {}) =>
+    task("b1", { kind: "world_backup", instanceId: "生存", status: "failed", error: { code: "io", message: "磁盘满了" }, spec: { command: "backup_world", args: { id: "生存", world: "w" } }, gameDir, ...overrides });
+  const move = (gameDir: string | null) => task("m1", { kind: "instance_move", instanceId: "生存", status: "failed", error: { code: "io", message: "x" }, spec: { command: "move_instance", args: { id: "生存", source: A, target: B } }, gameDir });
+
+  it("重试挡不挡：同一目录（写法不同也算）不挡；别的目录写明发起于哪里；不知道发起于哪里、当前目录还没读到都挡并各自说明", () => {
+    expect(retryGameDirReason(backup(A), "d:/games/.minecraft/")).toBeNull();
+    expect(retryGameDirReason(backup(A), B)).toBe(`这个任务发起于游戏目录 ${A}，切回去再重试`);
+    expect(retryGameDirReason(backup(null), A)).toBe("这条任务记录是旧版本留下的，不知道发起于哪个游戏目录，不能重试；需要的话重新发起");
+    expect(retryGameDirReason(backup(A), null)).toBe("还没读到当前的游戏目录，读到后再重试");
+  });
+
+  it("Java 下载与游戏目录无关，从不挡；旧日志里的移动按源目录判断，源目录不是字符串按日志坏了报错", () => {
+    const java = task("j1", { status: "failed", gameDir: null });
+    expect(retryGameDirReason(java, null)).toBeNull();
+    expect(retryGameDirReason(java, B)).toBeNull();
+    expect(retryGameDirReason(move(null), A)).toBeNull();
+    expect(retryGameDirReason(move(null), B)).toBe(`这个任务发起于游戏目录 ${A}，切回去再重试`);
+    expect(() => retryGameDirReason({ ...move(null), spec: { command: "move_instance", args: { id: "生存" } } }, A)).toThrow("移动任务 m1 的参数 source 应为字符串");
+  });
+
+  it("批量重试只收目录对得上的失败；Java 下载照收", () => {
+    const tasks = [backup(A, { id: "same" }), backup(B, { id: "other" }), backup(null, { id: "old" }), task("j1", { status: "failed", gameDir: B })];
+    expect(tasks.filter((t) => batchRetryable(t, A, new Set())).map((t) => t.id)).toEqual(["same", "j1"]);
+    expect(tasks.filter((t) => batchRetryable(t, null, new Set())).map((t) => t.id)).toEqual(["j1"]);
+  });
+
+  it("实例正在移动：挂在它上面的失败（不分大小写）重试带原因挡下、批量不收；新建导入、别的实例与 Java 照旧；目录对不上的先说目录", () => {
+    const moving = movingKeys([
+      { id: "生存", activity: "moving" },
+      { id: "Survival", activity: "moving" },
+      { id: "创造", activity: "modifying" },
+      { id: "空闲", activity: null },
+    ]);
+    expect([...moving]).toEqual(["生存", "survival"]);
+    const failed = (id: string, overrides: Partial<Task>) => task(id, { status: "failed", error: { code: "io", message: "x" }, gameDir: A, ...overrides });
+    const tasks = [
+      backup(A, { id: "here" }),
+      failed("latin", { kind: "mod", instanceId: "SURVIVAL", spec: { command: "install_mods", args: { versionId: "SURVIVAL", items: [] } } }),
+      failed("create", { kind: "game", instanceId: "生存", spec: { command: "install_version", args: { targetName: "生存" } } }),
+      failed("import", { kind: "modpack", instanceId: "生存", spec: { command: "install_modpack", args: { name: "生存" } } }),
+      failed("other", { kind: "mod", instanceId: "创造", spec: { command: "install_mods", args: { versionId: "创造", items: [] } } }),
+      task("j1", { status: "failed", gameDir: A }),
+    ];
+    expect(tasks.map((t) => retryBlockedReason(t, A, moving))).toEqual(["实例正在移到其他游戏目录", "实例正在移到其他游戏目录", null, null, null, null]);
+    expect(tasks.filter((t) => batchRetryable(t, A, moving)).map((t) => t.id)).toEqual(["create", "import", "other", "j1"]);
+    // 移动有了结局（不在 moving 里）就不挡
+    expect(retryBlockedReason(tasks[0], A, new Set(["创造"]))).toBeNull();
+    // 目录对不上是切回去之前一直成立的原因，先说它
+    expect(retryBlockedReason(backup(B), A, moving)).toBe(`这个任务发起于游戏目录 ${B}，切回去再重试`);
+  });
+
+  it("移动成功后已结束的失败与取消跟着实例记到目标目录：同一实例（不分大小写）、已知发起于源目录的才迁；新建导入、移动、已完成、排队中、别的实例、别的目录与旧记录不动", () => {
+    const C = "F:\\Other\\.minecraft";
+    const done = { ...move(A), status: "done" as const, error: null, finishedAt: T0 };
+    const mods = { kind: "mod" as const, spec: { command: "install_mods", args: { versionId: "生存", items: [] } } };
+    const ended = (id: string, status: Task["status"], overrides: Partial<Task>) => task(id, { status, gameDir: A, finishedAt: T0, ...(status === "failed" ? { error: { code: "version_not_installed", message: "本地未安装版本 生存" } } : {}), ...overrides });
+    const tasks = [
+      done,
+      ended("failed", "failed", { ...mods, instanceId: "生存" }),
+      ended("cancelled", "cancelled", { ...mods, instanceId: "生存" }),
+      ended("spelled", "failed", { ...mods, instanceId: "生存", gameDir: "d:/games/.minecraft/" }),
+      ended("latin", "failed", { ...mods, instanceId: "survival" }),
+      ended("create", "failed", { kind: "game", instanceId: "生存", spec: { command: "install_version", args: { targetName: "生存" } } }),
+      ended("import", "cancelled", { kind: "modpack", instanceId: "生存", spec: { command: "install_modpack", args: { source: "D:/packs/生存.mrpack", name: "生存" } } }),
+      ended("old-move", "failed", { kind: "instance_move", instanceId: "生存", spec: { command: "move_instance", args: { id: "生存", source: A, target: C } } }),
+      ended("succeeded", "done", { ...mods, instanceId: "生存" }),
+      task("queued", { ...mods, instanceId: "生存", status: "queued", gameDir: A }),
+      ended("other", "failed", { ...mods, instanceId: "创造" }),
+      ended("elsewhere", "failed", { ...mods, instanceId: "生存", gameDir: C }),
+      ended("unknown", "failed", { ...mods, instanceId: "生存", gameDir: null }),
+    ];
+    const followed = followMove(tasks, done);
+    expect(followed.filter((t) => t.gameDir === B).map((t) => t.id)).toEqual(["failed", "cancelled", "spelled"]);
+    expect(followed.filter((t) => t.gameDir !== B).map((t) => [t.id, t.gameDir])).toEqual([
+      ["m1", A],
+      ["latin", A],
+      ["create", A],
+      ["import", A],
+      ["old-move", A],
+      ["succeeded", A],
+      ["queued", A],
+      ["other", A],
+      ["elsewhere", C],
+      ["unknown", null],
+    ]);
+    // 迁过去的只换游戏目录，结局与参数原样
+    expect(followed[1]).toEqual({ ...tasks[1], gameDir: B });
+    // 迁过去之后：源目录里不再挂着一个注定失败的重试，切到目标目录照常重试
+    expect(retryGameDirReason(followed[1], A)).toBe(`这个任务发起于游戏目录 ${B}，切回去再重试`);
+    expect(retryGameDirReason(followed[1], "e:/hmcl/.minecraft")).toBeNull();
+    expect(commandGameDir(followed[1])).toBe(B);
+    // 实例名不分大小写，与后端的锁键一致；旧日志里的移动没有 gameDir，按源目录认
+    const latin = { ...done, gameDir: null, instanceId: "Survival", spec: { command: "move_instance", args: { id: "Survival", source: A, target: B } } };
+    expect(followMove(tasks, latin).filter((t) => t.gameDir === B).map((t) => t.id)).toEqual(["latin"]);
+    expect(() => followMove(tasks, tasks[1])).toThrow("任务 failed 不是移动实例");
+    expect(() => followMove(tasks, { ...done, spec: { command: "move_instance", args: { id: "生存", source: A } } })).toThrow("移动任务 m1 的参数 target 应为字符串");
+  });
+
+  it("命令带的 gameDir：移动与 Java 下载不带，别的带发起时的目录；不知道发起于哪里的走到执行是状态层的错", () => {
+    expect(commandGameDir(backup(A))).toBe(A);
+    expect(commandGameDir(move(A))).toBeNull();
+    expect(commandGameDir(task("j1", { gameDir: A }))).toBeNull();
+    expect(() => commandGameDir(backup(null))).toThrow("任务 b1 不知道发起于哪个游戏目录，不能执行");
+  });
+
+  it("补全成功撤下被接替的失败新建：同一目录与不知道目录的撤，已知别的目录的留着", () => {
+    const create = (id: string, gameDir: string | null) =>
+      task(id, { kind: "game", instanceId: "生存", status: "failed", error: { code: "io", message: "x" }, spec: { command: "install_version", args: { targetName: "生存" } }, gameDir });
+    const left = dropSuperseded([create("here", A), create("there", B), create("old", null)], "生存", "d:/games/.minecraft");
+    expect(left.map((t) => t.id)).toEqual(["there"]);
+    expect(inGameDir(create("there", B), null)).toBe(false);
+    expect(inGameDir(create("old", null), null)).toBe(true);
+  });
+
+  it("移动成功时开不了工的任务：同一实例（不分大小写）、同一目录发起、还在排队的；新建导入、别的实例、别的目录、已开工或已结束的不算", () => {
+    const running = { ...move(A), status: "running" as const, error: null };
+    const queued = (id: string, overrides: Partial<Task>) => task(id, { status: "queued", gameDir: A, ...overrides });
+    const mods = { kind: "mod" as const, spec: { command: "install_mods", args: { versionId: "生存", items: [] } } };
+    const tasks = [
+      running,
+      queued("mods", { ...mods, instanceId: "生存" }),
+      queued("pack", { kind: "resourcepack", instanceId: "生存", spec: { command: "install_resource", args: { versionId: "生存" } } }),
+      queued("restore", { kind: "world_restore", instanceId: "生存", spec: { command: "restore_world_backup", args: { id: "生存", world: "w" } } }),
+      queued("create", { kind: "game", instanceId: "生存", spec: { command: "install_version", args: { targetName: "生存" } } }),
+      queued("other", { ...mods, instanceId: "创造" }),
+      queued("elsewhere", { ...mods, instanceId: "生存", gameDir: B }),
+      queued("java", {}),
+      task("done", { ...mods, instanceId: "生存", status: "done", finishedAt: T0 }),
+      task("failed", { ...mods, instanceId: "生存", status: "failed", error: { code: "io", message: "x" }, finishedAt: T0 }),
+    ];
+    expect(strandedByMove(tasks, running).map((t) => t.id)).toEqual(["mods", "pack", "restore"]);
+    // 旧日志里的移动没有 gameDir，按源目录认
+    expect(strandedByMove(tasks, { ...running, gameDir: null }).map((t) => t.id)).toEqual(["mods", "pack", "restore"]);
+    // 实例名不分大小写，与后端的锁键一致
+    const latin = { ...running, instanceId: "Survival", spec: { command: "move_instance", args: { id: "Survival", source: A, target: B } } };
+    expect(strandedByMove([latin, queued("lower", { ...mods, instanceId: "survival" })], latin).map((t) => t.id)).toEqual(["lower"]);
+    expect(() => strandedByMove(tasks, tasks[1])).toThrow("任务 mods 不是移动实例");
   });
 });
 

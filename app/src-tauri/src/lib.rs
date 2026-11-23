@@ -14,7 +14,9 @@
 //! 新增命令时在 `generate_handler!` 里本领域的分块内追加，块之间以 `// -- 领域 --` 分隔；
 //! 新增 managed state 同样写在 setup 里本领域的分块内。
 
+mod channel_handoff;
 mod commands;
+mod data_gate;
 mod drop;
 mod events;
 mod exit;
@@ -84,6 +86,12 @@ pub fn run() {
         );
     }
 
+    // 数据被更新的版本用过就不打开：排在读配置之前，读配置可能把坏配置改名，那已经是一次写入；排在等上一个实例
+    // 退出之后，同一数据目录上就不会有两个进程同时抬号。
+    if data_gate::check_on_startup(&context.package_info().version) == data_gate::Gate::Exit {
+        return;
+    }
+
     let updater_support = commands::updater::detect_support(
         context.config().plugins.0.get("updater"),
         cfg!(debug_assertions),
@@ -114,7 +122,15 @@ pub fn run() {
             let petalfall = petalfall.with_app_version(&app.package_info().version.to_string())?;
             let server_monitor = ServerMonitor::new(petalfall.data_dir());
             let data_dir = petalfall.data_dir().to_path_buf();
+            // 在任何后台续期之前订阅，开头那次提前续期改了的账户也通知得到前端。
+            let account_changes = petalfall.subscribe_account_changes();
             app.manage(Facade::new(petalfall));
+            // 用户在安装引导程序里换了通道，偏好要在任何一次更新检查之前跟上。
+            tauri::async_runtime::block_on(channel_handoff::consume_on_startup(
+                &app.state::<Facade>(),
+                &app.package_info().version,
+                updater_support == UpdaterSupport::Supported,
+            ));
             app.manage(
                 commands::system::StartupNotices::from_recovery(recovery)
                     .with_data_dir(&petalfall_base::fs::resolve_data_dir()?),
@@ -135,6 +151,7 @@ pub fn run() {
             // -- accounts --
             app.manage(commands::accounts::MicrosoftLoginSlot::default());
             app.manage(commands::accounts::AuthlibPendingSlot::default());
+            events::forward_account_changes_to_app(app.handle(), account_changes);
             commands::accounts::renew_ahead_in_background(app.handle());
             // -- art --
             textures::setup(app);
@@ -153,7 +170,7 @@ pub fn run() {
             window::setup_main_window(app)?;
             #[cfg(windows)]
             if let Some(instance) = instance {
-                // 退出时要拉起安装程序的，先用它打发走在等的后来者（见 `install_on_exit`）。
+                // 要拉起安装程序的，先用它打发走在等的后来者（见更新插件的退出前钩子 `before_installer_launch`）。
                 app.manage(instance.answer());
                 window::front_on_second_launch(app, instance)?;
             }
@@ -163,6 +180,9 @@ pub fn run() {
             // -- appearance --
             commands::appearance::get_appearance,
             commands::appearance::set_appearance,
+            // -- ui_shape --
+            commands::ui_shape::get_ui_shape,
+            commands::ui_shape::set_ui_shape,
             // -- tasks --
             commands::tasks::cancel_task,
             commands::tasks::save_task_journal,
@@ -276,6 +296,8 @@ pub fn run() {
             commands::system::memory_advice,
             commands::system::is_first_run,
             commands::system::complete_first_run,
+            commands::system::usage_notice_acceptance,
+            commands::system::accept_usage_notice,
             commands::system::startup_notices,
             commands::system::probe_network,
             commands::servers::list_pinned_servers,
@@ -289,6 +311,7 @@ pub fn run() {
             commands::updater::download_update,
             commands::updater::install_update,
             commands::updater::set_install_on_exit,
+            commands::updater::set_update_channel,
             // -- window --
             commands::window::restore_window_without_focus,
             commands::window::reveal_main_window,
@@ -424,6 +447,28 @@ mod tests {
             "{log}"
         );
         assert!(log.contains(&format!("lib.rs:{line}:")), "{log}");
+    }
+
+    // 启动时消费换通道记录，传进去的「支不支持自更新」必须就是决定注册更新插件的那个判定：写死成 true 的话，开发构建
+    // 也会去动这台机器上正式安装留下的记录。setup 闭包要 AppHandle，单测造不出来，钉住源码。
+    #[test]
+    fn the_channel_handoff_is_consumed_only_when_self_update_is_supported() {
+        let (source, _) = include_str!("lib.rs").split_once("#[cfg(test)]").unwrap();
+        let call = "channel_handoff::consume_on_startup(";
+        assert_eq!(source.matches(call).count(), 1, "消费换通道记录只该有一处");
+        let (_, after) = source.split_once(call).unwrap();
+        let (args, _) = after.split_once("));").expect("找不到这次调用的结尾");
+        let args = args.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            args,
+            "&app.state::<Facade>(), &app.package_info().version, \
+             updater_support == UpdaterSupport::Supported,"
+        );
+        assert_eq!(source.matches("let updater_support =").count(), 1);
+        assert!(
+            source.contains("let updater_support = commands::updater::detect_support("),
+            "updater_support 应是 detect_support 的结果"
+        );
     }
 
     // tauri.conf.json、index.html 与前端 TS 无法引用 Rust 常量，产品名只能各写一份，

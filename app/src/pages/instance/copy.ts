@@ -494,6 +494,9 @@ export const SETTINGS_COPY = {
   backgroundImage: "我的图片",
   backgroundFollowNote: (style: string) => `跟随设置里「外观」选的默认背景，现在是「${style}」。`,
   backgroundTextureNote: "平铺封面方块的侧面材质，本机读不到材质时画渐变花瓣。",
+  backgroundArtNote: "按封面方块的色调画丘陵，花瓣位置每个实例各不相同。",
+  /** 「我的图片」选中时卡面背景一行的说明；居中裁切与图片留存写在下面「背景图片」一行，这里不重复。 */
+  backgroundImageOptionNote: "用你自己的图片铺满卡面，读不出来时先画渐变花瓣。",
   backgroundImageTitle: "背景图片",
   backgroundImageNote: "居中裁切铺满卡面。换成别的背景时图片还留着，切回来不用重选。",
   /** 设置里还记着背景图而文件找不到了；inUse 为背景此刻正用着它。 */
@@ -596,9 +599,23 @@ export const SETTINGS_COPY = {
   open: "打开",
   templateTitle: "设为新实例的默认设置",
   templateNote: "把本实例的 options.txt（键位、视距等）与服务器列表复制一份，新建实例时可以沿用。",
-  /** 已有默认设置时的第二行；文件是手放进数据目录的、没有记录时说来源不明。 */
-  templateCurrent: (source: string | null, savedAt: number | null, now: number) =>
-    source === null ? "当前默认来自数据目录里的文件" : savedAt === null ? `当前默认取自「${source}」` : `当前默认取自「${source}」，${formatRelative(savedAt, now)}保存`,
+  /** 已有默认设置、文件是手放进数据目录的（没有来源记录）时的第二行。 */
+  templateUnknownSource: "当前默认来自数据目录里的文件",
+  /**
+   * 已有默认设置、记得来源实例时的第二行，按实例名拆成前后两段：实例名最长 32 字，窄列里只截它、悬停看全名，
+   * 前后两段照常写全，这一行不折成两行。
+   */
+  templateSource: (savedAt: number | null, now: number) => ({
+    before: "当前默认取自「",
+    after: savedAt === null ? "」" : `」，${formatRelative(savedAt, now)}保存`,
+  }),
+  /** 没存过默认设置时的第二行。不说新实例会是什么样：启动前仍会补语言等几行，不隔离的实例共用 .minecraft 的设置，整合包带着自己的。 */
+  templateAbsent: "还没有默认设置，新建实例时没有可沿用的设置。",
+  /**
+   * 关了沿用时的第二行，存没存过都这样写：新建与整合包导入一律不套，再写「取自某实例」就成了假话。
+   * 开关在设置的「游戏」分区，点名分区，让人找得到在哪里打开。
+   */
+  templateDisabled: "新建实例时沿用默认设置已关闭，可以在设置的「游戏」分区打开。",
   templateError: (message: string) => `读不到默认设置：${message}`,
   templateSave: "保存为默认",
   templateClear: "清除",

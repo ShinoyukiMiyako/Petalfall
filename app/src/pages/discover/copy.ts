@@ -1,6 +1,6 @@
 // 发现页、资源详情、安装面板与整合包导入的文案。插值一律经 domain/format 格式化，页面组件只引用这里。
 
-import { joinMixed } from "../../copy/flows";
+import { joinMixed, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
 import { formatBytes, formatCount } from "../../domain/format";
 import { PLATFORM_TIMEOUT_MS } from "../../domain/limits";
 import type { Platform } from "../../domain/types";
@@ -192,8 +192,9 @@ export const DETAIL_COPY = {
     [author === null ? CARD_COPY.authorUnknown : author, latest === null ? DETAIL_COPY.noVersion : latest].join(" · "),
   depOpen: (title: string) => `查看前置 ${title}`,
   onlyFits: "只看能装进我的实例的版本",
-  beta: "测试版",
-  alpha: "预览版",
+  // Mod 版本的不稳定通道沿用启动器自己发布通道的叫法，与实例页的 MOD_CHANNEL_LABEL 同源
+  beta: RELEASE_CHANNEL_LABEL.beta,
+  alpha: RELEASE_CHANNEL_LABEL.preview,
   loadMore: "加载更多",
   versionsEmptyFit: "没有能装进你的实例的版本",
   versionsEmpty: "这个资源还没有发布版本",
@@ -229,6 +230,8 @@ export const INSTALL_COPY = {
   installedInWorld: (world: string) => `已装在存档「${world}」`,
   instanceInstalling: "实例正在安装",
   instanceBroken: "实例已损坏，先修复",
+  /** 目标行里放得下，不截断；说的是哪个实例，行上已经写着。 */
+  instanceMoving: "正在移到其他游戏目录",
   judging: "正在判断能否安装…",
   readingWorlds: "正在读取存档…",
   worldsFailed: (message: string) => `存档读不出来：${message}`,
@@ -282,13 +285,15 @@ export const MODPACK_COPY = {
   overrides: (n: number, bytes: number) => `包内自带 ${n} 个文件 · ${formatBytes(bytes)}`,
   memory: "内存跟随全局设置",
   memoryAuto: "内存跟随全局设置，会按大型整合包档位给足",
-  pin: (next: number, limit: number) => `装好后固定在侧栏（${next}/${limit}）`,
+  pin: (next: number, limit: number) => `会自动固定到侧栏（${next}/${limit}）`,
   pinFull: (limit: number) => `侧栏固定位已满（${limit}/${limit}），这个实例不会自动固定`,
   noGameVersion: "这个版本没有标注游戏版本，没法建实例",
   versionsFailed: "整合包的版本列表没加载出来，只能装最新版本",
   queued: "排队中，前面的任务完成后开始",
   downloading: (pct: string) => `正在下载 · ${pct}`,
   background: "已出现在侧栏与实例库里，关掉这个窗口不影响下载。",
+  /** 入队时侧栏固定位已满，新实例没有排进侧栏。 */
+  backgroundUnpinned: "已出现在实例库里，关掉这个窗口不影响下载。",
   ready: (name: string) => `「${name}」已就绪，可以直接开玩。`,
   cancelled: "安装已取消，未完成的实例已撤掉。可以重新安装。",
   failed: (reason: string) => `没装成：${reason}`,

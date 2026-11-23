@@ -218,15 +218,6 @@
   background: var(--sk-accent-grad);
 }
 
-.srOnly {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
 /*
  * ---- 详情浮层 ----
  * 浮层分主体与底部两层（随内容形变）：宽度定在面板上。主体是面板的滚动区，常驻 10px 滚动条槽位，
@@ -363,7 +354,7 @@
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
-  height: calc(4 * var(--sk-lh-mono-sm) + 2 * var(--sk-space-8));
+  height: calc(4 * var(--sk-lh-mono) + 2 * var(--sk-space-8));
   padding: var(--sk-space-8) var(--sk-space-10);
   overflow: hidden;
   border-radius: var(--sk-r-sm);
@@ -377,8 +368,8 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
   color: var(--sk-text-2);
 }
 

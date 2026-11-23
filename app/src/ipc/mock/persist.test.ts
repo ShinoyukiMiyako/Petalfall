@@ -68,6 +68,7 @@ describe("mock 持久化", () => {
     await first.mockInvoke("rename_instance", { id: "樱花生存", newName: "樱花二周目" });
     await first.mockInvoke("remove_mod", { versionId: "1.20.1-Fabric", fileName: "handmade-1.0.jar" });
     await first.mockInvoke("install_resource", {
+      gameDir: "D:\\Games\\Launcher\\.minecraft",
       taskId: "t-rp",
       versionId: "1.21.1-Fabric",
       resourceType: "resource_pack",
@@ -77,6 +78,7 @@ describe("mock 持久化", () => {
       fileVersionId: "f32-1211",
     });
     await first.mockInvoke("add_java_path", { path: "D:\\Portable\\jdk-17\\bin\\javaw.exe" });
+    await first.mockInvoke("set_ui_shape", { patch: { recent_cards: 3, repair_banner: true } });
     expect(storage.keys()).toEqual([
       "slug.mock.accounts",
       "slug.mock.appearance",
@@ -86,6 +88,7 @@ describe("mock 持久化", () => {
       "slug.mock.java",
       "slug.mock.mods",
       "slug.mock.system",
+      "slug.mock.ui-shape",
     ]);
 
     const second = await reload();
@@ -94,6 +97,8 @@ describe("mock 持久化", () => {
     second.enableMockPersistence(storage, PREFIX);
     expect(await second.mockInvoke("is_first_run")).toBe(false);
     expect(await second.mockInvoke("get_appearance")).toEqual({ mode: "night", accent: "moss", petals: false, panorama: true, reduce_motion: true, cover_background: "texture" });
+    // 界面形状也接着上次：刷新后首帧按记下的形状占位，与冷启动读配置一样
+    expect(await second.mockInvoke("get_ui_shape")).toEqual({ recent_cards: 3, repair_banner: true });
     expect(await second.mockInvoke<{ download_concurrency: number }>("get_config")).toMatchObject({ download_concurrency: 16 });
     // 手动添加的 Java 在配置与探测结果里都还在，不会刷新后变成识别不出。
     const manualExe = "D:\\Portable\\jdk-17\\bin\\java.exe";
@@ -140,6 +145,31 @@ describe("mock 持久化", () => {
     expect(await third.mockInvoke("get_config")).toMatchObject({ ...expected, skip_accessibility_onboarding: true });
   });
 
+  it("使用须知的确认：同意后刷新仍记着；早先的快照没有这一项时按没确认过读入", async () => {
+    type StoredConfig = { data: Record<string, unknown> };
+    const KEY = "slug.mock.config";
+    const storage = new MemoryStorage();
+    const version = 1 + Math.floor(Math.random() * 900);
+    const first = await reload();
+    first.enableMockPersistence(storage, PREFIX);
+    expect(await first.mockInvoke("usage_notice_acceptance")).toBeNull();
+    await first.mockInvoke("accept_usage_notice", { version });
+
+    const second = await reload();
+    second.enableMockPersistence(storage, PREFIX);
+    expect(await second.mockInvoke("usage_notice_acceptance")).toMatchObject({ version });
+
+    const raw = storage.getItem(KEY);
+    if (raw === null) throw new Error(`存储里没有 ${KEY}`);
+    const saved = JSON.parse(raw) as StoredConfig;
+    delete saved.data.usageNotice;
+    storage.setItem(KEY, JSON.stringify(saved));
+
+    const third = await reload();
+    third.enableMockPersistence(storage, PREFIX);
+    expect(await third.mockInvoke("usage_notice_acceptance")).toBeNull();
+  });
+
   it("resetMockData 回到种子并清掉存下的状态，刷新后仍是种子", async () => {
     const storage = new MemoryStorage();
     const first = await reload();
@@ -167,7 +197,7 @@ describe("mock 持久化", () => {
     const storage = new MemoryStorage();
     const core = await reload();
     core.enableMockPersistence(storage, PREFIX);
-    const install = core.mockInvoke("install_version", { taskId: "t-fail", id: "9.9.9", loader: null, loaderVersion: null, targetName: "装不上" });
+    const install = core.mockInvoke("install_version", { taskId: "t-fail", gameDir: "D:\\Games\\Launcher\\.minecraft", id: "9.9.9", loader: null, loaderVersion: null, targetName: "装不上" });
     await expect(install).rejects.toMatchObject({ code: "install_failed" });
     const text = storage.getItem("slug.mock.instances");
     if (text === null) throw new Error("实例状态没有落盘");

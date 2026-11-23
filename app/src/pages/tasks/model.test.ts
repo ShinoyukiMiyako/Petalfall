@@ -40,7 +40,7 @@ const MB = 1024 * 1024;
 
 function task(id: string, overrides: Partial<Task> = {}): Task {
   return {
-    ...newTask({ id, kind: "java", title: `下载 Java ${id}`, detail: "Mojang 运行时 · 手动", instanceId: null, spec: { command: "install_java", args: { requiredMajor: 21 } } }, T0),
+    ...newTask({ gameDir: "D:/Games/.minecraft", id, kind: "java", title: `下载 Java ${id}`, detail: "Mojang 运行时 · 手动", instanceId: null, spec: { command: "install_java", args: { requiredMajor: 21 } } }, T0),
     ...overrides,
   };
 }

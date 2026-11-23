@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
 // 整合包表单里会动的几处：换封面时舞台方块的那一下、转成只读时几块的进出与让位。
-// 要等 framer-motion 的帧循环把动画播完，整个文件走真实时间。
+// 舞台方块弹回的用例逐帧看途中的值，走假时钟（startFrameClock）；其余用例按真实时间等 framer-motion 的帧循环把动画播完。
 
 import { MotionConfig } from "framer-motion";
-import { useCallback, type ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, useCallback, type ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { COVER_PRESETS, type InstanceCover } from "../../art/iso/covers";
 import type { SpringName } from "../../lib/motion";
 import { OverlayProvider, OverlayRoot } from "../../shell/overlay";
-import { render, waitForFrames, type Rendered } from "../../test/dom";
+import { drainFrames, render, stepFrames, stubResizeObserver, waitForFrames, type Rendered } from "../../test/dom";
 import { PackForm, type PackFacts } from "./PackForm";
 
 // 方块要读材质、画 canvas，和这里要验的位移无关：换成一个标着封面的占位
@@ -43,10 +43,19 @@ const [FIRST, SECOND] = COVER_PRESETS;
 let view: Rendered | null = null;
 
 afterEach(() => {
-  view?.unmount();
-  view = null;
   reflowed.clear();
 });
+
+/**
+ * 断言弹回途中取值的用例让帧跟着假时钟走，用 stepFrames 逐帧推进。按真实时间走的话，机器满载时两帧之间可能隔得比
+ * 整段弹回还长，下一帧直接写成落定的 none，录到的缩放里就没有走近原大的那几帧。录到的第一帧倒不受影响：
+ * framer-motion 建动画与解析关键帧相隔超过 40 ms 时从解析的那一帧起算，第一帧最多走 40 ms。
+ * 换之前先在真实计时器上把帧循环排空（见 test/dom 的 drainFrames）。
+ */
+async function startFrameClock() {
+  await drainFrames();
+  vi.useFakeTimers();
+}
 
 interface FormOptions {
   reduced?: "always" | "never";
@@ -91,28 +100,30 @@ const scales = (transforms: string[]) =>
     return m === null ? [] : [Number(m[1])];
   });
 
-/** 等 n 帧：中途什么都不断言，只为让帧循环有机会写样式。 */
-async function frames(n: number): Promise<void> {
-  let seen = 0;
-  await waitForFrames(() => expect((seen += 1)).toBeGreaterThanOrEqual(n));
-}
+/** 舞台方块的弹回（pop 弹簧）在这么多帧（约 1 秒）之内落定。 */
+const SETTLE_FRAMES = 60;
 
 describe("舞台方块换封面", () => {
   it("挂载时不动；换了封面从 0.94 弹回原大", async () => {
+    await startFrameClock();
     view = render(form(FIRST));
     const el = stage();
     const written = record(el);
-    await frames(4);
+    await stepFrames(4);
     expect(written.transforms).toEqual([]);
 
     view.rerender(form(SECOND));
-    await waitForFrames(() => expect(written.transforms.at(-1)).toBe("none"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(written.transforms.at(-1)).toBe("none");
     written.stop();
-    // 第一帧画出来时弹簧已经走了几毫秒，不一定正好是 0.94：起点看最小值，不低于 0.94，且第一帧明显小于原大
     const seen = scales(written.transforms);
-    expect(seen[0]).toBeLessThan(0.97);
+    // 帧一帧不落：录到的第一帧离提交只隔一帧，弹簧只走了一小截
+    expect(seen[0]).toBeLessThan(0.95);
     expect(Math.min(...seen)).toBeGreaterThanOrEqual(0.94);
-    expect(seen.some((s) => s > 0.99)).toBe(true);
+    // 一帧帧弹回：走了好几帧才过 0.99，此前逐帧变大，不是一下跳到原大
+    const near = seen.findIndex((s) => s > 0.99);
+    expect(near).toBeGreaterThan(3);
+    for (let i = 1; i <= near; i++) expect(seen[i]).toBeGreaterThan(seen[i - 1]);
   });
 
   it("减少动画时不缩放，只从透明淡入", async () => {
@@ -124,6 +135,61 @@ describe("舞台方块换封面", () => {
     written.stop();
     expect(Number(written.opacities[0])).toBeLessThan(1);
     expect(scales(written.transforms)).toEqual([]);
+  });
+});
+
+describe("换封面面板里的勾标", () => {
+  // 浮层按面板尺寸重新定位，jsdom 没有 ResizeObserver
+  beforeEach(() => {
+    stubResizeObserver();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** 打开换封面面板，取此刻选中那一格的勾标。 */
+  function openPicker(): HTMLElement {
+    const button = [...document.querySelectorAll("button")].find((b) => b.textContent === "换封面");
+    if (button === undefined) throw new Error("没有换封面按钮");
+    act(() => button.click());
+    const check = document.querySelector<HTMLElement>('[role="radio"][aria-checked="true"] [data-cover-check]');
+    if (check === null) throw new Error("换封面面板里选中的那一格没有勾标");
+    return check;
+  }
+
+  it("换到别的一格：旧格的勾标缩回 0.6 并淡出，新格的勾标从 0.6 弹出", async () => {
+    view = render(form(FIRST));
+    const old = openPicker();
+    const written = record(old);
+    view.rerender(form(SECOND));
+    const fresh = document.querySelector<HTMLElement>('[role="radio"][aria-checked="true"] [data-cover-check]');
+    expect(fresh).not.toBe(old);
+    expect(fresh?.style.opacity).toBe("0");
+    expect(fresh?.style.transform).toBe("scale(0.6)");
+
+    await waitForFrames(() => expect(old.isConnected).toBe(false));
+    written.stop();
+    // 只淡出不缩小时（行内标签那一档的退场）这里一个缩放值都录不到
+    const seen = scales(written.transforms);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.at(-1)).toBeCloseTo(0.6, 6);
+    expect(seen.every((s) => s >= 0.6 - 1e-6 && s <= 1)).toBe(true);
+    expect(written.opacities.at(-1)).toBe("0");
+  });
+
+  it("减少动画时旧格的勾标只淡出，进出都不缩放", async () => {
+    view = render(form(FIRST, { reduced: "always" }));
+    const old = openPicker();
+    const written = record(old);
+    view.rerender(form(SECOND, { reduced: "always" }));
+    const fresh = document.querySelector<HTMLElement>('[role="radio"][aria-checked="true"] [data-cover-check]');
+    expect(fresh?.style.opacity).toBe("0");
+    expect(fresh?.style.transform).toBe("");
+
+    await waitForFrames(() => expect(old.isConnected).toBe(false));
+    written.stop();
+    expect(scales(written.transforms)).toEqual([]);
+    expect(written.opacities.at(-1)).toBe("0");
   });
 });
 

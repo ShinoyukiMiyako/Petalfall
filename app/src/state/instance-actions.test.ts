@@ -4,6 +4,7 @@ import { TASK_TEXT, TASK_TOAST } from "../copy/flows";
 import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import type { TaskRecordDto } from "../ipc/tasks";
+import { launchView } from "../launch/launchView";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, cancelledError, configDto, deferred, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
 import { resources } from "./resource";
@@ -661,6 +662,7 @@ describe("改名迁移任务", () => {
       error: { code: "interrupted", message: "关闭时中断" },
       created_at: 1_719_000_000_000,
       finished_at: 1_719_000_000_500,
+      game_dir: "D:/Games/.minecraft",
       spec: { command, args },
     };
     bootOverrides(ipc, { journal: [record] });
@@ -700,6 +702,7 @@ describe("改名迁移任务", () => {
       error: { code: "interrupted", message: "关闭时中断" },
       created_at: 1_719_000_000_000,
       finished_at: 1_719_000_000_500,
+      game_dir: "D:/Games/.minecraft",
       spec: { command: "update_mods", args: { versionId: "生存", items: [] } },
     };
     bootOverrides(ipc, { journal: [record] });
@@ -970,6 +973,40 @@ describe("改名已落盘、之后的读取失败：内存里挂在旧 id 上的
     expect(await renamed).toBe("生存二");
     expect(store.getState().instances.map((i) => i.id)).toEqual(["生存二", "创造", "新世界"]);
   });
+
+  it("手里的固定列表还留着与新名字同名的旧实例：就地迁移时去掉它，不出现两项新名字；之后固定别的实例照常写成", async () => {
+    // 固定列表读到的时候「生存二」还在，之后在落樱之外删掉了、没再读过。假后端整组写入时照后端的规矩拒掉重复
+    let pins = ["生存二", "生存"];
+    ipc.overrides.set("get_sidebar_pins", () => pins);
+    ipc.overrides.set("set_sidebar_pins", (args) => {
+      const next = args.pins as string[];
+      const dup = next.find((p, i) => next.indexOf(p) !== i);
+      if (dup !== undefined) throw new IpcError("invalid_argument", "侧栏固定列表不合法：同一个实例重复固定", { field: "pins", reason: "duplicate", id: dup });
+      pins = next;
+      return pins;
+    });
+    await store.actions.reload("pins");
+    await settle();
+    expect(store.getState().sidebarPins).toEqual(["生存二", "生存"]);
+
+    // 后端改名时去掉同名旧固定、原位改名；改名之后的固定读取失败，只剩就地迁移
+    ipc.overrides.set("rename_instance", () => {
+      instances = instances.map((i) => (i.id === "生存" ? { ...i, id: "生存二" } : i));
+      pins = ["生存二"];
+      return { id: "生存二" };
+    });
+    ipc.overrides.set("get_sidebar_pins", () => {
+      throw new IpcError("io_error", "读取失败：拒绝访问。 (os error 5)");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(await store.actions.renameInstance("生存", "生存二")).toBe("生存二");
+    expect(store.getState().sidebarPins).toEqual(["生存二"]);
+
+    await store.actions.togglePin("创造");
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存二", "创造"] }]);
+    expect(pins).toEqual(["生存二", "创造"]);
+    expect(store.getState().sidebarPins).toEqual(["生存二", "创造"]);
+  });
 });
 
 describe("删除实例时取消它的全部任务", () => {
@@ -1052,9 +1089,17 @@ describe("新建实例入队即成为当前实例，侧栏有空位时安装期�
   }
 
   async function finish(): Promise<void> {
-    instances = [...instances, instanceDto("新世界")];
+    instances = [...instances.filter((i) => i.id !== "新世界"), instanceDto("新世界")];
     install.resolve({ id: "新世界" });
     await settle();
+  }
+
+  /** 装到一半时别的重扫扫到了盘上的半成品目录：还没写版本 JSON，扫出来损坏、没有版本，扫描项接替了占位项。 */
+  async function scannedHalfway(): Promise<void> {
+    instances = [...instances, instanceDto("新世界", { status: "broken", mc_version: null, loaders: [], activity: "installing" })];
+    await store.actions.refreshInstances();
+    await settle();
+    expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({ placeholder: false, status: "installing" });
   }
 
   it("有空位：占位项排在侧栏末尾并设为当前实例；装好后写进固定列表", async () => {
@@ -1072,10 +1117,27 @@ describe("新建实例入队即成为当前实例，侧栏有空位时安装期�
     expect(store.getState().sidebarPins).toEqual(["生存", "新世界"]);
   });
 
+  it("还没写进固定列表的固定项单独标出：安装期间是自动固定的占位项，内容没变时沿用同一份，装好写进之后为空", async () => {
+    await restart(["生存"]);
+    expect(store.getState().unsavedPins).toEqual([]);
+    await store.actions.createInstance(spec);
+    expect(store.getState().unsavedPins).toEqual(["新世界"]);
+    const unsaved = store.getState().unsavedPins;
+    // 重扫换了实例列表，标出的内容没变：同一份引用，按引用订阅它的组件不跟着重渲染
+    await store.actions.refreshInstances();
+    await settle();
+    expect(callsOf(ipc, "list_instances").length).toBeGreaterThan(1);
+    expect(store.getState().unsavedPins).toBe(unsaved);
+    await finish();
+    expect(store.getState().sidebarPins).toEqual(["生存", "新世界"]);
+    expect(store.getState().unsavedPins).toEqual([]);
+  });
+
   it("侧栏已满 5 个：不固定，装好后也不固定", async () => {
     await restart(["a", "b", "c", "d", "e"]);
     await store.actions.createInstance(spec);
     expect(store.getState().sidebarPins).toEqual(["a", "b", "c", "d", "e"]);
+    expect(store.getState().unsavedPins).toEqual([]);
     await finish();
     expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
   });
@@ -1087,6 +1149,7 @@ describe("新建实例入队即成为当前实例，侧栏有空位时安装期�
     expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存"] }]);
     await store.actions.togglePin("新世界");
     expect(store.getState().sidebarPins).toEqual(["生存"]);
+    expect(store.getState().unsavedPins).toEqual([]);
     expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(1);
     await finish();
     expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(1);
@@ -1107,6 +1170,130 @@ describe("新建实例入队即成为当前实例，侧栏有空位时安装期�
     await store.actions.togglePin("创造");
     expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
     expect(store.getState().toasts.map((t) => t.tone)).toContain("warning");
+  });
+
+  it("装到一半被重扫扫到半成品目录：扫描项接替占位项后仍排在侧栏末尾、仍只在派生里固定，中间没有一拍离开侧栏；装好后写进固定列表", async () => {
+    await restart(["生存"]);
+    await store.actions.createInstance(spec);
+    const inSidebar: boolean[] = [];
+    const off = store.subscribe(() => inSidebar.push(store.getState().sidebarPins.includes("新世界")));
+    await scannedHalfway();
+    expect(store.getState().sidebarPins).toEqual(["生存", "新世界"]);
+    expect(store.getState().unsavedPins).toEqual(["新世界"]);
+    expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({ placeholder: false, pinned: true });
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+
+    await finish();
+    off();
+    expect(inSidebar.length).toBeGreaterThan(0);
+    expect(inSidebar).not.toContain(false);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存", "新世界"] }]);
+    expect(store.getState().sidebarPins).toEqual(["生存", "新世界"]);
+    expect(store.getState().unsavedPins).toEqual([]);
+    expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({ status: "ready", pinned: true });
+  });
+
+  it("装到一半被扫到之后拖动排序、取消固定：都不把它写进固定列表，只改装好后的打算", async () => {
+    await restart(["生存"]);
+    await store.actions.createInstance(spec);
+    await scannedHalfway();
+    await store.actions.setSidebarPins(["新世界", "生存"]);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存"] }]);
+    expect(store.getState().sidebarPins).toEqual(["生存", "新世界"]);
+
+    await store.actions.togglePin("新世界");
+    expect(store.getState().sidebarPins).toEqual(["生存"]);
+    expect(store.getState().unsavedPins).toEqual([]);
+    expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({ pinned: false });
+    expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(1);
+
+    await finish();
+    expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(1);
+    expect(store.getState().sidebarPins).toEqual(["生存"]);
+  });
+
+  it("半成品目录被扫到后读回的固定列表里早就有它（配置里留着同名的旧固定）：它是真的固定项，拖动排序照常写进去", async () => {
+    await restart(["生存"]);
+    await store.actions.createInstance(spec);
+    await scannedHalfway();
+    ipc.overrides.set("get_sidebar_pins", () => ["新世界", "生存"]);
+    await store.actions.reload("pins");
+    await settle();
+    expect(store.getState().sidebarPins).toEqual(["新世界", "生存"]);
+    expect(store.getState().unsavedPins).toEqual([]);
+
+    await store.actions.setSidebarPins(["生存", "新世界"]);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存", "新世界"] }]);
+    expect(store.getState().sidebarPins).toEqual(["生存", "新世界"]);
+  });
+
+  /**
+   * 固定列表读到的时候同名的旧实例还在，之后在落樱之外删掉了、没再读过：手里的列表还留着它。新建结束时后端去掉了配置里的
+   * 这一项（假后端在装好的那一刻改成去掉之后的列表），落地按后端重读再定。
+   */
+  async function landOverStalePin(bootPins: string[], afterDrop: string[]): Promise<void> {
+    await restart(bootPins);
+    await store.actions.createInstance(spec);
+    expect(store.getState().sidebarPins).toEqual(bootPins);
+    ipc.overrides.set("get_sidebar_pins", () => afterDrop);
+    await finish();
+  }
+
+  it("手里的固定列表还留着同名旧实例、侧栏有空位：落地重读后按自动固定追加到末尾", async () => {
+    await landOverStalePin(["新世界", "生存"], ["生存"]);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存", "新世界"] }]);
+    expect(store.getState().sidebarPins).toEqual(["生存", "新世界"]);
+    expect(store.getState().unsavedPins).toEqual([]);
+    expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({ status: "ready", pinned: true });
+  });
+
+  it("手里的固定列表还留着同名旧实例、侧栏已满：落地重读后新实例不固定，也不写固定列表", async () => {
+    await landOverStalePin(["a", "b", "新世界", "c", "d"], ["a", "b", "c", "d"]);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+    expect(store.getState().sidebarPins).toEqual(["a", "b", "c", "d"]);
+    expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({ status: "ready", pinned: false });
+  });
+
+  it.each([
+    {
+      ending: "失败，盘上留下未完成的目录",
+      end: () => install.reject(new IpcError("download_failed", "下载源暂时不可用")),
+      onDisk: () => [...instances.filter((i) => i.id !== "新世界"), instanceDto("新世界", { status: "broken", broken_reason: "安装没有完成", mc_version: null, loaders: [] })],
+      left: ["生存", "创造", "新世界"],
+    },
+    {
+      ending: "取消，后端删掉半成品",
+      end: () => store.actions.cancelTask(store.getState().tasks[0].id),
+      onDisk: () => instances.filter((i) => i.id !== "新世界"),
+      left: ["生存", "创造"],
+    },
+  ])("装到一半被扫到之后$ending：固定留到这次结束触发的重扫落定，然后撤掉，不写进固定列表", async ({ end, onDisk, left }) => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await restart(["生存"]);
+    ipc.overrides.set("cancel_task", () => {
+      install.reject(cancelledError());
+      return true;
+    });
+    let scan: Deferred<InstanceDto[]> | null = null;
+    ipc.overrides.set("list_instances", () => (scan === null ? instances : scan.promise));
+    await store.actions.createInstance(spec);
+    await scannedHalfway();
+    expect(store.getState().sidebarPins).toEqual(["生存", "新世界"]);
+
+    scan = deferred<InstanceDto[]>();
+    await end();
+    await settle();
+    expect(store.getState().tasks.map((t) => t.status)).not.toContain("running");
+    expect(store.getState().sidebarPins).toEqual(["生存", "新世界"]);
+
+    instances = onDisk();
+    scan.resolve(instances);
+    scan = null;
+    await settle();
+    expect(store.getState().instances.map((i) => i.id)).toEqual(left);
+    expect(store.getState().sidebarPins).toEqual(["生存"]);
+    expect(store.getState().unsavedPins).toEqual([]);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
   });
 });
 
@@ -1235,6 +1422,177 @@ describe("新建与导入结束后，占位项留到这次结束触发的重扫�
     await deleting;
     await settle();
     expect(ids()).toEqual(["生存", "创造"]);
+  });
+});
+
+describe("装好或补全好之后、落地重扫回来之前，实例照旧按安装中派生", () => {
+  /** 非 null 时实例列表的下一次请求挂在它上面。 */
+  let scan: Deferred<InstanceDto[]> | null;
+
+  beforeEach(() => {
+    scan = null;
+    ipc.overrides.set("list_instances", () => (scan === null ? instances : scan.promise));
+    ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+    stubInstanceSettings();
+  });
+
+  const find = (id: string) => store.getState().instances.find((i) => i.id === id);
+  const viewOf = (id: string) => {
+    const inst = find(id);
+    if (inst === undefined) throw new Error(`列表里没有「${id}」`);
+    return launchView(store.getState(), inst);
+  };
+  const landing = () => (store as unknown as { raw: { landing: readonly string[] } }).raw.landing;
+
+  /** 「生存」在盘上是损坏的，先重扫一次让列表里是这一份。 */
+  async function brokenOnDisk(): Promise<void> {
+    instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON" }) : i));
+    await store.actions.reload("instances");
+    await settle();
+    expect(find("生存")).toMatchObject({ status: "broken" });
+  }
+
+  it("新建：占位项对应的是那个已完成、满格的任务，入口不翻回排队；重扫回来后就绪", async () => {
+    const install = deferred<{ id: string }>();
+    ipc.overrides.set("install_version", () => install.promise);
+    await store.actions.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", cover: "grass" });
+    await settle();
+    scan = deferred<InstanceDto[]>();
+    install.resolve({ id: "新世界" });
+    await settle();
+    const [task] = store.getState().tasks;
+    expect(task).toMatchObject({ status: "done", progress: 1 });
+    expect(find("新世界")).toMatchObject({ placeholder: true, status: "installing" });
+    expect(viewOf("新世界")).toEqual({ kind: "installing", task, queuePosition: null });
+
+    instances = [...instances, instanceDto("新世界", { mc_version: "1.21.1" })];
+    scan.resolve(instances);
+    await settle();
+    expect(find("新世界")).toMatchObject({ placeholder: false, status: "ready" });
+    expect(landing()).toEqual([]);
+  });
+
+  it("新建：装的过程中扫到过盘上的半成品，装好后、重扫回来前仍是安装中，不先按那一份画成损坏", async () => {
+    const install = deferred<{ id: string }>();
+    ipc.overrides.set("install_version", () => install.promise);
+    await store.actions.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", cover: "grass" });
+    await settle();
+    // 后端写完版本 JSON 之前、放开实例名之后的那一刻扫到的：损坏、没有版本
+    instances = [...instances, instanceDto("新世界", { status: "broken", broken_reason: "安装没有完成", mc_version: null, loaders: [] })];
+    await store.actions.reload("instances");
+    await settle();
+    expect(find("新世界")).toMatchObject({ placeholder: false, status: "installing" });
+
+    scan = deferred<InstanceDto[]>();
+    install.resolve({ id: "新世界" });
+    await settle();
+    const [task] = store.getState().tasks;
+    expect(task.status).toBe("done");
+    expect(find("新世界")).toMatchObject({ placeholder: false, status: "installing", brokenReason: null, mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10" });
+    expect(viewOf("新世界")).toEqual({ kind: "installing", task, queuePosition: null });
+
+    instances = instances.map((i) => (i.id === "新世界" ? instanceDto("新世界", { mc_version: "1.21.1", loaders: [{ kind: "fabric", version: "0.16.10" }] }) : i));
+    scan.resolve(instances);
+    await settle();
+    expect(find("新世界")).toMatchObject({ status: "ready", brokenReason: null });
+    expect(landing()).toEqual([]);
+  });
+
+  it("导入整合包：扫到的半成品缺版本时，落地期间沿用入队时的版本与加载器", async () => {
+    const pack = deferred<unknown>();
+    ipc.overrides.set("install_modpack", () => pack.promise);
+    await store.actions.installModpack({
+      source: { kind: "file", path: "C:/packs/pack.mrpack" },
+      name: "整合包",
+      cover: "grass",
+      packName: "整合包",
+      packVersion: "1.0.0",
+      modCount: 12,
+      mcVersion: "1.20.1",
+      loader: "fabric",
+      loaderVersion: "0.16.10",
+      excludedOptional: [],
+    });
+    await settle();
+    instances = [...instances, instanceDto("整合包", { status: "broken", broken_reason: "整合包没有导入完", mc_version: null, loaders: [] })];
+    await store.actions.reload("instances");
+    await settle();
+
+    scan = deferred<InstanceDto[]>();
+    pack.resolve({ version_id: "整合包" });
+    await settle();
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["done"]);
+    expect(find("整合包")).toMatchObject({ placeholder: false, status: "installing", brokenReason: null, mcVersion: "1.20.1", loader: "fabric", loaderVersion: "0.16.10" });
+
+    instances = instances.map((i) => (i.id === "整合包" ? instanceDto("整合包", { mc_version: "1.20.1", loaders: [{ kind: "fabric", version: "0.16.10" }] }) : i));
+    scan.resolve(instances);
+    await settle();
+    expect(find("整合包")).toMatchObject({ status: "ready", mcVersion: "1.20.1" });
+    expect(landing()).toEqual([]);
+  });
+
+  it("补全：任务完成后、重扫回来前仍是安装中，不是补全前扫到的损坏，入口拿到满格的已完成任务；重扫回来后就绪", async () => {
+    await brokenOnDisk();
+    const repair = deferred<unknown>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    await store.actions.repairInstance("生存");
+    await settle();
+    expect(find("生存")).toMatchObject({ status: "installing" });
+
+    scan = deferred<InstanceDto[]>();
+    instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存") : i));
+    repair.resolve({ reinstalled: false, libraries: 3, assets: 0, natives: 0 });
+    await settle();
+    const [task] = store.getState().tasks;
+    expect(task).toMatchObject({ status: "done", progress: 1, spec: { command: "repair_instance" } });
+    expect(landing()).toEqual([task.id]);
+    expect(find("生存")).toMatchObject({ status: "installing", brokenReason: null });
+    expect(viewOf("生存")).toEqual({ kind: "installing", task, queuePosition: null });
+
+    scan.resolve(instances);
+    await settle();
+    expect(find("生存")).toMatchObject({ status: "ready", brokenReason: null });
+    expect(viewOf("生存")).toEqual({ kind: "ready", busyElsewhere: false });
+    expect(landing()).toEqual([]);
+    expect(store.getState().toasts.map((t) => t.title)).toContain(TASK_TOAST.repaired("生存").title);
+  });
+
+  it("补全失败：不留安装中，重扫回来之前按手里那份损坏的列表画", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await brokenOnDisk();
+    const repair = deferred<unknown>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    await store.actions.repairInstance("生存");
+    await settle();
+
+    scan = deferred<InstanceDto[]>();
+    repair.reject(new IpcError("network_failed", "连接超时"));
+    await settle();
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["failed"]);
+    expect(landing()).toEqual([]);
+    expect(find("生存")).toMatchObject({ status: "broken", brokenReason: "缺少版本 JSON" });
+    scan.resolve(instances);
+    await settle();
+    expect(find("生存")).toMatchObject({ status: "broken" });
+  });
+
+  it("补全成功但落地重扫失败：不卡在安装中，退回手里那份列表，失败照常报出", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await brokenOnDisk();
+    const repair = deferred<unknown>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    await store.actions.repairInstance("生存");
+    await settle();
+
+    scan = deferred<InstanceDto[]>();
+    repair.resolve({ reinstalled: false, libraries: 3, assets: 0, natives: 0 });
+    await settle();
+    expect(find("生存")).toMatchObject({ status: "installing" });
+    scan.reject(new IpcError("io", "目录读不出来"));
+    await settle();
+    expect(landing()).toEqual([]);
+    expect(find("生存")).toMatchObject({ status: "broken", brokenReason: "缺少版本 JSON" });
+    expect(store.getState().toasts.map((t) => t.tone)).toContain("error");
   });
 });
 
@@ -1486,6 +1844,21 @@ describe("删除还在安装的新建实例", () => {
     expect(store.getState().toasts.map((t) => t.title)).toContain("已删除「新世界」");
   });
 
+  it("直接取消新建：后端删掉半成品时一并去掉了当前选中，前端重读设置，不再留着已删的名字", async () => {
+    ipc.overrides.set("cancel_task", () => {
+      install.reject(cancelledError());
+      return true;
+    });
+    await store.actions.createInstance(spec);
+    await settle();
+    expect(store.getState().settings?.selectedVersion).toBe("新世界");
+    ipc.overrides.set("get_config", () => configDto({ selected_version: null }));
+    await store.actions.cancelTask(store.getState().tasks[0].id);
+    await settle();
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["cancelled"]);
+    expect(store.getState().settings?.selectedVersion).toBeNull();
+  });
+
   it("删除已有实例时补全恰好做完：不弹「已修复」，照常删除", async () => {
     const repair = deferred<unknown>();
     ipc.overrides.set("repair_instance", () => repair.promise);
@@ -1522,6 +1895,7 @@ describe("重启后重试上次关闭时中断的新建与导入", () => {
       error: null,
       created_at: 1_719_999_000_000,
       finished_at: null,
+      game_dir: "D:/Games/.minecraft",
       spec: { command, args },
     };
   }
@@ -1580,21 +1954,24 @@ describe("重启后重试上次关闭时中断的新建与导入", () => {
     expect(store.getState().tasks).toEqual([]);
   });
 
-  it("导入整合包：全部重试期间同样有占位项，失败后重扫落定才撤下", async () => {
+  it("导入整合包：全部重试期间同样有占位项、按有空位就固定排在侧栏末尾，失败后重扫落定才一起撤下", async () => {
     await restartWith(interrupted("t-pack", "modpack", "整合包", "install_modpack", { source: { kind: "file", path: "C:/packs/pack.mrpack" }, name: "整合包" }));
     const pack = deferred<unknown>();
     ipc.overrides.set("install_modpack", () => pack.promise);
     expect(store.actions.retryFailedTasks()).toBe(1);
     await settle();
-    expect(entry("整合包")).toMatchObject({ placeholder: true, status: "installing" });
+    expect(entry("整合包")).toMatchObject({ placeholder: true, status: "installing", pinned: true });
+    expect(store.getState().sidebarPins).toEqual(["整合包"]);
 
     const scan = deferred<InstanceDto[]>();
     ipc.overrides.set("list_instances", () => scan.promise);
     pack.reject(new IpcError("modpack_invalid", "清单读不出来"));
     await settle();
     expect(entry("整合包")).toMatchObject({ placeholder: true });
+    expect(store.getState().sidebarPins).toEqual(["整合包"]);
     scan.resolve(instances);
     await settle();
     expect(entry("整合包")).toBeUndefined();
+    expect(store.getState().sidebarPins).toEqual([]);
   });
 });

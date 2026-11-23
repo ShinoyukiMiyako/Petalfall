@@ -1,5 +1,6 @@
-// 应用装配：AppearanceProvider -> LauncherProvider -> ShellProvider -> AppShell，最外层的错误边界接住
+// 应用装配：AppearanceProvider -> UiShapeProvider -> LauncherProvider -> UsageNoticeGate -> ShellProvider -> AppShell，最外层的错误边界接住
 // 外壳本身（Provider 与外壳布局）的渲染错误，整屏显示错误原文；页面级的错误由外壳内容区自己的边界接住。
+// 使用须知的关口在外壳核心之前：要展示须知时，同意之前外壳一样都不挂（见 shell/UsageNoticeGate）。
 //
 // 页面与流程模块按目录约定在这里收集，外壳不直接引用 pages/ 与 flows/：
 // - pages/<PageId>/index.tsx 七个必须齐全，缺一个或多一个在启动前（prepareApp）就报错；
@@ -24,10 +25,13 @@ import { createPageRegistry, type PageRegistry } from "./shell/pages";
 import { gameDirectoryCommands, launcherFolderCommands, pickDirectory } from "./shell/platform";
 import { ShellProvider } from "./shell/shell";
 import { loadStartupNotices } from "./shell/startup-notices";
+import { UsageNoticeGate } from "./shell/UsageNoticeGate";
 import { RevealWindow } from "./shell/window";
 import { AppearanceProvider } from "./state/appearance";
 import type { FlowName, FlowProps } from "./state/flows";
 import { LauncherProvider } from "./state/launcher";
+import { UiShapeProvider, type UiShape } from "./state/ui-shape";
+import type { UsageNoticeState } from "./state/usage-notice";
 
 const Gallery = import.meta.env.DEV ? lazy(() => import("./dev/Gallery")) : null;
 
@@ -86,15 +90,17 @@ function reportShellCrash(error: unknown): void {
   logDiagnostic("error", "外壳渲染出错", { error: describeError(error) }).catch((logError: unknown) => console.error("外壳错误没有写入诊断日志", logError));
 }
 
-export default function App({ appearance }: { appearance: Appearance }) {
+export default function App({ appearance, uiShape, usageNotice }: { appearance: Appearance; uiShape: UiShape; usageNotice: UsageNoticeState }) {
   if (Gallery !== null && isGalleryMode()) {
     return (
       <AppearanceProvider initial={appearance}>
-        <RevealWindow>
-          <Suspense fallback={null}>
-            <Gallery />
-          </Suspense>
-        </RevealWindow>
+        <UiShapeProvider initial={uiShape}>
+          <RevealWindow>
+            <Suspense fallback={null}>
+              <Gallery />
+            </Suspense>
+          </RevealWindow>
+        </UiShapeProvider>
       </AppearanceProvider>
     );
   }
@@ -108,13 +114,17 @@ export default function App({ appearance }: { appearance: Appearance }) {
       )}
     >
       <AppearanceProvider initial={appearance}>
-        <LauncherProvider>
-          <ShellProvider>
-            <HostProviders>
-              <AppShell pages={pageRegistry()} flows={FLOWS} startupNotices={loadStartupNotices} />
-            </HostProviders>
-          </ShellProvider>
-        </LauncherProvider>
+        <UiShapeProvider initial={uiShape}>
+          <LauncherProvider>
+            <UsageNoticeGate state={usageNotice}>
+              <ShellProvider>
+                <HostProviders>
+                  <AppShell pages={pageRegistry()} flows={FLOWS} startupNotices={loadStartupNotices} />
+                </HostProviders>
+              </ShellProvider>
+            </UsageNoticeGate>
+          </LauncherProvider>
+        </UiShapeProvider>
       </AppearanceProvider>
     </ErrorBoundary>
   );

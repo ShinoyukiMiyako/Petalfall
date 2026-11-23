@@ -104,7 +104,7 @@ describe("artUrl", () => {
     "不合取址规则的 %j 直接抛错（与有无材质源无关）",
     (path) => {
       expect(() => artUrl(path)).toThrow("不在白名单");
-      setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
+      setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
       expect(() => artUrl(path)).toThrow("不在白名单");
     },
   );
@@ -115,14 +115,14 @@ describe("artUrl", () => {
   });
 
   it("有材质源时带 v 戳，版本号按 URI 组件编码", () => {
-    setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
+    setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
     expect(artUrl("block/cherry_planks")).toBe(`${ORIGIN}/art/block/cherry_planks.png?v=1.21.1`);
     expect(artUrl("entity/player/slim/zuri")).toBe(`${ORIGIN}/art/entity/player/slim/zuri.png?v=1.21.1`);
     // 预设以外的方块材质（目录方块、卡面平铺）同样可取
     expect(artUrl("block/oak_log_top")).toBe(`${ORIGIN}/art/block/oak_log_top.png?v=1.21.1`);
     expect(artUrl("block/furnace_front")).toBe(`${ORIGIN}/art/block/furnace_front.png?v=1.21.1`);
 
-    setArtStatus({ source: { versionId: "1.20 Pre-Release 1&x" }, panorama: false });
+    setArtStatus({ source: { versionId: "1.20 Pre-Release 1&x", degraded: false, legacySkins: false }, panorama: false });
     expect(artUrl("entity/steve")).toBe(`${ORIGIN}/art/entity/steve.png?v=1.20%20Pre-Release%201%26x`);
   });
 });
@@ -153,11 +153,23 @@ describe("panoramaUrl / skinUrl / thumbUrl", () => {
 
 describe("材质状态", () => {
   it("DTO 转换：snake_case 到 camelCase，形状不对即抛", () => {
-    expect(artStatusFromDto({ source: { version_id: "1.21.1" }, panorama: true })).toEqual({ source: { versionId: "1.21.1" }, panorama: true });
+    expect(artStatusFromDto({ source: { version_id: "1.21.1", degraded: false, legacy_skins: false }, panorama: true })).toEqual({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: true });
     expect(artStatusFromDto({ source: null, panorama: false })).toEqual(NO_ART);
-    expect(() => artStatusFromDto({ source: { version_id: "" }, panorama: false })).toThrow("source");
+    expect(() => artStatusFromDto({ source: { version_id: "", degraded: false, legacy_skins: false }, panorama: false })).toThrow("source");
     expect(() => artStatusFromDto({ source: null } as never)).toThrow("panorama");
     expect(() => artStatusFromDto(null as never)).toThrow("不是对象");
+  });
+
+  it("DTO 转换：材质源带着是否降级，缺了或不是布尔值即抛", () => {
+    expect(artStatusFromDto({ source: { version_id: "1.16.5", degraded: true, legacy_skins: true }, panorama: false })).toEqual({ source: { versionId: "1.16.5", degraded: true, legacySkins: true }, panorama: false });
+    expect(() => artStatusFromDto({ source: { version_id: "1.16.5" }, panorama: false } as never)).toThrow("source");
+    expect(() => artStatusFromDto({ source: { version_id: "1.16.5", degraded: "yes", legacy_skins: false }, panorama: false } as never)).toThrow("source");
+  });
+
+  it("DTO 转换：材质源带着默认皮肤是不是旧版两款，缺了或不是布尔值即抛", () => {
+    expect(artStatusFromDto({ source: { version_id: "1.19.4", degraded: true, legacy_skins: false }, panorama: false })).toEqual({ source: { versionId: "1.19.4", degraded: true, legacySkins: false }, panorama: false });
+    expect(() => artStatusFromDto({ source: { version_id: "1.19.2", degraded: true }, panorama: false } as never)).toThrow("source");
+    expect(() => artStatusFromDto({ source: { version_id: "1.19.2", degraded: true, legacy_skins: 1 }, panorama: false } as never)).toThrow("source");
   });
 
   it("只有材质源版本或全景可用性真正变化时才清缓存", () => {
@@ -165,12 +177,14 @@ describe("材质状态", () => {
     const off = onArtInvalidated(invalidate);
     setArtStatus({ source: null, panorama: false });
     expect(invalidate).toHaveBeenCalledTimes(0);
-    setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
-    setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
+    setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
+    setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: false });
     expect(invalidate).toHaveBeenCalledTimes(1);
-    setArtStatus({ source: { versionId: "1.21.1" }, panorama: true });
-    setArtStatus({ source: { versionId: "1.20.1" }, panorama: true });
+    setArtStatus({ source: { versionId: "1.21.1", degraded: false, legacySkins: false }, panorama: true });
+    setArtStatus({ source: { versionId: "1.20.1", degraded: false, legacySkins: false }, panorama: true });
     expect(invalidate).toHaveBeenCalledTimes(3);
+    setArtStatus({ source: { versionId: "1.20.1", degraded: false, legacySkins: true }, panorama: true });
+    expect(invalidate).toHaveBeenCalledTimes(4);
     off();
   });
 });
