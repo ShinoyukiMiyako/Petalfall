@@ -207,6 +207,12 @@ jobs:
             echo "::error::Petalfall.exe 里没有内嵌 CurseForge API key"
             exit 1
           fi
+          # aws-lc 的 CPU 抖动熵源初始化失败会直接终止进程，.cargo/config.toml 把它关了。它编进来时 exe 会导出一组
+          # 名字里带 jent_ 的函数；配置没生效、被带目标后缀的同名变量盖掉、或依赖升级后开关换了名字，都只有在 exe 里找才知道
+          if grep -qF -e "jent_entropy_collector_alloc" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
+            echo "::error::Petalfall.exe 里编进了 aws-lc 的 CPU 抖动熵源"
+            exit 1
+          fi
           installer="$bundle_dir/nsis/Petalfall_${VERSION}_x64-setup.exe"
           test -f "$installer"
           echo "installer=$installer" >> "$GITHUB_OUTPUT"

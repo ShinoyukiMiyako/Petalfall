@@ -350,6 +350,14 @@ mod tests {
         assert_eq!(network_failure(&io), None);
     }
 
+    // 少了这个变量，aws-lc 会把 CPU 抖动熵源编进来：它初始化失败时直接终止进程，第一条 HTTPS 连接就可能带走整个启动器。
+    // 变量由仓库根的 .cargo/config.toml 设给编译，这条只守那份配置还在、这次 cargo 调用读到了它：在仓库目录之外调用
+    // cargo 读不到，同样会挂。编出来的程序里到底有没有抖动熵源，由发布流水线打包后在 exe 里核对。
+    #[test]
+    fn cargo_config_turns_off_aws_lc_cpu_jitter_entropy() {
+        assert_eq!(option_env!("AWS_LC_SYS_NO_JITTER_ENTROPY"), Some("1"));
+    }
+
     #[test]
     fn default_user_agent_has_brand_prefix() {
         assert!(USER_AGENT.starts_with("Petalfall/"));

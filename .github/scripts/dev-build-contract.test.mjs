@@ -64,6 +64,31 @@ const INJECT_STEP = [
   '          "',
 ];
 
+// 打包那一步的脚本全文（不含 shell 注释）。打包后的几条核对都写在这一步里，只找那几行拦不住同类写法：把它包进一个
+// 从不调用的函数，或在前面插一句 exit 0，核对就不再执行。和注入那一步一样逐行钉死。
+const PETALFALL_EXE = '"$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"';
+const BUNDLE_SCRIPT = [
+  'bundle_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/bundle"',
+  'rm -rf "$bundle_dir"',
+  BUILD_COMMAND,
+  `if ! grep -qF -e "$PETALFALL_MSA_CLIENT_ID" -- ${PETALFALL_EXE}; then`,
+  'echo "::error::Petalfall.exe 里没有内嵌微软登录 client_id"',
+  'exit 1',
+  'fi',
+  `if ! grep -qF -e "$PETALFALL_CURSEFORGE_API_KEY" -- ${PETALFALL_EXE}; then`,
+  'echo "::error::Petalfall.exe 里没有内嵌 CurseForge API key"',
+  'exit 1',
+  'fi',
+  `if grep -qF -e "jent_entropy_collector_alloc" -- ${PETALFALL_EXE}; then`,
+  'echo "::error::Petalfall.exe 里编进了 aws-lc 的 CPU 抖动熵源"',
+  'exit 1',
+  'fi',
+  'installer="$bundle_dir/nsis/Petalfall_${VERSION}_x64-setup.exe"',
+  'test -f "$installer"',
+  'echo "installer=$installer" >> "$GITHUB_OUTPUT"',
+  'echo "installer-name=$(basename "$installer")" >> "$GITHUB_OUTPUT"',
+];
+
 // release-heads 检出之后的四步全文。同样的道理：命令后面接 || true、多一个 if，检查就不再挡构建，
 // 违反版本先后的包照样发出去；dev 每次推送都发布，模式只能是 release。版本号的公式也钉在这里，build 不再自己算。
 const RELEASE_HEADS_STEPS = [
@@ -323,6 +348,21 @@ describe('dev 构建工作流的契约', () => {
       script.slice(0, 3),
       ['bundle_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/bundle"', 'rm -rf "$bundle_dir"', BUILD_COMMAND],
       '打包那一步在 pnpm tauri build 之前多做了别的事',
+    );
+  });
+
+  // 少了内嵌凭据的包登录不了、搜不了 CurseForge；带着 CPU 抖动熵源的包，aws-lc 初始化它失败时直接终止进程。
+  // 这几条都只有在打出来的 exe 里找才知道，查不到（或查到了不该有的）就不能发给 dev 用户；这一步多一个 if 或
+  // continue-on-error 就等于没查。
+  it('打包后在 Petalfall.exe 里核对内嵌的凭据，并核对没有编进 CPU 抖动熵源', () => {
+    const bundle = steps('build').find((step) => codeOf(step).includes(BUILD_COMMAND));
+    assert.notEqual(bundle, undefined, `build 作业里找不到打包启动器的那一步：${BUILD_COMMAND}`);
+    assert.deepEqual(stepKeys(bundle), ['name: 构建 Windows 安装包', 'id: bundle', 'working-directory: app', 'env:', 'run: |']);
+    assert.deepEqual(blockOf(bundle, 8, 'env'), ['VERSION: ${{ steps.version.outputs.version }}']);
+    assert.deepEqual(
+      codeOf(bundle.filter((line) => line.kind === 'content')),
+      BUNDLE_SCRIPT,
+      '打包那一步的脚本变了，exe 里的核对可能不再执行',
     );
   });
 
