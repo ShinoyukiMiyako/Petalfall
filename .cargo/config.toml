@@ -1,0 +1,12 @@
+# rustls 用的加密库 aws-lc（reqwest 经 aws-lc-rs 带进来）默认在进程里第一次取随机数时初始化 CPU 抖动熵源，初始化失败不返回
+# 错误，直接 abort：启动器整个进程消失，不留日志。实测在虚拟机里，同意使用须知后的第一条 HTTPS 连接上多次这样退出；
+# 上游的同类报告见 https://github.com/aws/aws-lc-rs/issues/1072 ，那里给的规避办法就是这个构建开关。
+# 关掉后 aws-lc 用操作系统的随机数源做种子（CPU 支持时另加 RDRAND），抖动熵源不再编进程序。
+# 等 aws-lc 自己能从这种失败里恢复（https://github.com/aws/aws-lc/pull/3631 ）并随 aws-lc-sys 发布之后，可以去掉。
+#
+# force 让它盖过外面已经设着的同名变量。两种情况它管不到：cargo 只从当前目录往上找这份配置，在仓库目录之外调用 cargo
+# 读不到它；aws-lc-sys 还认带目标后缀的同名变量，那个优先。所以两条发布流水线打包后都在 Petalfall.exe 里核对
+# 抖动熵源确实没编进去：认的是导出表里的 jent_entropy_collector_alloc。升级 aws-lc-sys 时，要拿一份开着抖动熵源的
+# 构建确认这个名字还找得到，否则那条核对会一直放行。
+[env]
+AWS_LC_SYS_NO_JITTER_ENTROPY = { value = "1", force = true }
