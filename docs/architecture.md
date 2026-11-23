@@ -467,6 +467,64 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 发版前可以在 dev 分支上手动跑 `.github/workflows/dist-trial.yml` 空跑分发链路：用同一套脚本往三个桶各传一个 1 MiB 的随机文件（放在 `dev/trial-<运行号>-<运行次数>/` 下，即 `GITHUB_RUN_ID` 与 `GITHUB_RUN_ATTEMPT`：重跑时运行号不变，`dev/` 下的对象又不能覆盖；随 `dev/` 前缀 30 天后删掉）并读回，再把香港机上现有的 dev 清单原样重推一次（字节相同，`put-manifest` 视为无变化），验凭据、跨境上传和香港机的 22 端口，不改客户端会读到的任何内容。香港机上还没有 dev 清单时（装好香港机之后、第一次 `publish-hk` 成功之前，正是发版前最想试跑的时候），重推这一步读到 404 只打一条 notice 就跳过，整个试跑照样显示成功：`HK_MANIFEST_SSH_KEY`、香港机 `authorized_keys` 里的强制命令、钉住的主机公钥和 22 端口都没验到，要等第一次 `publish-hk` 才第一次用上，那时 GitHub 预发布已经重建。
 
+### 发出后不能改的格式
+
+装在用户电脑上的落樱只按它发出时的规则取清单、验签、收更新包、拉起安装程序，也只按那时的规则读本机留下的记录。下面这些格式一改，已装的版本就收不到更新、装不上更新包或者读不了数据，只能让用户手动重装，所以只能由以后的发布去迁就已发出的包：要么不动，要么只做已装的版本会忽略的加法。规则本身多半已在上文与「磁盘布局」里，这里按不能动与只能加归拢，写明改之前看哪条测试；没有测试钉住的也照实写出。
+
+**版本号。** 形如 `X.Y.Z`、`X.Y.Z-dev.N`、`X.Y.Z-beta.N`，先后一律按标准 semver（`petalfall-release` 的 `order`，见「自更新的清单与下载源」开头）。已发出的启动器与引导程序按这套规则认通道，它们与更新插件都按 semver 比新旧，换一种比法就和它们各判各的；新的预发布标识它们一律认不出，带它的包判为 `unknown_channel`，放进哪份清单都过不了清单头核验。几处实现按共用版本向量对拍，见「测试与守卫」。
+
+**清单的地址。**
+
+- 三个香港机端点（`commands/updater.rs` 的 `PRIMARY_ENDPOINT`、`BETA_ENDPOINT`、`DEV_ENDPOINT`）的域名、路径与 https 不改；dev 在 GitHub 上的那份，tag 名 `dev-build`（`DEV_RELEASE_TAG`）与文件名 `latest.json` 不改：每个包只问编进去的这几个地址。`commands/updater.rs` 的用例 `endpoints_are_https_on_brand_domains`、`dev_endpoint_is_where_ci_uploads_the_manifest` 把它们钉成字面量，`release-heads.test.mjs` 另读这几个常量。
+- 「还没有发布」只用 404 表示：一个通道的端点全都答 404 才算没有发布、不算失败（见「自更新的清单与下载源」的端点与通道的结果）。要撤下一个通道的版本，就让它的清单地址回 404；还没有发布的通道（正式版首发之前的 stable，偏好预览版、测试版的包每次检查都问它）也一直回 404。回 403、503、204 或一张网页时，偏好这个通道的用户检查失败，两条流水线的 `release-heads.mjs read` 也让构建失败。也不拿更低版本的清单顶替：见过更高版本的客户端判这个通道为 `stale`，偏好它的报 `update_source_stale`。
+
+**清单的格式。** 清单由更新插件解析。已发出的包里有插件 2.10.1 与 2.12.0 两个版本，下面前四条两者相同（插件 `updater.rs` 里 `RemoteRelease` 的反序列化与 `get_urls`），违反了，读到这份清单的已装版本就整份解析失败或整次检查报错：
+
+- 顶层只写 `version`、`notes`、`pub_date`、`platforms`。`name` 是 `version` 的别名，两个同时出现整份作废；顶层的 `url`、`signature` 是没有 `platforms` 时的单平台写法。这三个键都不往顶层加。
+- `notes` 只写字符串或 `null`；`pub_date` 可以不写，写了就必须是合法的 RFC 3339（CI 怎么写、怎么查见上文 dev 发布链路的第 5 步）。
+- `platforms` 里的每一条，别的平台的也算，都要有合法的 `url` 与字符串 `signature`。
+- 每一份会被读到的清单都要有 `windows-x86_64` 条目：插件不管版本新旧都要找本平台的条目，找不到整次检查报错；启动器核验清单头时（`commands/updater.rs` 的 `manifest_signature`）照同样的顺序找。偏好预览版、测试版的包每次都问更慢通道的清单，将来的正式版清单同样要带它。
+- 不加 `windows-x86_64-nsis` 条目，真要加就与 `windows-x86_64` 写同一个 `url` 与 `signature`：插件与 `manifest_signature` 都先找它，CI（`dev-distribution.mjs`、`release-heads.mjs`）只写、只读 `windows-x86_64`。
+- 新内容只放进 `x-` 开头的键：插件的清单结构收下多余的键不报错，不带前缀的键却可能撞上插件已有的字段（顶层的 `name`、`url`、`signature` 就是）。以后的客户端读新键时照 `x-sources` 的先例，缺这个键就按加键之前的行为走（`listed_sources` 对缺失的 `x-sources` 只记 info）：已发出的清单都没有它。`dev-distribution.mjs` 的 `validate` 要求键集合一字不差，加键时先改它。数据格式号不进清单（见「数据格式号」）。
+- `x-sources`、`x-size` 照上文「读扩展字段」的读法写：只写在插件选中的那个平台条目里；`x-sources` 的源名只用四个之一，不超过 6 条（`MAX_SOURCES`，多出的已发出的版本不看）。`x-size` 是下载时的字节上限，不能小于更新包的真实大小：写小了，读它的客户端在每个源上都以 `too_large` 失败。
+- 每份清单只放本通道的版本（见「自更新的清单与下载源」的清单头核验第 1 条）；dev 的两份清单字节相同，`url` 等于 `github` 源（见上文）。
+
+**签名与公钥。**
+
+- 签名照「自更新的清单与下载源」的清单头核验与「装配与状态」的启动器更新一条：CI 用 `tauri signer sign --app-version` 签，签进可信注释的版本与清单的 `version` 逐字相同，可信注释里恰好一个 `version:` 字段；`requireSignedVersion` 为 true，不打开 `allowDowngrades`。签名之后 `.github/scripts/verify-update-signature.mjs` 按这几条硬查，`dev-build-contract.test.mjs` 与 `beta-release-contract.test.mjs` 钉住签名命令带 `--app-version`。升级 `app/pnpm-lock.yaml` 里锁定的 `@tauri-apps/cli` 时，先确认这一步照样通过。
+- 两把公钥（`.github/dev-updater.pub`、`.github/release-updater.pub`）不换：已装的版本只认编进去的那一把，签名行的密钥号必须等于它。密钥号由 `update_head.rs` 的 `key_ids_of_the_shipped_and_test_public_keys` 与上面两份契约测试钉住。
+- 正式版与测试版共用发布钥：偏好预览版、测试版的包问 stable 清单时用发布钥验（`channel_pubkey` 给 beta 与 stable 的是同一把），将来正式版的清单与安装包也要用这把钥签；另起一把的话，已发出的包都跟不上正式版。
+
+**下载源。**
+
+- 现有四个源名与它们的主机不删、不改（`commands/update_sources.rs` 的 `ALLOWED_SOURCE_HOSTS`、`SOURCE_REGIONS` 编在每个包里）：已发出的版本跳过认不得的源名与主机，`github` 源还只认编进去的仓库前缀（见上文）。以后的清单至少要留一个它们认得的源，否则这些版本下不了包；新增的源名只对认得它的新包有用。源表有三份，一起改（见上文）。
+- 更新包不超过 256 MiB（`MAX_PACKAGE_SIZE`）。这个硬上限编在每个已发出的版本里、与清单无关，调大只对新包生效；包超过它时，已发出的版本在每个源上都以 `too_large` 失败。
+
+**更新包。**
+
+- 更新包永远是带 `PFSETUP2` 载荷头的引导程序，不换成单独的 NSIS 包、MSI 或别的形态：启动器下载验签之后读载荷头（`commands/update_package.rs` 的 `judge_package`），读不出就报 `update_signature_invalid`，不带数据格式号的旧头按 0 算（见上文「下载验签之后读包头」）。头里的版本与清单的 `version` 按 semver 相等，不超过 48 字节（版本字段定长，`pack-setup` 写不下时报错）。
+- 头的格式只能加能力位：magic、各字段的偏移、144 字节的头长与 `caps` 第 0 位（`CAP_CHANNEL_SWITCH`）的含义都不改。不发 `PFSETUP3`：已发出的版本认不得新 magic，读头失败。新增的能力只占 `caps` 里还没定义的位，读者忽略认不得的位；读者按 magic 定头长，magic 不变时加长的部分已发出的版本看不到。偏移由 `petalfall-setup-payload` 的编译期断言钉住，启动器怎么读头由 `update_package.rs` 的用例钉住（`a_v1_package_counts_as_format_zero`、`header_versions_match_like_signed_versions` 等）。
+
+**安装程序的命令行。**
+
+- 以后每一版引导程序都要认更新插件 2.12.0 与 2.10.1 的两种拼法，`/ARGS` 之后的参数原样带回启动器（见「装配与状态」的启动器更新一条）：用旧插件的已装版本照样会拉起新包。`app/src-tauri-setup/src/cli.rs` 的用例钉住两种（`relaunch_after_update_is_recognised_like_the_old_order` 等）。
+- `/CHANNELSWITCH` 的名字与规则（不带值、整个记号相等才算、只认 `/ARGS` 之前的、只在带 `/UPDATE` 时生效）不改：换到更慢的通道时要拉起的是那个通道上版本更低的包，多半是更早发出的引导程序，它们都按这套规则认它。`cli.rs` 里名字带 `channel_switch` 的用例钉住这几条。
+- 检查器不配 `installer_args`、不关装完重开，`tauri.conf.json` 与流水线的公钥注入行不出现 `installerArgs`（见「装配与状态」的启动器更新一条，由 `commands/updater.rs` 的单测与 `release-heads.test.mjs` 钉住）。
+
+**单实例与安装身份。**
+
+- 单实例的事件名不改：启动器的占位名与应答名见上文 `single_instance.rs` 一行（`event_name`、`answer_name`），引导程序是 `Local\Petalfall-Setup`（`boot.rs` 的 `INSTANCE_EVENT`）。不同版本之间靠同一个名字互斥：启动器的名字换了，新旧两个版本就可能在同一个数据目录上同时运行、同时写一份数据。换用别的单实例实现也要沿用这两个名字。引导程序的名字由 `the_real_event_name_is_in_the_session_namespace` 钉成字面量，启动器的占位名与应答名由 `the_name_is_spelled_the_way_released_versions_spell_it` 钉成字面量。
+- 卸载项与安装身份不改：卸载项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Petalfall` 与其中的 `InstallLocation`、`DisplayVersion`，记安装目录的 `Software\Shinoyuki_Miyako\Petalfall` 与 dev.10 及更早的包写的 `Software\petalfall\Petalfall`，主程序名 `Petalfall.exe`，以及拼出这些名字的 `productName`、`mainBinaryName`、`publisher`、`identifier` 与 currentUser 安装模式。引导程序凭卸载项与目录键认出已装的版本和目录，凭 `Petalfall.exe` 认程序文件、判断落樱开着没有（`existing.rs`、`launcher.rs`）；卸载项改了，它就找不到已装的版本，按首装处理。引导程序的 `registry_paths_match_what_the_nsis_template_writes`、启动器的 `product_name_is_consistent_across_config_html_and_frontend` 与 `app/scripts/build-target.test.ts` 连起来钉住这些值，安装模式由 `installer-hooks.nsh` 在编译期检查。卸载项与目录键实际由 Tauri CLI 内嵌的 NSIS 模板写，这些用例只钉得住仓库这一侧：升级 `@tauri-apps/cli` 时要对照新模板核对一遍。
+
+**本机的数据与记录。**
+
+- 数据目录的选法：启动器（`petalfall-base` 的 `choose_data_root`）与引导程序（`app/src-tauri-setup/src/datamark.rs`）各一份，两边一起改、不单边改（见「数据目录」与「数据格式号」的四处把关）。已发出的引导程序那一份改不了，启动器单边换了规则，它们就会读错数据目录、漏看记号。`datamark.rs` 的 `the_data_gate_keeps_the_registered_dir_exactly_where_the_launcher_does` 按几类目录核对两边的结论。
+- 数据格式号：只升不降、不跳号，`DATA_FORMAT` 那一行的写法固定，加号的提交只随 dev 整体晋级，关卡不给「仍然打开」、不自动重置，引导程序从不写记号，都见「数据格式号」。记号的文件名与两处位置、没有记号算 1、不带号的旧包算 0 是已发出的版本的读法，不改；记号只能加键（`STAMP_FILE` 由 `stamp_file_name_is_fixed` 钉住）。
+- 换通道交接记录 `%LOCALAPPDATA%\Petalfall-Setup\channel-handoff.json`（格式见「自更新的清单与下载源」的通道偏好与交接记录）：位置与 `channel`、`version`、`written_at` 三个键的名字和含义不改，`channel` 的取值就是通道名；只能加键，读的一方忽略多出来的键。`petalfall-release` 的 `handoff.rs` 的用例 `file_location_is_fixed`、`writes_exactly_the_three_keys`、`extra_keys_are_ignored` 钉住这几条，引导程序的 `the_handoff_lands_where_the_launcher_looks_for_it` 核对两边拼出的目录相同。
+- 半装记录 `%LOCALAPPDATA%\Petalfall-Setup\journal.json`：引导程序下次运行时读它认出上次没装完的安装，下次运行的可能是别的版本。现有五个键 `instdir`、`was_fresh`、`version`、`payload_pid`、`started_at` 不改名、不删、不改类型，只能加带 `#[serde(default)]` 的可选字段：加一个不带默认值的字段，已发出的引导程序留下的记录就读不出，被当成读不懂删掉，认不出上次的半装（`journal.rs` 的 `a_switch_install_writes_the_same_five_fields`）。
+- `config.json` 的 `update_channel` 与 `seen_update_versions`：键名、取值与形状不改，按原样的 JSON 值收下、不登记 `ENUM_FIELDS`，启动时不顺手写偏好（见「自更新的清单与下载源」的通道偏好与交接记录、见过的最高版本）。
+- 凭据库 `credentials.bin` 的 DPAPI 参数（按当前用户加密、不带 entropy，`petalfall-auth` 的 `dpapi.rs`）不改：已发出的版本解不开换了参数加密的凭据库，会把它改名留存（见「启动提示」），这台电脑上的账户都要重新登录。这是号更低的版本读不了的改动，按「数据格式号」的规则处理；快照比对的是加密之前的明文，抓不到它。
+
 ## IPC 约定
 
 ### 命令
