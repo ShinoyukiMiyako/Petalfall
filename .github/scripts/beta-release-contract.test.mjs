@@ -57,7 +57,8 @@ const INJECT_STEP = [
 ];
 
 // 打包那一步的脚本全文（不含 shell 注释）。只找那几行 grep 拦不住同类写法：把它包进一个从不调用的函数，或在前面
-// 插一句 exit 0，exe 里的地址就不再核对，只改客户端地址的情况照样打包成功。和注入那一步一样逐行钉死。
+// 插一句 exit 0，exe 里的地址就不再核对，只改客户端地址的情况照样打包成功；带着 CPU 抖动熵源的包（aws-lc 初始化它
+// 失败时直接终止进程）也照样放行。和注入那一步一样逐行钉死。
 const BUNDLE_SCRIPT = [
   'bundle_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/bundle"',
   BUILD_COMMAND,
@@ -71,6 +72,10 @@ const BUNDLE_SCRIPT = [
   'fi',
   `if ! grep -qF -e "$BETA_MANIFEST_URL" -- ${PETALFALL_EXE}; then`,
   'echo "::error::Petalfall.exe 里没有测试版的更新清单地址 $BETA_MANIFEST_URL"',
+  'exit 1',
+  'fi',
+  `if grep -qF -e "jent_entropy_collector_alloc" -- ${PETALFALL_EXE}; then`,
+  'echo "::error::Petalfall.exe 里编进了 aws-lc 的 CPU 抖动熵源"',
   'exit 1',
   'fi',
   'installer="$bundle_dir/nsis/Petalfall_${VERSION}_x64-setup.exe"',
@@ -218,8 +223,8 @@ describe('beta 发布工作流的契约', () => {
     assert.deepEqual(script.slice(0, 2), ['bundle_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/bundle"', BUILD_COMMAND]);
   });
 
-  // 地址核对写在打包那一步里，这一步多一个 if 或 continue-on-error 就等于没查；env 也逐项钉住，免得在这里改写配置。
-  it('打包后在 Petalfall.exe 里核对测试版清单地址，查不到就失败', () => {
+  // 这几条核对都写在打包那一步里，这一步多一个 if 或 continue-on-error 就等于没查；env 也逐项钉住，免得在这里改写配置。
+  it('打包后在 Petalfall.exe 里核对测试版清单地址，并核对没有编进 CPU 抖动熵源', () => {
     const bundle = steps(LINES, 'build').find((step) => codeOf(step).includes(BUILD_COMMAND));
     assert.notEqual(bundle, undefined, `build 作业里找不到打包启动器的那一步：${BUILD_COMMAND}`);
     assert.deepEqual(stepKeys(bundle), ['name: 构建 Windows 安装包', 'id: bundle', 'working-directory: app', 'env:', 'run: |']);
