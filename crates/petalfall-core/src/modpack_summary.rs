@@ -93,7 +93,8 @@ impl Petalfall {
     /// 平台上某个整合包版本的清单摘要，不下载整包。服务器不支持范围读取、包不是可读的 zip
     /// 或缺清单时报 [`CoreError::RemotePack`]，清单本身不合法或压缩方式解不开时报 [`CoreError::Modpack`]。
     ///
-    /// 包本体不允许启动器直接下载时，认领过就读暂存副本（导入读的也是它），没认领过报
+    /// 包本体不允许启动器直接下载时，设置 `download_restricted_curseforge_files` 打开、拼出的地址能下就照常
+    /// 范围读它；拿不到能下的地址时，认领过就读暂存副本（导入读的也是它），没认领过报
     /// [`CoreError::FileDistributionBlocked`]，清单里只有这个包，用户在安装前就能手动下载。
     pub async fn summarize_platform_modpack(
         &self,
@@ -112,7 +113,7 @@ impl Petalfall {
                 return self.summarize_staged_pack(&staged).await;
             }
         };
-        // CurseForge 的包本体在 forgecdn 上，范围读取与导入时的下载一样要带下载密钥。
+        // 范围读取与导入时的下载同一做法：平台给出的地址带下载密钥，拼出的地址任务不挂凭据、也就不带。
         let reader = match &task.credential {
             Some(credential) => RangeClient::Credentialed {
                 client: self.http_manual(),
@@ -481,7 +482,7 @@ async fn read_entry(http: &RangeClient, url: &str, entry: &CentralEntry) -> Resu
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::instances::tests::petalfall_at;
     use std::io::Write;
@@ -526,6 +527,73 @@ mod tests {
                 )
                 .set_body_bytes(&self.body[start..=end])
         }
+    }
+
+    /// 线上 edge.forgecdn.net 的脾气：HEAD 与不带 Range 的 GET 回 302 到 `target`，带 Range 的请求直接 404、
+    /// 不跳转。
+    struct EdgeRedirect {
+        target: String,
+    }
+
+    impl Respond for EdgeRedirect {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            if request.headers.contains_key("range") {
+                return ResponseTemplate::new(404);
+            }
+            ResponseTemplate::new(302).insert_header("location", self.target.as_str())
+        }
+    }
+
+    /// 照线上挂一个假 CDN：拼出的路径 `edge` 只会跳转（见 [`EdgeRedirect`]），跳到同一服务器上的 `media`；
+    /// `media` 对 HEAD 回 200，对 GET 按 Range 回 206 与对应片段、不带 Range 回 200 整个 `body`。
+    pub(crate) async fn mount_edge_cdn(
+        server: &MockServer,
+        edge: &str,
+        media: &str,
+        body: Vec<u8>,
+    ) {
+        Mock::given(path(edge))
+            .respond_with(EdgeRedirect {
+                target: format!("{}{media}", server.uri()),
+            })
+            .mount(server)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path(media))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(media))
+            .respond_with(RangeServer {
+                body: Arc::new(body),
+                ranges: true,
+                served_bytes: Arc::new(AtomicUsize::new(0)),
+            })
+            .mount(server)
+            .await;
+    }
+
+    /// 假 CDN 上 `paths` 收到的请求，按到达顺序：方法、路径、带没带 Range、带没带 x-api-key。
+    pub(crate) async fn cdn_requests(
+        server: &MockServer,
+        paths: &[&str],
+    ) -> Vec<(String, String, bool, bool)> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| paths.contains(&request.url.path()))
+            .map(|request| {
+                (
+                    request.method.as_str().to_owned(),
+                    request.url.path().to_owned(),
+                    request.headers.contains_key("range"),
+                    request.headers.contains_key("x-api-key"),
+                )
+            })
+            .collect()
     }
 
     /// 打一个 .mrpack：清单 + 两个覆盖文件，再塞一大块不会被读到的填充，模拟几十 MB 的包。
@@ -985,9 +1053,10 @@ mod tests {
         let petalfall_modpack::RemoteFiles::CurseForge(refs) = &pack.manifest.remote else {
             panic!("应读出 CurseForge 清单");
         };
-        let remote = crate::modpack::curseforge_remote_facts(&client, refs, BlockedProbe::Skip)
-            .await
-            .unwrap();
+        let remote =
+            crate::modpack::curseforge_remote_facts(&client, refs, BlockedProbe::Skip, false)
+                .await
+                .unwrap();
         let summary = pack.summarize(remote);
 
         assert_eq!(summary.format, PackFormat::CurseForge);
@@ -1007,7 +1076,7 @@ mod tests {
         server.verify().await;
     }
 
-    /// CurseForge 的包本体在 forgecdn 上：摘要的每个范围请求都带下载密钥（CDN 只认带密钥的请求），
+    /// CurseForge 平台给出的包本体地址在 forgecdn 上：摘要的每个范围请求与导入时的下载一样带下载密钥，
     /// CDN 拒绝密钥时报密钥被拒、只请求一次，不当作普通的读取失败。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn curseforge_summary_range_reads_carry_the_download_key() {
@@ -1114,6 +1183,130 @@ mod tests {
             "{download:?}"
         );
         server.verify().await;
+    }
+
+    /// 包本体受限（文件对象不给地址、download-url 端点 403）：设置关着时照旧报受限、清单里只有这个包，假 CDN
+    /// 一次都没被请求。设置开着时摘要成功，范围读取全打在探测交回的跳转终点上：假 CDN 照线上的脾气，拼出的
+    /// 地址只会跳转、对带 Range 的请求回 404，拿它去范围读摘要就会失败。CDN 上的请求一个都不带 x-api-key，
+    /// 凭据作用域也指着这个假服务器，任务误挂了凭据就会被看见。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restricted_curseforge_pack_is_summarized_from_the_redirect_target() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        let pack = curseforge_zip(&curseforge_manifest());
+        let total = pack.len();
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/394468/files/4712000"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 4_712_000, "modId": 394468, "displayName": "All of Create",
+                    "fileName": "pack.zip", "hashes": [], "fileLength": total,
+                    "downloadUrl": null, "gameVersions": ["1.20.1"]
+                }})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/394468/files/4712000/download-url"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/394468"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 394468, "name": "All of Create", "slug": "all-of-create", "summary": "",
+                    "classId": 4471,
+                    "links": {"websiteUrl": "https://www.curseforge.com/minecraft/modpacks/all-of-create"}
+                }})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    curseforge_file(4_712_001, 328085, "create-0.5.1.jar", 13_000_000),
+                    curseforge_file(4_712_002, 306612, "jei-15.2.jar", 1_250_000),
+                    curseforge_file(4_712_003, 457570, "create-textures.zip", 8_000_000),
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                { "id": 328085, "name": "Create", "slug": "create", "summary": "", "classId": 6 },
+                { "id": 306612, "name": "JEI", "slug": "jei", "summary": "", "classId": 6 },
+                { "id": 457570, "name": "Textures", "slug": "textures", "summary": "", "classId": 12 }
+            ]})))
+            .mount(&server)
+            .await;
+        // 编号 4712000 拼出 4712/0：余数为 0 也不补零。
+        let edge = "/files/4712/0/pack.zip";
+        let media = "/mediafilez/files/4712/0/pack.zip";
+        mount_edge_cdn(&server, edge, media, pack).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let port = server.address().port();
+        let mut petalfall = petalfall_at(tmp.path())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k")
+            .with_curseforge_cdn_base(&uri)
+            .with_curseforge_cdn_scope(petalfall_download::CredentialScope::new(
+                [format!("127.0.0.1:{port}")],
+                false,
+            ));
+
+        let err = petalfall
+            .summarize_platform_modpack(Platform::CurseForge, "394468", "4712000")
+            .await
+            .unwrap_err();
+        let CoreError::FileDistributionBlocked { files } = &err else {
+            panic!("设置关着应报受限：{err:?}");
+        };
+        assert_eq!(
+            files
+                .iter()
+                .map(|f| (f.project_id, f.file_id, f.destination.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(394468, 4_712_000, "pack.zip")]
+        );
+        assert_eq!(
+            cdn_requests(&server, &[edge, media]).await,
+            Vec::<(String, String, bool, bool)>::new(),
+            "设置关着时不探测、不读"
+        );
+
+        petalfall.set_download_restricted_curseforge_files(true);
+        let summary = petalfall
+            .summarize_platform_modpack(Platform::CurseForge, "394468", "4712000")
+            .await
+            .unwrap();
+
+        assert_eq!(summary.format, PackFormat::CurseForge);
+        assert_eq!(summary.name, "All of Create");
+        assert_eq!(summary.version.as_deref(), Some("2.1"));
+        assert_eq!(summary.minecraft, "1.20.1");
+        assert_eq!(summary.pack_bytes, total as u64);
+        assert_eq!((summary.remote_files, summary.mod_files), (3, 3));
+        assert_eq!(summary.remote_bytes, Some(22_250_000));
+        assert_eq!(
+            (summary.override_files, summary.override_bytes),
+            (3, 120 + 30 + 6)
+        );
+        let get = |range: bool| ("GET".to_owned(), media.to_owned(), range, false);
+        assert_eq!(
+            cdn_requests(&server, &[edge, media]).await,
+            vec![
+                ("HEAD".to_owned(), edge.to_owned(), false, false),
+                ("HEAD".to_owned(), media.to_owned(), false, false),
+                get(true),
+                get(true),
+                get(true),
+                get(true),
+            ],
+            "拼出的地址只收到探测那一个 HEAD；总长、包尾、清单条目的本地头、清单数据四次范围读取都打在终点上"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

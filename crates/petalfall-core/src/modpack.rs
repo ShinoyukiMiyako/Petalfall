@@ -4,8 +4,8 @@
 //! 导入总是新建一个实例目录 `versions/<实例名>/`，按顺序：
 //!
 //! 1. 读清单、去掉用户选择跳过的可选文件、校验实例名并查重；CurseForge 包先把全部文件 id 换成下载
-//!    地址——有作者禁止第三方分发、用户也还没手动下载认领的文件就在这一步整体报错，不先装几百 MB 游戏再
-//!    告诉用户装不完。这一步不动游戏目录（[`Petalfall::prepare_modpack`]），调用方可以在这之后占住实例名再往下走。
+//!    地址——有作者禁止第三方分发、（设置打开时）拼出的地址也下不了、用户也还没手动下载认领的文件就在这
+//!    一步整体报错，不先装几百 MB 游戏再告诉用户装不完。这一步不动游戏目录（[`Petalfall::prepare_modpack`]），调用方可以在这之后占住实例名再往下走。
 //! 2. 核对游戏目录的数据格式记号，原子地建目录（同名即报错），写下带任务 id 的未完成标记
 //!    （[`Petalfall::import_modpack`] 从这里开始）。
 //! 3. 装整合包要求的原版与加载器（与「安装版本」同一条路径，落在它们自然的版本目录里）。这次新落下的目录
@@ -44,7 +44,7 @@ use crate::facade::Petalfall;
 use crate::install::LoaderChoice;
 use crate::instance_install::{MarkerSettlement, now_millis, template_stage};
 use crate::resources::{
-    curseforge_download_url, is_safe_file_name, join_landing, task_for_file_url,
+    curseforge_fallback_url, is_safe_file_name, join_landing, task_for_file_url,
 };
 
 /// 实例目录里的整合包信息文件名（在启动器元数据目录下）。
@@ -101,7 +101,8 @@ pub struct ModpackPreview {
     pub mods: Vec<PackModEntry>,
     /// 不直接落进 `mods/` 的可选远程文件（资源包、光影、配置等），排序同上。
     pub optional_extras: Vec<PackModEntry>,
-    /// 作者不允许启动器直接下载、暂存位里也还没有校验通过的副本的文件：导入前要用户手动下载。
+    /// 作者不允许启动器直接下载、（设置打开时）拼出的 CDN 地址也下不了、暂存位里也还没有校验通过的副本的
+    /// 文件：导入前要用户手动下载。
     pub blocked_files: Vec<BlockedFile>,
 }
 
@@ -357,9 +358,10 @@ impl Petalfall {
     /// 预览本地整合包文件：只读清单与条目表，不解压。CurseForge 清单有远程文件时要问两个批量接口才
     /// 数得出 Mod、算得出下载量（导入同样要问），没配 API key 或断网时与导入报同样的错。
     ///
-    /// CurseForge 包里没给下载地址的文件逐个问 download-url 端点，作者不允许直接下载的列进
+    /// CurseForge 包里没给下载地址的文件逐个问 download-url 端点，设置 `download_restricted_curseforge_files`
+    /// 打开时端点也不给的再拼 CDN 地址探测（能下的导入时直接下载，不列），都拿不到地址的列进
     /// `blocked_files`，暂存位里已有校验通过副本的记为已认领，落点被覆盖层盖住的不用下载、也不列。受限文件
-    /// 不让预览失败：用户要在这一步就看到要手动下载哪些。
+    /// 不让预览失败：用户要在这一步就看到要手动下载哪些；探测本身出错（网络不通、CDN 回 5xx）照常报错。
     pub async fn preview_modpack_file(&self, path: &Path) -> Result<ModpackPreview> {
         let archive = read_pack_blocking(path.to_path_buf()).await?;
         let remote = self
@@ -402,8 +404,10 @@ impl Petalfall {
     }
 
     /// 导入的第一步：拿到整合包（平台整合包先下载到缓存目录）、读清单、去掉 `selection` 里跳过的可选
-    /// 文件、定下实例名并查重，把远程文件换成下载任务（CurseForge 禁止分发、又没认领到副本的文件在这里
-    /// 整体报错，认领到的改为从暂存位复制）。`name` 缺省用整合包自己的名字。
+    /// 文件、定下实例名并查重，把远程文件换成下载任务（CurseForge 禁止分发、落点又没被覆盖层盖住的文件在
+    /// 设置打开时先拼 CDN 地址探测，能下就直接下载；还拿不到、又没认领到副本的文件在这里整体报错，认领到的
+    /// 改为从暂存位复制）。
+    /// `name` 缺省用整合包自己的名字。
     ///
     /// 不动游戏目录。之后交给 [`Petalfall::import_modpack`]，不导入了就 [`PreparedModpack::discard`]。
     pub async fn prepare_modpack(
@@ -890,8 +894,9 @@ impl Petalfall {
     /// 目录每次导入一个、名字带随机后缀：同一个版本同时导入两次时，先结束的一路删目录不能动另一路手里的包。
     /// 代价是下载失败后分片没有下一次来续传，当场连目录删掉。
     ///
-    /// CurseForge 包本体也可能不允许启动器直接下载：这时报的受限清单里只有这个包，用户从网页下载、认领进
-    /// 暂存位后，重新安装直接读暂存副本，不再向 CDN 要，也没有要删的临时目录（暂存副本留给下次用）。
+    /// CurseForge 包本体也可能不允许启动器直接下载。设置 `download_restricted_curseforge_files` 打开、拼出的
+    /// 地址能下时照常下载到缓存目录；拿不到能下的地址时报的受限清单里只有这个包，用户从网页下载、认领进
+    /// 暂存位后，重新安装仍拿不到地址就读暂存副本，没有要删的临时目录（暂存副本留给下次用）。
     async fn download_platform_pack(
         &self,
         platform: Platform,
@@ -945,8 +950,8 @@ impl Petalfall {
         Ok((dest, Some(dir)))
     }
 
-    /// 把清单里的远程文件变成下载任务（落点都在实例目录下）；CurseForge 的受限文件认领到了就从暂存位复制，
-    /// 落点在 `covered`（见 [`override_landings`]）里的不用管。
+    /// 把清单里的远程文件变成下载任务（落点都在实例目录下）；CurseForge 的受限文件拿不到能下的地址时，
+    /// 认领到了就从暂存位复制，落点在 `covered`（见 [`override_landings`]）里的不用管。
     async fn remote_downloads(
         &self,
         remote: &RemoteFiles,
@@ -997,9 +1002,15 @@ impl Petalfall {
         }
     }
 
-    /// CurseForge 清单里的文件 id 换成下载任务：落点按 [`CurseForgeIndex::locate`]，没给下载地址的再问
-    /// download-url 端点，任务都挂上 CDN 下载凭据。作者禁止第三方分发的文件，落点被覆盖层盖住的跳过，暂存位
-    /// 里有校验通过的副本就改为复制；还有没认领到的就汇总成一个错误，只列这些。
+    /// CurseForge 清单里的文件 id 换成下载任务：落点按 [`CurseForgeIndex::locate`]，地址先用文件对象自带的，
+    /// 没给的再问 download-url 端点，这两种任务挂上 CDN 下载凭据。设置 `download_restricted_curseforge_files`
+    /// 打开时，端点也不给、落点又没被覆盖层盖住的再按文件编号与文件名拼出 CDN 地址、探测能下就用（见
+    /// [`curseforge_fallback_url`]），这种任务不挂凭据：作者没把文件开放给第三方分发，不以落樱的 key 去取。
+    ///
+    /// 都拿不到地址的是作者禁止第三方分发的文件：落点被覆盖层盖住的跳过，暂存位里有校验通过的副本就改为复制；
+    /// 还有没认领到的就汇总成一个错误，只列这些。落点被盖住的文件不拼地址、不探测：它导入后反正会被包里自带
+    /// 的那份盖掉，为它探测只会多依赖一次 CDN，探测出错还会让整个导入失败；端点给了地址的被盖住文件照旧下载
+    /// （随后被盖掉）。认领副本排在拼地址之后，所以设置开着时能下的受限文件不再用认领过的副本。
     async fn curseforge_downloads(
         &self,
         client: &CurseForgeClient,
@@ -1009,21 +1020,34 @@ impl Petalfall {
     ) -> Result<RemotePlan> {
         let index = CurseForgeIndex::fetch(client, refs).await?;
         let credential = self.curseforge_credential(client)?;
+        let derive_restricted = self.config().download_restricted_curseforge_files;
         let mut plan = RemotePlan::default();
         let mut blocked = Vec::new();
+        // 逐个串行地要地址就够了：没给地址的只有作者禁止第三方分发的那几个文件，每个多一次端点请求、
+        // 设置开着时再多一次 HEAD，并发省不下多少时间。
         for reference in refs {
             let (file, sub) = index.locate(reference)?;
             let dest = version_dir.join(sub).join(&file.file_name);
             let task = match file.to_download_task(&dest) {
-                Some(task) => task,
+                Some(task) => task.with_credential(credential.clone()),
                 None => {
-                    match curseforge_download_url(client, reference.project_id, reference.file_id)
-                        .await?
+                    let landing_covered =
+                        covered.contains(&join_landing(sub, &file.file_name).to_lowercase());
+                    match curseforge_fallback_url(
+                        client,
+                        reference.project_id,
+                        reference.file_id,
+                        &file.file_name,
+                        derive_restricted && !landing_covered,
+                    )
+                    .await?
                     {
-                        Some(url) => task_for_file_url(url, &dest, file),
+                        Some(url) => {
+                            url.into_task(|url| task_for_file_url(url, &dest, file), &credential)
+                        }
                         None => {
                             let item = index.blocked(reference, file, sub)?;
-                            if covered.contains(&item.destination.to_lowercase()) {
+                            if landing_covered {
                                 continue;
                             }
                             match self.claimed_copy(&item).await? {
@@ -1036,7 +1060,7 @@ impl Petalfall {
                 }
             };
             plan.downloads.push(RemoteDownload {
-                task: task.with_credential(credential.clone()),
+                task,
                 fallbacks: Vec::new(),
             });
         }
@@ -1047,7 +1071,9 @@ impl Petalfall {
     }
 
     /// 远程文件的落点与总字节数。Modrinth 清单自带；CurseForge 要多问两个批量接口，没配 API key 时
-    /// 与导入一样报 key 缺失（该源被禁用），没有远程文件时不问。`probe` 决定要不要逐个探出受限文件。
+    /// 与导入一样报 key 缺失（该源被禁用），没有远程文件时不问。`probe` 决定要不要逐个探出受限文件；探的时候
+    /// 按设置 `download_restricted_curseforge_files` 决定要不要再拼 CDN 地址探测，与导入同一口径（落点被
+    /// 覆盖层盖住的文件除外，见 [`curseforge_remote_facts`]）。
     pub(crate) async fn remote_facts(
         &self,
         remote: &RemoteFiles,
@@ -1072,7 +1098,13 @@ impl Petalfall {
                 bytes: Some(0),
             }),
             RemoteFiles::CurseForge(refs) => {
-                curseforge_remote_facts(&self.curseforge_client()?, refs, probe).await
+                curseforge_remote_facts(
+                    &self.curseforge_client()?,
+                    refs,
+                    probe,
+                    self.config().download_restricted_curseforge_files,
+                )
+                .await
             }
         }
     }
@@ -1125,9 +1157,9 @@ fn on_cdn(scope: &CredentialScope, url: &str) -> bool {
 }
 
 /// Modrinth 清单文件要用的 CDN 凭据。别的启动器导出的 .mrpack 会把 CurseForge 上的 Mod 写成 forgecdn 地址，
-/// 这类地址与平台下载一样不带 key 就回 401；清单里没有这类地址时不去要 key，没配 key 也照常导入。
+/// 这类地址与平台给出的地址一样，下载时带 key；清单里没有这类地址时不去要 key，没配 key 也照常导入。
 ///
-/// 没配 key 时，每个文件都还有别的地址可换就只记日志（CDN 那个地址回 401 后换下一个）；有文件只能从 CDN
+/// 没配 key 时，每个文件都还有别的地址可换就只记日志（CDN 那个地址下不成时换下一个）；有文件只能从 CDN
 /// 下载就在这里报错，不先装几百 MB 游戏再告诉用户装不完。key 配了但不合法是用户要改的错，不在此列。
 fn modrinth_cdn_credential(
     files: &[ModrinthFile],
@@ -1286,21 +1318,41 @@ pub(crate) struct RemoteEntry {
 }
 
 /// CurseForge 清单只有工程与文件 id：落点与大小经 [`CurseForgeIndex`] 向批量接口要。`probe` 为
-/// [`BlockedProbe::Probe`] 时，没给下载地址的文件再逐个问 download-url 端点，判定与导入相同。
+/// [`BlockedProbe::Probe`] 时，没给下载地址的文件再经 [`curseforge_fallback_url`] 逐个判定，与导入同一口径：
+/// 先问 download-url 端点，`derive_restricted`（配置里的 `download_restricted_curseforge_files`）为真时端点
+/// 也不给的再拼 CDN 地址探测，能下的不算受限，探测出错照常报错。这里不知道覆盖层，落点被盖住的受限文件
+/// 照样要问、设置开着时照样探测，由调用方再筛掉；导入那边不为被盖住的文件探测（见
+/// `Petalfall::curseforge_downloads`）。[`BlockedProbe::Skip`] 时一个都不问，`derive_restricted` 不起作用。
 pub(crate) async fn curseforge_remote_facts(
     client: &CurseForgeClient,
     refs: &[CurseForgeFileRef],
     probe: BlockedProbe,
+    derive_restricted: bool,
 ) -> Result<RemoteFacts> {
     let index = CurseForgeIndex::fetch(client, refs).await?;
     let mut entries = Vec::with_capacity(refs.len());
     let mut bytes = Some(0u64);
+    // 逐个串行地问就够了：要问的只有作者禁止第三方分发的那几个文件，每个多一次端点请求、设置开着时
+    // 再多一次 HEAD，并发省不下多少时间。
     for reference in refs {
         let (file, sub) = index.locate(reference)?;
         let blocked = match probe {
-            BlockedProbe::Probe if file.download_url.is_none() => {
-                match curseforge_download_url(client, reference.project_id, reference.file_id)
-                    .await?
+            // 空白地址算没给：这条规则要与 `CurseForgeFile::to_download_task` 保持一致，导入按它决定要不要
+            // 问端点，两边口径一岔开，预览说能下的文件导入时就会报受限。
+            BlockedProbe::Probe
+                if file
+                    .download_url
+                    .as_deref()
+                    .is_none_or(|url| url.trim().is_empty()) =>
+            {
+                match curseforge_fallback_url(
+                    client,
+                    reference.project_id,
+                    reference.file_id,
+                    &file.file_name,
+                    derive_restricted,
+                )
+                .await?
                 {
                     Some(_) => None,
                     None => Some(index.blocked(reference, file, sub)?),
@@ -1541,8 +1593,8 @@ mod tests {
             .await;
     }
 
-    /// 别的启动器导出的 .mrpack 会把 CurseForge 上的 Mod 写成 forgecdn 地址，读包时放行。这些任务要带上
-    /// 与 CurseForge 包同一份下载凭据，否则 CDN 回 401、整个导入失败；只有 Modrinth 地址的任务不带。
+    /// 别的启动器导出的 .mrpack 会把 CurseForge 上的 Mod 写成 forgecdn 地址，读包时放行。这些任务与平台
+    /// 给出的 CurseForge 地址一样，挂上同一份下载凭据；只有 Modrinth 地址的任务不带。
     #[tokio::test]
     async fn forgecdn_files_in_a_modrinth_pack_carry_the_download_credential() {
         const EDGE: &str = "https://edge.forgecdn.net/files/3040/523/jei.jar";
@@ -2912,8 +2964,8 @@ mod tests {
     }
 
     /// 别的启动器导出的 .mrpack 会把 CurseForge 上的 Mod 写成 forgecdn 地址，读包也认这类主机：下载时与
-    /// 平台下载一样要带密钥，否则 CDN 一律回 401。发往 CDN 的每个请求都带，发往别处的不带；CDN 拒绝密钥时
-    /// 报 CredentialRejected（界面据此说明怎么换密钥），不混同于普通的 401。
+    /// 平台给出的地址一样带密钥。发往 CDN 的每个请求都带，发往别处的不带；CDN 拒绝密钥时报
+    /// CredentialRejected（界面据此说明怎么换密钥），不混同于普通的 401。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mrpack_files_on_the_curseforge_cdn_carry_the_download_key() {
         let cdn = MockServer::start().await;
@@ -3087,8 +3139,8 @@ mod tests {
         serde_json::json!({"id": id, "name": "m", "slug": "m", "summary": "", "classId": class_id})
     }
 
-    /// CurseForge 文件按所属工程的大类落进对应目录，每个任务都挂 CurseForge 下载凭据；禁止分发的文件汇总
-    /// 报错，每项带工程、文件 id、网页链接与落点。
+    /// CurseForge 文件按所属工程的大类落进对应目录，文件对象自带地址的任务都挂 CurseForge 下载凭据；禁止
+    /// 分发的文件汇总报错，每项带工程、文件 id、网页链接与落点。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn curseforge_files_land_by_class_and_blocked_files_are_reported_together() {
         let server = MockServer::start().await;
@@ -3279,7 +3331,7 @@ mod tests {
             })
             .collect();
 
-        let facts = curseforge_remote_facts(&client, &refs, BlockedProbe::Skip)
+        let facts = curseforge_remote_facts(&client, &refs, BlockedProbe::Skip, false)
             .await
             .unwrap();
         assert_eq!(
@@ -3313,13 +3365,13 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let facts = curseforge_remote_facts(&client, &refs[..2], BlockedProbe::Skip)
+        let facts = curseforge_remote_facts(&client, &refs[..2], BlockedProbe::Skip, false)
             .await
             .unwrap();
         assert_eq!(facts.entries.len(), 2);
         assert_eq!(facts.bytes, None, "缺一个文件的大小就不报总量");
 
-        let err = curseforge_remote_facts(&client, &refs, BlockedProbe::Skip)
+        let err = curseforge_remote_facts(&client, &refs, BlockedProbe::Skip, false)
             .await
             .unwrap_err();
         assert!(
@@ -3545,7 +3597,7 @@ mod tests {
         };
         let client = CurseForgeClient::new(petalfall_base::http::build_client().unwrap(), "k")
             .with_base_url(server.uri());
-        let remote = curseforge_remote_facts(&client, refs, BlockedProbe::Skip)
+        let remote = curseforge_remote_facts(&client, refs, BlockedProbe::Skip, false)
             .await
             .unwrap();
         let preview = preview_of(&archive, remote, &HashSet::new(), Vec::new());
@@ -3945,9 +3997,9 @@ mod tests {
         );
     }
 
-    /// 受限文件的完整流程：准备时报受限，只列没认领的那一个；从下载文件夹认领（浏览器改过名）后再准备不再
-    /// 报受限，它不生成下载任务；导入后它落在 mods/ 下、内容与认领的文件相同，阶段里有「放入 1 个手动下载的
-    /// 文件」，暂存副本与下载文件夹里的原文件都还在。
+    /// 受限文件的完整流程（设置关着）：准备时报受限，只列没认领的那一个；从下载文件夹认领（浏览器改过名）后
+    /// 再准备不再报受限，它不生成下载任务；导入后它落在 mods/ 下、内容与认领的文件相同，阶段里有「放入 1 个
+    /// 手动下载的文件」，暂存副本与下载文件夹里的原文件都还在。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn claimed_blocked_files_are_copied_in_on_import() {
         let server = MockServer::start().await;
@@ -4084,8 +4136,8 @@ mod tests {
         assert!(renamed.is_file(), "下载文件夹里的原文件不动");
     }
 
-    /// CurseForge 整合包本体就不允许启动器直接下载：第一次导入报受限文件，清单里只有这个包；用户从网页
-    /// 下载、认领进暂存位后再导入，直接用暂存副本，不再向 CDN 要包，暂存副本导入后留着。
+    /// CurseForge 整合包本体就不允许启动器直接下载、设置关着：第一次导入报受限文件，清单里只有这个包；用户
+    /// 从网页下载、认领进暂存位后再导入，直接用暂存副本，不再向 CDN 要包，暂存副本导入后留着。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn claimed_curseforge_pack_file_is_imported_without_downloading() {
         let server = MockServer::start().await;
@@ -4178,8 +4230,8 @@ mod tests {
         assert!(renamed.is_file(), "下载文件夹里的原文件不动");
     }
 
-    /// 整合包本体受限：认领之前摘要报受限、清单里只有这个包；认领之后摘要从暂存副本读，数字与导入时读到的
-    /// 同一份包一致，不向 CDN 要包。暂存副本被改过时不算认领，照旧报受限。
+    /// 整合包本体受限、设置关着：认领之前摘要报受限、清单里只有这个包；认领之后摘要从暂存副本读，数字与
+    /// 导入时读到的同一份包一致，不向 CDN 要包。暂存副本被改过时不算认领，照旧报受限。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn claimed_curseforge_pack_file_is_summarized_from_the_claim() {
         let server = MockServer::start().await;
@@ -4293,6 +4345,906 @@ mod tests {
         assert!(
             matches!(&err, CoreError::FileDistributionBlocked { files } if files[0].file_id == 7001),
             "{err:?}"
+        );
+    }
+
+    // ---- 设置打开时按拼出的 CDN 地址下载受限文件 ----
+
+    const BLOCKED_A: &[u8] = b"blocked a bytes";
+
+    /// 按文件编号与文件名拼出的 CDN 路径，规律同 `CurseForgeClient::derived_download_url`：编号整除 1000、
+    /// 余数、文件名。这里的文件名只有字母、数字、连字符与点，不用转义。
+    fn derived_path(file_id: u32, name: &str) -> String {
+        format!("/files/{}/{}/{name}", file_id / 1000, file_id % 1000)
+    }
+
+    /// 写一个只要原版 test、清单引用 `ids`（都是必需文件）的 CurseForge 包，整合包名是「受限包」。
+    fn restricted_pack(
+        dir: &Path,
+        file: &str,
+        ids: &[(u32, u32)],
+        overrides: &[(&str, &[u8])],
+    ) -> PathBuf {
+        let refs: serde_json::Value = ids
+            .iter()
+            .map(|&(project_id, file_id)| {
+                serde_json::json!({ "projectID": project_id, "fileID": file_id, "required": true })
+            })
+            .collect();
+        let pack = dir.join(file);
+        write_curseforge_pack(&pack, &curseforge_vanilla_manifest(refs), overrides);
+        pack
+    }
+
+    /// 两个批量接口回 `files` 与它们的工程（大类都是 Mod）；`restricted` 里每个（工程, 文件）的 download-url
+    /// 端点回 403，与平台对作者禁止第三方分发的文件的回应一致。
+    async fn mount_restricted_platform(
+        server: &MockServer,
+        files: Vec<serde_json::Value>,
+        restricted: &[(u32, u32)],
+    ) {
+        let mods: Vec<serde_json::Value> = files
+            .iter()
+            .map(|file| cf_mod(u32::try_from(file["modId"].as_u64().unwrap()).unwrap(), 6))
+            .collect();
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": files })),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": mods })),
+            )
+            .mount(server)
+            .await;
+        for (project, file) in restricted {
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/v1/mods/{project}/files/{file}/download-url"
+                )))
+                .respond_with(ResponseTemplate::new(403))
+                .mount(server)
+                .await;
+        }
+    }
+
+    /// 拼出的地址上的探测（HEAD）回 `status`，期望被探 `times` 次。
+    async fn mount_probe(
+        server: &MockServer,
+        file_id: u32,
+        name: &str,
+        status: u16,
+        times: impl Into<wiremock::Times>,
+    ) {
+        Mock::given(method("HEAD"))
+            .and(path(derived_path(file_id, name)))
+            .respond_with(ResponseTemplate::new(status))
+            .expect(times)
+            .mount(server)
+            .await;
+    }
+
+    /// 拼出的地址上的下载（GET）回 `bytes`，期望被下 `times` 次。
+    async fn mount_derived_file(
+        server: &MockServer,
+        file_id: u32,
+        name: &str,
+        bytes: &[u8],
+        times: u64,
+    ) {
+        Mock::given(method("GET"))
+            .and(path(derived_path(file_id, name)))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.to_vec()))
+            .expect(times)
+            .mount(server)
+            .await;
+    }
+
+    /// API、拼地址用的 CDN 根地址与 CDN 凭据作用域都指到这个假服务器。凭据作用域也指过来，任务误挂了凭据时
+    /// x-api-key 真的会发到拼出的地址上，测试才看得见。
+    fn derive_petalfall(root: &Path, server: &MockServer, derive: bool) -> Petalfall {
+        let mut petalfall = petalfall(root, server)
+            .with_curseforge_key("k")
+            .with_curseforge_cdn_base(server.uri())
+            .with_curseforge_cdn_scope(petalfall_download::CredentialScope::new(
+                [format!("127.0.0.1:{}", server.address().port())],
+                false,
+            ));
+        petalfall.set_download_restricted_curseforge_files(derive);
+        petalfall
+    }
+
+    /// 准备导入，期望报受限，返回清单。
+    async fn blocked_on_prepare(petalfall: &Petalfall, pack: &Path) -> Vec<BlockedFile> {
+        let err = petalfall
+            .prepare_modpack(
+                &ModpackSource::File {
+                    path: pack.to_path_buf(),
+                },
+                None,
+                &ImportSelection::default(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        let CoreError::FileDistributionBlocked { files } = err else {
+            panic!("应报受限文件：{err:?}");
+        };
+        files
+    }
+
+    /// 假服务器在 `at` 上收到的 `verb` 请求各自带的 x-api-key，按到达顺序。
+    async fn api_keys_sent(server: &MockServer, verb: &str, at: &str) -> Vec<Option<String>> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method.as_str() == verb && request.url.path() == at)
+            .map(|request| {
+                request
+                    .headers
+                    .get("x-api-key")
+                    .map(|value| value.to_str().unwrap().to_owned())
+            })
+            .collect()
+    }
+
+    /// 设置关着：受限文件照旧报受限，拼出的地址一次都不碰。假服务器上那个地址明明能下（HEAD 与 GET 都回 200），
+    /// 设置要是没被当回事，文件就会被悄悄下回来、不报受限。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restricted_files_stay_blocked_on_import_while_the_setting_is_off() {
+        let server = MockServer::start().await;
+        mount_restricted_platform(
+            &server,
+            vec![cf_file_with(55012, 5, "blocked-a.jar", None, BLOCKED_A)],
+            &[(5, 55012)],
+        )
+        .await;
+        mount_probe(&server, 55012, "blocked-a.jar", 200, 0u64).await;
+        mount_derived_file(&server, 55012, "blocked-a.jar", BLOCKED_A, 0).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = restricted_pack(tmp.path(), "受限包.zip", &[(5, 55012)], &[]);
+        let petalfall = derive_petalfall(tmp.path(), &server, false);
+
+        let files = blocked_on_prepare(&petalfall, &pack).await;
+        assert_eq!(
+            files
+                .iter()
+                .map(|f| (f.file_id, f.destination.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(55012, "mods/blocked-a.jar")]
+        );
+        server.verify().await;
+    }
+
+    /// 设置开着、拼出的地址探得到：准备不报受限，任务的地址是拼出的那个，带着文件对象里的大小与 sha1、不挂
+    /// CDN 凭据；导入后文件落在 mods/ 下、内容校验通过。凭据作用域也指着这个假服务器：文件对象自带地址的 jei
+    /// 发出的 GET 带着 x-api-key，拼出地址的 GET 不带。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn derived_urls_download_restricted_files_on_import_without_the_key() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let uri = server.uri();
+        mount_restricted_platform(
+            &server,
+            vec![
+                cf_file_with(11, 1, "jei.jar", Some(format!("{uri}/f/11")), b"jei"),
+                cf_file_with(55012, 5, "blocked-a.jar", None, BLOCKED_A),
+            ],
+            &[(5, 55012)],
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/f/11"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"jei".to_vec()))
+            .mount(&server)
+            .await;
+        mount_probe(&server, 55012, "blocked-a.jar", 200, 1u64).await;
+        mount_derived_file(&server, 55012, "blocked-a.jar", BLOCKED_A, 1).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = restricted_pack(tmp.path(), "受限包.zip", &[(1, 11), (5, 55012)], &[]);
+        let petalfall = derive_petalfall(tmp.path(), &server, true);
+        let mods = petalfall
+            .game_dir()
+            .join("versions")
+            .join("受限包")
+            .join("mods");
+        let derived = derived_path(55012, "blocked-a.jar");
+
+        let prepared = petalfall
+            .prepare_modpack(
+                &ModpackSource::File { path: pack },
+                None,
+                &ImportSelection::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(prepared.claimed.is_empty());
+        assert_eq!(
+            prepared
+                .remote
+                .iter()
+                .map(|d| (
+                    d.task.dest.clone(),
+                    d.task.url.clone(),
+                    d.task.size,
+                    d.task.sha1.clone(),
+                    d.task.credential.is_some()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    mods.join("jei.jar"),
+                    format!("{uri}/f/11"),
+                    Some(3),
+                    Some(sha1_hex(b"jei")),
+                    true
+                ),
+                (
+                    mods.join("blocked-a.jar"),
+                    format!("{uri}{derived}"),
+                    Some(BLOCKED_A.len() as u64),
+                    Some(sha1_hex(BLOCKED_A)),
+                    false
+                ),
+            ]
+        );
+
+        petalfall
+            .import_modpack(prepared, "task-derived", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(mods.join("blocked-a.jar")).unwrap(),
+            BLOCKED_A
+        );
+        assert_eq!(std::fs::read(mods.join("jei.jar")).unwrap(), b"jei");
+        assert_eq!(api_keys_sent(&server, "GET", &derived).await, vec![None]);
+        assert_eq!(
+            api_keys_sent(&server, "GET", "/f/11").await,
+            vec![Some("k".to_owned())],
+            "凭据作用域确实指着这个假服务器"
+        );
+        server.verify().await;
+    }
+
+    /// 设置开着、CDN 也不给（探测回 404、410）：照旧报受限，清单与设置关着时一字不差；每个探过一次，没去下。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restricted_files_the_cdn_refuses_stay_blocked_on_import() {
+        let server = MockServer::start().await;
+        mount_restricted_platform(
+            &server,
+            vec![
+                cf_file_with(55012, 5, "blocked-a.jar", None, BLOCKED_A),
+                cf_file(66013, 6, "blocked-b.jar", None),
+            ],
+            &[(5, 55012), (6, 66013)],
+        )
+        .await;
+        mount_probe(&server, 55012, "blocked-a.jar", 404, 1u64).await;
+        mount_probe(&server, 66013, "blocked-b.jar", 410, 1u64).await;
+        mount_derived_file(&server, 55012, "blocked-a.jar", BLOCKED_A, 0).await;
+        mount_derived_file(&server, 66013, "blocked-b.jar", b"b", 0).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = restricted_pack(tmp.path(), "受限包.zip", &[(5, 55012), (6, 66013)], &[]);
+        let mut petalfall = derive_petalfall(tmp.path(), &server, false);
+        let off = blocked_on_prepare(&petalfall, &pack).await;
+        petalfall.set_download_restricted_curseforge_files(true);
+
+        let on = blocked_on_prepare(&petalfall, &pack).await;
+        assert_eq!(on, off);
+        assert_eq!(
+            on.iter()
+                .map(|f| (f.file_id, f.destination.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(55012, "mods/blocked-a.jar"), (66013, "mods/blocked-b.jar")]
+        );
+        server.verify().await;
+    }
+
+    /// 设置开着、探测回 500：照常报错，不当成「不能下」让用户去手动下载，也没去下。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failing_probe_fails_the_import_instead_of_asking_for_a_manual_download() {
+        let server = MockServer::start().await;
+        mount_restricted_platform(
+            &server,
+            vec![cf_file_with(55012, 5, "blocked-a.jar", None, BLOCKED_A)],
+            &[(5, 55012)],
+        )
+        .await;
+        mount_probe(&server, 55012, "blocked-a.jar", 500, 1u64..).await;
+        mount_derived_file(&server, 55012, "blocked-a.jar", BLOCKED_A, 0).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = restricted_pack(tmp.path(), "受限包.zip", &[(5, 55012)], &[]);
+        let petalfall = derive_petalfall(tmp.path(), &server, true);
+
+        let err = petalfall
+            .prepare_modpack(
+                &ModpackSource::File { path: pack },
+                None,
+                &ImportSelection::default(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CoreError::ModPlatform(petalfall_modplatform::Error::Status { status: 500, .. })
+            ),
+            "{err:?}"
+        );
+        server.verify().await;
+    }
+
+    /// 一个包里的受限文件有拼得到的也有拼不到的：设置开着时清单只列拼不到的（CDN 回 404 的、编号小于 1000
+    /// 拼不出地址的），拼得到的不列。去掉拼不到的再准备就成了：文件对象自带地址与 download-url 端点给的地址
+    /// 照常挂凭据，只有拼出来的不挂；端点给了地址的、拼不出地址的都不探测。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_restricted_files_that_cannot_be_derived_are_listed_on_import() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        mount_restricted_platform(
+            &server,
+            vec![
+                cf_file(11, 1, "jei.jar", Some(format!("{uri}/f/11"))),
+                cf_file(22012, 2, "endpoint.jar", None),
+                cf_file_with(55012, 5, "blocked-a.jar", None, BLOCKED_A),
+                cf_file(77012, 7, "blocked-c.jar", None),
+                cf_file(66, 6, "blocked-small.jar", None),
+            ],
+            &[(5, 55012), (7, 77012), (6, 66)],
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/2/files/22012/download-url"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "data": format!("{uri}/ep/22012") })),
+            )
+            .mount(&server)
+            .await;
+        mount_probe(&server, 55012, "blocked-a.jar", 200, 2u64).await;
+        mount_probe(&server, 77012, "blocked-c.jar", 404, 1u64).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = derive_petalfall(tmp.path(), &server, true);
+        let all = restricted_pack(
+            tmp.path(),
+            "全部.zip",
+            &[(1, 11), (2, 22012), (5, 55012), (7, 77012), (6, 66)],
+            &[],
+        );
+
+        let files = blocked_on_prepare(&petalfall, &all).await;
+        assert_eq!(
+            files
+                .iter()
+                .map(|f| (f.file_id, f.destination.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (77012, "mods/blocked-c.jar"),
+                (66, "mods/blocked-small.jar")
+            ]
+        );
+
+        let derivable = restricted_pack(
+            tmp.path(),
+            "拼得到.zip",
+            &[(1, 11), (2, 22012), (5, 55012)],
+            &[],
+        );
+        let prepared = petalfall
+            .prepare_modpack(
+                &ModpackSource::File { path: derivable },
+                None,
+                &ImportSelection::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let derived = derived_path(55012, "blocked-a.jar");
+        assert_eq!(
+            prepared
+                .remote
+                .iter()
+                .map(|d| (d.task.url.clone(), d.task.credential.is_some()))
+                .collect::<Vec<_>>(),
+            vec![
+                (format!("{uri}/f/11"), true),
+                (format!("{uri}/ep/22012"), true),
+                (format!("{uri}{derived}"), false),
+            ]
+        );
+        prepared.discard().await;
+        let probed: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method.as_str() == "HEAD")
+            .map(|request| request.url.path().to_owned())
+            .collect();
+        assert_eq!(
+            probed,
+            vec![
+                derived.clone(),
+                derived_path(77012, "blocked-c.jar"),
+                derived
+            ]
+        );
+        server.verify().await;
+    }
+
+    /// 落点被覆盖层盖住的受限文件，设置开着时导入也不为它拼地址、探测：它反正会被包里自带的那份盖掉。
+    /// download-url 端点照旧要问，端点给了地址的被盖住文件照旧下载（挂凭据），随后被盖掉。预览不知道覆盖层，
+    /// 照样探一次、不列它；准备与导入一次都不探，拼出的地址一次都不下，导入成功，落点都是包里自带的内容。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn covered_restricted_files_are_not_probed_on_import_when_the_setting_is_on() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let uri = server.uri();
+        mount_restricted_platform(
+            &server,
+            vec![
+                cf_file_with(55012, 5, "covered.jar", None, b"cdn jar"),
+                cf_file_with(22012, 2, "covered-ep.jar", None, b"ep jar"),
+            ],
+            &[(5, 55012)],
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/2/files/22012/download-url"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "data": format!("{uri}/ep/22012") })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/ep/22012"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ep jar".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_probe(&server, 55012, "covered.jar", 200, 1u64).await;
+        mount_derived_file(&server, 55012, "covered.jar", b"cdn jar", 0).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = restricted_pack(
+            tmp.path(),
+            "自带.zip",
+            &[(5, 55012), (2, 22012)],
+            &[
+                ("overrides/mods/covered.jar", b"bundled jar"),
+                ("overrides/mods/covered-ep.jar", b"bundled ep"),
+            ],
+        );
+        let petalfall = derive_petalfall(tmp.path(), &server, true);
+        let derived = derived_path(55012, "covered.jar");
+
+        let preview = petalfall.preview_modpack_file(&pack).await.unwrap();
+        assert_eq!(preview.blocked_files, Vec::new());
+        assert_eq!(
+            preview
+                .mods
+                .iter()
+                .map(|m| (m.file_name.as_str(), m.availability))
+                .collect::<Vec<_>>(),
+            vec![
+                ("covered-ep.jar", PackFileAvailability::Bundled),
+                ("covered.jar", PackFileAvailability::Bundled)
+            ]
+        );
+        assert_eq!(api_keys_sent(&server, "HEAD", &derived).await, vec![None]);
+
+        let prepared = petalfall
+            .prepare_modpack(
+                &ModpackSource::File { path: pack },
+                Some("自带"),
+                &ImportSelection::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(prepared.claimed.is_empty());
+        assert_eq!(
+            prepared
+                .remote
+                .iter()
+                .map(|d| (d.task.url.clone(), d.task.credential.is_some()))
+                .collect::<Vec<_>>(),
+            vec![(format!("{uri}/ep/22012"), true)]
+        );
+        let outcome = petalfall
+            .import_modpack(prepared, "task-covered-derived", None)
+            .await
+            .unwrap();
+        let mods = outcome.version_dir.join("mods");
+        assert_eq!(
+            std::fs::read(mods.join("covered.jar")).unwrap(),
+            b"bundled jar"
+        );
+        assert_eq!(
+            std::fs::read(mods.join("covered-ep.jar")).unwrap(),
+            b"bundled ep"
+        );
+        assert_eq!(
+            api_keys_sent(&server, "HEAD", &derived).await,
+            vec![None],
+            "准备与导入没有再探"
+        );
+        assert_eq!(
+            api_keys_sent(&server, "GET", "/v1/mods/5/files/55012/download-url")
+                .await
+                .len(),
+            2,
+            "预览与准备都问过 download-url 端点"
+        );
+        server.verify().await;
+    }
+
+    /// 文件对象回 `"downloadUrl": ""`：预览与导入都把空串当成没给地址。设置关着时预览把它列进 blocked_files、
+    /// 准备报受限，两边清单一字不差，拼出的地址一次都不碰；设置开着、拼出的地址探得到时两边都不算受限：预览
+    /// 标为要下载，准备出的是按拼出地址下载、不挂凭据的任务。探测只在打开后发，预览与准备各一次。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blank_download_urls_count_as_missing_in_both_preview_and_import() {
+        let server = MockServer::start().await;
+        mount_restricted_platform(
+            &server,
+            vec![cf_file_with(
+                55012,
+                5,
+                "blocked-a.jar",
+                Some(String::new()),
+                BLOCKED_A,
+            )],
+            &[(5, 55012)],
+        )
+        .await;
+        mount_probe(&server, 55012, "blocked-a.jar", 200, 2u64).await;
+        mount_derived_file(&server, 55012, "blocked-a.jar", BLOCKED_A, 0).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = restricted_pack(tmp.path(), "受限包.zip", &[(5, 55012)], &[]);
+        let mut petalfall = derive_petalfall(tmp.path(), &server, false);
+        let derived = derived_path(55012, "blocked-a.jar");
+
+        let preview = petalfall.preview_modpack_file(&pack).await.unwrap();
+        let on_import = blocked_on_prepare(&petalfall, &pack).await;
+        assert_eq!(preview.blocked_files, on_import);
+        assert_eq!(
+            on_import
+                .iter()
+                .map(|f| (f.file_id, f.destination.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(55012, "mods/blocked-a.jar")]
+        );
+        assert_eq!(
+            api_keys_sent(&server, "HEAD", &derived).await,
+            Vec::<Option<String>>::new()
+        );
+
+        petalfall.set_download_restricted_curseforge_files(true);
+        let preview = petalfall.preview_modpack_file(&pack).await.unwrap();
+        assert_eq!(preview.blocked_files, Vec::new());
+        assert_eq!(
+            preview
+                .mods
+                .iter()
+                .map(|m| (m.file_name.as_str(), m.availability))
+                .collect::<Vec<_>>(),
+            vec![("blocked-a.jar", PackFileAvailability::Download)]
+        );
+        let prepared = petalfall
+            .prepare_modpack(
+                &ModpackSource::File { path: pack },
+                None,
+                &ImportSelection::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(prepared.claimed.is_empty());
+        assert_eq!(
+            prepared
+                .remote
+                .iter()
+                .map(|d| (d.task.url.clone(), d.task.credential.is_some()))
+                .collect::<Vec<_>>(),
+            vec![(format!("{}{derived}", server.uri()), false)]
+        );
+        prepared.discard().await;
+        assert_eq!(
+            api_keys_sent(&server, "HEAD", &derived).await,
+            vec![None, None]
+        );
+        server.verify().await;
+    }
+
+    /// 设置开着、拼出的地址能下时不用暂存位里认领过的副本。同一个包设置关着时预览标为已认领、准备出的是复制
+    /// 副本（副本确实校验得过）；打开后预览标为要下载，准备出的是按拼出地址下载的任务、没有要复制的副本，
+    /// 导入时真的发了下载请求。探测发了两次：打开后的预览与准备各一次。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn derived_downloads_win_over_claimed_copies() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        mount_restricted_platform(
+            &server,
+            vec![cf_file_with(55012, 5, "blocked-a.jar", None, BLOCKED_A)],
+            &[(5, 55012)],
+        )
+        .await;
+        mount_probe(&server, 55012, "blocked-a.jar", 200, 2u64).await;
+        mount_derived_file(&server, 55012, "blocked-a.jar", BLOCKED_A, 1).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = restricted_pack(tmp.path(), "受限包.zip", &[(5, 55012)], &[]);
+        let source = ModpackSource::File { path: pack.clone() };
+        let availability = |preview: &ModpackPreview| {
+            assert_eq!(preview.blocked_files, Vec::new());
+            preview
+                .mods
+                .iter()
+                .map(|m| (m.file_name.clone(), m.availability))
+                .collect::<Vec<_>>()
+        };
+        let mut petalfall = derive_petalfall(tmp.path(), &server, false);
+        let slot = petalfall
+            .blocked_claims_dir()
+            .join("curseforge-55012")
+            .join("blocked-a.jar");
+        std::fs::create_dir_all(slot.parent().unwrap()).unwrap();
+        std::fs::write(&slot, BLOCKED_A).unwrap();
+        let dest = petalfall
+            .game_dir()
+            .join("versions")
+            .join("受限包")
+            .join("mods")
+            .join("blocked-a.jar");
+        let none = ImportSelection::default();
+
+        let preview = petalfall.preview_modpack_file(&pack).await.unwrap();
+        assert_eq!(
+            availability(&preview),
+            vec![("blocked-a.jar".to_owned(), PackFileAvailability::Claimed)]
+        );
+        let prepared = petalfall
+            .prepare_modpack(&source, None, &none, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            prepared.claimed,
+            vec![ClaimedCopy {
+                staged: slot.clone(),
+                dest: dest.clone()
+            }]
+        );
+        assert!(prepared.remote.is_empty());
+        prepared.discard().await;
+
+        petalfall.set_download_restricted_curseforge_files(true);
+        let preview = petalfall.preview_modpack_file(&pack).await.unwrap();
+        assert_eq!(
+            availability(&preview),
+            vec![("blocked-a.jar".to_owned(), PackFileAvailability::Download)]
+        );
+        let prepared = petalfall
+            .prepare_modpack(&source, None, &none, None)
+            .await
+            .unwrap();
+        assert!(prepared.claimed.is_empty());
+        assert_eq!(
+            prepared
+                .remote
+                .iter()
+                .map(|d| (d.task.dest.clone(), d.task.url.clone()))
+                .collect::<Vec<_>>(),
+            vec![(
+                dest.clone(),
+                format!("{}{}", server.uri(), derived_path(55012, "blocked-a.jar"))
+            )]
+        );
+        petalfall
+            .import_modpack(prepared, "task-derived-claim", None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), BLOCKED_A);
+        server.verify().await;
+    }
+
+    /// 预览、设置关着：受限文件照旧列进清单，拼出的地址一次都不碰（假服务器上它明明能下）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preview_does_not_probe_restricted_files_while_the_setting_is_off() {
+        let server = MockServer::start().await;
+        mount_restricted_platform(
+            &server,
+            vec![cf_file_with(55012, 5, "blocked-a.jar", None, BLOCKED_A)],
+            &[(5, 55012)],
+        )
+        .await;
+        mount_probe(&server, 55012, "blocked-a.jar", 200, 0u64).await;
+        mount_derived_file(&server, 55012, "blocked-a.jar", BLOCKED_A, 0).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = restricted_pack(tmp.path(), "受限包.zip", &[(5, 55012)], &[]);
+
+        let preview = derive_petalfall(tmp.path(), &server, false)
+            .preview_modpack_file(&pack)
+            .await
+            .unwrap();
+        assert_eq!(
+            preview
+                .blocked_files
+                .iter()
+                .map(|f| (f.file_id, f.destination.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(55012, "mods/blocked-a.jar")]
+        );
+        server.verify().await;
+    }
+
+    /// 预览与导入同一口径：设置开着时探得到的受限文件不列进清单、在 Mod 清单里标为要下载；CDN 不给的
+    /// （探测回 404、403）照旧列，内容与设置关着时一字不差。预览只探不下。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preview_lists_only_restricted_files_the_cdn_refuses_when_the_setting_is_on() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        mount_restricted_platform(
+            &server,
+            vec![
+                cf_file(11, 1, "jei.jar", Some(format!("{uri}/f/11"))),
+                cf_file_with(55012, 5, "blocked-a.jar", None, BLOCKED_A),
+                cf_file(77012, 7, "blocked-c.jar", None),
+                cf_file(88012, 8, "blocked-d.jar", None),
+            ],
+            &[(5, 55012), (7, 77012), (8, 88012)],
+        )
+        .await;
+        mount_probe(&server, 55012, "blocked-a.jar", 200, 1u64).await;
+        mount_probe(&server, 77012, "blocked-c.jar", 404, 1u64).await;
+        mount_probe(&server, 88012, "blocked-d.jar", 403, 1u64).await;
+        mount_derived_file(&server, 55012, "blocked-a.jar", BLOCKED_A, 0).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = restricted_pack(
+            tmp.path(),
+            "受限包.zip",
+            &[(1, 11), (5, 55012), (7, 77012), (8, 88012)],
+            &[],
+        );
+        let mut petalfall = derive_petalfall(tmp.path(), &server, false);
+        let off = petalfall.preview_modpack_file(&pack).await.unwrap();
+        assert_eq!(
+            off.blocked_files
+                .iter()
+                .map(|f| f.file_id)
+                .collect::<Vec<_>>(),
+            vec![55012, 77012, 88012]
+        );
+        petalfall.set_download_restricted_curseforge_files(true);
+
+        let on = petalfall.preview_modpack_file(&pack).await.unwrap();
+        assert_eq!(on.blocked_files, off.blocked_files[1..].to_vec());
+        assert_eq!(
+            on.mods
+                .iter()
+                .map(|m| (m.file_name.as_str(), m.availability))
+                .collect::<Vec<_>>(),
+            vec![
+                ("blocked-a.jar", PackFileAvailability::Download),
+                ("blocked-c.jar", PackFileAvailability::Blocked),
+                ("blocked-d.jar", PackFileAvailability::Blocked),
+                ("jei.jar", PackFileAvailability::Download),
+            ]
+        );
+        server.verify().await;
+    }
+
+    /// 预览、设置开着、探测回 500：预览照常报错，不把它当成要手动下载的文件列出来。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preview_fails_when_probing_a_restricted_file_errors() {
+        let server = MockServer::start().await;
+        mount_restricted_platform(
+            &server,
+            vec![cf_file_with(55012, 5, "blocked-a.jar", None, BLOCKED_A)],
+            &[(5, 55012)],
+        )
+        .await;
+        mount_probe(&server, 55012, "blocked-a.jar", 500, 1u64..).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = restricted_pack(tmp.path(), "受限包.zip", &[(5, 55012)], &[]);
+
+        let err = derive_petalfall(tmp.path(), &server, true)
+            .preview_modpack_file(&pack)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CoreError::ModPlatform(petalfall_modplatform::Error::Status { status: 500, .. })
+            ),
+            "{err:?}"
+        );
+        server.verify().await;
+    }
+
+    /// 整合包本体受限、设置开着：不用认领，按探测交回的跳转终点直接下到包并导入。假 CDN 照线上的脾气：拼出的
+    /// 地址只会跳转、对带 Range 的请求回 404。拼出的地址只收到探测那一个 HEAD，下载打在终点上；CDN 上的请求都
+    /// 不带 x-api-key（凭据作用域指着这个假服务器，任务误挂了凭据就会被看见）。导入后不留下载缓存，也不用暂存位。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restricted_curseforge_pack_file_is_downloaded_without_a_claim_when_the_setting_is_on()
+    {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("built.zip");
+        write_curseforge_pack(
+            &built,
+            &curseforge_vanilla_manifest(serde_json::json!([])),
+            &[("overrides/options.txt", b"fov:70")],
+        );
+        let pack_bytes = std::fs::read(&built).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/700/files/7001"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": cf_file_with(7001, 700, "locked-pack-1.0.zip", None, &pack_bytes)
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/700/files/7001/download-url"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let edge = derived_path(7001, "locked-pack-1.0.zip");
+        let media = format!("/mediafilez{edge}");
+        crate::modpack_summary::tests::mount_edge_cdn(&server, &edge, &media, pack_bytes).await;
+        let petalfall = derive_petalfall(tmp.path(), &server, true);
+        let source = ModpackSource::Platform {
+            platform: Platform::CurseForge,
+            project_id: "700".into(),
+            version_id: "7001".into(),
+        };
+
+        let outcome = petalfall
+            .install_modpack(
+                &source,
+                Some("拼地址下的包"),
+                &ImportSelection::default(),
+                "task-derived-pack",
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.modpack.platform, Some(Platform::CurseForge));
+        assert_eq!(outcome.modpack.version_id.as_deref(), Some("7001"));
+        assert_eq!(
+            std::fs::read(outcome.version_dir.join("options.txt")).unwrap(),
+            b"fov:70"
+        );
+        let cdn = crate::modpack_summary::tests::cdn_requests(&server, &[&edge, &media]).await;
+        assert_eq!(
+            cdn,
+            vec![
+                ("HEAD".to_owned(), edge.clone(), false, false),
+                ("HEAD".to_owned(), media.clone(), false, false),
+                ("GET".to_owned(), media.clone(), false, false),
+            ],
+            "拼出的地址只被探测，包从跳转终点下载"
+        );
+        assert_eq!(
+            pack_cache_entries(tmp.path()),
+            Vec::<String>::new(),
+            "导入后不留下载缓存"
+        );
+        assert!(
+            !petalfall
+                .blocked_claims_dir()
+                .join("curseforge-7001")
+                .exists(),
+            "没走认领"
         );
     }
 

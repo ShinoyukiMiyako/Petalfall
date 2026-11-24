@@ -49,7 +49,7 @@ use crate::modfs::{
     MODS_DIR, ensure_not_held, is_plain_file_name, ledger_key, lock_mods_dir, now_unix,
     numbered_backup_name, present, refuse, try_exists,
 };
-use crate::resources::curseforge_download_url;
+use crate::resources::curseforge_fallback_url;
 
 /// 暂存区目录名，位于 `<工作目录>/<元数据目录>/staging`。每次安装在其下另开一个独立子目录。
 ///
@@ -618,6 +618,9 @@ impl Petalfall {
     }
 
     /// 为一个计划项生成下载任务，落点在本次安装的暂存子目录。
+    ///
+    /// 地址依次取文件对象自带的、[`Self::fallback_download_task`] 补到的，都拿不到才用认领过的副本：设置
+    /// `download_restricted_curseforge_files` 开着且拼出的 CDN 地址能下时直接下载，不再用认领过的副本。
     async fn stage_item(&self, item: PlannedItem, staging_dir: &Path) -> Result<StagedItem> {
         let PlannedItem {
             version,
@@ -638,9 +641,16 @@ impl Petalfall {
         }
         let dest = staging_dir.join(&file_name);
         let (task, claimed) = match version.to_download_task(&dest) {
-            Some(task) => (task, None),
-            None => match self.fallback_download_url(&version).await {
-                Ok(url) => (version.task_for_url(url, &dest), None),
+            Some(task) => match version.platform {
+                Platform::CurseForge => {
+                    let credential = self.curseforge_credential(&self.curseforge_client()?)?;
+                    (task.with_credential(credential), None)
+                }
+                Platform::Modrinth => (task, None),
+            },
+            // 补到的地址挂不挂凭据由来源决定，在 fallback_download_task 里定好了。
+            None => match self.fallback_download_task(&version, &dest).await {
+                Ok(task) => (task, None),
                 Err(err) => {
                     let (_, copy) = self.claimed_instead_of(err).await?;
                     // 这条任务不下载，地址只会出现在校验失败的报错里，写副本路径才对得上来源。
@@ -648,13 +658,6 @@ impl Petalfall {
                     (version.task_for_url(source, &dest), Some(copy))
                 }
             },
-        };
-        let task = match version.platform {
-            Platform::CurseForge => {
-                let client = self.curseforge_client()?;
-                task.with_credential(self.curseforge_credential(&client)?)
-            }
-            Platform::Modrinth => task,
         };
         Ok(StagedItem {
             sha1: version.sha1.clone(),
@@ -668,10 +671,20 @@ impl Petalfall {
         })
     }
 
-    /// 版本自带直链为空时的兜底直链。只有 CurseForge 会走到这里（禁止第三方分发的工程不在文件对象里
-    /// 给直链）；Modrinth 版本没有文件时根本不会进入版本列表。端点拒绝或给空串时报
-    /// [`CoreError::FileDistributionBlocked`]，与整合包导入、资源安装同一口径，落点是 `mods/` 下的同名文件。
-    async fn fallback_download_url(&self, version: &ModVersionInfo) -> Result<String> {
+    /// 版本自带直链为空时的兜底下载任务，落点是 `dest`。只有 CurseForge 会走到这里（禁止第三方分发的工程
+    /// 不在文件对象里给直链）；Modrinth 版本没有文件时根本不会进入版本列表。
+    ///
+    /// 先问 download-url 端点，端点给的地址与文件对象自带的同等对待，任务挂 CDN 凭据。设置
+    /// `download_restricted_curseforge_files` 开着时，端点也不给就按文件编号与文件名拼 CDN 地址并探测，能下才用，
+    /// 这条任务不挂凭据（见 [`curseforge_fallback_url`]）；两种任务都带版本信息里的大小与 sha1。
+    ///
+    /// 拿不到能下的地址时报 [`CoreError::FileDistributionBlocked`]，与整合包导入、资源安装同一口径，落点是
+    /// `mods/` 下的同名文件；探测本身出错（CDN 回 5xx、网络不通）照常报错，不当成受限。
+    async fn fallback_download_task(
+        &self,
+        version: &ModVersionInfo,
+        dest: &Path,
+    ) -> Result<DownloadTask> {
         let not_found = || CoreError::ModVersionNotFound {
             platform: version.platform.display_name(),
             project_id: version.project_id.clone(),
@@ -682,8 +695,20 @@ impl Petalfall {
                 let mod_id: u32 = version.project_id.parse().map_err(|_| not_found())?;
                 let file_id: u32 = version.version_id.parse().map_err(|_| not_found())?;
                 let client = self.curseforge_client()?;
-                match curseforge_download_url(&client, mod_id, file_id).await? {
-                    Some(url) => Ok(url),
+                let derive_restricted = self.config().download_restricted_curseforge_files;
+                match curseforge_fallback_url(
+                    &client,
+                    mod_id,
+                    file_id,
+                    &version.file_name,
+                    derive_restricted,
+                )
+                .await?
+                {
+                    Some(url) => Ok(url.into_task(
+                        |url| version.task_for_url(url, dest),
+                        &self.curseforge_credential(&client)?,
+                    )),
                     // 版本信息里没有 fileFingerprint，只按 sha1 与大小认。
                     None => Err(single_blocked(&client, mod_id, |project| BlockedFile {
                         project_id: mod_id,
@@ -3816,6 +3841,360 @@ mod tests {
         assert_eq!(cdn_hits, 1);
         let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         assert!(!mods_dir.join("jei.jar").exists());
+    }
+
+    // ---- 设置开着时按规律拼出的 CDN 地址 ----
+
+    /// 受限 JEI（编号 3040523、文件名 jei-1.21.jar）拼出的地址在假服务器上的路径：编号拆成 3040 与 523，
+    /// 文件名里的字母数字与 `-.` 不转义。
+    const DERIVED_JEI_PATH: &str = "/files/3040/523/jei-1.21.jar";
+
+    /// 挂一个作者不允许第三方分发的 CurseForge 文件：文件对象不给直链但带着 `bytes` 的 sha1 与大小，
+    /// download-url 端点回 403；工程摘要给受限文件的网页链接用。
+    async fn mount_restricted_jei(server: &MockServer, bytes: &[u8]) {
+        let file = serde_json::json!({
+            "id": 3040523, "modId": 238222, "displayName": "JEI", "fileName": "jei-1.21.jar",
+            "releaseType": 1, "hashes": [{"value": sha1_hex(bytes), "algo": 1}],
+            "fileDate": "2026-01-01T00:00:00Z", "fileLength": bytes.len(),
+            "downloadUrl": null, "gameVersions": ["1.21"], "dependencies": []
+        });
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files/3040523"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": file})),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files/3040523/download-url"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 238222, "name": "JEI", "slug": "jei", "summary": "", "classId": 6
+                }})),
+            )
+            .mount(server)
+            .await;
+    }
+
+    /// 在拼出的地址 `route` 上挂探测（HEAD）与下载（GET，回 `bytes`）的应答，并限定各自应被请求的次数，
+    /// 由 `server.verify()` 核对。
+    async fn mount_derived(
+        server: &MockServer,
+        route: &str,
+        probe: ResponseTemplate,
+        probes: impl Into<wiremock::Times>,
+        bytes: &[u8],
+        downloads: u64,
+    ) {
+        Mock::given(method("HEAD"))
+            .and(path(route))
+            .respond_with(probe)
+            .expect(probes)
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.to_vec()))
+            .expect(downloads)
+            .mount(server)
+            .await;
+    }
+
+    /// 装受限文件用的门面：CurseForge API 与拼地址用的 CDN 根地址都指到 `server`。CDN 凭据的作用域也指过来，
+    /// 任务误挂了凭据时 x-api-key 就会真的发到假服务器上，断言才抓得到。
+    fn derive_petalfall(mc: &Path, server: &MockServer, enabled: bool) -> Petalfall {
+        let uri = server.uri();
+        let mut petalfall = isolated_petalfall(mc, uri.clone())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k")
+            .with_curseforge_cdn_base(&uri)
+            .with_curseforge_cdn_scope(petalfall_download::CredentialScope::new(
+                [format!("127.0.0.1:{}", server.address().port())],
+                false,
+            ));
+        petalfall.set_download_restricted_curseforge_files(enabled);
+        petalfall
+    }
+
+    /// 受限 JEI 在受限清单里的那一条，设置开着而拼出的地址下不了时也应一字不差。
+    fn blocked_jei(bytes: &[u8]) -> BlockedFile {
+        BlockedFile {
+            project_id: 238222,
+            file_id: 3040523,
+            file_name: "jei-1.21.jar".into(),
+            web_url: "https://www.curseforge.com/minecraft/mc-mods/jei/files/3040523".into(),
+            destination: "mods/jei-1.21.jar".into(),
+            sha1: Some(sha1_hex(bytes)),
+            fingerprint: 0,
+            size: Some(bytes.len() as u64),
+        }
+    }
+
+    /// 假服务器收到的、对 `route` 的 GET 请求。
+    async fn downloads_of(server: &MockServer, route: &str) -> Vec<wiremock::Request> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.method.as_str() == "GET" && request.url.path() == route)
+            .collect()
+    }
+
+    /// 设置关着：download-url 端点不给地址就报受限，清单照旧；拼出的地址一次都不碰（不探测也不下载），
+    /// mods/ 里什么都不落。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restricted_mod_with_the_setting_off_never_touches_the_derived_url() {
+        let bytes: &[u8] = b"restricted-jar";
+        let server = MockServer::start().await;
+        mount_restricted_jei(&server, bytes).await;
+        mount_derived(
+            &server,
+            DERIVED_JEI_PATH,
+            ResponseTemplate::new(200),
+            0,
+            bytes,
+            0,
+        )
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        put_version(tmp.path(), "1.21").await;
+        let petalfall = derive_petalfall(tmp.path(), &server, false);
+
+        let err = petalfall
+            .install_mod("1.21", Platform::CurseForge, "238222", "3040523", None)
+            .await
+            .unwrap_err();
+
+        let CoreError::FileDistributionBlocked { files } = &err else {
+            panic!("实际：{err:?}");
+        };
+        assert_eq!(files, &[blocked_jei(bytes)]);
+        server.verify().await;
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
+        assert!(!try_exists(&mods_dir.join("jei-1.21.jar")).await.unwrap());
+    }
+
+    /// 设置开着、download-url 端点不给地址、拼出的地址探测回 200：不报受限，按拼出的地址下进 mods/，内容与
+    /// 文件对象里的大小、sha1 对得上，卷宗记下来源。下载那一跳不带 x-api-key。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restricted_mod_downloads_from_the_derived_url_without_the_key() {
+        let seed = fastrand::u64(..);
+        let mut rng = fastrand::Rng::with_seed(seed);
+        let mut bytes = vec![0u8; rng.usize(1..=4096)];
+        rng.fill(&mut bytes);
+        let server = MockServer::start().await;
+        mount_restricted_jei(&server, &bytes).await;
+        mount_derived(
+            &server,
+            DERIVED_JEI_PATH,
+            ResponseTemplate::new(200),
+            1,
+            &bytes,
+            1,
+        )
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        put_version(tmp.path(), "1.21").await;
+        let petalfall = derive_petalfall(tmp.path(), &server, true);
+
+        let outcome = petalfall
+            .install_mod("1.21", Platform::CurseForge, "238222", "3040523", None)
+            .await
+            .unwrap_or_else(|err| panic!("种子 {seed}：{err:?}"));
+
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
+        assert_eq!(outcome.path, mods_dir.join("jei-1.21.jar"));
+        assert_eq!(dir_names(&mods_dir).await, vec!["jei-1.21.jar"]);
+        assert_eq!(
+            tokio::fs::read(&outcome.path).await.unwrap(),
+            bytes,
+            "种子 {seed}"
+        );
+        let listed = petalfall.list_mods("1.21").await.unwrap();
+        assert_eq!(listed.len(), 1);
+        let source = listed[0].source.as_ref().expect("卷宗应记下来源");
+        assert_eq!(
+            (source.project_id.as_str(), source.version_id.as_str()),
+            ("238222", "3040523")
+        );
+        server.verify().await;
+        let downloads = downloads_of(&server, DERIVED_JEI_PATH).await;
+        assert_eq!(downloads.len(), 1);
+        assert_eq!(downloads[0].headers.get("x-api-key"), None);
+    }
+
+    /// 设置开着但拼出的地址探测回 404、403、410 或 401（CDN 上没有这个文件、或不给取）：照旧报受限，清单与设置
+    /// 关着时一样，不下载，mods/ 里什么都不落。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restricted_mod_whose_derived_url_is_refused_is_still_reported_blocked() {
+        let bytes: &[u8] = b"restricted-jar";
+        for status in [404, 403, 410, 401] {
+            let server = MockServer::start().await;
+            mount_restricted_jei(&server, bytes).await;
+            mount_derived(
+                &server,
+                DERIVED_JEI_PATH,
+                ResponseTemplate::new(status),
+                1,
+                bytes,
+                0,
+            )
+            .await;
+            let tmp = tempfile::tempdir().unwrap();
+            put_version(tmp.path(), "1.21").await;
+            let petalfall = derive_petalfall(tmp.path(), &server, true);
+
+            let err = petalfall
+                .install_mod("1.21", Platform::CurseForge, "238222", "3040523", None)
+                .await
+                .unwrap_err();
+
+            let CoreError::FileDistributionBlocked { files } = &err else {
+                panic!("探测回 {status}：{err:?}");
+            };
+            assert_eq!(files, &[blocked_jei(bytes)], "探测回 {status}");
+            server.verify().await;
+            let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
+            assert!(
+                !try_exists(&mods_dir.join("jei-1.21.jar")).await.unwrap(),
+                "探测回 {status}"
+            );
+        }
+    }
+
+    /// 设置开着、拼出的地址探测回 500：照常报错，带着状态码与地址，不当成受限让玩家去手动下载，也不下载。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restricted_mod_whose_probe_fails_reports_the_failure() {
+        let bytes: &[u8] = b"restricted-jar";
+        let server = MockServer::start().await;
+        mount_restricted_jei(&server, bytes).await;
+        // 5xx 会重试，次数由探测自己封顶，这里只要求确实探测过。
+        mount_derived(
+            &server,
+            DERIVED_JEI_PATH,
+            ResponseTemplate::new(500),
+            1..,
+            bytes,
+            0,
+        )
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        put_version(tmp.path(), "1.21").await;
+        let petalfall = derive_petalfall(tmp.path(), &server, true);
+
+        let err = petalfall
+            .install_mod("1.21", Platform::CurseForge, "238222", "3040523", None)
+            .await
+            .unwrap_err();
+
+        let derived = format!("{}{DERIVED_JEI_PATH}", server.uri());
+        assert!(
+            matches!(
+                &err,
+                CoreError::ModPlatform(petalfall_modplatform::Error::Status { url, status: 500 })
+                    if url == &derived
+            ),
+            "{err:?}"
+        );
+        server.verify().await;
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
+        assert!(!try_exists(&mods_dir.join("jei-1.21.jar")).await.unwrap());
+    }
+
+    /// 受限 Mod 认领过副本，而设置开着且拼出的地址能下：按拼出的地址下载，不再用认领过的副本。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn derived_url_is_preferred_over_the_claimed_copy() {
+        let bytes: &[u8] = b"claimed-jar";
+        let route = "/files/9/0/9-9000.jar";
+        let server = MockServer::start().await;
+        mount_blocked_project(&server, 9, 9000).await;
+        // 用了认领过的副本就不会有这一次下载，verify 时就对不上。
+        mount_derived(&server, route, ResponseTemplate::new(200), 1, bytes, 1).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21").await;
+        let petalfall = derive_petalfall(mc, &server, true);
+        claim(&petalfall, mc, &blocked_file(9, 9000, bytes), bytes).await;
+
+        let outcome = petalfall
+            .install_planned(
+                "1.21",
+                plan_of(vec![planned(blocked_version(9, 9000, bytes))]),
+                (Platform::CurseForge, "9", "9000"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.file_name, "9-9000.jar");
+        assert_eq!(tokio::fs::read(&outcome.path).await.unwrap(), bytes);
+        server.verify().await;
+        let downloads = downloads_of(&server, route).await;
+        assert_eq!(downloads.len(), 1);
+        assert_eq!(downloads[0].headers.get("x-api-key"), None);
+    }
+
+    /// 拼出的地址建的暂存任务带着版本信息里的大小与 sha1，不挂凭据，也不算认领；同一个门面里 download-url
+    /// 端点给的地址照常挂凭据，挂不挂是按来源定的。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn derived_staged_task_keeps_size_and_sha1_but_not_the_credential() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        mount_blocked_project(&server, 9, 9000).await;
+        Mock::given(method("HEAD"))
+            .and(path("/files/9/0/9-9000.jar"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/8/files/8000/download-url"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": format!("{uri}/cdn/fallback.jar")})),
+            )
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = derive_petalfall(tmp.path(), &server, true);
+        let staging = tmp.path().join("staging");
+        let bytes: &[u8] = b"derived-jar";
+
+        let derived = petalfall
+            .stage_item(planned(blocked_version(9, 9000, bytes)), &staging)
+            .await
+            .unwrap();
+        assert_eq!(derived.task.url, format!("{uri}/files/9/0/9-9000.jar"));
+        assert_eq!(derived.task.dest, staging.join("9-9000.jar"));
+        assert_eq!(derived.task.size, Some(bytes.len() as u64));
+        assert_eq!(derived.task.sha1, Some(sha1_hex(bytes)));
+        assert!(derived.task.credential.is_none());
+        assert!(derived.claimed.is_none());
+
+        let endpoint = petalfall
+            .stage_item(
+                planned(version_info("curseforge", "8", "8000", None)),
+                &staging,
+            )
+            .await
+            .unwrap();
+        assert_eq!(endpoint.task.url, format!("{uri}/cdn/fallback.jar"));
+        assert_eq!(
+            endpoint.task.credential.as_ref().map(|c| c.realm()),
+            Some(petalfall_download::CredentialRealm::CurseForge)
+        );
+        server.verify().await;
     }
 
     // ---- 游戏目录的数据格式记号 ----

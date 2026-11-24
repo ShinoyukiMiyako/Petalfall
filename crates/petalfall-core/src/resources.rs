@@ -53,6 +53,9 @@ impl Petalfall {
     /// 先在本地定位目标目录（实例不存在、存档不存在都在触网前报错），再取平台文件、校验文件名、
     /// 经批量下载池落盘（带 sha1 与大小契约，不符即重下换源）。
     ///
+    /// CurseForge 文件拿不到下载地址时，设置 `download_restricted_curseforge_files` 开着就先拼 CDN 地址探测，
+    /// 能下照常下载；拼不出或探测不能下，再用手动下载并认领过的副本，没有副本才报受限。
+    ///
     /// 这之前先以「使用」方式核对游戏目录的数据格式记号：任务中心的重试与列实例被拒之后的旧列表都会不经
     /// 列实例直接调进来，记号比这一版新或读不懂时什么都不下载、不写。
     pub async fn install_resource(
@@ -188,8 +191,13 @@ impl Petalfall {
         ))
     }
 
-    /// 取平台上一个版本（文件）的主文件，生成落到 `dir` 下的下载任务。CurseForge 的任务挂上下载凭据。
-    /// `landing` 是 `dir` 给用户看的相对写法：文件受限时它是受限文件的落点目录。
+    /// 取平台上一个版本（文件）的主文件，生成落到 `dir` 下的下载任务。`landing` 是 `dir` 给用户看的
+    /// 相对写法：文件受限时它是受限文件的落点目录。
+    ///
+    /// CurseForge 的地址依次取文件对象自带的、download-url 端点给的，这两种任务挂上下载凭据；都拿不到而
+    /// 设置 `download_restricted_curseforge_files` 开着时，按文件编号与文件名拼出 CDN 地址并探测，能下就用
+    /// 它建任务，照样带文件对象里的大小与 sha1，但不挂凭据（见 [`FallbackUrl`]）。仍拿不到时报
+    /// [`CoreError::FileDistributionBlocked`]。设置关着时不拼地址、不发探测请求。
     pub(crate) async fn platform_file_task(
         &self,
         platform: Platform,
@@ -231,9 +239,19 @@ impl Petalfall {
                 let dest = dir.join(&file_name);
                 let credential = self.curseforge_credential(&client)?;
                 let task = match file.to_download_task(&dest) {
-                    Some(task) => task,
-                    None => match curseforge_download_url(&client, mod_id, file_id).await? {
-                        Some(url) => task_for_file_url(url, &dest, &file),
+                    Some(task) => task.with_credential(credential),
+                    None => match curseforge_fallback_url(
+                        &client,
+                        mod_id,
+                        file_id,
+                        &file_name,
+                        self.config().download_restricted_curseforge_files,
+                    )
+                    .await?
+                    {
+                        Some(url) => {
+                            url.into_task(|url| task_for_file_url(url, &dest, &file), &credential)
+                        }
                         None => {
                             let destination = join_landing(landing, &file_name);
                             return Err(single_blocked(&client, mod_id, |project| {
@@ -243,7 +261,7 @@ impl Petalfall {
                         }
                     },
                 };
-                Ok((file_name, task.with_credential(credential)))
+                Ok((file_name, task))
             }
         }
     }
@@ -251,7 +269,7 @@ impl Petalfall {
 
 /// 文件对象没给下载地址时向 download-url 端点要。作者禁止第三方分发时该端点拒绝（403/404）或给空串，
 /// 返回 `None`：调用方把它报成「需要到网页手动下载」，而不是笼统的请求失败。
-pub(crate) async fn curseforge_download_url(
+async fn curseforge_download_url(
     client: &CurseForgeClient,
     mod_id: u32,
     file_id: u32,
@@ -264,6 +282,61 @@ pub(crate) async fn curseforge_download_url(
         }) => Ok(None),
         Err(other) => Err(other.into()),
     }
+}
+
+/// 文件对象没给下载地址时补到的地址，按来源分两种：下载任务挂不挂 CDN 凭据取决于它。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FallbackUrl {
+    /// download-url 端点给的。与文件对象自带的地址同等对待，下载任务照常挂 CDN 凭据。
+    Endpoint(String),
+    /// 平台不给地址，按文件编号与文件名拼出来、并且探测过能下的。作者没有把这个文件开放给第三方分发，
+    /// 取它不该打着落樱那把 key 的名义：下载任务不挂凭据。装的是探测跟随跳转后的最终地址，不是拼出的那个：
+    /// 拼出的地址在 edge.forgecdn.net 上，它对带 Range 的请求回 404、不跳转，整合包摘要的范围读取只能对最终地址发。
+    Derived(String),
+}
+
+impl FallbackUrl {
+    /// 用这个地址建下载任务：`build` 只管把地址换成任务，凭据由这里按来源决定挂不挂。
+    pub(crate) fn into_task(
+        self,
+        build: impl FnOnce(String) -> DownloadTask,
+        credential: &petalfall_download::DownloadCredential,
+    ) -> DownloadTask {
+        match self {
+            Self::Endpoint(url) => build(url).with_credential(credential.clone()),
+            Self::Derived(url) => build(url),
+        }
+    }
+}
+
+/// 文件对象没给下载地址时去哪要：先问 download-url 端点；端点也不给（403、404 或空串，作者禁止第三方
+/// 分发时就是这样）而 `derive_restricted` 为真时，按文件编号与文件名拼出 CDN 地址，探测能下才用，用的是
+/// 探测交回的跳转终点（见 [`FallbackUrl::Derived`]）。
+///
+/// 返回 `None` 表示拿不到任何能下的地址，调用方把它报成「需要到网页手动下载」。`derive_restricted` 来自
+/// 配置里的 `download_restricted_curseforge_files`，默认关闭：关着时不拼地址、不发探测请求，行为与没有
+/// 这个设置时一样。探测出错（网络不通、CDN 回 5xx）照常报错，不当成「不能下」：否则一次网络抖动就会
+/// 让用户去手动下载本来能自动下的文件。
+pub(crate) async fn curseforge_fallback_url(
+    client: &CurseForgeClient,
+    mod_id: u32,
+    file_id: u32,
+    file_name: &str,
+    derive_restricted: bool,
+) -> Result<Option<FallbackUrl>> {
+    if let Some(url) = curseforge_download_url(client, mod_id, file_id).await? {
+        return Ok(Some(FallbackUrl::Endpoint(url)));
+    }
+    if !derive_restricted {
+        return Ok(None);
+    }
+    let Some(url) = client.derived_download_url(file_id, file_name) else {
+        return Ok(None);
+    };
+    Ok(client
+        .probe_derived_download(&url)
+        .await?
+        .map(FallbackUrl::Derived))
 }
 
 /// download-url 端点给的地址换成下载任务，带上文件对象里的大小与 sha1 契约。
@@ -764,8 +837,8 @@ mod tests {
         );
     }
 
-    /// CurseForge 的任务（含 download-url 兜底出来的）都挂 CurseForge 凭据，Modrinth 的任务不挂。数据包的
-    /// 落点写法带上存档。
+    /// 文件对象自带地址与 download-url 端点兜底出来的 CurseForge 任务挂 CurseForge 凭据，Modrinth 的任务
+    /// 不挂（按文件编号拼出来的地址也不挂，见后面拼地址的用例）。数据包的落点写法带上存档。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn curseforge_tasks_carry_the_download_credential_and_modrinth_tasks_do_not() {
         let server = MockServer::start().await;
@@ -829,6 +902,651 @@ mod tests {
             "saves/新的世界/datapacks/a.zip"
         );
         assert_eq!(join_landing("", "a.zip"), "a.zip");
+    }
+
+    // ---- 拿不到下载地址时按设置拼出 CDN 地址 ----
+
+    fn derived_path(file_id: u32, file_name: &str) -> String {
+        format!("/files/{}/{}/{file_name}", file_id / 1000, file_id % 1000)
+    }
+
+    /// 作者关掉第三方分发的一个 CurseForge 资源包。编号随机且不小于 1000（拼得出 CDN 地址），内容随机、
+    /// 长度从 1 字节起。
+    struct Restricted {
+        file_id: u32,
+        bytes: Vec<u8>,
+        /// 按编号与文件名拼出的 CDN 路径。
+        cdn_path: String,
+    }
+
+    impl Restricted {
+        fn new() -> Self {
+            let file_id = fastrand::u32(1000..);
+            let mut bytes = vec![0u8; fastrand::usize(1..=4096)];
+            fastrand::fill(&mut bytes);
+            Self {
+                file_id,
+                bytes,
+                cdn_path: derived_path(file_id, "pack.zip"),
+            }
+        }
+
+        fn version_id(&self) -> String {
+            self.file_id.to_string()
+        }
+
+        /// 报受限时该给出的那一条：与设置无关。
+        fn blocked(&self) -> BlockedFile {
+            BlockedFile {
+                project_id: 123,
+                file_id: self.file_id,
+                file_name: "pack.zip".into(),
+                web_url: format!(
+                    "https://www.curseforge.com/minecraft/texture-packs/pack/files/{}",
+                    self.file_id
+                ),
+                destination: "resourcepacks/pack.zip".into(),
+                sha1: Some(sha1_hex(&self.bytes)),
+                fingerprint: 778,
+                size: Some(self.bytes.len() as u64),
+            }
+        }
+    }
+
+    const PACK: ResourceTarget<'static> = ResourceTarget {
+        version_id: "1.21.1",
+        resource_type: ResourceType::ResourcePack,
+        world: None,
+    };
+
+    /// 文件对象不给地址、download-url 端点 403，工程给网页链接（报受限时拼链接用）。
+    async fn mount_restricted(server: &MockServer, file: &Restricted) {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/mods/123/files/{}", file.file_id)))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": file.file_id, "modId": 123, "displayName": "Pack", "fileName": "pack.zip",
+                    "hashes": [{"value": sha1_hex(&file.bytes), "algo": 1}],
+                    "downloadUrl": null, "fileLength": file.bytes.len(), "fileFingerprint": 778
+                }})),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1/mods/123/files/{}/download-url",
+                file.file_id
+            )))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/123"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 123, "name": "Pack", "slug": "pack", "summary": "", "classId": 12,
+                    "links": {"websiteUrl": "https://www.curseforge.com/minecraft/texture-packs/pack/"}
+                }})),
+            )
+            .mount(server)
+            .await;
+    }
+
+    /// 拼出的地址上的探测（HEAD，回 `head`）与下载（GET，回文件内容），各该收到多少次。
+    async fn mount_derived(
+        server: &MockServer,
+        file: &Restricted,
+        head: u16,
+        heads: impl Into<wiremock::Times>,
+        gets: u64,
+    ) {
+        Mock::given(method("HEAD"))
+            .and(path(file.cdn_path.as_str()))
+            .respond_with(ResponseTemplate::new(head))
+            .expect(heads)
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(file.cdn_path.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(file.bytes.clone()))
+            .expect(gets)
+            .mount(server)
+            .await;
+    }
+
+    /// CurseForge API 与拼地址用的 CDN 根都指到 `server`。凭据作用域也指到它：任务误挂了凭据，x-api-key
+    /// 就会真的发到拼出的地址上，测试才抓得到。
+    fn restricted_petalfall(mc: &Path, server: &MockServer, enabled: bool) -> Petalfall {
+        let port = server.address().port();
+        let mut petalfall = petalfall(mc, IsolationPolicy::All, &server.uri())
+            .with_curseforge_key("k")
+            .with_curseforge_cdn_scope(petalfall_download::CredentialScope::new(
+                [format!("127.0.0.1:{port}")],
+                false,
+            ))
+            .with_curseforge_cdn_base(server.uri());
+        petalfall.set_download_restricted_curseforge_files(enabled);
+        petalfall
+    }
+
+    /// 拼出的地址收到的请求，按到达顺序：方法，以及带没带 x-api-key。
+    async fn derived_requests(server: &MockServer, file: &Restricted) -> Vec<(String, bool)> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == file.cdn_path)
+            .map(|request| {
+                (
+                    request.method.as_str().to_owned(),
+                    request.headers.contains_key("x-api-key"),
+                )
+            })
+            .collect()
+    }
+
+    /// 设置关着：照旧报受限，清单照文件对象给；拼出的地址既没被探测也没被下载。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restricted_resource_with_the_setting_off_never_touches_the_derived_url() {
+        let server = MockServer::start().await;
+        let file = Restricted::new();
+        mount_restricted(&server, &file).await;
+        mount_derived(&server, &file, 200, 0, 0).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21.1").await;
+        let petalfall = restricted_petalfall(mc, &server, false);
+
+        let err = petalfall
+            .install_resource(PACK, Platform::CurseForge, "123", &file.version_id(), None)
+            .await
+            .unwrap_err();
+
+        let CoreError::FileDistributionBlocked { files } = &err else {
+            panic!("实际：{err:?}");
+        };
+        assert_eq!(files, &[file.blocked()]);
+        assert!(!mc.join("versions/1.21.1/resourcepacks/pack.zip").exists());
+        server.verify().await;
+        assert_eq!(
+            derived_requests(&server, &file).await,
+            Vec::<(String, bool)>::new()
+        );
+    }
+
+    /// 设置开着、探测 200：不报受限，按拼出的地址下到 resourcepacks/，内容与平台一致（大小与 sha1 照文件
+    /// 对象校验）。凭据作用域覆盖这个地址，下载那一跳仍不带 x-api-key：拼出的地址不挂凭据。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restricted_resource_with_the_setting_on_downloads_from_the_derived_url_without_the_key()
+     {
+        let server = MockServer::start().await;
+        let file = Restricted::new();
+        mount_restricted(&server, &file).await;
+        mount_derived(&server, &file, 200, 1, 1).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21.1").await;
+        let petalfall = restricted_petalfall(mc, &server, true);
+
+        let outcome = petalfall
+            .install_resource(PACK, Platform::CurseForge, "123", &file.version_id(), None)
+            .await
+            .unwrap();
+
+        let expected = mc.join("versions/1.21.1/resourcepacks/pack.zip");
+        assert_eq!(outcome.file_name, "pack.zip");
+        assert_eq!(outcome.path, expected);
+        assert_eq!(outcome.platform, Platform::CurseForge);
+        assert_eq!(tokio::fs::read(&expected).await.unwrap(), file.bytes);
+        server.verify().await;
+        assert_eq!(
+            derived_requests(&server, &file).await,
+            vec![("HEAD".to_owned(), false), ("GET".to_owned(), false)]
+        );
+    }
+
+    /// 拼出的地址建的任务带上文件对象里的大小与 sha1，下载后照样校验；凭据不挂。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn derived_task_keeps_the_size_and_sha1_but_not_the_credential() {
+        let server = MockServer::start().await;
+        let file = Restricted::new();
+        mount_restricted(&server, &file).await;
+        mount_derived(&server, &file, 200, 1, 0).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = restricted_petalfall(tmp.path(), &server, true);
+        let dir = tmp.path().join("rp");
+
+        let (file_name, task) = petalfall
+            .platform_file_task(
+                Platform::CurseForge,
+                "123",
+                &file.version_id(),
+                &dir,
+                "resourcepacks",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(file_name, "pack.zip");
+        assert_eq!(
+            task,
+            DownloadTask {
+                url: format!("{}{}", server.uri(), file.cdn_path),
+                dest: dir.join("pack.zip"),
+                sha1: Some(sha1_hex(&file.bytes)),
+                size: Some(file.bytes.len() as u64),
+                credential: None,
+            }
+        );
+        server.verify().await;
+    }
+
+    /// 设置开着、探测回 404 或 410：仍报受限，清单与设置关着时一字不差；拼出的地址只被探测、没被下载。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restricted_resource_the_cdn_refuses_is_still_reported_blocked() {
+        for status in [404u16, 410] {
+            let server = MockServer::start().await;
+            let file = Restricted::new();
+            mount_restricted(&server, &file).await;
+            mount_derived(&server, &file, status, 1, 0).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let mc = tmp.path();
+            put_version(mc, "1.21.1").await;
+            let mut petalfall = restricted_petalfall(mc, &server, false);
+            let off = petalfall
+                .install_resource(PACK, Platform::CurseForge, "123", &file.version_id(), None)
+                .await
+                .unwrap_err();
+            petalfall.set_download_restricted_curseforge_files(true);
+
+            let on = petalfall
+                .install_resource(PACK, Platform::CurseForge, "123", &file.version_id(), None)
+                .await
+                .unwrap_err();
+
+            let (
+                CoreError::FileDistributionBlocked { files: off_files },
+                CoreError::FileDistributionBlocked { files: on_files },
+            ) = (&off, &on)
+            else {
+                panic!("{status}：关着 {off:?}，开着 {on:?}");
+            };
+            assert_eq!(on_files, off_files, "{status}");
+            assert_eq!(on_files, &[file.blocked()], "{status}");
+            assert_eq!(
+                on.to_string(),
+                "这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：pack.zip",
+                "{status}"
+            );
+            assert!(
+                !mc.join("versions/1.21.1/resourcepacks/pack.zip").exists(),
+                "{status}"
+            );
+            server.verify().await;
+            assert_eq!(
+                derived_requests(&server, &file).await,
+                vec![("HEAD".to_owned(), false)],
+                "{status}"
+            );
+        }
+    }
+
+    /// 设置开着、探测回 500：报探测的错而不是受限（一次网络抖动不该把能自动下的文件推给用户手动下），
+    /// 什么都不下载。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restricted_resource_probe_failure_is_an_error_not_blocked() {
+        let server = MockServer::start().await;
+        let file = Restricted::new();
+        mount_restricted(&server, &file).await;
+        mount_derived(&server, &file, 500, 1.., 0).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21.1").await;
+        let petalfall = restricted_petalfall(mc, &server, true);
+
+        let err = petalfall
+            .install_resource(PACK, Platform::CurseForge, "123", &file.version_id(), None)
+            .await
+            .unwrap_err();
+
+        let derived = format!("{}{}", server.uri(), file.cdn_path);
+        assert!(
+            matches!(
+                &err,
+                CoreError::ModPlatform(petalfall_modplatform::Error::Status { url, status: 500 })
+                    if url == &derived
+            ),
+            "实际：{err:?}"
+        );
+        assert!(!mc.join("versions/1.21.1/resourcepacks/pack.zip").exists());
+        server.verify().await;
+    }
+
+    /// 认领过副本之后打开设置、拼出的地址能下：按地址下载，不用认领的副本（阶段是「开始下载」而不是
+    /// 「使用手动下载的」，拼出的地址被 GET 了一次）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn derived_download_comes_before_the_claimed_copy() {
+        let server = MockServer::start().await;
+        let file = Restricted::new();
+        mount_restricted(&server, &file).await;
+        mount_derived(&server, &file, 200, 1, 1).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21.1").await;
+        let mut petalfall = restricted_petalfall(mc, &server, false);
+        let err = petalfall
+            .install_resource(PACK, Platform::CurseForge, "123", &file.version_id(), None)
+            .await
+            .unwrap_err();
+        let CoreError::FileDistributionBlocked { files } = err else {
+            panic!("设置关着、没认领时应报受限：{err:?}");
+        };
+        let downloads = mc.join("Downloads");
+        tokio::fs::create_dir_all(&downloads).await.unwrap();
+        tokio::fs::write(downloads.join("pack (1).zip"), &file.bytes)
+            .await
+            .unwrap();
+        let report = petalfall
+            .claim_blocked_files(&downloads, &files)
+            .await
+            .unwrap();
+        assert!(report.missing.is_empty(), "{report:?}");
+        petalfall.set_download_restricted_curseforge_files(true);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = petalfall
+            .install_resource(
+                PACK,
+                Platform::CurseForge,
+                "123",
+                &file.version_id(),
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+
+        let mut stages = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let CoreEvent::Stage(stage) = event {
+                stages.push(stage);
+            }
+        }
+        assert!(
+            stages.iter().any(|stage| stage == "开始下载 pack.zip"),
+            "{stages:?}"
+        );
+        assert!(
+            !stages
+                .iter()
+                .any(|stage| stage.starts_with("使用手动下载的")),
+            "{stages:?}"
+        );
+        assert_eq!(
+            outcome.path,
+            mc.join("versions/1.21.1/resourcepacks/pack.zip")
+        );
+        assert_eq!(tokio::fs::read(&outcome.path).await.unwrap(), file.bytes);
+        server.verify().await;
+        assert_eq!(
+            derived_requests(&server, &file).await,
+            vec![("HEAD".to_owned(), false), ("GET".to_owned(), false)]
+        );
+    }
+
+    // ---- curseforge_fallback_url ----
+
+    /// 直接对着 `server` 的客户端：API 与拼地址用的 CDN 根都指到它。最多试两次且几乎不等，探测出错的用例
+    /// 不必等满默认退避。
+    fn fallback_client(server: &MockServer, mc: &Path) -> CurseForgeClient {
+        petalfall(mc, IsolationPolicy::All, &server.uri())
+            .with_curseforge_key("k")
+            .with_curseforge_cdn_base(server.uri())
+            .curseforge_client()
+            .unwrap()
+            .with_retry(petalfall_base::retry::RetryPolicy {
+                max_attempts: 2,
+                initial_delay: std::time::Duration::from_millis(1),
+                max_delay: std::time::Duration::from_millis(1),
+                multiplier: 1.0,
+                jitter: false,
+            })
+    }
+
+    /// download-url 端点对 `file_id` 回 `response`，且只该被问一次。
+    async fn mount_endpoint(server: &MockServer, file_id: u32, response: ResponseTemplate) {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/mods/123/files/{file_id}/download-url")))
+            .respond_with(response)
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    /// `server` 收到的 HEAD（探测）请求路径。
+    async fn probes(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method.as_str() == "HEAD")
+            .map(|request| request.url.path().to_owned())
+            .collect()
+    }
+
+    /// 端点给了地址就用它，标成 Endpoint；设置开不开都不拼地址、不探测。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fallback_url_takes_the_endpoint_url_first() {
+        for derive in [false, true] {
+            let server = MockServer::start().await;
+            let file_id = fastrand::u32(1000..);
+            let given = format!("{}/endpoint/pack.zip", server.uri());
+            mount_endpoint(
+                &server,
+                file_id,
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": given})),
+            )
+            .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let client = fallback_client(&server, tmp.path());
+
+            let got = curseforge_fallback_url(&client, 123, file_id, "pack.zip", derive)
+                .await
+                .unwrap();
+
+            assert_eq!(got, Some(FallbackUrl::Endpoint(given)), "{derive}");
+            assert_eq!(probes(&server).await, Vec::<String>::new(), "{derive}");
+            server.verify().await;
+        }
+    }
+
+    /// 端点 403 而设置关着：返回 None，拼出的地址一次都没被请求。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fallback_url_with_the_setting_off_stops_at_the_endpoint() {
+        let server = MockServer::start().await;
+        let file_id = fastrand::u32(1000..);
+        mount_endpoint(&server, file_id, ResponseTemplate::new(403)).await;
+        Mock::given(path(derived_path(file_id, "pack.zip")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = fallback_client(&server, tmp.path());
+
+        let got = curseforge_fallback_url(&client, 123, file_id, "pack.zip", false)
+            .await
+            .unwrap();
+
+        assert_eq!(got, None);
+        assert_eq!(probes(&server).await, Vec::<String>::new());
+        server.verify().await;
+    }
+
+    /// 端点拒绝（403、404、空串）而设置开着、探测 200：返回 Derived，地址以注入的 CDN 根开头，路径按编号
+    /// 整除 1000 与余数分两段。编号取 1000（余数为 0 的下界）与随机值。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fallback_url_derives_and_probes_when_the_endpoint_refuses() {
+        let refusals: [fn() -> ResponseTemplate; 3] = [
+            || ResponseTemplate::new(403),
+            || ResponseTemplate::new(404),
+            || ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": ""})),
+        ];
+        for (case, refusal) in refusals.into_iter().enumerate() {
+            for file_id in [1000, fastrand::u32(1000..)] {
+                let server = MockServer::start().await;
+                mount_endpoint(&server, file_id, refusal()).await;
+                let cdn_path = derived_path(file_id, "pack.zip");
+                Mock::given(method("HEAD"))
+                    .and(path(cdn_path.as_str()))
+                    .respond_with(ResponseTemplate::new(200))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let tmp = tempfile::tempdir().unwrap();
+                let client = fallback_client(&server, tmp.path());
+
+                let got = curseforge_fallback_url(&client, 123, file_id, "pack.zip", true)
+                    .await
+                    .unwrap();
+
+                let Some(FallbackUrl::Derived(url)) = got else {
+                    panic!("第 {case} 种拒绝、编号 {file_id}：{got:?}");
+                };
+                assert!(
+                    url.starts_with(&format!("{}/files/", server.uri())),
+                    "{url}"
+                );
+                assert_eq!(url, format!("{}{cdn_path}", server.uri()));
+                server.verify().await;
+            }
+        }
+        assert_eq!(derived_path(1000, "a.jar"), "/files/1/0/a.jar");
+    }
+
+    /// 探测经 302 落到别的路径（线上 edge.forgecdn.net 跳到 mediafilez.forgecdn.net）：Derived 装的是跳转终点，
+    /// 之后的下载与范围读取都对它发，不再碰对带 Range 的请求回 404 的拼出地址。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fallback_url_carries_the_redirect_target_of_the_probe() {
+        let server = MockServer::start().await;
+        let file_id = fastrand::u32(1000..);
+        mount_endpoint(&server, file_id, ResponseTemplate::new(403)).await;
+        let cdn_path = derived_path(file_id, "pack.zip");
+        let media = format!("/mediafilez{cdn_path}");
+        Mock::given(method("HEAD"))
+            .and(path(cdn_path.as_str()))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}{media}", server.uri()).as_str()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path(media.as_str()))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = fallback_client(&server, tmp.path());
+
+        let got = curseforge_fallback_url(&client, 123, file_id, "pack.zip", true)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            got,
+            Some(FallbackUrl::Derived(format!("{}{media}", server.uri())))
+        );
+        assert_eq!(probes(&server).await, vec![cdn_path, media]);
+        server.verify().await;
+    }
+
+    /// 探测回 401、403、404、410：CDN 不给，返回 None 而不是报错。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fallback_url_is_none_when_the_probe_says_no() {
+        for status in [401u16, 403, 404, 410] {
+            let server = MockServer::start().await;
+            let file_id = fastrand::u32(1000..);
+            mount_endpoint(&server, file_id, ResponseTemplate::new(403)).await;
+            Mock::given(method("HEAD"))
+                .and(path(derived_path(file_id, "pack.zip")))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let client = fallback_client(&server, tmp.path());
+
+            let got = curseforge_fallback_url(&client, 123, file_id, "pack.zip", true)
+                .await
+                .unwrap();
+
+            assert_eq!(got, None, "{status}");
+            server.verify().await;
+        }
+    }
+
+    /// 探测回 500：报错，错里是拼出的地址与状态码，不当成「不能下」。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fallback_url_probe_failure_is_an_error() {
+        let server = MockServer::start().await;
+        let file_id = fastrand::u32(1000..);
+        mount_endpoint(&server, file_id, ResponseTemplate::new(403)).await;
+        let cdn_path = derived_path(file_id, "pack.zip");
+        Mock::given(method("HEAD"))
+            .and(path(cdn_path.as_str()))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1..)
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = fallback_client(&server, tmp.path());
+
+        let err = curseforge_fallback_url(&client, 123, file_id, "pack.zip", true)
+            .await
+            .unwrap_err();
+
+        let derived = format!("{}{cdn_path}", server.uri());
+        assert!(
+            matches!(
+                &err,
+                CoreError::ModPlatform(petalfall_modplatform::Error::Status { url, status: 500 })
+                    if url == &derived
+            ),
+            "实际：{err:?}"
+        );
+        server.verify().await;
+    }
+
+    /// 拼不出地址（文件名带路径分隔符或是 `..`，编号小于 1000）：返回 None，不发探测。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fallback_url_is_none_without_probing_when_nothing_can_be_derived() {
+        for (file_id, file_name) in [
+            (fastrand::u32(1000..), "mods/pack.zip"),
+            (fastrand::u32(1000..), "mods\\pack.zip"),
+            (fastrand::u32(1000..), ".."),
+            (999, "pack.zip"),
+        ] {
+            let server = MockServer::start().await;
+            mount_endpoint(&server, file_id, ResponseTemplate::new(403)).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let client = fallback_client(&server, tmp.path());
+
+            let got = curseforge_fallback_url(&client, 123, file_id, file_name, true)
+                .await
+                .unwrap();
+
+            assert_eq!(got, None, "{file_id} {file_name:?}");
+            assert_eq!(
+                probes(&server).await,
+                Vec::<String>::new(),
+                "{file_id} {file_name:?}"
+            );
+            server.verify().await;
+        }
     }
 
     #[test]

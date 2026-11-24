@@ -14,6 +14,7 @@
     "check_updates": false,
     "default_java": "C:/Java/jdk-21/bin/javaw.exe",
     "download_concurrency": 32,
+    "download_restricted_curseforge_files": true,
     "download_source": "auto",
     "extra_game_directories": [
       {
@@ -105,6 +106,7 @@
     "check_updates": false,
     "default_java": "C:/Java/jdk-21/bin/javaw.exe",
     "download_concurrency": 32,
+    "download_restricted_curseforge_files": true,
     "download_source": "official_first",
     "extra_game_directories": [
       {
@@ -196,6 +198,7 @@
     "check_updates": false,
     "default_java": "C:/Java/jdk-21/bin/javaw.exe",
     "download_concurrency": 32,
+    "download_restricted_curseforge_files": true,
     "download_source": "mirror_first",
     "extra_game_directories": [
       {
@@ -287,6 +290,7 @@
     "check_updates": false,
     "default_java": "C:/Java/jdk-21/bin/javaw.exe",
     "download_concurrency": 32,
+    "download_restricted_curseforge_files": true,
     "download_source": "auto",
     "extra_game_directories": [
       {
@@ -378,6 +382,7 @@
     "check_updates": false,
     "default_java": "C:/Java/jdk-21/bin/javaw.exe",
     "download_concurrency": 32,
+    "download_restricted_curseforge_files": true,
     "download_source": "official_first",
     "extra_game_directories": [
       {

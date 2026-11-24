@@ -203,15 +203,19 @@ impl Petalfall {
     pub(crate) fn curseforge_client(&self) -> Result<CurseForgeClient> {
         #[cfg(test)]
         if let Some(key) = self.injected_curseforge_key() {
-            return Ok(
-                CurseForgeClient::new(self.http(), key).with_base_url(self.curseforge_base())
-            );
+            let client =
+                CurseForgeClient::new(self.http(), key).with_base_url(self.curseforge_base());
+            return Ok(match self.injected_curseforge_cdn_base() {
+                Some(cdn) => client.with_cdn_base_url(cdn),
+                None => client,
+            });
         }
         Ok(CurseForgeClient::from_env(self.http())?.with_base_url(self.curseforge_base()))
     }
 
     /// 与 `client` 同一个 key 的 CDN 下载凭据，CurseForge 的三条下载路径（资源与平台整合包本体、Mod、
-    /// 整合包里的文件）生成的任务都挂上它。
+    /// 整合包里的文件）生成的任务都挂上它；平台不给地址、按文件编号拼出来的那种除外，见
+    /// [`crate::resources::FallbackUrl`]。
     pub(crate) fn curseforge_credential(
         &self,
         client: &CurseForgeClient,

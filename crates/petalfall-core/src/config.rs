@@ -259,6 +259,10 @@ pub struct PetalfallConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub usage_notice: Option<UsageNoticeAcceptance>,
+    /// 作者关掉了第三方分发的 CurseForge 文件，download-url 端点也给不出地址时，是否按文件编号与文件名拼出 CDN
+    /// 地址直接下载。默认关：作者没有允许经第三方取这个文件，要不要这样取由用户自己决定；关着时照旧请用户到网页
+    /// 手动下载。旧配置没有这一项时按关着读入。
+    pub download_restricted_curseforge_files: bool,
     /// 这个版本不认识的顶层设置（多半是更新的版本写的），原样留着、落盘时原样写回。
     ///
     /// 配置整份按内存里的值落盘：不留着的话，降级之后随便改一项设置，新版本的设置就从文件里消失了，
@@ -304,6 +308,7 @@ impl Default for PetalfallConfig {
             world_backup: WorldBackupSettings::default(),
             ui_shape: UiShape::default(),
             usage_notice: None,
+            download_restricted_curseforge_files: false,
             unrecognized: serde_json::Map::new(),
             carried_over: CarriedOver::default(),
         }
@@ -742,6 +747,10 @@ mod tests {
         assert!(c.extra_java_paths.is_empty());
         assert!(!c.prefer_dedicated_gpu, "独显偏好默认关");
         assert!(c.skip_accessibility_onboarding, "默认跳过无障碍引导");
+        assert!(
+            !c.download_restricted_curseforge_files,
+            "受限的 CurseForge 文件默认不自动下载"
+        );
         assert_eq!(
             (c.ui_shape.recent_cards, c.ui_shape.repair_banner),
             (0, false),
@@ -884,6 +893,53 @@ mod tests {
             serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
         assert_eq!(raw["skip_accessibility_onboarding"], false);
         assert_eq!(store.load().await.unwrap(), loaded);
+    }
+
+    /// 旧配置没有 download_restricted_curseforge_files 时按关着载入；打开后整份落盘，文件顶层写着这个键，
+    /// 再读回还是开着，且由字段认领、不落进不认识的设置里。
+    #[tokio::test]
+    async fn download_restricted_curseforge_files_defaults_off_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = ConfigStore::at(&path);
+
+        tokio::fs::write(
+            &path,
+            br#"{"download_concurrency": 12, "auto_download_java": false}"#,
+        )
+        .await
+        .unwrap();
+        let mut loaded = store.load().await.unwrap();
+        assert!(!loaded.download_restricted_curseforge_files);
+        assert_eq!(loaded.download_concurrency, 12);
+        assert!(!loaded.auto_download_java);
+
+        loaded.download_restricted_curseforge_files = true;
+        store.save(&loaded).await.unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["download_restricted_curseforge_files"], true);
+        assert_eq!(raw["download_concurrency"], 12);
+
+        let reloaded = store.load().await.unwrap();
+        assert!(reloaded.download_restricted_curseforge_files);
+        assert!(
+            reloaded.unrecognized.is_empty(),
+            "这个键由字段认领，不该当作不认识的设置：{:?}",
+            reloaded.unrecognized
+        );
+        assert_eq!(reloaded, loaded);
+
+        tokio::fs::write(&path, br#"{"download_restricted_curseforge_files": false}"#)
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .load()
+                .await
+                .unwrap()
+                .download_restricted_curseforge_files
+        );
     }
 
     /// 旧配置没有 world_backup 时按默认值载入：自动备份开、每个存档 5 份、总量 20 GB。
@@ -2181,6 +2237,7 @@ mod tests {
         assert_eq!(raw["prefer_dedicated_gpu"], false);
         assert_eq!(raw["skip_accessibility_onboarding"], true);
         assert_eq!(raw["new_instance_template"], true);
+        assert_eq!(raw["download_restricted_curseforge_files"], false);
         assert_eq!(
             raw["world_backup"],
             serde_json::json!({"auto": true, "keep_per_world": 5, "max_total_gb": 20})

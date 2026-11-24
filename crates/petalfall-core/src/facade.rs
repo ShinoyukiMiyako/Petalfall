@@ -100,6 +100,9 @@ pub struct Petalfall {
     /// 测试把 CurseForge 下载凭据的作用域换成本地 mock：生产作用域只认 https 的 forgecdn.net。
     #[cfg(test)]
     curseforge_cdn_scope: Option<petalfall_download::CredentialScope>,
+    /// 测试把 CurseForge 的 CDN 指到本地 mock：拼出来的下载地址与对它的探测都打到这里。
+    #[cfg(test)]
+    curseforge_cdn_base: Option<String>,
     /// 测试注入的下载地址改写：往返测试要让导入侧把清单里的正式 CDN 地址下到本地 mock，又不能放松导入
     /// 对清单地址的白名单校验，只能在下载池这一层改写。
     #[cfg(test)]
@@ -197,6 +200,8 @@ impl Petalfall {
             curseforge_key: None,
             #[cfg(test)]
             curseforge_cdn_scope: None,
+            #[cfg(test)]
+            curseforge_cdn_base: None,
             #[cfg(test)]
             download_resolver: None,
             #[cfg(test)]
@@ -410,6 +415,11 @@ impl Petalfall {
     /// 只管之后的新建与整合包导入；已经套过模板的实例不动，模板文件也不删，再打开时照常沿用。
     pub fn set_new_instance_template(&mut self, enabled: bool) {
         self.config.new_instance_template = enabled;
+    }
+
+    /// 设置作者关掉了第三方分发的 CurseForge 文件拿不到下载地址时，是否拼出 CDN 地址直接下载。
+    pub fn set_download_restricted_curseforge_files(&mut self, enabled: bool) {
+        self.config.download_restricted_curseforge_files = enabled;
     }
 
     /// 记下用户跳过的启动器版本。
@@ -648,6 +658,7 @@ impl Petalfall {
             account_changes: Default::default(),
             curseforge_key: None,
             curseforge_cdn_scope: None,
+            curseforge_cdn_base: None,
             download_resolver: None,
             authlib_latest_url: None,
         }
@@ -727,6 +738,16 @@ impl Petalfall {
         &self,
     ) -> Option<&petalfall_download::CredentialScope> {
         self.curseforge_cdn_scope.as_ref()
+    }
+
+    /// 让 CurseForge 客户端把这个地址当成 CDN：按文件编号拼出的下载地址以它开头。
+    pub(crate) fn with_curseforge_cdn_base(mut self, url: impl Into<String>) -> Self {
+        self.curseforge_cdn_base = Some(url.into());
+        self
+    }
+
+    pub(crate) fn injected_curseforge_cdn_base(&self) -> Option<&str> {
+        self.curseforge_cdn_base.as_deref()
     }
 
     /// 启动时查 authlib-injector 最新构建改查这个地址。
@@ -847,6 +868,12 @@ mod tests {
         assert!(!petalfall.config().new_instance_template);
         petalfall.set_new_instance_template(true);
         assert!(petalfall.config().new_instance_template);
+
+        assert!(!petalfall.config().download_restricted_curseforge_files);
+        petalfall.set_download_restricted_curseforge_files(true);
+        assert!(petalfall.config().download_restricted_curseforge_files);
+        petalfall.set_download_restricted_curseforge_files(false);
+        assert!(!petalfall.config().download_restricted_curseforge_files);
     }
 
     /// 改版本列表源只写配置：清单地址仍是官方地址，镜像优先体现在源计划给出的首个候选上。
