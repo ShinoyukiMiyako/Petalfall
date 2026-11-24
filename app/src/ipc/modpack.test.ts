@@ -25,7 +25,8 @@ import {
   type ModpackExportOptions,
   type ModpackSource,
 } from "./modpack";
-import { setModUpdateHold, setModsEnabled } from "./mods";
+import { listMods, setModUpdateHold, setModsEnabled } from "./mods";
+import { updateConfig } from "./config";
 import { CORE_EVENT, cancelTask, type CoreEvent } from "./tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -407,6 +408,54 @@ describe("整合包 mock：可选文件与需要手动下载的文件", () => {
     off();
     expect(outcome.version_id).toBe("受限包");
     expect(events.filter((e) => e.kind === "stage").map((e) => e.message)).toContain("放入 2 个手动下载的文件");
+  });
+
+  it("打开自动下载受限文件：预览不列受限文件、那两个文件标 download；不认领也导入成功，阶段里没有放入手动下载的文件，实例与 Mod 照常落下", async () => {
+    await updateConfig({ downloadRestrictedCurseforgeFiles: true });
+    const preview = await previewModpack(BLOCKED.path);
+    expect(preview.blocked_files).toEqual([]);
+    expect(preview.mods).toHaveLength(41);
+    expect(preview.mods.filter((m) => m.path.startsWith("mods/blocked-")).map((m) => [m.path, m.project_id, m.file_id, m.availability])).toEqual([
+      ["mods/blocked-a.jar", 900001, 5000001, "download"],
+      ["mods/blocked-b.jar", 900002, 5000002, "download"],
+    ]);
+
+    const { events, off } = await capture();
+    const outcome = await installModpack("t-derived", mockGameDir(), BLOCKED, "受限包", []);
+    off();
+    expect(outcome.version_id).toBe("受限包");
+    expect(outcome.modpack).toMatchObject({ format: "curseforge", platform: null, project_id: null, version_id: null, name: "Blocked-Pack", version: "1.0.0", remote_files: 48, override_files: 57 });
+    expect(events.filter((e) => e.kind === "stage").map((e) => e.message)).toEqual([
+      "读取整合包 Blocked-Pack：48 个远程文件，57 个覆盖文件",
+      "开始下载 Blocked-Pack 的 48 个文件",
+      "整合包已导入为实例 受限包",
+    ]);
+    expect((await listInstances()).find((i) => i.id === "受限包")?.modpack).toMatchObject({ platform: null, name: "Blocked-Pack", version: "1.0.0" });
+    const mods = (await listMods("受限包")).map((m) => m.file_name);
+    expect(mods).toHaveLength(41);
+    expect([mods[0], mods[40]]).toEqual(["pack-mod-001.jar", "pack-mod-041.jar"]);
+  });
+
+  it("自动下载受限文件开了又关：关回去后预览重新列出两个受限文件，导入照旧以 distribution_blocked 失败、不建实例", async () => {
+    await updateConfig({ downloadRestrictedCurseforgeFiles: true });
+    expect((await previewModpack(BLOCKED.path)).blocked_files).toEqual([]);
+    await updateConfig({ downloadRestrictedCurseforgeFiles: false });
+
+    const preview = await previewModpack(BLOCKED.path);
+    expect(preview.blocked_files.map((f) => f.file_id)).toEqual([5000001, 5000002]);
+    expect(preview.mods.filter((m) => m.path.startsWith("mods/blocked-")).map((m) => m.availability)).toEqual(["blocked", "blocked"]);
+    const failed = await installModpack("t-off", mockGameDir(), BLOCKED, "受限包", []).catch((e: unknown) => e);
+    expect(blockedFilesOf(failed)?.map((f) => f.file_name)).toEqual(["blocked-a.jar", "blocked-b.jar"]);
+    expect((await listInstances()).map((i) => i.id)).not.toContain("受限包");
+  });
+
+  it("打开自动下载受限文件：平台整合包本体受限也不用认领，摘要与导入都直接放行", async () => {
+    await updateConfig({ downloadRestrictedCurseforgeFiles: true });
+    const source: ModpackSource = { kind: "platform", platform: "curseforge", project_id: "285109", version_id: "4501122" };
+    expect(await summarizePlatformModpack("curseforge", "285109", "4501122")).toMatchObject({ format: "curseforge", version: "2.9.2", mod_files: 178, pack_bytes: 56_623_104 });
+    const outcome = await installModpack("t-body-derived", mockGameDir(), source, "受限包", []);
+    expect(outcome.modpack).toMatchObject({ platform: "curseforge", project_id: "285109", version_id: "4501122", version: "2.9.2" });
+    expect((await listMods("受限包")).length).toBe(178);
   });
 
   it("跳过可选文件：只能跳过包里的可选文件（落点不分大小写），空路径在登记任务前就拒绝；旧日志里没有这个参数照常导入", async () => {

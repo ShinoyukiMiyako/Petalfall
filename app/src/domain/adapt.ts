@@ -402,6 +402,8 @@ export interface Settings {
   hasClientId: boolean;
   microsoftLoginAvailable: boolean;
   autoDownloadJava: boolean;
+  /** 作者不允许第三方分发的 CurseForge 文件改从拼出的 CDN 地址下载，探不到时仍要手动下载。 */
+  downloadRestrictedCurseforgeFiles: boolean;
   /** "auto" 或 java 可执行文件绝对路径。 */
   defaultJava: string;
   afterLaunch: AfterLaunch;
@@ -444,6 +446,7 @@ export function settingsFromDto(dto: ConfigDto): Settings {
     hasClientId: dto.has_client_id,
     microsoftLoginAvailable: dto.microsoft_login_available,
     autoDownloadJava: dto.auto_download_java,
+    downloadRestrictedCurseforgeFiles: dto.download_restricted_curseforge_files,
     defaultJava: dto.default_java,
     afterLaunch: oneOf(dto.after_launch, AFTER_LAUNCH, "游戏启动后的窗口行为"),
     checkUpdates: dto.check_updates,
@@ -468,6 +471,7 @@ export interface SettingsPatch {
   memory?: { maxMb: number; minMb: number | null; auto: boolean };
   isolationPolicy?: IsolationPolicy;
   autoDownloadJava?: boolean;
+  downloadRestrictedCurseforgeFiles?: boolean;
   cacheDirectory?: string;
   clientId?: string;
   clearClientId?: true;

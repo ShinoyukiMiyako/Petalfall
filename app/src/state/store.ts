@@ -2410,7 +2410,10 @@ export class LauncherStore {
     this.failureBatch = { toastId, startedAt: now, reasons: [reason] };
   }
 
-  /** 文件没到手时重试必然再失败一次，通知上不给重试，转去失败筛选看清单。 */
+  /**
+   * 带手动下载清单的失败，通知上不给重试，转去失败筛选看清单：「自动下载受限的 CurseForge 文件」关着时原样重跑只会再失败；
+   * 开着时清单里能直接点「重新安装」再试。
+   */
   private failedTaskAction(task: Task, error: TaskError): ToastAction {
     return error.blocked_files === undefined
       ? { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.install }
@@ -3852,6 +3855,8 @@ export class LauncherStore {
         await configIpc.updateConfig(settingsPatchToConfig(patch));
         // 实例页与新建确认步经默认设置的查询读这一项（template_info 的 enabled），不读配置
         if ("newInstanceTemplate" in patch) invalidateResources("template");
+        // 平台整合包的摘要按这个开关决定本体受限时报不报 distribution_blocked：缓存里的是切换前的结论
+        if ("downloadRestrictedCurseforgeFiles" in patch) invalidateResources(MODPACK_SUMMARY_RESOURCE);
         await store.fetchSettings();
       },
       async addJavaPath(path) {

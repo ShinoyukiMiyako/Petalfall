@@ -5,6 +5,9 @@
 // 记在 mockDownloads（测试经 seedMockDownloads 放），认领过的记在 claimed，导入时只有都认领了才能成。
 // 目录里标了 bodyBlocked 的平台版本，整合包文件本身也要手动下载：认领前摘要和导入都读不到清单。
 // 这两份状态只在内存里，不进浏览器里的持久化快照。
+// 设置里打开「自动下载受限的 CurseForge 文件」后，真后端在 download-url 端点拿不到地址时改用拼出的 CDN 地址，
+// 拿到地址就照常下载、不再看认领过的副本；这里把两种受限夹具都当作探得到，预览不列受限文件、导入直接成功，
+// 认领状态不影响结果。探不到（401、403、404、410）仍要手动下载的那一支不在夹具里。
 // 导出读 Mod mock 里的同一份 mods 目录与卷宗，额外项的文件数与体积用固定表（浏览器里没有磁盘）。
 
 import type { PlatformId } from "../../discover";
@@ -24,6 +27,7 @@ import type {
   ModpackPreviewDto,
   ModpackSource,
   ModpackSummaryDto,
+  PackFileAvailability,
   PackFormat,
   PackLoader,
   PackLoaderKind,
@@ -32,7 +36,7 @@ import type {
 import { DISTRIBUTION_BLOCKED, EXPORT_EXTRAS, parseBlockedFiles } from "../../modpack";
 import { findMockSource, type MockPackManifest } from "../catalog";
 import type { MockArgs, MockHandlers } from "../types";
-import { ensureMockGameDir, MOCK_DATA_DIR, tauriArgError } from "./config";
+import { ensureMockGameDir, MOCK_DATA_DIR, mockDownloadRestrictedCurseforgeFiles, tauriArgError } from "./config";
 import { MOCK_GAME_DIR, argReader, emitCoreEvent, parsePlatform, runMockTask, simulateDownload } from "./discover";
 import { NAME_MESSAGES, acquireMockInstance, acquireMockInstanceWithBases, addMockInstance, ensureMockSavesSettledForReading, handlers as instanceHandlers, markMockSavesRead, recordMockExport, mockInstanceIds, mockInstanceWorlds, type MockInstanceHold } from "./instances";
 import { DISABLED_SUFFIX, ledgerKey, mockInstance, mockModsDir, placeMockPackMods } from "./mods";
@@ -152,7 +156,7 @@ function fixtureMods(fixture: LocalFixture): PackModDto[] {
   let special: PackModDto[] = [];
   if (fixture === "mrpack") special = [packEntry(OPTIONAL_MOD, null, true)];
   if (fixture === "blocked") {
-    special = BLOCKED_FIXTURE.map((f) => ({ ...packEntry(f.destination, f, false), availability: claimed.has(f.file_id) ? "claimed" : "blocked" }));
+    special = BLOCKED_FIXTURE.map((f) => ({ ...packEntry(f.destination, f, false), availability: restrictedAvailability(f.file_id) }));
   }
   const plain = LOCAL_MANIFEST.modFiles - bundled.length - special.length;
   const remote = Array.from({ length: plain }, (_, i) => {
@@ -169,6 +173,12 @@ function fixtureOptional(fixture: LocalFixture): readonly string[] {
 
 function unclaimedBlocked(): BlockedFileDto[] {
   return BLOCKED_FIXTURE.filter((f) => !claimed.has(f.file_id)).map((f) => ({ ...f }));
+}
+
+/** 受限夹具里一个文件的到手方式：开关打开时拼出的地址优先，认领过的副本用不上。 */
+function restrictedAvailability(fileId: number): PackFileAvailability {
+  if (mockDownloadRestrictedCurseforgeFiles()) return "download";
+  return claimed.has(fileId) ? "claimed" : "blocked";
 }
 
 /** 命令自己校验的空白值报 invalid_argument（与后端 non_blank 一致）。 */
@@ -267,10 +277,10 @@ function packOf(source: ModpackSource): PackFacts {
   };
 }
 
-/** 与后端一样，读包之前就要拿到文件：没认领过的受限本体报只有这个包的清单。 */
+/** 与后端一样，读包之前就要拿到文件：没认领过的受限本体报只有这个包的清单；开关打开时本体同样从拼出的地址下载。 */
 function assertBodyClaimed(pack: PackFacts): void {
   const body = pack.blockedBody;
-  if (body === null || claimed.has(body.file_id)) return;
+  if (body === null || claimed.has(body.file_id) || mockDownloadRestrictedCurseforgeFiles()) return;
   throw new IpcError(DISTRIBUTION_BLOCKED, `这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：${body.file_name}`, { files: [body] });
 }
 
@@ -293,7 +303,7 @@ function previewModpack(args: MockArgs): ModpackPreviewDto {
     override_bytes: LOCAL_MANIFEST.overrideBytes,
     mods: fixtureMods(fixture),
     optional_extras: fixture === "mrpack" ? [packEntry(OPTIONAL_EXTRA, null, true)] : [],
-    blocked_files: fixture === "blocked" ? unclaimedBlocked() : [],
+    blocked_files: fixture === "blocked" && !mockDownloadRestrictedCurseforgeFiles() ? unclaimedBlocked() : [],
   };
 }
 
@@ -344,7 +354,8 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
 
     const { manifest } = pack;
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `读取整合包 ${pack.name}：${manifest.remoteFiles} 个远程文件，${manifest.overrideFiles} 个覆盖文件` });
-    if (fixture === "blocked") {
+    // 开关打开时受限文件与其余远程文件一起下载，没有放入手动下载文件这一步
+    if (fixture === "blocked" && !mockDownloadRestrictedCurseforgeFiles()) {
       // 与后端一样在读包时判定：还有没认领到的受限文件就整体失败，不建实例
       const missing = unclaimedBlocked();
       if (missing.length > 0) {

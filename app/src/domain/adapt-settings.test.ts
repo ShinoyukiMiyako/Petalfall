@@ -49,6 +49,28 @@ describe("全局设置的适配：新实例沿用默认设置", () => {
   });
 });
 
+describe("全局设置的适配：自动下载受限的 CurseForge 文件", () => {
+  it("开与关都原样进 Settings，与相邻的自动下载 Java 互不串位", () => {
+    expect(settingsFromDto(configDto({ download_restricted_curseforge_files: true, auto_download_java: false }))).toMatchObject({
+      downloadRestrictedCurseforgeFiles: true,
+      autoDownloadJava: false,
+    });
+    expect(settingsFromDto(configDto({ download_restricted_curseforge_files: false, auto_download_java: true }))).toMatchObject({
+      downloadRestrictedCurseforgeFiles: false,
+      autoDownloadJava: true,
+    });
+  });
+
+  it("补丁键是 downloadRestrictedCurseforgeFiles，true 与 false 都写出去；没给时不出现这个键", () => {
+    expect(settingsPatchToConfig({ downloadRestrictedCurseforgeFiles: true })).toEqual({ downloadRestrictedCurseforgeFiles: true });
+    expect(settingsPatchToConfig({ downloadRestrictedCurseforgeFiles: false, checkUpdates: true })).toEqual({
+      downloadRestrictedCurseforgeFiles: false,
+      checkUpdates: true,
+    });
+    expect("downloadRestrictedCurseforgeFiles" in settingsPatchToConfig({ autoDownloadJava: false })).toBe(false);
+  });
+});
+
 describe("全局设置的适配：存档备份", () => {
   it("三项转成驼峰进 Settings，取值原样", () => {
     expect(settingsFromDto(configDto({ world_backup: { auto: false, keep_per_world: 1, max_total_gb: 1000 } })).worldBackup).toEqual({

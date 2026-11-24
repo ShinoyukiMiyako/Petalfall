@@ -128,6 +128,24 @@ describe("新实例沿用默认设置", () => {
   });
 });
 
+describe("自动下载受限的 CurseForge 文件", () => {
+  it("默认关，补丁改了读回一致；不带这个键的补丁不动它，也不动相邻的自动下载 Java", async () => {
+    expect(await getConfig()).toMatchObject({ download_restricted_curseforge_files: false, auto_download_java: true });
+    await updateConfig({ downloadRestrictedCurseforgeFiles: true });
+    expect(await getConfig()).toMatchObject({ download_restricted_curseforge_files: true, auto_download_java: true });
+    await updateConfig({ autoDownloadJava: false });
+    expect(await getConfig()).toMatchObject({ download_restricted_curseforge_files: true, auto_download_java: false });
+    await updateConfig({ downloadRestrictedCurseforgeFiles: false });
+    expect(await getConfig()).toMatchObject({ download_restricted_curseforge_files: false, auto_download_java: false });
+  });
+
+  it("不是布尔值是 Tauri 参数错误，归为 unknown，同一次补丁里的其它字段也不生效", async () => {
+    const error = await rejection(invoke("update_config", { checkUpdates: false, downloadRestrictedCurseforgeFiles: "true" }));
+    expect(error).toMatchObject({ code: "unknown", message: "invalid args `downloadRestrictedCurseforgeFiles` for command `update_config`: expected a boolean" });
+    expect(await getConfig()).toMatchObject({ download_restricted_curseforge_files: false, check_updates: true });
+  });
+});
+
 describe("游戏目录", () => {
   it("发现只报告盘上存在且未记录的目录，添加后不再出现", async () => {
     expect(await listGameDirectories()).toEqual([{ name: "默认目录", path: DEFAULT_DIR, is_current: true, available: true, version_count: 0 }]);

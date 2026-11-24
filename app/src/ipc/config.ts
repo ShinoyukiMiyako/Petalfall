@@ -64,6 +64,11 @@ export interface ConfigDto {
   /** 配置、环境变量、构建时内嵌三处至少有一个微软登录 client_id；fork 与自行构建没有内嵌时为 false。 */
   microsoft_login_available: boolean;
   auto_download_java: boolean;
+  /**
+   * CurseForge 上作者不允许第三方分发的文件，download-url 端点也拿不到地址时按文件编号与文件名拼出 CDN 地址，
+   * 探得到就直接下载；探不到仍要手动下载。缺省关，较早的 config.json 没有这个键时读成关。
+   */
+  download_restricted_curseforge_files: boolean;
   /** "auto" 或 java 可执行文件绝对路径。 */
   default_java: string;
   after_launch: AfterLaunch;
@@ -100,6 +105,7 @@ export interface ConfigPatch {
   memory?: MemorySettings;
   isolationPolicy?: IsolationPolicy;
   autoDownloadJava?: boolean;
+  downloadRestrictedCurseforgeFiles?: boolean;
   cacheDirectory?: string;
   clientId?: string;
   /** 清掉填过的 client_id，回到运行期环境变量或构建时内嵌的值；与 clientId 同时给报 invalid_argument。 */

@@ -137,6 +137,7 @@ export function configDto(overrides: Partial<ConfigDto> = {}): ConfigDto {
     has_client_id: true,
     microsoft_login_available: true,
     auto_download_java: true,
+    download_restricted_curseforge_files: false,
     default_java: "auto",
     after_launch: "keep",
     check_updates: true,

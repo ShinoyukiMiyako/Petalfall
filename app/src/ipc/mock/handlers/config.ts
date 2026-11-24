@@ -71,6 +71,7 @@ function seedConfig(): ConfigDto {
     has_client_id: true,
     microsoft_login_available: true,
     auto_download_java: true,
+    download_restricted_curseforge_files: false,
     default_java: DEFAULT_JAVA_AUTO,
     after_launch: "minimize",
     check_updates: true,
@@ -353,6 +354,11 @@ export function mockNewInstanceTemplate(): boolean {
   return config.new_instance_template;
 }
 
+/** 受限的 CurseForge 文件是否改从拼出的 CDN 地址下载；整合包 mock 的受限夹具按它决定报不报 distribution_blocked。 */
+export function mockDownloadRestrictedCurseforgeFiles(): boolean {
+  return config.download_restricted_curseforge_files;
+}
+
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], what: string): T {
   if (!allowed.includes(value as T)) throw new IpcError("invalid_argument", `未知${what} ${String(value)}`);
   return value as T;
@@ -396,6 +402,9 @@ function updateConfig(args: MockArgs): void {
   if (args.memory !== undefined) next.memory = parseMemory(args.memory);
   if (args.isolationPolicy !== undefined) next.isolation_policy = oneOf(args.isolationPolicy, ISOLATION_POLICIES, "隔离档位");
   if (args.autoDownloadJava !== undefined) next.auto_download_java = requireBoolean(args, "autoDownloadJava");
+  if (args.downloadRestrictedCurseforgeFiles !== undefined) {
+    next.download_restricted_curseforge_files = requireBoolean(args, "downloadRestrictedCurseforgeFiles");
+  }
   if (args.cacheDirectory !== undefined) next.cache_directory = requireString(args, "cacheDirectory", "update_config");
   const clearClientId = args.clearClientId !== undefined && requireBoolean(args, "clearClientId");
   if (args.clientId !== undefined && clearClientId) throw new IpcError("invalid_argument", "clientId 与 clearClientId 不能同时给");
@@ -518,7 +527,12 @@ interface ConfigSnapshot {
 }
 
 /** 后来才加进配置、早先存下的快照里没有的字段。 */
-type LaterConfigFields = "extra_java_paths" | "prefer_dedicated_gpu" | "skip_accessibility_onboarding" | "new_instance_template";
+type LaterConfigFields =
+  | "extra_java_paths"
+  | "prefer_dedicated_gpu"
+  | "skip_accessibility_onboarding"
+  | "new_instance_template"
+  | "download_restricted_curseforge_files";
 type StoredConfigSnapshot = Omit<ConfigSnapshot, "config" | "usageNotice"> & {
   config: Omit<ConfigDto, LaterConfigFields> & Partial<Pick<ConfigDto, LaterConfigFields>>;
   usageNotice?: UsageNoticeAcceptanceDto | null;
@@ -531,8 +545,16 @@ export const persist: MockPersist = {
   snapshot: (): ConfigSnapshot => ({ config, extras, disk: [...disk], withVersions: [...withVersions], versions: [...versions], firstRunCompleted, usageNotice }),
   restore: (data) => {
     const saved = data as StoredConfigSnapshot;
-    // 与后端配置的 serde(default) 一致：手动 Java、独显偏好、跳过无障碍引导与沿用默认设置是后加的字段，之前存下的快照没有它们，按默认值读入
-    config = { extra_java_paths: [], prefer_dedicated_gpu: false, skip_accessibility_onboarding: true, new_instance_template: true, ...saved.config };
+    // 与后端配置的 serde(default) 一致：手动 Java、独显偏好、跳过无障碍引导、沿用默认设置与自动下载受限文件是后加的字段，
+    // 之前存下的快照没有它们，按默认值读入
+    config = {
+      extra_java_paths: [],
+      prefer_dedicated_gpu: false,
+      skip_accessibility_onboarding: true,
+      new_instance_template: true,
+      download_restricted_curseforge_files: false,
+      ...saved.config,
+    };
     extras = saved.extras;
     disk = new Set(saved.disk);
     withVersions = new Set(saved.withVersions);

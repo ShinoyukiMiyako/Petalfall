@@ -87,6 +87,8 @@ pub struct ConfigDto {
     pub new_instance_template: bool,
     /// 存档自动备份：`{ auto, keep_per_world, max_total_gb }`。
     pub world_backup: WorldBackupSettings,
+    /// 作者关掉了第三方分发的 CurseForge 文件拿不到下载地址时，是否拼出 CDN 地址直接下载。
+    pub download_restricted_curseforge_files: bool,
 }
 
 pub(crate) fn config_dto(petalfall: &Petalfall) -> ConfigDto {
@@ -126,6 +128,7 @@ pub(crate) fn config_dto(petalfall: &Petalfall) -> ConfigDto {
         skip_accessibility_onboarding: config.skip_accessibility_onboarding,
         new_instance_template: config.new_instance_template,
         world_backup: config.world_backup,
+        download_restricted_curseforge_files: config.download_restricted_curseforge_files,
     }
 }
 
@@ -183,6 +186,7 @@ pub(crate) struct ConfigPatch {
     skip_accessibility_onboarding: Option<bool>,
     new_instance_template: Option<bool>,
     world_backup: Option<WorldBackupSettings>,
+    download_restricted_curseforge_files: Option<bool>,
 }
 
 /// 未解析的配置修改，字段与 `update_config` 的入参一一对应。
@@ -208,6 +212,7 @@ pub(crate) struct RawConfigPatch {
     pub skip_accessibility_onboarding: Option<bool>,
     pub new_instance_template: Option<bool>,
     pub world_backup: Option<WorldBackupInput>,
+    pub download_restricted_curseforge_files: Option<bool>,
 }
 
 /// 更新全局配置：字段全可选，未提供者不动。先把全部参数校验完再拿写锁：有一个非法就整体拒绝，
@@ -235,6 +240,7 @@ pub async fn update_config(
     skip_accessibility_onboarding: Option<bool>,
     new_instance_template: Option<bool>,
     world_backup: Option<WorldBackupInput>,
+    download_restricted_curseforge_files: Option<bool>,
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
     let raw = RawConfigPatch {
@@ -258,6 +264,7 @@ pub async fn update_config(
         skip_accessibility_onboarding,
         new_instance_template,
         world_backup,
+        download_restricted_curseforge_files,
     };
     update_config_with(&facade, raw).await
 }
@@ -316,6 +323,7 @@ async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
         skip_accessibility_onboarding: raw.skip_accessibility_onboarding,
         new_instance_template: raw.new_instance_template,
         world_backup: raw.world_backup.map(validate_world_backup).transpose()?,
+        download_restricted_curseforge_files: raw.download_restricted_curseforge_files,
     })
 }
 
@@ -378,6 +386,9 @@ fn apply_patch(petalfall: &mut Petalfall, patch: ConfigPatch) -> Result<(), Comm
     }
     if let Some(settings) = patch.world_backup {
         petalfall.set_world_backup(settings);
+    }
+    if let Some(enabled) = patch.download_restricted_curseforge_files {
+        petalfall.set_download_restricted_curseforge_files(enabled);
     }
     Ok(())
 }
@@ -1254,6 +1265,85 @@ mod tests {
         .await
         .unwrap();
         assert!(read_config(&facade).await.skip_accessibility_onboarding);
+    }
+
+    /// 受限的 CurseForge 文件默认不自动下载；update_config 带 downloadRestrictedCurseforgeFiles 打开后 get_config
+    /// 回读为开，并落了盘。同一补丁里别的参数非法时整体拒绝，这一项也不生效。
+    #[tokio::test]
+    async fn download_restricted_curseforge_files_patch_reads_back_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let path = dir.path().join("config.json");
+        let initial = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(initial["download_restricted_curseforge_files"], false);
+
+        let err = update_config_with(
+            &facade,
+            RawConfigPatch {
+                download_restricted_curseforge_files: Some(true),
+                download_source: Some("fastest".into()),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        assert!(
+            !read_config(&facade)
+                .await
+                .download_restricted_curseforge_files
+        );
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                download_restricted_curseforge_files: Some(true),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        let dto = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(dto["download_restricted_curseforge_files"], true);
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(raw["download_restricted_curseforge_files"], true);
+        let reloaded = petalfall_core::ConfigStore::at(&path).load().await.unwrap();
+        assert!(reloaded.download_restricted_curseforge_files);
+
+        // 不带这一项的补丁不动它。
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                check_updates: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            read_config(&facade)
+                .await
+                .download_restricted_curseforge_files
+        );
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                download_restricted_curseforge_files: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            !read_config(&facade)
+                .await
+                .download_restricted_curseforge_files
+        );
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(raw["download_restricted_curseforge_files"], false);
     }
 
     /// 老配置文件里没有这个键：读回按开着，改别的设置落盘后键按开着写进文件。
