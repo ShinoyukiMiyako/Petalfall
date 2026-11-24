@@ -720,7 +720,7 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 - `save_instance_as_template(id)` 占 `modifying`，从实例工作目录复制白名单文件，一个都没有时报 `template_source_empty`。文件先写暂存目录、再整体换下旧目录，中途失败时旧模板完好，上次中断留下的半成品下次读写时恢复。
 - `template_info` 给出 `{ present, files, source_instance, saved_at, enabled }`，`clear_template` 清空，两者与保存都返回这个形状。
-- 套用（`Petalfall::apply_template`）只补缺：实例里已有的文件原样不动，键位也不逐行合并。`install_version` 带 `useTemplate: true` 时在实例装好后套用，结果在出参的 `template` 里；缺省按 false，旧任务表里重放的新建任务没有这个键。整合包导入在解出覆盖文件之后套一次，包里自带的 `options.txt` 以包为准（其中写着游戏默认语言的那一行在这之前已经去掉，见启动前补全 `options.txt` 的一段），缺的文件由模板补上。不隔离的实例共用游戏目录根下的设置，跳过；`new_instance_template` 关掉时一律跳过。
+- 套用（`Petalfall::apply_template`）只补缺：实例里已有的文件原样不动，键位也不逐行合并。`install_version` 带 `useTemplate: true` 时在实例装好后套用，结果在出参的 `template` 里；缺省按 false，旧任务表里重放的新建任务没有这个键。整合包导入在解出覆盖文件之后套一次，包里自带的 `options.txt` 以包为准（其中写着游戏默认语言的那一行在这之前已经去掉，见启动前补全 `options.txt` 的一段），缺的文件由模板补上。整合包经模组带来的默认文件同样以包为准：实例里还没有某个白名单文件、但 `config/yosbr/` 或 `config/defaultoptions/` 下有同名文件时，模板的那份不补，留给模组第一次启动时去铺（结果的 `left_to_mods` 一栏，进度文案里写明留给了模组）。这两个模组只在目标不存在时才铺默认设置，先把模板的补进去，作者的那份就整份作废了；只看同名文件在不在，不管这个版本的模组认不认它。不隔离的实例共用游戏目录根下的设置，跳过；`new_instance_template` 关掉时一律跳过。
 
 `starter_mods(loader, mcVersion)` 按 `starter.rs` 里每个加载器一张的小表（前置 API 与性能优化，只记 Modrinth 工程 id）逐项查适配版本，出参 `{ loader, mc_version, available, missing }`，两张表都按开局表的顺序。版本走 5 分钟的版本缓存，只收兼容判定为确凿匹配的版本。列表只按实例自己的加载器过滤，Quilt 实例不收只标 fabric 的版本，比发现页严一档：开局 Mod 是替玩家决定要装的，不因为跑得起来就放宽。工程在平台上不存在（404）或没有适配版本时进 `missing` 并写明原因；其他失败让整个调用失败，不交回半张表。认不出的加载器、LiteLoader 与空的 MC 版本报 `invalid_argument`。勾选的开局 Mod 在实例就绪后由组合任务 `install_mods` 安装，这一步失败不影响实例本身。
 

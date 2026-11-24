@@ -1100,7 +1100,7 @@ function applyTemplate(instance: MockInstance): TemplateOutcomeDto {
   if (template === null || template.files.length === 0) return { status: "skipped", reason: "empty" };
   if (!isolatedOf(instance)) return { status: "skipped", reason: "shared_working_dir" };
   // 新建的实例目录里还没有任何设置文件：模板里的全都补上
-  return { status: "applied", copied: template.files.map((f) => f.name), kept: [] };
+  return { status: "applied", copied: template.files.map((f) => f.name), kept: [], left_to_mods: [] };
 }
 
 const TEMPLATE_SKIP_STAGE: Record<Extract<TemplateOutcomeDto, { status: "skipped" }>["reason"], string> = {

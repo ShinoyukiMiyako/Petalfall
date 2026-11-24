@@ -75,6 +75,10 @@ const MOD_DEFAULT_OPTIONS: [&str; 2] = [
     "config/defaultoptions/options.txt",
 ];
 
+/// 这两个模组放默认设置的目录，与 [`MOD_DEFAULT_OPTIONS`] 逐项对应。目录里的文件由模组在第一次启动时铺到
+/// 游戏目录的同名位置，目标已经存在就不铺：options.txt 之外的文件（服务器列表、OptiFine 的设置）也是这样。
+pub(crate) const MOD_DEFAULTS_DIRS: [&str; 2] = ["config/yosbr", "config/defaultoptions"];
+
 /// 系统语言能落到的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GameLanguage {
@@ -1314,6 +1318,15 @@ mod tests {
             ["这个版本没有资源索引，游戏语言保持默认", SKIPPED]
         );
         assert!(report.failures.is_empty(), "{:?}", report.failures);
+    }
+
+    /// 套默认设置按目录判断整合包有没有带同名文件，这里按完整路径补 options.txt：两张表说的是同一批模组。
+    #[test]
+    fn mod_defaults_dirs_are_where_the_mod_default_options_live() {
+        assert_eq!(
+            MOD_DEFAULT_OPTIONS.map(str::to_owned),
+            MOD_DEFAULTS_DIRS.map(|dir| format!("{dir}/{OPTIONS_FILE}"))
+        );
     }
 
     fn pending_note(pending: &str) -> String {

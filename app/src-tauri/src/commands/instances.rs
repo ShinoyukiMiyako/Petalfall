@@ -935,6 +935,7 @@ pub enum TemplateOutcomeDto {
     Applied {
         copied: Vec<&'static str>,
         kept: Vec<&'static str>,
+        left_to_mods: Vec<&'static str>,
     },
     Skipped {
         reason: TemplateSkip,
@@ -944,7 +945,15 @@ pub enum TemplateOutcomeDto {
 impl From<TemplateOutcome> for TemplateOutcomeDto {
     fn from(outcome: TemplateOutcome) -> Self {
         match outcome {
-            TemplateOutcome::Applied { copied, kept } => Self::Applied { copied, kept },
+            TemplateOutcome::Applied {
+                copied,
+                kept,
+                left_to_mods,
+            } => Self::Applied {
+                copied,
+                kept,
+                left_to_mods,
+            },
             TemplateOutcome::Skipped(reason) => Self::Skipped { reason },
         }
     }
@@ -3990,11 +3999,17 @@ mod tests {
             Some(TemplateOutcomeDto::Applied {
                 copied: vec!["options.txt", "servers.dat"],
                 kept: vec![],
+                left_to_mods: vec![],
             })
         );
         assert_eq!(
             serde_json::to_value(&result).unwrap()["template"],
-            json!({ "status": "applied", "copied": ["options.txt", "servers.dat"], "kept": [] })
+            json!({
+                "status": "applied",
+                "copied": ["options.txt", "servers.dat"],
+                "kept": [],
+                "left_to_mods": []
+            })
         );
         let dir = env.game_dir().join("versions").join("沿用");
         assert_eq!(std::fs::read(dir.join("options.txt")).unwrap(), b"fov:90");
@@ -4023,6 +4038,25 @@ mod tests {
         assert!(dir.join("不沿用.json").is_file());
         assert!(!dir.join("options.txt").exists());
         assert!(!dir.join("servers.dat").exists());
+    }
+
+    /// 套了的出参三栏都写出来，空的也写：前端按固定的三个键读。
+    #[test]
+    fn applied_template_serializes_all_three_lists() {
+        let outcome = TemplateOutcome::Applied {
+            copied: vec!["servers.dat"],
+            kept: vec!["optionsof.txt"],
+            left_to_mods: vec!["options.txt"],
+        };
+        assert_eq!(
+            serde_json::to_value(TemplateOutcomeDto::from(outcome)).unwrap(),
+            json!({
+                "status": "applied",
+                "copied": ["servers.dat"],
+                "kept": ["optionsof.txt"],
+                "left_to_mods": ["options.txt"]
+            })
+        );
     }
 
     #[test]

@@ -2158,6 +2158,64 @@ mod tests {
         assert_eq!(read(&dir, "config/yosbr/options.txt"), YOSBR);
     }
 
+    /// 整合包带着 Default Options 的默认设置时，默认设置（模板）里的 options.txt 不补进实例：补了，模组就不再铺
+    /// 作者的那份。包里没有的服务器列表照常由模板补上，进度里写明 options.txt 留给了模组。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn template_leaves_the_options_file_to_the_mod_defaults_of_the_pack() {
+        const DEFAULT_OPTIONS: &[u8] = b"version:3955\nfov:0.8\nlang:zh_cn\n";
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("测试包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[(
+                "overrides/config/defaultoptions/options.txt",
+                DEFAULT_OPTIONS,
+            )],
+        );
+        let petalfall = petalfall(tmp.path(), &server);
+        let template = petalfall.template_dir();
+        std::fs::create_dir_all(&template).unwrap();
+        std::fs::write(template.join("options.txt"), b"fov:90").unwrap();
+        std::fs::write(template.join("servers.dat"), b"mine").unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = petalfall
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("带模组默认设置"),
+                &ImportSelection::default(),
+                "task-d",
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        drop(tx);
+
+        let dir = outcome.version_dir;
+        assert!(!dir.join("options.txt").exists());
+        assert_eq!(
+            std::fs::read(dir.join("config/defaultoptions/options.txt")).unwrap(),
+            DEFAULT_OPTIONS
+        );
+        assert_eq!(std::fs::read(dir.join("servers.dat")).unwrap(), b"mine");
+        let mut stages = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let CoreEvent::Stage(stage) = event {
+                stages.push(stage);
+            }
+        }
+        assert!(
+            stages
+                .iter()
+                .any(|s| s
+                    == "沿用默认设置：补上 servers.dat（options.txt 留给整合包里模组的默认设置）"),
+            "{stages:?}"
+        );
+    }
+
     /// 去掉默认语言行只针对整合包带来的文件：默认设置里的 options.txt 是玩家自己存下的，补进实例时连同里面的
     /// 语言原样进来。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

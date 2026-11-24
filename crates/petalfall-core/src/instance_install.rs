@@ -804,15 +804,29 @@ impl PhaseAnnouncer {
 /// 套默认设置这一步的进度文案。
 pub(crate) fn template_stage(outcome: &TemplateOutcome) -> String {
     match outcome {
-        TemplateOutcome::Applied { copied, kept } if copied.is_empty() => {
-            format!("沿用默认设置：已有的 {} 保留不动", kept.join("、"))
-        }
-        TemplateOutcome::Applied { copied, kept } => {
-            let mut text = format!("沿用默认设置：补上 {}", copied.join("、"));
+        TemplateOutcome::Applied {
+            copied,
+            kept,
+            left_to_mods,
+        } => {
+            let mut untouched = Vec::new();
             if !kept.is_empty() {
-                text.push_str(&format!("（已有的 {} 保留不动）", kept.join("、")));
+                untouched.push(format!("已有的 {} 保留不动", kept.join("、")));
             }
-            text
+            if !left_to_mods.is_empty() {
+                untouched.push(format!(
+                    "{} 留给整合包里模组的默认设置",
+                    left_to_mods.join("、")
+                ));
+            }
+            let untouched = untouched.join("；");
+            if copied.is_empty() {
+                format!("沿用默认设置：{untouched}")
+            } else if untouched.is_empty() {
+                format!("沿用默认设置：补上 {}", copied.join("、"))
+            } else {
+                format!("沿用默认设置：补上 {}（{untouched}）", copied.join("、"))
+            }
         }
         TemplateOutcome::Skipped(reason) => format!("没有沿用默认设置：{}", reason.describe()),
     }
@@ -1008,6 +1022,7 @@ mod tests {
             Some(TemplateOutcome::Applied {
                 copied: vec!["options.txt", "servers.dat"],
                 kept: vec![],
+                left_to_mods: vec![],
             })
         );
         assert_eq!(
@@ -1442,6 +1457,7 @@ mod tests {
             template_stage(&TemplateOutcome::Applied {
                 copied: vec!["servers.dat"],
                 kept: vec!["options.txt", "optionsof.txt"],
+                left_to_mods: vec![],
             }),
             "沿用默认设置：补上 servers.dat（已有的 options.txt、optionsof.txt 保留不动）"
         );
@@ -1449,8 +1465,41 @@ mod tests {
             template_stage(&TemplateOutcome::Applied {
                 copied: vec![],
                 kept: vec!["options.txt"],
+                left_to_mods: vec![],
             }),
             "沿用默认设置：已有的 options.txt 保留不动"
+        );
+        assert_eq!(
+            template_stage(&TemplateOutcome::Applied {
+                copied: vec!["options.txt", "servers.dat"],
+                kept: vec![],
+                left_to_mods: vec![],
+            }),
+            "沿用默认设置：补上 options.txt、servers.dat"
+        );
+        assert_eq!(
+            template_stage(&TemplateOutcome::Applied {
+                copied: vec!["optionsof.txt"],
+                kept: vec!["optionsshaders.txt"],
+                left_to_mods: vec!["options.txt", "servers.dat"],
+            }),
+            "沿用默认设置：补上 optionsof.txt（已有的 optionsshaders.txt 保留不动；options.txt、servers.dat 留给整合包里模组的默认设置）"
+        );
+        assert_eq!(
+            template_stage(&TemplateOutcome::Applied {
+                copied: vec!["servers.dat"],
+                kept: vec![],
+                left_to_mods: vec!["options.txt"],
+            }),
+            "沿用默认设置：补上 servers.dat（options.txt 留给整合包里模组的默认设置）"
+        );
+        assert_eq!(
+            template_stage(&TemplateOutcome::Applied {
+                copied: vec![],
+                kept: vec![],
+                left_to_mods: vec!["options.txt"],
+            }),
+            "沿用默认设置：options.txt 留给整合包里模组的默认设置"
         );
         assert_eq!(
             template_stage(&TemplateOutcome::Skipped(TemplateSkip::Empty)),

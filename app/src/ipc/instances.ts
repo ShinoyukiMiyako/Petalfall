@@ -310,8 +310,13 @@ export interface TemplateInfoDto {
 /** 没有套上的原因：配置里关了、模板是空的、新实例与别的实例共用游戏目录根下的设置。 */
 export type TemplateSkipReason = "disabled" | "empty" | "shared_working_dir";
 
-/** 套模板的结果：copied 是补进实例的文件，kept 是实例里本来就有、原样保留的文件。 */
-export type TemplateOutcomeDto = { status: "applied"; copied: string[]; kept: string[] } | { status: "skipped"; reason: TemplateSkipReason };
+/**
+ * 套模板的结果：copied 是补进实例的文件，kept 是实例里本来就有、原样保留的文件，left_to_mods 是实例里还没有、
+ * 但整合包在 YOSBR 或 Default Options 的默认设置里带了同名文件、留给模组第一次启动时去铺的。
+ */
+export type TemplateOutcomeDto =
+  | { status: "applied"; copied: string[]; kept: string[]; left_to_mods: string[] }
+  | { status: "skipped"; reason: TemplateSkipReason };
 
 export interface RepairResultDto {
   /** 是否按记下的安装内容重装（新建没装完的实例）。 */
