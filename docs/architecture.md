@@ -680,14 +680,16 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 `prefer_dedicated_gpu` 开着时，启动在定下 Java 之后、拉起游戏之前（`petalfall-core` 的 `gpu.rs`），把这次用的 java 可执行文件写进当前用户的 `Software\Microsoft\DirectX\UserGpuPreferences`（Windows 图形设置记按程序显卡偏好的位置）：值名是完整路径，取值里的 `GpuPreference` 改成 `2`（高性能），其余片段原样保留，已经是高性能时不写。写不进去只在启动日志里记一条警告，游戏按 Windows 默认的显卡启动；关掉开关不撤销已写的值。
 
-启动前还会补全工作目录里的 `options.txt`（`petalfall-core` 的 `game_lang.rs`）：游戏语言跟随系统显示语言，并按 `skip_accessibility_onboarding` 跳过 Minecraft 第一次进游戏的无障碍引导。游戏自己不看系统语言，没有 `options.txt` 就是英文，现代版本第一次进游戏还要先走一遍引导。每一局启动都过这一步，所以新建、导入、补全出来的实例都覆盖；写的是实例实际的工作目录（隔离实例是 `versions/<实例名>`，不隔离的是游戏目录）。它放在启动流程里最后一个可取消的点之后、拉起 java 之前：取消或中途失败的启动不碰玩家的设置，这时资源索引也一定在本地了。
+启动前还会补全工作目录里的 `options.txt`（`petalfall-core` 的 `game_lang.rs`）：按 `follow_system_game_language` 让游戏语言跟随系统显示语言，并按 `skip_accessibility_onboarding` 跳过 Minecraft 第一次进游戏的无障碍引导。游戏自己不看系统语言，没有 `options.txt` 就是英文，现代版本第一次进游戏还要先走一遍引导。每一局启动都过这一步，所以新建、导入、补全出来的实例都覆盖；写的是实例实际的工作目录（隔离实例是 `versions/<实例名>`，不隔离的是游戏目录）。它放在启动流程里最后一个可取消的点之后、拉起 java 之前：取消或中途失败的启动不碰玩家的设置，这时资源索引也一定在本地了。
 
-- 只补缺行：`lang:` 与 `onboardAccessibility:` 各自缺哪行补哪行，其余内容逐字节保留（文件不一定是 UTF-8，按字节处理），换行风格跟随原文件。已有的行是玩家、整合包或默认设置定下的，意思不动；唯一的例外是已有 `lang:` 的大小写要跟着这一局的版本走（见下）。
+- 只补缺行：`lang:` 与 `onboardAccessibility:` 各自缺哪行补哪行，其余内容逐字节保留（文件不一定是 UTF-8，按字节处理），换行风格跟随原文件。已有的行是玩家、整合包或默认设置定下的，意思不动；唯一的例外是已有 `lang:` 的大小写要跟着这一局的版本走（见下）。整合包带来的游戏默认语言不在启动前改，在导入时处理（见下）。
 - 语言码：系统显示语言经 `sys-locale` 读出，再查这个版本的资源索引，不按版本号判断；写的是索引里的原样写法。索引里的语言文件在 `minecraft/lang/`（`legacy` 索引是 `lang/`），`realms/lang/` 不算，那是 Realms 界面的翻译，有它不等于游戏有这门语言。中文按简繁分：简体（`zh-Hans`、`zh-CN`、`zh-SG`）写 `zh_cn`，繁体（`zh-Hant`、`zh-TW`）写 `zh_tw`，`zh-HK`、`zh-MO` 先找 `zh_hk`、索引里没有就退 `zh_tw`。其余语言先试「语言加地区」，没有再退到一张语言默认地区表（只写把握大的，表外的语言猜一个地区不如保持英文）。落到游戏默认语言 `en_us` 的不写；读不出系统语言、版本没有资源索引、索引里没有这门语言时也不写，游戏保持英文，原因记进启动日志。pre-1.6 的版本语言在客户端 jar 里，索引查不到，同样归这一类。
 - 大小写跟着版本走：默认隔离策略下原版实例共用一份 `options.txt`，而语言码的大小写 1.11 起从 `zh_CN` 变成 `zh_cn`。新版留下的 `zh_cn` 老版不认，老版写法的 `zh_CN` 碰上文件里新版的 `version:` 也不走游戏自己的小写迁移，两头都退回英文。所以已有的 `lang:` 只差大小写时换成这个版本索引里的写法，语言本身不变；这个版本没有的语言、非 UTF-8 的值原样留着。默认语言 `en_us` 不读索引，英文玩家的启动开销不变。
 - 无障碍引导：`skip_accessibility_onboarding` 开着（默认）且缺 `onboardAccessibility:` 行时补 `onboardAccessibility:false`；关掉时不写，也不改已有的值。不认识这个键的旧版本会忽略这一行，所以不按版本区分。
-- 关掉开关、`options.txt` 又不存在而要写语言时，新文件开头多一行 `version:3319`：游戏的无障碍引导修复挂在数据版本 3319 上，加载 `options.txt` 时数据版本比它低的文件一律把引导标成走过，没有 `version:` 行按 0 算，只写了语言的新文件也在内，不写这一行的话关掉开关引导依然不弹，设置等于没用。比这个版本老的游戏遇到更高的声明版本什么也不做。已有的文件不加这一行：声明版本会让它跳过自己需要的迁移，引导弹不弹由它自己的版本决定。
-- 模组默认设置闸门：`options.txt` 不存在、但 `config/yosbr/options.txt`（YOSBR）或 `config/defaultoptions/options.txt`（Default Options）存在时，语言与引导都不写，只记一条 info。这两个模组只在 `options.txt` 不存在时才把默认设置铺过去，启动器抢先写一份，整合包作者调好的设置就全作废了。
+- 关掉 `skip_accessibility_onboarding`、`options.txt` 又不存在而要写语言时，新文件开头多一行 `version:3319`：游戏的无障碍引导修复挂在数据版本 3319 上，加载 `options.txt` 时数据版本比它低的文件一律把引导标成走过，没有 `version:` 行按 0 算，只写了语言的新文件也在内，不写这一行的话关掉开关引导依然不弹，设置等于没用。比这个版本老的游戏遇到更高的声明版本什么也不做。已有的文件不加这一行：声明版本会让它跳过自己需要的迁移，引导弹不弹由它自己的版本决定。
+- 模组的默认设置：`options.txt` 不存在、但 `config/yosbr/options.txt`（YOSBR）或 `config/defaultoptions/options.txt`（Default Options）存在时，不新建 `options.txt`，缺的行按上面同一套规则补进模组那份文件（两份都在就各补各的），并记一条 info。这两个模组只在 `options.txt` 不存在时才把默认设置铺过去，启动器抢先写一份，整合包作者调好的设置就全作废了；补进模组那份文件，语言就随作者的设置一起铺进 `options.txt`。那份文件算已有的文件，不加 `version:3319`，YOSBR 每次启动都会建的那份空文件也一样。只认这两个路径：别的模组放在 `config/<模组>/options.txt` 的是它自己的配置，不是游戏设置。模组那份文件读不了时照下面的做法记 warn，不当成没有而去新建 `options.txt`。
+- 整合包自带的默认语言：导入整合包时（`modpack.rs`，解出覆盖文件之后、套默认设置之前），`options.txt` 与上面两份模组默认设置里的 `lang:` 行如果写的全是游戏默认语言 `en_us`（不分大小写），就把这些行去掉，其余字节不动（`drop_pack_default_language`）。整合包里的 `lang:en_us` 多半是作者把自己的 `options.txt` 整份带进来的，不是特意让玩家用英文；缺 `lang:` 时游戏用的就是默认语言，去掉它不改变游戏读到的结果，只是让启动前的补全按系统语言来。写着别的语言的是作者有意选的，原样保留；默认语言与别的语言并存的文件也不动，游戏取后一行，去掉哪行都可能改变结果。只在导入的那一刻做：这时文件一定来自整合包，之后再出现的 `lang:en_us` 可能是玩家自己在游戏里选的，启动前一律不改。默认设置（模板）里的 `options.txt` 是玩家自己存下的，在这一步之后才补进实例，不在此列。这一步失败与导入的其他步骤一样让导入失败。
+- 语言开关：`follow_system_game_language` 关掉后，启动前不补 `lang:`（启动日志里记一条说明），导入时也不去掉默认语言行。引导那一行与大小写改写照旧：改写只是让文件里已有的语言在这一局的版本继续生效，不是替玩家选语言。
 - 写不进去不拦启动：读写 `options.txt` 失败、资源索引读不出来都只在启动日志里记一条 warn（带完整原因链），按现有设置启动。索引读不出来只算语言这一项没做成，引导那一行照写。这是省玩家改一次语言、走一遍引导的便利项，不值得为它让这一局起不来。落盘走原子写入。
 
 ### 存档备份
@@ -718,7 +720,7 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 - `save_instance_as_template(id)` 占 `modifying`，从实例工作目录复制白名单文件，一个都没有时报 `template_source_empty`。文件先写暂存目录、再整体换下旧目录，中途失败时旧模板完好，上次中断留下的半成品下次读写时恢复。
 - `template_info` 给出 `{ present, files, source_instance, saved_at, enabled }`，`clear_template` 清空，两者与保存都返回这个形状。
-- 套用（`Petalfall::apply_template`）只补缺：实例里已有的文件原样不动，键位也不逐行合并。`install_version` 带 `useTemplate: true` 时在实例装好后套用，结果在出参的 `template` 里；缺省按 false，旧任务表里重放的新建任务没有这个键。整合包导入在解出覆盖文件之后套一次，包里自带的 `options.txt` 以包为准，缺的文件由模板补上。不隔离的实例共用游戏目录根下的设置，跳过；`new_instance_template` 关掉时一律跳过。
+- 套用（`Petalfall::apply_template`）只补缺：实例里已有的文件原样不动，键位也不逐行合并。`install_version` 带 `useTemplate: true` 时在实例装好后套用，结果在出参的 `template` 里；缺省按 false，旧任务表里重放的新建任务没有这个键。整合包导入在解出覆盖文件之后套一次，包里自带的 `options.txt` 以包为准（其中写着游戏默认语言的那一行在这之前已经去掉，见启动前补全 `options.txt` 的一段），缺的文件由模板补上。不隔离的实例共用游戏目录根下的设置，跳过；`new_instance_template` 关掉时一律跳过。
 
 `starter_mods(loader, mcVersion)` 按 `starter.rs` 里每个加载器一张的小表（前置 API 与性能优化，只记 Modrinth 工程 id）逐项查适配版本，出参 `{ loader, mc_version, available, missing }`，两张表都按开局表的顺序。版本走 5 分钟的版本缓存，只收兼容判定为确凿匹配的版本。列表只按实例自己的加载器过滤，Quilt 实例不收只标 fabric 的版本，比发现页严一档：开局 Mod 是替玩家决定要装的，不因为跑得起来就放宽。工程在平台上不存在（404）或没有适配版本时进 `missing` 并写明原因；其他失败让整个调用失败，不交回半张表。认不出的加载器、LiteLoader 与空的 MC 版本报 `invalid_argument`。勾选的开局 Mod 在实例就绪后由组合任务 `install_mods` 安装，这一步失败不影响实例本身。
 
@@ -977,6 +979,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | `extra_java_paths` | 空 | 手动添加的 Java，一律存成规范化后的 java.exe 路径，只经 `add_java_path` / `remove_java_path` 改 |
 | `prefer_dedicated_gpu` | `false` | 启动前把这次用的 Java 设为 Windows 图形设置里的高性能 |
 | `skip_accessibility_onboarding` | `true` | 启动前在缺 `onboardAccessibility:` 这一行的 `options.txt` 里补 `onboardAccessibility:false`，跳过 Minecraft 第一次进游戏时的讲述人与无障碍引导（做法见上文启动前补全 `options.txt` 的一段）；关掉时不写，也不改已有的值。只对还没有这一行的 `options.txt` 起作用：不隔离的实例共用游戏目录里的一份，这一行写过之后，关掉开关再新建的不隔离实例也不会出现引导。老配置缺这个键按 `true` 读入。经 `get_config` / `update_config` 读写，设置页「常规」分区「启动」卡里的开关叫「跳过首次无障碍引导」 |
+| `follow_system_game_language` | `true` | 游戏语言是否跟随系统显示语言：启动前给缺 `lang:` 的 `options.txt`（或等着模组铺过去的默认设置）补上语言，导入整合包时去掉包里写着游戏默认语言的那一行（做法见上文启动前补全 `options.txt` 的一段）。关掉后两处都不做，已经写进文件的语言不跟着改。老配置缺这个键按 `true` 读入：加这个开关之前启动前就一直在补语言。经 `get_config` / `update_config` 读写（`followSystemGameLanguage`），设置页「常规」分区「启动」卡里的开关叫「游戏语言跟随系统语言」 |
 | `new_instance_template` | `true` | 新实例是否沿用默认设置。经 `get_config` / `update_config` 读写（`newInstanceTemplate`），`template_info.enabled` 给出的是同一项；设置页「游戏」分区「新实例」卡里的开关叫「沿用默认设置」，改了以后前端让默认设置的查询失效，实例页与新建确认步跟着换说法 |
 | `world_backup` | `{ auto: true, keep_per_world: 5, max_total_gb: 20 }` | 存档备份。段里不认识的键读入时保留、落盘时写回 |
 | `pinned_servers[].instance` | 无 | 「加入」时记住的实例 id。条目层不认识的键不保留 |
