@@ -1,9 +1,10 @@
 // 发现页、资源详情、安装面板与整合包导入的文案。插值一律经 domain/format 格式化，页面组件只引用这里。
 
-import { joinMixed, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
+import { joinMixed, RELEASE_CHANNEL_LABEL, SETTINGS_SECTION_LABEL } from "../../copy/flows";
 import { formatBytes, formatCount } from "../../domain/format";
 import { PLATFORM_TIMEOUT_MS } from "../../domain/limits";
 import type { Platform } from "../../domain/types";
+import { APP_NAME } from "../../lib/app-info";
 import type { DiscoverKind } from "../../state/route";
 import type { SortField } from "../../state/queries/discover";
 
@@ -260,6 +261,8 @@ export const INSTALL_COPY = {
   install: "安装",
   installMany: (n: number) => `安装到 ${n} 个实例`,
   blocked: "作者不允许在启动器里下载这个资源，只能去 CurseForge 网页下载。",
+  /** 打开了「自动下载受限的 CurseForge 文件」时的同一处：只说明，不拦安装。下不到的以失败的任务给出清单。 */
+  blockedAutoTry: "作者不允许启动器直接下载这个资源。已经打开「自动下载受限的 CurseForge 文件」，安装时会先尝试直接下载，下不到再列出要手动下载的文件。",
   openWeb: "打开网页",
 } as const;
 
@@ -351,6 +354,18 @@ export const IMPORT_COPY = {
 export const BLOCKED_COPY = {
   title: "需要手动下载的文件",
   intro: (n: number) => `这 ${n} 个文件的作者不允许启动器直接下载。到 CurseForge 网页下载后，回到这里重新检查。`,
+  /**
+   * 按「自动下载受限的 CurseForge 文件」的当前取值给的一句提示：开关默认关着，碰到这类文件时在这里让人知道有它。
+   * 关着时只说在哪打开，不给跳转：从清单跳去设置会丢掉正在进行的导入。
+   * 开着时按入口说：失败任务的清单可能是打开这一项之前留下的，底栏另给「重新安装」再试；导入时的清单来自刚读的预览，已经试过直接下载。
+   */
+  restrictedSetting: {
+    off: `在「设置 → ${SETTINGS_SECTION_LABEL.download}」里打开「自动下载受限的 CurseForge 文件」后，重新安装或重新导入时${APP_NAME}会先尝试直接下载。`,
+    on: {
+      failed: `已打开「自动下载受限的 CurseForge 文件」。${APP_NAME}直接下载不到的才会留在清单里；清单要是打开这一项之前留下的，点「重新安装」会再试一次。`,
+      import: `已打开「自动下载受限的 CurseForge 文件」。清单里的是${APP_NAME}直接下载也下不到的文件，仍要手动下载。`,
+    },
+  },
   destination: (dir: string) => `装到 ${dir}/`,
   found: "已找到",
   missing: "还没找到",

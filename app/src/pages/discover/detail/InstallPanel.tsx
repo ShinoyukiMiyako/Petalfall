@@ -155,10 +155,14 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
   const instances = useLauncherSelector((s) => s.instances);
   const instancesRead = useLauncherSelector((s) => s.status.instances.kind === "ready");
   const selectedInstanceId = useLauncherSelector((s) => s.selectedInstanceId);
+  // 设置还没读到时按关着算：与没有这个设置时一样，作者不允许的就拦着
+  const restrictedDownloads = useLauncherSelector((s) => s.settings !== null && s.settings.downloadRestrictedCurseforgeFiles);
   const actions = useLauncherActions();
   const run = useRunner();
   const shell = useShell();
   const type = installableType(detail);
+  // 打开了自动下载受限的 CurseForge 文件时后端会按拼出的地址先试着下，下不到才以 distribution_blocked 失败并给出清单，前端不再先拦
+  const blockedByAuthor = !detail.distribution_allowed && !restrictedDownloads;
   const matches = useInstanceMatches(detail.platform, detail.project_id, type, pinned);
   const [worlds, reportWorlds] = useCollected<WorldsState>();
   const [iris, setIris] = useState<IrisReport | null>(null);
@@ -310,17 +314,21 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
   ];
 
   const pageUrl = detail.page_url;
-  // 重的在前：判断失败时不知道能装进哪些实例，手动下载挡着安装，Iris 只影响光影的判断，没有实例时列表本来就是空的
+  const openWeb = pageUrl === null ? null : { label: INSTALL_COPY.openWeb, run: () => void run(() => actions.openExternal(pageUrl), BLOCKED_COPY.openFailed) };
+  // 重的在前：判断失败时不知道能装进哪些实例，手动下载挡着安装，Iris 只影响光影的判断；
+  // 会先试着直接下载的说明不挡安装，排在它们之后；没有实例时列表本来就是空的
   const notices: PanelNotice[] = [];
   if (matches.status === "error") {
     notices.push({ key: "matches-failed", tone: "danger", text: INSTALL_COPY.matchesFailed, reason: matches.error.message, action: { label: SEARCH_COPY.retry, run: matches.reload } });
   }
-  if (!detail.distribution_allowed) {
-    const openWeb = pageUrl === null ? null : { label: INSTALL_COPY.openWeb, run: () => void run(() => actions.openExternal(pageUrl), BLOCKED_COPY.openFailed) };
+  if (blockedByAuthor) {
     notices.push({ key: "blocked", tone: "warn", text: INSTALL_COPY.blocked, reason: null, action: openWeb });
   }
   if (type === "shader" && iris !== null && iris.status === "error" && iris.error !== null) {
     notices.push({ key: "iris-failed", tone: "warn", text: INSTALL_COPY.irisFailed, reason: iris.error.message, action: { label: SEARCH_COPY.retry, run: iris.reload } });
+  }
+  if (!detail.distribution_allowed && restrictedDownloads) {
+    notices.push({ key: "restricted", tone: "info", text: INSTALL_COPY.blockedAutoTry, reason: null, action: openWeb });
   }
   if (instances.length === 0) {
     notices.push({ key: "no-instances", tone: "info", text: INSTALL_COPY.noInstances, reason: null, action: { label: INSTALL_COPY.createInstance, run: () => shell.openCreateInstance() } });
@@ -337,7 +345,7 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
       <Button variant="ghost" onClick={onClose}>
         {INSTALL_COPY.cancel}
       </Button>
-      <Button variant="primary" icon="download" disabled={selected.length === 0 || !detail.distribution_allowed || matchesStale || showingPrevious} loading={submitting} onClick={() => void confirm()}>
+      <Button variant="primary" icon="download" disabled={selected.length === 0 || blockedByAuthor || matchesStale || showingPrevious} loading={submitting} onClick={() => void confirm()}>
         <InstallLabel current={primaryLabel(selected)} instanceCount={instances.length} />
       </Button>
     </>

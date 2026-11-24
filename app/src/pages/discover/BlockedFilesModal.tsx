@@ -1,7 +1,7 @@
 // 需要手动下载的文件清单：作者不允许启动器直接下载的 CurseForge 文件，逐个给出它在网页上的文件页；用户下载好后
 // 选文件所在的文件夹，后端按 sha1 或指纹认领进暂存位（不看文件名，被浏览器改过名的也认得出）。
 // 从导入确认步或发现页面板的安装前说明打开时，全部找到后「继续导入」回到原处；
-// 从安装失败态打开时「重新安装」重排这个任务。
+// 从安装失败态打开时「重新安装」重排这个任务；「自动下载受限的 CurseForge 文件」开着时没找齐也给，重跑会先试直接下载。
 // 检查进行中可以关掉清单：后台检查不打断，结果丢弃。
 
 import { AnimatePresence, motion, useIsPresent } from "framer-motion";
@@ -9,7 +9,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref 
 import { fade } from "../../lib/motion";
 import { cx } from "../../lib/util";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncherActions } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import type { BlockedFileDto, ClaimReportDto } from "../../state/store";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
@@ -21,7 +21,7 @@ import { BLOCKED_COPY } from "./copy";
 import styles from "./pack.module.css";
 import { usePickFolder } from "./platform";
 
-/** 打开清单的入口：决定全部找到之后主按钮做什么。 */
+/** 打开清单的入口：决定全部找到之后主按钮做什么，以及开关开着时没找齐能不能先重新安装。 */
 export type BlockedOrigin = "import" | "failed";
 
 type FileStatus = "found" | "missing";
@@ -31,7 +31,10 @@ export interface BlockedFilesModalProps {
   files: readonly BlockedFileDto[];
   origin: BlockedOrigin;
   onClose: () => void;
-  /** 全部找到后点主按钮：import 回到打开清单的地方，failed 重新安装。清单由调用方关掉。 */
+  /**
+   * 全部找到后点主按钮：import 回到打开清单的地方，failed 重新安装。清单由调用方关掉。
+   * failed 且开关开着时没找齐也会经底栏的「重新安装」走到这里：调用方不能假定文件都已认领。
+   */
   onAllFound: () => void;
 }
 
@@ -112,6 +115,8 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
   const actions = useLauncherActions();
   const run = useRunner();
   const pickFolder = usePickFolder();
+  // 设置还没读到时拿不准开关开没开，两种说法都可能是错的，这条提示就不出
+  const restricted = useLauncherSelector((s) => (s.settings === null ? null : s.settings.downloadRestrictedCurseforgeFiles));
   const [statuses, setStatuses] = useState<ReadonlyMap<number, FileStatus> | null>(null);
   const [checking, setChecking] = useState(false);
   const [folderError, setFolderError] = useState<string | null>(null);
@@ -132,8 +137,8 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
     if (!open) live.current = null;
   }, [open]);
 
-  // 找到的文件那一行，「打开网页」随旧标签一起淡出、不可交互（inert），淡完才移除：它聚焦着时焦点会落空，
-  // 交给主按钮，接着检查或继续
+  // 找到的文件那一行，「打开网页」随旧标签一起淡出、不可交互（inert），淡完才移除；全部找到时底栏的次要「重新安装」
+  // 当场拿掉。它们聚焦着时焦点会落空，交给主按钮，接着检查或继续
   const primaryRef = useRef<HTMLButtonElement>(null);
   useLayoutEffect(() => {
     if (statuses === null) return;
@@ -145,6 +150,9 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
 
   const found = statuses === null ? 0 : files.filter((f) => statuses.get(f.file_id) === "found").length;
   const allFound = statuses !== null && found === files.length;
+  // 开关开着时失败任务重跑会先试直接下载，打开这一项之前留下的清单不必等文件找齐就能再试。全部找到后主按钮就是
+  // 「重新安装」，这一颗随即拿掉，不留两颗做同一件事的按钮。导入时的清单来自刚读的预览，开着时已经试过，不给
+  const reinstallEarly = origin === "failed" && restricted === true && !allFound;
 
   const check = () => {
     if (live.current !== null) return;
@@ -206,6 +214,13 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
       footer={
         <>
           <span className={cx(styles.footNote, styles.blockedFootNote)}>{BLOCKED_COPY.footNote}</span>
+          {/* 排在「关闭」前面：全部找到时它让给主按钮、当场拿掉，「关闭」与主按钮都不挪位置，只有左边的说明多出一截。
+              检查进行中与「打开网页」一样不可用、保持可聚焦：认领还没把文件放进暂存位，这时重排的任务用不上它们 */}
+          {reinstallEarly && (
+            <Button disabled={checking} focusableWhenDisabled onClick={onAllFound}>
+              {BLOCKED_COPY.reinstall}
+            </Button>
+          )}
           <Button variant="ghost" onClick={close}>
             {BLOCKED_COPY.close}
           </Button>
@@ -215,6 +230,7 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
     >
       <div className={styles.blocked}>
         <p className={styles.blockedIntro}>{BLOCKED_COPY.intro(files.length)}</p>
+        {restricted !== null && <p className={styles.blockedIntro}>{restricted ? BLOCKED_COPY.restrictedSetting.on[origin] : BLOCKED_COPY.restrictedSetting.off}</p>}
         <div className={styles.blockedList}>
           <List aria-label={BLOCKED_COPY.title}>
             {files.map((file) => {

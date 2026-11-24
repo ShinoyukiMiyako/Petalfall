@@ -36,7 +36,7 @@ export function InstallStageTab({ tab, instanceId, stage }: InstallStageTabProps
 /**
  * 概览在任务排队或在跑时顶上是安装横幅：标题、进度与「查看下载任务」都在横幅里，下面的说明不再重复。
  * 各阶段共用同一副结构（横幅槽 + 说明卡）：任务结束时横幅淡出、说明卡原位换字并滑上去，不整块换掉；
- * 被拦文件的清单「全部找到」后任务重新排队，说明卡也不卸载，清单的退场才放得完。
+ * 被拦文件的清单里点「重新安装」后任务重新排队，说明卡也不卸载，清单的退场才放得完。
  */
 function OverviewStage({ instanceId, stage }: { instanceId: string; stage: InstallStageTabProps["stage"] }) {
   const reflow = useReflow<HTMLDivElement>();
@@ -67,6 +67,11 @@ function StagePanel({ stage, banner }: { stage: InstallStageTabProps["stage"]; b
       onClose={() => setBlocked({ ...blocked, open: false })}
       onAllFound={() => {
         setBlocked({ ...blocked, open: false });
+        // 与下面的「重试」同一口径：断网时重排必然又失败一次，白白多出一次尝试
+        if (!online) {
+          actions.toast("warning", TASKS_COPY.offline.title, TASKS_COPY.offline.retryReason);
+          return;
+        }
         void run(() => actions.retryTask(blocked.taskId), ACTION_ERROR.install);
       }}
     />

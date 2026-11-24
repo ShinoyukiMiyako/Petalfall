@@ -2,7 +2,8 @@
 // 所选版本的清单摘要（只读远端包末尾的目录与清单，不下载整包）给出游戏版本、加载器、Mod 数与下载量；
 // 摘要还没到或读不出来时，游戏版本与加载器退回平台版本信息，Mod 数与下载量不显示。
 // 平台整合包不提供可选文件勾选，可选文件照装。导入因有文件需要到 CurseForge 网页手动下载而失败时，
-// 主按钮改为「查看这些文件」打开清单，全部找到后在清单里「重新安装」重排这个任务。
+// 主按钮改为「查看这些文件」打开清单，全部找到后在清单里「重新安装」重排这个任务；
+// 「自动下载受限的 CurseForge 文件」开着时，没找齐也能在清单里「重新安装」。
 // 摘要就报整合包文件本身要手动下载时，提前说明上也能打开清单；认领后摘要读得到了，面板回到正常的安装前状态。
 
 import { useState } from "react";
@@ -98,10 +99,12 @@ function summaryBlockedFiles(summary: ResourceResult<ModpackSummaryDto>): readon
 /**
  * 要不要提前说明整合包文件得手动下载。工程标记只是工程级的默认说法：这个版本的摘要读到了就说明文件拿得到，
  * 摘要报受限时不管标记怎么写都算；摘要没到时先按标记说。这里不禁用安装：没先手动下载就点了，失败态同样给清单。
+ * 打开了自动下载受限的 CurseForge 文件时标记不再作数：包本体多半能按拼出的地址直接下，只认摘要报出的清单。
  */
-function packFileBlocked(detail: ProjectDetail, summary: ResourceResult<ModpackSummaryDto>): boolean {
+function packFileBlocked(detail: ProjectDetail, summary: ResourceResult<ModpackSummaryDto>, restrictedDownloads: boolean): boolean {
   if (summary.status === "ready") return false;
-  return !detail.distribution_allowed || summaryBlockedFiles(summary) !== null;
+  if (summaryBlockedFiles(summary) !== null) return true;
+  return !restrictedDownloads && !detail.distribution_allowed;
 }
 
 /**
@@ -112,6 +115,7 @@ function packNotices(
   detail: ProjectDetail,
   versions: ResourceResult<ModVersionList>,
   summary: ResourceResult<ModpackSummaryDto>,
+  restrictedDownloads: boolean,
   noGameVersion: boolean,
   fromPack: readonly { name: string }[],
   openBlocked: (files: readonly BlockedFileDto[]) => void,
@@ -120,7 +124,7 @@ function packNotices(
   const warn = { tone: "warn", reason: null, action: null } as const;
   const blockedFiles = summaryBlockedFiles(summary);
   if (noGameVersion) notices.push({ ...warn, key: "no-game-version", text: MODPACK_COPY.noGameVersion });
-  if (packFileBlocked(detail, summary)) {
+  if (packFileBlocked(detail, summary, restrictedDownloads)) {
     notices.push(
       blockedFiles === null
         ? { ...warn, key: "pack-blocked", text: MODPACK_COPY.packBlocked }
@@ -201,6 +205,8 @@ function CreatedLaunch({ instanceId }: { instanceId: string }) {
 
 export function ModpackPanel({ detail, origins, versions, pinned, onPin, online, showingPrevious, footerHost, onClose }: ModpackPanelProps) {
   const instances = useLauncherSelector((s) => s.instances);
+  // 设置还没读到时按关着算，与没有这个设置时一样按工程标记提前说明
+  const restrictedDownloads = useLauncherSelector((s) => s.settings !== null && s.settings.downloadRestrictedCurseforgeFiles);
   const actions = useLauncherActions();
   const run = useRunner();
   const nav = useNav();
@@ -310,7 +316,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
   // 开始安装后版本选择已经收起，这些提醒都管不到这次安装了；进度态自己的说明块是这一步唯一的一条
   const notices =
     progress === null
-      ? packNotices(detail, versions, summary, version !== null && facts.mcVersion === null, fromPack, (files) => setBlocked({ open: true, files, taskId: null }))
+      ? packNotices(detail, versions, summary, restrictedDownloads, version !== null && facts.mcVersion === null, fromPack, (files) => setBlocked({ open: true, files, taskId: null }))
       : [];
   const footer = (
     <>

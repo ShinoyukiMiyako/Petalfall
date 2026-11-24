@@ -488,7 +488,11 @@ export function markCancelled(tasks: readonly Task[], id: string, now: number): 
   return update(tasks, id, (t) => (isActiveTask(t) ? { ...t, status: "cancelled", speedBps: 0, finishedAt: now } : t));
 }
 
-/** 失败里带着手动下载清单的任务：文件没到手，原样重跑只会再失败一次，不进通知的重试与「全部重试」，要走清单。 */
+/**
+ * 失败里带着手动下载清单的任务：不进通知的重试与「全部重试」，要走清单。「自动下载受限的 CurseForge 文件」关着时文件没到手，
+ * 原样重跑只会再失败一次；开着时重跑会先试直接下载，可分不出清单是打开这一项之前留下的、还是试过也下不到的，
+ * 批量里不替玩家再跑一遍，由玩家在清单里点「重新安装」。
+ */
 export function awaitsManualFiles(task: Task): boolean {
   return task.error !== null && task.error.blocked_files !== undefined;
 }

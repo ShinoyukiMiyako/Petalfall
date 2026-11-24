@@ -144,7 +144,8 @@ export function TaskRow({ task, finishing, meta, hasInstance, retryBlocked, onCa
           {/* 收尾期任务已经完成：取消键留在原位、尾部不变宽，但不可用，读屏不会听到一个点了没反应的操作；
               焦点可能正停在它上面，所以保持可聚焦，不用原生禁用把焦点丢回页面开头 */}
           {active && <IconButton icon="x" label={TASKS_COPY.row.cancel} size="sm" disabled={finishing} focusableWhenDisabled onClick={onCancel} />}
-          {/* 文件没到手时重试必然还是这个结果：清单找齐后由它重排任务。关闭时中断的移动已由后端收尾，没有可重试的 */}
+          {/* 带手动下载清单的失败不给重试，重排走清单：「自动下载受限的 CurseForge 文件」关着时原样重跑只会再失败，文件找齐后
+              由清单重排；开着时清单里随时能点「重新安装」。关闭时中断的移动已由后端收尾，没有可重试的 */}
           {task.status === "failed" &&
             !settledOnRestart(task) &&
             (task.error?.blocked_files === undefined ? (

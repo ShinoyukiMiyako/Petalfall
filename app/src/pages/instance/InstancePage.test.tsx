@@ -1454,6 +1454,78 @@ describe("实例详情：新建与导入还没装好", () => {
     expect(text()).not.toContain("安装没有完成");
   });
 
+  it("清单里「重新安装」时断网：只提示联网后才能重试，任务不重排；联网后再点才重排", async () => {
+    resetModpackMock();
+    const FILE = {
+      project_id: 9,
+      file_id: 90,
+      file_name: "locked.jar",
+      web_url: "https://www.curseforge.com/minecraft/mc-mods/locked/files/90",
+      destination: "mods/locked.jar",
+      sha1: "a".repeat(40),
+      fingerprint: 0,
+      size: 3,
+    };
+    let attempts = 0;
+    ipc.overrides.set("install_version", () => {
+      attempts += 1;
+      return attempts === 1 ? Promise.reject(new IpcError("distribution_blocked", "原文", { files: [FILE] })) : new Promise(() => undefined);
+    });
+    function KeptPlaceholder() {
+      const creation = useLauncherSelector((s) => creationRef(s.tasks, NAME), creationRefEqual);
+      if (creation === null) return null;
+      const stage = installStage({ id: NAME, placeholder: true, activity: "installing" }, creation);
+      return stage.kind === "none" ? null : <InstallStageTab tab="crash" instanceId={NAME} stage={stage} />;
+    }
+    view = render(
+      <Providers>
+        <Probe />
+        <KeptPlaceholder />
+      </Providers>,
+    );
+    await flush();
+    await create(NAME);
+    const offlineToasts = () => launcher.state.toasts.filter((t) => t.body === "联网后才能重试").map((t) => [t.tone, t.title]);
+    // 测试里退场动画不会自己放完，上一次关掉的清单还留着退场的那一层：按钮只在开着的那层里找
+    const openLayer = () => {
+      const layer = document.querySelector<HTMLElement>("[data-sk-modal-layer]:not([data-exiting])");
+      if (layer === null) throw new Error("清单应当开着");
+      return layer;
+    };
+    const reachReinstall = async () => {
+      click(button("查看这些文件"));
+      await flush();
+      click(button("我已下载，重新检查", openLayer()));
+      await flush();
+    };
+    seedMockDownloads(["locked.jar"]);
+    await reachReinstall();
+
+    // 清单是联网时打开的，点「重新安装」那一刻已经断网：重排只会再失败一次
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    onTestFinished(() => onLine.mockRestore());
+    act(() => {
+      window.dispatchEvent(new Event("offline"));
+    });
+    expect(offlineToasts()).toEqual([]);
+    click(button("重新安装", openLayer()));
+    await flush();
+    expect(attempts).toBe(1);
+    expect(launcher.state.tasks.filter((t) => t.instanceId === NAME).map((t) => [t.status, t.attempt])).toEqual([["failed", 1]]);
+    expect(offlineToasts()).toEqual([["warning", "没有网络连接"]]);
+
+    onLine.mockReturnValue(true);
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await reachReinstall();
+    click(button("重新安装", openLayer()));
+    await flush();
+    expect(attempts).toBe(2);
+    expect(launcher.state.tasks.filter((t) => t.instanceId === NAME).map((t) => [t.status, t.attempt])).toEqual([["running", 2]]);
+    expect(offlineToasts()).toEqual([["warning", "没有网络连接"]]);
+  });
+
   it("概览上「全部找到」后任务重新排队：说明卡不卸载，被拦文件的清单还挂着放完退场，不在同一帧连遮罩一起消失", async () => {
     resetModpackMock();
     const FILE = {

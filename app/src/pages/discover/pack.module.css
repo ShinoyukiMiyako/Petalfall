@@ -353,10 +353,13 @@
   color: var(--sk-text-2);
 }
 
-/* 叠在共用的 footNote 上：清单底栏的说明是 12 号字 */
+/* 叠在共用的 footNote 上：清单底栏的说明是 12 号字。底栏多出「重新安装」时一行放不下，折成两行而不截断：
+   它说的是主按钮接下来要你做什么，截掉后半句就读不出来了 */
 .blockedFootNote {
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
+  white-space: normal;
+  text-wrap: balance;
 }
 
 /* 淡入淡出的标签外层：不成块；里面是「还没找到」与「打开网页」一组时，间距与行尾区一致 */

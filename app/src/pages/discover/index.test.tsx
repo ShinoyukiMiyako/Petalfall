@@ -2616,6 +2616,49 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(launcher.state.toasts.find((t) => t.title === "没能打开网页")?.body).toBe("没有默认浏览器");
   });
 
+  it("打开了「自动下载受限的 CurseForge 文件」：作者不允许的 Mod 照样能装，按勾选的实例发起安装；说明块只说明会先试着直接下载，打开网页还在", async () => {
+    vi.stubGlobal("open", vi.fn());
+    const mod = entry("M1", { platform: "curseforge", title: "受限 Mod", resource_type: "mod", loaders: ["fabric"] });
+    const url = "https://www.curseforge.com/minecraft/mc-mods/locked";
+    const main = modVersion("cf-7001", { project_id: "M1", platform: "curseforge", version_number: "2.1.0", file_size: 4096 });
+    ipc.overrides.set("get_config", () => configDto({ selected_version: "生存", download_restricted_curseforge_files: true }));
+    pages = () => result([mod]);
+    ipc.overrides.set("project_detail", () => detailOf(mod, { distribution_allowed: false, page_url: url, latest_version: main }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [main], truncated: false }));
+    ipc.overrides.set("match_instances", () => [
+      match("生存", { best_version: main }),
+      match("创造", { state: "incompatible", compatibility: { kind: "mismatch", reason: "需要 1.20.1" }, best_version: null }),
+    ]);
+    ipc.overrides.set("plan_install", () => ({ items: [{ version: main, title: "受限 Mod", icon_url: null, required_by: null, already_satisfied: false }], skipped: [] }));
+    // 下载一直在跑：只看发出去的参数
+    ipc.overrides.set("install_mod", () => new Promise(() => undefined));
+    await mount();
+    act(() => card("受限 Mod").click());
+    await flush();
+
+    const panel = dialog().querySelector("aside") as HTMLElement;
+    const callouts = () => [...panel.querySelectorAll<HTMLElement>('[class*="_callout_"]')].filter((el) => el.closest("[inert]") === null);
+    expect(callouts().map((el) => [el.dataset.tone, el.textContent])).toEqual([
+      ["info", "作者不允许启动器直接下载这个资源。已经打开「自动下载受限的 CurseForge 文件」，安装时会先尝试直接下载，下不到再列出要手动下载的文件。打开网页"],
+    ]);
+    expect(liveText(dialog())).not.toContain("只能去 CurseForge 网页下载");
+    expect(dialog().querySelector('[role="checkbox"][aria-label^="生存，兼容"]')?.getAttribute("aria-checked")).toBe("true");
+
+    await clickIn(dialog(), "打开网页");
+    expect(callsOf(ipc, "plugin:opener|open_url")).toEqual([{ url }]);
+
+    const install = buttonByText("安装", dialog());
+    expect(install.disabled).toBe(false);
+    await clickIn(dialog(), "安装");
+    await flush();
+    // 预览算一次，点安装时按计划排任务再算一次
+    const plan = { versionId: "生存", platform: "curseforge", projectId: "M1", modVersionId: "cf-7001" };
+    expect(callsOf(ipc, "plan_install")).toEqual([plan, plan]);
+    expect(callsOf(ipc, "install_mod")).toMatchObject([{ gameDir: "D:/Games/.minecraft", versionId: "生存", platform: "curseforge", projectId: "M1", modVersionId: "cf-7001" }]);
+    expect(launcher.state.tasks.map((t) => [t.spec.command, t.instanceId, t.status])).toEqual([["install_mods", "生存", "running"]]);
+    expect(openDialogs()).toHaveLength(0);
+  });
+
   it("Mod 的安装面板一步至多一条说明块：判断失败留作说明块，手动下载写成行，重试与打开网页的入口都还在", async () => {
     const { IpcError } = await import("../../ipc/errors");
     vi.stubGlobal("open", vi.fn());
@@ -2787,6 +2830,57 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
       await openPack(false, () => new Promise(() => {}));
       expect(dialog().textContent).toContain(NOTE);
       expect([...dialog().querySelectorAll("button")].some((b) => b.textContent === "查看这些文件")).toBe(false);
+    });
+
+    describe("打开了「自动下载受限的 CurseForge 文件」", () => {
+      beforeEach(() => {
+        ipc.overrides.set("get_config", () => configDto({ selected_version: "生存", download_restricted_curseforge_files: true }));
+      });
+
+      it("工程标着不允许、摘要还没到：不按工程标记预告，面板照常", async () => {
+        await openPack(false, () => new Promise(() => {}));
+        expect(liveText(dialog())).toContain("整合包总是单独建一个实例");
+        expect(liveText(dialog())).not.toContain(NOTE);
+        expect(liveText(dialog())).not.toContain(LISTED);
+        expect(buttonByText("安装为新实例", dialog()).disabled).toBe(false);
+      });
+
+      it("摘要报本体受限（拼出的地址也下不到）：照旧按摘要给的清单说明，清单打得开", async () => {
+        await openPack(false, blockedSummary);
+        expect(liveText(dialog())).toContain(LISTED);
+        expect(liveText(dialog())).not.toContain(NOTE);
+        await clickIn(dialog(), "查看这些文件");
+        expect([...blockedDialog().querySelectorAll("li")].map((li) => li.textContent?.startsWith("生存 2.0.0.zip"))).toEqual([true]);
+      });
+    });
+
+    it("切换「自动下载受限的 CurseForge 文件」后摘要重读：打开后本体读得到，说明收起；关回去又报要手动下载", async () => {
+      let restricted = false;
+      ipc.overrides.set("get_config", () => configDto({ selected_version: "生存", download_restricted_curseforge_files: restricted }));
+      // 假后端：摘要按配置里的开关决定本体受限时报不报 distribution_blocked
+      ipc.overrides.set("update_config", (args) => {
+        if (typeof args.downloadRestrictedCurseforgeFiles === "boolean") restricted = args.downloadRestrictedCurseforgeFiles;
+        return null;
+      });
+      await openPack(false, () => (restricted ? READY_SUMMARY : blockedSummary()));
+      expect(liveText(dialog())).toContain(LISTED);
+      expect(callsOf(ipc, "summarize_platform_modpack")).toHaveLength(1);
+
+      await act(async () => {
+        await launcher.actions.updateSettings({ downloadRestrictedCurseforgeFiles: true });
+        await settle(20);
+      });
+      expect(callsOf(ipc, "summarize_platform_modpack")).toHaveLength(2);
+      expect(liveText(dialog())).not.toContain(LISTED);
+      expect(liveText(dialog())).toContain("2 个 Mod");
+
+      await act(async () => {
+        await launcher.actions.updateSettings({ downloadRestrictedCurseforgeFiles: false });
+        await settle(20);
+      });
+      expect(callsOf(ipc, "summarize_platform_modpack")).toHaveLength(3);
+      expect(liveText(dialog())).toContain(LISTED);
+      expect(callsOf(ipc, "update_config")).toEqual([{ downloadRestrictedCurseforgeFiles: true }, { downloadRestrictedCurseforgeFiles: false }]);
     });
 
     it("工程标着不允许、这个版本的摘要读到了：本体拿得到，不说明", async () => {
