@@ -7,6 +7,10 @@
 //! 尾部不用 `bytes=-n` 取：Modrinth 的 CDN（Fastly）对这种写法一律回 501 Unsupported client range，
 //! 先用一个字节的范围问出总长，再按明确的起止取。
 //!
+//! 有的地址只管跳转：CurseForge 给出的 `edge.forgecdn.net` 对带 Range 的请求直接回 404、不跳转，不带 Range
+//! 才 302 到真正存文件的主机。问总长的那个范围请求被错误状态拒绝时，不带 Range 再请求一次看它停在哪，
+//! 停在了别处就改对那个地址范围读；能直接范围读的地址不多发这个请求。
+//!
 //! 服务器不支持 Range（回 200 整包）时直接报错，不退回整包下载：那与导入时的下载重复，也违背
 //! 「不下载整包」的前提。ZIP64（中央目录或条目超过 4 GiB）同样报错：整合包远到不了这个体量。
 //!
@@ -42,6 +46,8 @@ const MANIFEST_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const RANGE_MAX_BYTES: u64 = 2 * MANIFEST_MAX_BYTES;
 /// 单个范围请求的时限。
 const RANGE_TIMEOUT: Duration = Duration::from_secs(20);
+/// 问文件总长用的范围：一个字节，总长在 Content-Range 里。
+const TOTAL_PROBE: &str = "bytes=0-0";
 
 /// 一个平台整合包版本的清单摘要。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,7 +179,9 @@ enum RangeClient {
 
 /// 取尾部找到中央目录，再只取清单那一个条目解析。
 async fn read_remote_pack(http: &RangeClient, url: &str, platform: Platform) -> Result<RemotePack> {
-    let (_, total) = fetch_range(http, url, "bytes=0-0".to_owned(), 1).await?;
+    let (endpoint, total) = locate(http, url).await?;
+    // 之后的范围读取都打在定下来的地址上，报错里写的也是它：真正应答的是那台主机。
+    let url = endpoint.as_str();
     let last = total
         .checked_sub(1)
         .ok_or_else(|| remote(url, "文件是空的"))?;
@@ -201,6 +209,81 @@ async fn read_remote_pack(http: &RangeClient, url: &str, platform: Platform) -> 
         manifest,
         entries,
     })
+}
+
+/// 问出文件总长，并定下之后的范围请求打在哪个地址上；`url` 能直接范围读时就是它自己。
+///
+/// 问总长的范围请求被错误状态拒绝时，不带 Range 再请求一次看它停在哪（[`redirect_target`]）：只管跳转的
+/// 主机（线上的 `edge.forgecdn.net`）对带 Range 的请求回 404、不跳转，文件在它不带 Range 时 302 去的
+/// 那台主机上。停在了别处就改对终点问总长；没有跳转（文件确实不在、服务器出错）照实报第一次的失败。
+/// 问跳转这一步自己出了错（连不上、超时、终点回错误状态）就报这个后来的错误，第一次的拒绝记进日志。
+/// 带了密钥的请求回 401 不在此列：那是密钥被拒，换地址也没用，原样报出去。
+async fn locate(http: &RangeClient, url: &str) -> Result<(String, u64)> {
+    let refused = match fetch_range(http, url, TOTAL_PROBE.to_owned(), 1).await {
+        Ok((_, total)) => return Ok((url.to_owned(), total)),
+        Err(err) if matches!(&err, CoreError::Fetch { source, .. } if source.is_status()) => err,
+        Err(err) => return Err(err),
+    };
+    let endpoint = match redirect_target(http, url).await {
+        Ok(Some(endpoint)) => endpoint,
+        Ok(None) => return Err(refused),
+        Err(err) => {
+            // 报出去的是后来这个错误，第一次的拒绝只剩这一行日志可查
+            tracing::warn!(%url, refused = ?refused, error = ?err, "范围请求被拒后，不带 Range 问跳转终点也没成");
+            return Err(err);
+        }
+    };
+    tracing::debug!(%url, %endpoint, refused = ?refused, "包本体的地址只管跳转，范围读取改打跳转终点");
+    let (_, total) = fetch_range(http, &endpoint, TOTAL_PROBE.to_owned(), 1).await?;
+    Ok((endpoint, total))
+}
+
+/// 不带 Range 请求 `url` 并跟随跳转，停在了别的地址就返回它，没有跳转返回 `None`。
+///
+/// 与下载引擎分片前探测最终地址同一做法（`petalfall-download` 的 `probe_final_url`）：发 GET 而不是 HEAD，
+/// 有的 CDN 对 HEAD 回 403 或 405；响应体是惰性流，这里只看响应停在哪个地址，不读正文，随响应一起丢掉。
+/// 带凭据时逐跳按作用域决定带不带密钥，与范围读取、导入时的下载同一套规则。
+///
+/// 跳到了别处而终点回 4xx、5xx 时，带着终点的地址报错：真正拒绝请求的是那台主机，也与引擎的探测同一口径。
+/// 没有跳转时不看状态码，由调用方报它手上那次范围请求的失败。
+async fn redirect_target(http: &RangeClient, url: &str) -> Result<Option<String>> {
+    let response = match http {
+        RangeClient::Shared(client) => client
+            .get(url)
+            .timeout(RANGE_TIMEOUT)
+            .send()
+            .await
+            .map_err(|source| CoreError::Fetch {
+                url: url.to_owned(),
+                source,
+            })?,
+        RangeClient::Credentialed { client, credential } => tokio::time::timeout(
+            RANGE_TIMEOUT,
+            petalfall_download::credentialed_get(client, credential, url, None),
+        )
+        .await
+        .map_err(|_| {
+            remote(
+                url,
+                format!(
+                    "不带 Range 问跳转终点超过 {} 秒没有响应",
+                    RANGE_TIMEOUT.as_secs()
+                ),
+            )
+        })??,
+    };
+    let endpoint = response.url().to_string();
+    // 按解析后的地址比：写法不同（大小写、默认端口）不算跳转。
+    if reqwest::Url::parse(url).ok().as_ref() == Some(response.url()) {
+        return Ok(None);
+    }
+    response
+        .error_for_status()
+        .map_err(|source| CoreError::Fetch {
+            url: endpoint.clone(),
+            source,
+        })?;
+    Ok(Some(endpoint))
 }
 
 impl RemotePack {
@@ -544,7 +627,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// 照线上挂一个假 CDN：拼出的路径 `edge` 只会跳转（见 [`EdgeRedirect`]），跳到同一服务器上的 `media`；
+    /// 照线上挂一个假 CDN：路径 `edge` 只会跳转（见 [`EdgeRedirect`]），跳到同一服务器上的 `media`；
     /// `media` 对 HEAD 回 200，对 GET 按 Range 回 206 与对应片段、不带 Range 回 200 整个 `body`。
     pub(crate) async fn mount_edge_cdn(
         server: &MockServer,
@@ -1185,10 +1268,284 @@ pub(crate) mod tests {
         server.verify().await;
     }
 
+    /// 平台、批量文件、批量工程三个接口：文件对象给出的包本体地址是 `download_url`。
+    async fn mount_curseforge_pack_api(server: &MockServer, download_url: &str, total: usize) {
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/394468/files/4712000"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 4_712_000, "modId": 394468, "displayName": "All of Create",
+                    "fileName": "pack.zip", "hashes": [], "fileLength": total,
+                    "downloadUrl": download_url, "gameVersions": ["1.20.1"]
+                }})),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    curseforge_file(4_712_001, 328085, "create-0.5.1.jar", 13_000_000),
+                    curseforge_file(4_712_002, 306612, "jei-15.2.jar", 1_250_000),
+                    curseforge_file(4_712_003, 457570, "create-textures.zip", 8_000_000),
+                ]})),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                { "id": 328085, "name": "Create", "slug": "create", "summary": "", "classId": 6 },
+                { "id": 306612, "name": "JEI", "slug": "jei", "summary": "", "classId": 6 },
+                { "id": 457570, "name": "Textures", "slug": "textures", "summary": "", "classId": 12 }
+            ]})))
+            .mount(server)
+            .await;
+    }
+
+    /// 平台给出的包本体地址在线上是 edge.forgecdn.net：它只管跳转，带 Range 的请求直接回 404、不跳，不带
+    /// Range 才 302 到存文件的主机。摘要的第一个范围请求被拒后，不带 Range 问出跳转终点，四次范围读取都改打
+    /// 终点。凭据作用域指着这个假服务器，所以每一跳都带密钥，与导入时的下载一样。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_pack_behind_a_redirecting_host_is_summarized_from_the_redirect_target() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        let edge = "/files/4712/0/pack.zip";
+        let media = "/mediafilez/files/4712/0/pack.zip";
+        let pack = curseforge_zip(&curseforge_manifest());
+        let total = pack.len();
+        mount_curseforge_pack_api(&server, &format!("{uri}{edge}"), total).await;
+        mount_edge_cdn(&server, edge, media, pack).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let port = server.address().port();
+        let petalfall = petalfall_at(tmp.path())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k")
+            .with_curseforge_cdn_scope(petalfall_download::CredentialScope::new(
+                [format!("127.0.0.1:{port}")],
+                false,
+            ));
+
+        let summary = petalfall
+            .summarize_platform_modpack(Platform::CurseForge, "394468", "4712000")
+            .await
+            .unwrap();
+
+        assert_eq!(summary.name, "All of Create");
+        assert_eq!(summary.pack_bytes, total as u64);
+        assert_eq!((summary.remote_files, summary.mod_files), (3, 3));
+        assert_eq!(summary.remote_bytes, Some(22_250_000));
+        let get = |path: &str, range: bool| ("GET".to_owned(), path.to_owned(), range, true);
+        assert_eq!(
+            cdn_requests(&server, &[edge, media]).await,
+            vec![
+                get(edge, true),
+                get(edge, false),
+                get(media, false),
+                get(media, true),
+                get(media, true),
+                get(media, true),
+                get(media, true),
+            ],
+            "问总长被拒一次，不带 Range 跟到终点一次，之后总长、包尾、清单条目的本地头、清单数据都打在终点上"
+        );
+    }
+
+    /// 跳转终点在凭据作用域之外（另一台服务器）：问跳转与之后的范围读取到了那台主机上都不带密钥，摘要照样读得出。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn range_reads_on_a_redirect_target_outside_the_scope_carry_no_key() {
+        let server = MockServer::start().await;
+        let storage = MockServer::start().await;
+        let uri = server.uri();
+        let edge = "/files/4712/0/pack.zip";
+        let media = "/storage/pack.zip";
+        let pack = curseforge_zip(&curseforge_manifest());
+        let total = pack.len();
+        mount_curseforge_pack_api(&server, &format!("{uri}{edge}"), total).await;
+        Mock::given(path(edge))
+            .respond_with(EdgeRedirect {
+                target: format!("{}{media}", storage.uri()),
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(media))
+            .respond_with(RangeServer {
+                body: Arc::new(pack),
+                ranges: true,
+                served_bytes: Arc::new(AtomicUsize::new(0)),
+            })
+            .mount(&storage)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let port = server.address().port();
+        let petalfall = petalfall_at(tmp.path())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k")
+            .with_curseforge_cdn_scope(petalfall_download::CredentialScope::new(
+                [format!("127.0.0.1:{port}")],
+                false,
+            ));
+
+        let summary = petalfall
+            .summarize_platform_modpack(Platform::CurseForge, "394468", "4712000")
+            .await
+            .unwrap();
+
+        assert_eq!(summary.pack_bytes, total as u64);
+        assert_eq!(
+            cdn_requests(&server, &[edge]).await,
+            vec![
+                ("GET".to_owned(), edge.to_owned(), true, true),
+                ("GET".to_owned(), edge.to_owned(), false, true),
+            ],
+            "作用域内的那台主机收到的两次请求都带密钥"
+        );
+        let get = |range: bool| ("GET".to_owned(), media.to_owned(), range, false);
+        assert_eq!(
+            cdn_requests(&storage, &[media]).await,
+            vec![get(false), get(true), get(true), get(true), get(true)],
+            "作用域外的主机上一个请求都不带密钥"
+        );
+    }
+
+    /// 不带凭据的共享客户端同一做法：跳转由客户端自己跟随，范围读取落在它停下的地址上。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pack_behind_a_redirecting_host_is_read_without_credentials_too() {
+        let server = MockServer::start().await;
+        let edge = "/data/pack.mrpack";
+        let media = "/storage/pack.mrpack";
+        let pack = mrpack(&manifest());
+        let total = pack.len();
+        mount_edge_cdn(&server, edge, media, pack).await;
+        let http = petalfall_base::http::build_client().unwrap();
+
+        let remote = read_remote_pack(
+            &RangeClient::Shared(http),
+            &format!("{}{edge}", server.uri()),
+            Platform::Modrinth,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(remote.total, total as u64);
+        assert_eq!(remote.manifest.name, "Fabulously Optimized");
+        let get = |path: &str, range: bool| ("GET".to_owned(), path.to_owned(), range, false);
+        assert_eq!(
+            cdn_requests(&server, &[edge, media]).await,
+            vec![
+                get(edge, true),
+                get(edge, false),
+                get(media, false),
+                get(media, true),
+                get(media, true),
+                get(media, true),
+                get(media, true),
+            ]
+        );
+    }
+
+    /// 跳到了别处而终点也没有这个文件（线上是包被撤下后 edge 照跳、存文件的主机回 404）：报的是终点的地址
+    /// 与它回的状态，不再对它发范围请求。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_redirect_target_that_refuses_is_reported_with_its_own_address() {
+        let server = MockServer::start().await;
+        let edge = "/data/pack.mrpack";
+        let media = "/storage/pack.mrpack";
+        Mock::given(path(edge))
+            .respond_with(EdgeRedirect {
+                target: format!("{}{media}", server.uri()),
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(media))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let http = petalfall_base::http::build_client().unwrap();
+
+        let err = read_remote_pack(
+            &RangeClient::Shared(http),
+            &format!("{}{edge}", server.uri()),
+            Platform::Modrinth,
+        )
+        .await
+        .unwrap_err();
+
+        let CoreError::Fetch {
+            url: failed,
+            source,
+        } = &err
+        else {
+            panic!("应报请求失败，实为 {err:?}");
+        };
+        assert_eq!(failed, &format!("{}{media}", server.uri()));
+        assert_eq!(source.status(), Some(reqwest::StatusCode::NOT_FOUND));
+        let get = |path: &str, range: bool| ("GET".to_owned(), path.to_owned(), range, false);
+        assert_eq!(
+            cdn_requests(&server, &[edge, media]).await,
+            vec![get(edge, true), get(edge, false), get(media, false)]
+        );
+    }
+
+    /// 范围请求被拒，不带 Range 也没有跳到别处（文件确实不在）：照实报第一次的失败，只多问这一次。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_range_without_a_redirect_reports_the_original_failure() {
+        let server = MockServer::start().await;
+        let gone = "/gone.mrpack";
+        Mock::given(method("GET"))
+            .and(path(gone))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let http = petalfall_base::http::build_client().unwrap();
+        let url = format!("{}{gone}", server.uri());
+
+        let err = read_remote_pack(&RangeClient::Shared(http), &url, Platform::Modrinth)
+            .await
+            .unwrap_err();
+
+        let CoreError::Fetch {
+            url: failed,
+            source,
+        } = &err
+        else {
+            panic!("应报请求失败，实为 {err:?}");
+        };
+        assert_eq!(failed, &url);
+        assert_eq!(source.status(), Some(reqwest::StatusCode::NOT_FOUND));
+        let both = vec![
+            ("GET".to_owned(), gone.to_owned(), true, false),
+            ("GET".to_owned(), gone.to_owned(), false, false),
+        ];
+        assert_eq!(cdn_requests(&server, &[gone]).await, both);
+
+        // 地址换一种写法（协议名大写）：响应停在的仍是同一个地址，不能当成跳到了别处再去范围读一遍
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(gone))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let http = petalfall_base::http::build_client().unwrap();
+        let spelled = format!("HTTP://127.0.0.1:{}{gone}", server.address().port());
+
+        let err = read_remote_pack(&RangeClient::Shared(http), &spelled, Platform::Modrinth)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, CoreError::Fetch { url, source } if url == &spelled && source.status() == Some(reqwest::StatusCode::NOT_FOUND)),
+            "{err:?}"
+        );
+        assert_eq!(cdn_requests(&server, &[gone]).await, both);
+    }
+
     /// 包本体受限（文件对象不给地址、download-url 端点 403）：设置关着时照旧报受限、清单里只有这个包，假 CDN
     /// 一次都没被请求。设置开着时摘要成功，范围读取全打在探测交回的跳转终点上：假 CDN 照线上的脾气，拼出的
-    /// 地址只会跳转、对带 Range 的请求回 404，拿它去范围读摘要就会失败。CDN 上的请求一个都不带 x-api-key，
-    /// 凭据作用域也指着这个假服务器，任务误挂了凭据就会被看见。
+    /// 地址只会跳转、对带 Range 的请求回 404，拿它去范围读就要先被拒一次、再问一次跳转，请求序列里会多出
+    /// 这几条。CDN 上的请求一个都不带 x-api-key，凭据作用域也指着这个假服务器，任务误挂了凭据就会被看见。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn restricted_curseforge_pack_is_summarized_from_the_redirect_target() {
         let server = MockServer::start().await;
@@ -1323,6 +1680,11 @@ pub(crate) mod tests {
             panic!("应报 RemotePack，实为 {err:?}");
         };
         assert!(reason.contains("不支持按范围读取"), "{reason}");
+        assert_eq!(
+            cdn_requests(&server, &["/pack.mrpack"]).await,
+            vec![("GET".to_owned(), "/pack.mrpack".to_owned(), true, false)],
+            "回的是 200 不是错误状态：不再不带 Range 问一次，那会又开一次整包下载"
+        );
     }
 
     /// 回了 206、正文却比请求的范围长得多（这里每次都回整个包）：不把整段读进内存，照实报错。
@@ -1362,6 +1724,11 @@ pub(crate) mod tests {
         assert!(
             reason.contains("bytes=0-0") && reason.contains("比请求的范围长"),
             "{reason}"
+        );
+        assert_eq!(
+            cdn_requests(&server, &["/pack.mrpack"]).await,
+            vec![("GET".to_owned(), "/pack.mrpack".to_owned(), true, false)],
+            "不是错误状态的失败不换地址，只有这一个请求"
         );
     }
 
