@@ -514,6 +514,22 @@ describe("下载队列：纯函数", () => {
         expect(stageProgress(markDone(tasks, "t1", 1, T0)[0])).toEqual({ value: 1, track: measured.track });
       });
 
+      it("stageProgress：认下的批次只有一个没声明大小的文件时给不出（按文件数只能是 0）；声明了大小、或不止一个文件就给得出", () => {
+        const entered = applyTaskPhase([task("t1", { status: "running" })], "t1#1", ["metadata", "libraries", "assets", "natives", "java", "loader_installer"], 5);
+        // 加载器安装器：一个文件，没有声明大小，下了多少字节也折不出比例
+        let tasks = applyTaskDownload(entered, "t1#1", snap(1, 0, 3_500_000, null));
+        expect(tasks[0].phase).toMatchObject({ batch: { total: 1, totalBytes: null }, fraction: 0 });
+        expect(stageProgress(tasks[0])).toEqual({ value: null, track: "t1#1:stage:5:count:1" });
+        // 完成时照常换成满格，标识不变
+        expect(stageProgress(markDone(tasks, "t1", 1, T0)[0])).toEqual({ value: 1, track: "t1#1:stage:5:count:1" });
+        // 边界：一个文件但声明了大小，按字节给得出
+        tasks = applyTaskDownload(entered, "t1#1", snap(1, 0, 1_000_000, 4_000_000));
+        expect(stageProgress(tasks[0])).toEqual({ value: 0.25, track: "t1#1:stage:5:4000000:1" });
+        // 边界：没声明大小但有两个文件，按文件数给得出
+        tasks = applyTaskDownload(entered, "t1#1", snap(2, 1, 0, null));
+        expect(stageProgress(tasks[0])).toEqual({ value: 0.5, track: "t1#1:stage:5:count:2" });
+      });
+
       it("stageProgress：换步即换标识；任何一种步骤没认下批次时都给不出", () => {
         let tasks = applyTaskPhase([task("t1", { status: "running" })], "t1#1", VANILLA, 0);
         const tracks = [stageProgress(tasks[0]).track];

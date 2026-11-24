@@ -1134,6 +1134,18 @@ describe("下载任务页：分步任务的两条进度条", () => {
     expect(nowOf(TITLE)).toEqual(["23", "50"]);
   });
 
+  it("认下的那批只有一个没声明大小的文件：下面那条仍是不定进度，不画成一条不动的 0%", async () => {
+    const { attempt } = await creating();
+    await step(attempt, 0);
+    await advance(LOADING_DELAY_MS);
+    expect(sweeping(TITLE)).toBe(true);
+    // 版本 JSON：一个文件，没有声明大小，下完之前按文件数只能是 0
+    await act(() => emit(CORE_EVENT, { kind: "download", task_id: attempt, total: 1, finished: 0, bytes: 20_000, total_bytes: null, transferred: 20_000, speed: MB }));
+    await advance(LOADING_DELAY_MS * 2);
+    expect(sweeping(TITLE)).toBe(true);
+    expect(bars(TITLE)[1].hasAttribute("aria-valuenow")).toBe(false);
+  });
+
   it("失败与取消的分步任务：行里一条进度条都不画", async () => {
     const { install } = await creating();
     install.reject(new IpcError("network_failed", "dns lookup failed"));

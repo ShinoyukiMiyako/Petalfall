@@ -382,6 +382,8 @@ export interface StageProgress {
  * 分步任务当前这一步的进度。这一步还没认下批次时给不出（null）：不按步骤的种类去猜它会不会报批次，同一步在不同情形下
  * 两样都有（校验只在缺文件时下载；打包先要遍历一遍要收的文件；等别的 Forge 安装让出来时停在准备 Java 上）。
  * 刚进一步就马上有批次的情形由界面去抹平，见任务行的 StageBar。
+ * 认下的批次只有一个文件、又没声明大小时同样给不出：这一批按文件数算，一个文件下完之前比例只能是 0，画出来是一条
+ * 不动的空轨道（版本 JSON、加载器安装器都是这样的一批，网慢时会停很久）。
  * 换步、同一步里换了一批或换了尝试，进度都从新的起点算，track 随之变，进度条直接跳过去，不从上一步（上一批）的满格往回走。
  * 完成时 track 不变：这一步有批次的从原处走满，给不出进度的直接换成满格。
  */
@@ -391,7 +393,8 @@ export function stageProgress(task: Task): StageProgress {
   const { index, batch, fraction } = task.phase;
   const track = batch === null ? `${attempt}:stage:${index}` : `${attempt}:stage:${index}:${batch.totalBytes === null ? "count" : batch.totalBytes}:${batch.total}`;
   if (task.status === "done") return { value: 1, track };
-  return { value: batch === null ? null : fraction, track };
+  const measurable = batch !== null && (batch.totalBytes !== null || batch.total > 1);
+  return { value: measurable ? fraction : null, track };
 }
 
 // ---------------------------------------------------------------- 组合任务的进度
