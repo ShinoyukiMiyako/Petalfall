@@ -40,10 +40,10 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 | L1 | `petalfall-download` | 单文件下载引擎（Range 分块、分片续传、按源重试）、批量并发池、换源调度、测速、主机熔断、吞吐看门狗、带作用域的下载凭据、取消令牌 | base |
 | L2 | `petalfall-instance` | 实例发现、命名规则、实例设置、未完成标记、版本隔离判定、存档与资源包读取、存档备份的文件层（打包、清单、保留策略、恢复、改名搬运）、移入回收站；只读写本地文件 | base, version |
 | L2 | `petalfall-install` | 原版、Fabric、Quilt、Forge、NeoForge 安装（含 Forge 处理器子进程），库、资源与 natives 补全 | base, version, download |
-| L2 | `petalfall-modplatform` | Modrinth v2（组织信息走 v3 的 `/organizations`，v2 没有组织路由）与 CurseForge v1 客户端、聚合搜索、本地 Mod 扫描与元数据缓存、CurseForge 的 CDN 下载凭据与文件指纹 | base, download |
+| L2 | `petalfall-modplatform` | Modrinth v2（组织信息走 v3 的 `/organizations`，v2 没有组织路由）与 CurseForge v1 客户端、聚合搜索、本地 Mod 扫描与元数据缓存、CurseForge 的 CDN 下载凭据与文件指纹、平台不给下载地址的 CurseForge 文件按编号与文件名拼出 CDN 地址并探测能否下载 | base, download |
 | L2 | `petalfall-modpack` | 读取 `.mrpack` 与 CurseForge `.zip`，统一成一份清单；把覆盖文件安全地解压到实例目录；把导出清单写成 `.mrpack` 并回读校验 | instance, version |
 | L3 | `petalfall-launch` | 启动命令拼装（参数、classpath、natives、authlib-injector、Quick Play）、游戏进程管理、会话日志、崩溃判定与退出码对照、启动前提醒的判断 | base, auth, version, instance |
-| L4 | `petalfall-core` | 门面 `Petalfall`：配置、实例、安装、下载源计划、整合包导入与导出、受限文件认领、Mod 与历史、发现、Java、账户、启动、崩溃诊断、存档备份、新实例默认设置与开局 Mod、游玩统计、新闻、服务器状态、外观、自更新包的选源、更新通道偏好与见过的最高版本的存取、数据格式号的把关（数据目录、游戏目录、更新包的载荷头） | 以上全部（含 release、setup-payload） |
+| L4 | `petalfall-core` | 门面 `Petalfall`：配置、实例、安装、下载源计划、整合包导入与导出、受限文件认领与自动下载（默认关闭的设置）、Mod 与历史、发现、Java、账户、启动、崩溃诊断、存档备份、新实例默认设置与开局 Mod、游玩统计、新闻、服务器状态、外观、自更新包的选源、更新通道偏好与见过的最高版本的存取、数据格式号的把关（数据目录、游戏目录、更新包的载荷头） | 以上全部（含 release、setup-payload） |
 | 外层 | `petalfall-cli` | 调试命令行，用于端到端冒烟 | core, base |
 | 外层 | `petalfall-tauri` | 桌面外壳 | core, base |
 
@@ -81,8 +81,12 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
   份额按连接数分，本传输开几条连接就算几份：TCP 公平的单位是连接，按文件数算时，开八条连接的大文件旁边的单连接文件永远拿不到一半。连接数在窗口内累加：别的文件在窗口后半段下完时当前连接数已经掉下去，用它算份额会虚高。计量（`LinkMeter`）放在 `SourceHealth` 上：门面每批新装配一个下载池但共用一张健康表，同时跑的几个池算同一条链路。
 
   判慢后放弃当前终点，向原地址重新取一个终点（BMCLAPI 这类分发入口每次都可能跳到不同节点），已完整的分片保留，只续传没下完的。每个源每次尝试最多换 2 次（`MAX_ENDPOINT_SWITCHES`），计数按源持有，重试与分片回退都不清零。额度用完、或原地址跳回同一个节点时报 `SlowEndpoint` 交给换源；重新取终点本身失败时原样报那个错误。已是最后一个源时关掉看门狗在当前终点上续传；后面的源都失败时（镜像还没同步到的新文件回 404 就是这样）回到先前判慢的源，关掉看门狗下完，慢也装上。`SlowCause::Link` 的判慢同样换源，但不记主机的账（`Error::is_host_fault`），正常的主机不会被熔断沉底。
-- 带作用域的下载凭据（`petalfall-download` 的 `credential.rs`）：CurseForge CDN 的下载要带与 API 相同的 `x-api-key`。任务经 `DownloadTask::with_credential` 挂上 `DownloadCredential`，凭据自带作用域（`CredentialScope`）：`curseforge_cdn()` 只认 https 下的 `forgecdn.net` 及其全部子域。资源与平台整合包本体、Mod、整合包里的文件三条下载路径都挂这份凭据（`Petalfall::curseforge_credential`）。
+- 带作用域的下载凭据（`petalfall-download` 的 `credential.rs`）：平台给出的 CurseForge CDN 地址，落樱下载时带上与 API 相同的 `x-api-key`。任务经 `DownloadTask::with_credential` 挂上 `DownloadCredential`，凭据自带作用域（`CredentialScope`）：`curseforge_cdn()` 只认 https 下的 `forgecdn.net` 及其全部子域。资源与平台整合包本体、Mod、整合包里的文件三条下载路径都挂这份凭据（`Petalfall::curseforge_credential`），只有一个例外：按文件编号拼出的地址探测与下载都不带 `x-api-key`（见下文「拼出的 CurseForge 地址」一条）。文件对象没给地址时补到的地址经 `FallbackUrl::into_task` 建任务，凭据按地址的来源挂：download-url 端点给的（`FallbackUrl::Endpoint`）与文件对象自带的地址同等对待、照常挂，拼出的（`FallbackUrl::Derived`）不挂。
 - 逐跳跳转：reqwest 跨主机跳转时只摘掉 Authorization、Cookie 等标准敏感头，自定义的 `x-api-key` 会被原样带到下一跳。所以带凭据的任务换用不自动跟随跳转的客户端（`petalfall_base::http::build_manual_redirect_client`，门面的 `http_manual`），由引擎逐跳跟随 301、302、303、307、308，最多 10 跳（`follow_redirects`）。每一跳、每个候选源各自判定带不带头，跳到作用域外的主机、改写到镜像时都不带。带了凭据的那一跳回 401 时报 `CredentialRejected`：不重试、不换源、不回退整文件、不记健康账，命令层报 `curseforge_key_rejected`。没带凭据的那一跳回 401 按普通状态码处理。整合包摘要的范围读取走同一套规则（`credentialed_get`）。
+- 拼出的 CurseForge 地址（`petalfall-modplatform` 的 `CurseForgeClient::derived_download_url`、`probe_derived_download`，`petalfall-core` 的 `resources.rs` 里的 `curseforge_fallback_url`）：作者关掉了第三方分发的文件，文件对象与 download-url 端点都不给地址，文件却仍在 CDN 上。设置 `download_restricted_curseforge_files` 开着时（默认关），端点也拿不到地址（403、404、空串或纯空白）才按 `https://edge.forgecdn.net/files/{编号整除 1000}/{编号除以 1000 的余数}/{转义后的文件名}` 拼出地址：余数不补零（9752012 落在 `9752/12`），不是取编号的前几位；文件名按 UTF-8 逐字节写成小写十六进制的 `%xx`，只有字母数字与 `-_.!*()` 原样保留，空格是 `%20`、加号是 `%2b`。编号小于 1000，或文件名为空、是 `.` / `..`、含 `/`、`\` 或控制字符时不拼，照旧报受限。这套规律是拿平台给出的地址逐字节核对出来的，平台没有承诺过，所以拼出的地址只是候选：下载前先探测，建任务时与端点给的地址同一个建法，照样带上大小与 sha1（资源与整合包两条路径经 `task_for_file_url` 取文件对象里的，Mod 那条经 `ModVersionInfo::task_for_url` 取版本信息里的），下载后的校验不变。开关关着时不拼地址、不发探测请求，行为与没有这项设置时相同。
+  - 探测发一个 HEAD，跟随跳转看最终状态：2xx 算能下；401、403、404、410 算不能下，照旧报 `distribution_blocked`，走手动下载与认领；其余状态报 `Status`、传输失败报 `Http`，照常冒泡，不当成不能下：否则一次网络抖动就会让用户去手动下载本来能自动下的文件。可重试的（5xx、429、408、超时与连接类）照样退避重试，但比别的请求收得紧：每次尝试限时 10 秒，最多试 2 次。探测只取响应头，用不着长时限；它又挡在预览与导入前面，CDN 不应答时要尽快报错，不让用户干等。探测打的是 CDN，不经元数据请求的节流闸。用 HEAD 而不是带 Range 的 GET：`edge.forgecdn.net` 对带 Range 的请求回 404，会把能下的文件判成不能下。
+  - 探测交回跟随跳转后的最终地址（`FallbackUrl::Derived` 装的就是它），之后的下载与整合包摘要的范围读取都对它发，不再碰拼出的地址：第一跳 `edge.forgecdn.net` 对带 Range 的请求直接回 404、不跳转，拿拼出的地址做范围读取会失败；跳转后的 `mediafilez.forgecdn.net` 对范围请求正常回 206。最终地址交回前先查主机：须在 https 下的 `forgecdn.net` 及其子域之内（与 `CredentialScope::curseforge_cdn()` 同一个范围）；与拼地址用的 CDN 根同源的也放行，这一条只在测试把 CDN 根换成本地服务器时用得上。跳到别处时报 `Status`（地址是跳到的那一个），不把用户的下载带到平台之外的主机。
+  - 探测与下载都不带 key：这些文件的作者没有开放第三方分发，不该以落樱那把 key 的名义去取。任务不挂凭据，走共享客户端；探测时由 reqwest 自动跟随 `edge.forgecdn.net` 到 `mediafilez.forgecdn.net` 的跳转；reqwest 跟随跳转时不摘自定义头，请求上本来就没有这个头，也就不会被带到下一跳。平台整合包摘要读这样的包本体时，范围读取同样走共享客户端、不带 key。
 
 ### 账户续期
 
@@ -548,7 +552,7 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 | --- | --- | --- |
 | `curseforge_key_missing` | 用到 CurseForge 却没配 API 密钥（环境变量 `PETALFALL_CURSEFORGE_API_KEY` 与构建时内嵌的值都没有）；导入 `.mrpack` 时包里有文件只有 CurseForge CDN 地址、没有别的地址可换，也在准备阶段就报，不先装完游戏再告诉用户装不完 | 无 |
 | `curseforge_key_rejected` | CurseForge 拒绝了下载密钥（带密钥的那一跳回 401） | `{ realm: "curseforge", url, status }`，`url` 是被拒的那一跳 |
-| `distribution_blocked` | 作者不允许第三方下载的文件，要到网页手动下载 | `{ files }`，元素形状同 `claim_blocked_files` 的入参 |
+| `distribution_blocked` | 作者不允许第三方下载的文件，download-url 端点也不给地址，又没有认领过的副本，要到网页手动下载；设置 `download_restricted_curseforge_files` 开着时，还要拼出的 CDN 地址也下不了（拼不出，或探测回 401、403、404、410）才报（见「下载源与下载引擎」的拼出的 CurseForge 地址） | `{ files }`，元素形状同 `claim_blocked_files` 的入参 |
 | `modpack_unsupported_compression` | 要解的条目用了不支持的压缩方式 | `{ path, entry, method }` |
 | `modpack_export_unsupported` | 这个实例写不成 `.mrpack` | `{ id, reason, loader? }`，`reason` 取 `version_unknown`、`loader_unsupported`、`loader_version_unknown`、`multiple_loaders`、`incomplete` |
 | `modpack_export_check_failed` | 导出的包没通过回读校验，产物已删除 | `{ path, reason }` |
@@ -638,7 +642,7 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 改名在目录、版本 JSON、jar 与 natives 都换成新名字之后，才删暂存的旧 JSON（旧 JSON 先挪到元数据目录里暂存，只改大小写时新旧文件名在 Windows 上指向同一个文件，先挪开才不会互相覆盖）。这一步删不掉只记 warn，改名照成功走：到这里已经回滚不了也不该回滚，报错的话调用方就不再同步游玩记录、备份与配置引用，它们全都还指着旧名字。留下的暂存文件在元数据目录里，不影响实例，下次改名时被覆盖。
 
-`install_resource` 只装资源包、光影与数据包，对 Mod 报 `invalid_argument`：Mod 一律走 `install_mod`，才会登记卷宗、带上前置并写进历史。CurseForge 上禁止第三方分发的文件，装 Mod、装资源与导入整合包都报 `distribution_blocked`（`detail.files` 列出每个文件，认领见「导入与导出整合包」），空白的 `downloadUrl` 按缺失处理、先走 download-url 兜底。
+`install_resource` 只装资源包、光影与数据包，对 Mod 报 `invalid_argument`：Mod 一律走 `install_mod`，才会登记卷宗、带上前置并写进历史。CurseForge 文件的来源按这个顺序取：文件对象自带的 `downloadUrl`（空白的按缺失处理）、download-url 端点、设置 `download_restricted_curseforge_files` 开着时拼出并探测过的 CDN 地址（见「下载源与下载引擎」的拼出的 CurseForge 地址）、认领过的暂存副本；都没有时装 Mod、装资源与导入整合包都报 `distribution_blocked`（`detail.files` 列出每个文件，认领见「导入与导出整合包」）。资源与平台整合包本体（`resources.rs` 的 `platform_file_task`）、Mod（`mods.rs` 的 `fallback_download_task`）、整合包里的文件（`modpack.rs` 的 `curseforge_downloads`）三处下载，连同整合包预览判定哪些文件要手动下载（`modpack.rs` 的 `curseforge_remote_facts`），是同一个顺序，兜底地址都经 `curseforge_fallback_url` 取。开关开着且拼出的地址能下时，不再用认领过的副本。
 
 聚合搜索某个平台这一页请求失败时，下一页游标里这个平台原地不动，先前记下的吸收项（已并进合并卡、还排在偏移之后的工程 id）照旧带着，重试那一页时这些工程不会作为单平台条目再出现一次。
 
@@ -733,10 +737,10 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 导入：
 
-- `preview_modpack` 除清单概况外列出 `mods`（导入后落进 `mods/` 的每个文件）、`optional_extras`（不直接落进 `mods/` 的可选文件）与 `blocked_files`（还没认领到的受限文件）。Modrinth 清单里 `env.client` 为 `optional` 的文件算可选。`install_modpack` 的可选参数 `excludedOptional` 列出取消勾选的文件（取预览给的 `path`），它们不进下载计划；列的不是可选文件时报 `invalid_argument`，清单不变。
+- `preview_modpack` 除清单概况外列出 `mods`（导入后落进 `mods/` 的每个文件）、`optional_extras`（不直接落进 `mods/` 的可选文件）与 `blocked_files`（拿不到能下的地址、又还没认领到的受限文件：download-url 端点不给地址，设置 `download_restricted_curseforge_files` 开着时拼出的地址也下不了）。Modrinth 清单里 `env.client` 为 `optional` 的文件算可选。`install_modpack` 的可选参数 `excludedOptional` 列出取消勾选的文件（取预览给的 `path`），它们不进下载计划；列的不是可选文件时报 `invalid_argument`，清单不变。
 - 条目名解码（`petalfall-modpack` 的 `archive.rs`）：依次按 UTF-8、GBK、CP437 解。zip 库只看 UTF-8 标志，没有标志就按 CP437 解，而中文系统上的老打包工具（资源管理器的压缩文件夹、旧版 WinRAR）不设标志、写的是 GBK。解码后才判重，同一层里解码后同名的条目报 `modpack_manifest_invalid`，不互相覆盖。平台整合包摘要自己读中央目录，用同一个 `decode_entry_name`，数出来的 Mod 与本地读包一致。
 - 压缩方式：`zip` 依赖只开纯 Rust 后端（deflate、deflate64、bzip2、lzma、xz、ppmd、shrink / reduce / implode），不开 zstd（要编 C）。列条目时用 `by_index_raw`，不建解压器：不在覆盖层里的条目用什么压缩方式都与安装无关。真正要解的条目在读包时先打开一次，不支持的方式报 `modpack_unsupported_compression`，不拖到装到一半，也不再说成文件损坏。
-- 受限文件（`petalfall-core` 的 `blocked.rs`）：作者不允许第三方下载的文件在本地预览阶段就查出来列进 `blocked_files`，`distribution_blocked` 的 `detail.files` 给出同样的清单（`project_id`、`file_id`、`file_name`、`web_url`、`destination`、`sha1`、`fingerprint`、`size`）。用户到网页下载后，`claim_blocked_files(folder, files)` 从所选文件夹认领：只看顶层的普通文件，文件名相同（不分大小写）或大小正好相同的才算候选（浏览器会把重名下载改成 `foo (1).jar`），按 sha1、没有 sha1 时按 fingerprint 校验，校验过的副本复制进暂存位，用户文件夹里的原文件不动，不联网、不占实例。出参 `{ claimed, missing }`。暂存位按文件 id 分、不按整合包分，导入后也不删，同一个文件在别的整合包里能直接用。`downloads_folder` 给出系统下载文件夹作为默认位置。认领后重走导入；单装的 Mod 与资源认领过时同样改用暂存副本。候选按 sha1 校验，没有 sha1 时按 fingerprint：只有 fingerprint 时走 `hash_mod_file` 两趟流式读（指纹的初值要剔除空白后的总长度，所以要读两趟），峰值内存是一个读缓冲，不再把整个文件读入内存。平台整合包的摘要（`summarize_platform_modpack`）同样看暂存位：包本体受限且认领过时读暂存副本（与预览本地文件一样读，不发范围请求，导入读的也是它），没认领过报 `distribution_blocked`，`detail.files` 里只有这个包，用户在安装前就能到网页手动下载；前端认领成功后让 `modpack-summary` 缓存失效，之前读不出的摘要这时读得到了。
+- 受限文件（`petalfall-core` 的 `blocked.rs`）：作者不允许第三方下载的文件在本地预览阶段就查出来列进 `blocked_files`，`distribution_blocked` 的 `detail.files` 给出同样的清单（`project_id`、`file_id`、`file_name`、`web_url`、`destination`、`sha1`、`fingerprint`、`size`）。预览与导入是同一口径，取地址都经 `curseforge_fallback_url`（预览在 `modpack.rs` 的 `curseforge_remote_facts`，导入在 `curseforge_downloads`）。文件对象有没有给地址，两边按同一条规则判：`downloadUrl` 缺失、空串、纯空白都算没给，才去问 download-url 端点。设置 `download_restricted_curseforge_files` 开着时，预览对 download-url 端点也不给地址的文件逐个探测拼出的 CDN 地址（见「下载源与下载引擎」的拼出的 CurseForge 地址），探得到的不列进 `blocked_files`，导入时直接下载、不挂凭据，也不改用认领过的副本；所以开着时预览除了问 download-url 端点，还要向 CDN 发 HEAD 请求，探测出错照常报错、预览失败。开关关着时预览不发探测请求。落点被包内覆盖文件盖住的受限文件（覆盖文件在下载之后解出，反正会把它盖掉）不列进 `blocked_files`，也不用认领；导入时这类文件 download-url 端点不给地址就直接跳过，不为它拼地址、不发探测。用户到网页下载后，`claim_blocked_files(folder, files)` 从所选文件夹认领：只看顶层的普通文件，文件名相同（不分大小写）或大小正好相同的才算候选（浏览器会把重名下载改成 `foo (1).jar`），按 sha1、没有 sha1 时按 fingerprint 校验，校验过的副本复制进暂存位，用户文件夹里的原文件不动，不联网、不占实例。出参 `{ claimed, missing }`。暂存位按文件 id 分、不按整合包分，导入后也不删，同一个文件在别的整合包里能直接用。`downloads_folder` 给出系统下载文件夹作为默认位置。认领后重走导入；单装的 Mod 与资源认领过时同样改用暂存副本。候选按 sha1 校验，没有 sha1 时按 fingerprint：只有 fingerprint 时走 `hash_mod_file` 两趟流式读（指纹的初值要剔除空白后的总长度，所以要读两趟），峰值内存是一个读缓冲，不再把整个文件读入内存。平台整合包的摘要（`summarize_platform_modpack`）同样看暂存位：包本体受限时，开关开着且拼出的地址探得到就按探测交回的最终地址读（范围读取不带 key，导入同样从它下载）；否则认领过时读暂存副本（与预览本地文件一样读，不发范围请求，导入读的也是它），都没有时报 `distribution_blocked`，`detail.files` 里只有这个包，用户在安装前就能到网页手动下载；前端认领成功后让 `modpack-summary` 缓存失效，之前读不出的摘要这时读得到了；切换 `download_restricted_curseforge_files` 时同样让它失效，摘要读不读得出跟着开关变。
 
 导出（`petalfall-core` 的 `export.rs`、`petalfall-modpack` 的 `writer.rs`）：
 
@@ -981,6 +985,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | `seen_update_versions` | 无，不写出 | 各通道见过的最高版本，形如 `{通道: {version, signature}}`，读时逐项按公钥重验，坏了只废那一项，见「自更新的清单与下载源」 |
 | `ui_shape` | `{ recent_cards: 0, repair_banner: false }` | 界面形状缓存，前端首帧按它占位，见「动效与布局稳定」。`recent_cards` 取 0 到 6。只经 `get_ui_shape` / `set_ui_shape` 读写，不进 `ConfigDto`；`set_ui_shape` 只收要改的字段，未知键、`null`、类型不对或越界报 `invalid_argument`。段里不认识的键不保留；读不懂时只这一段退回默认，见「启动提示」 |
 | `usage_notice` | 无，不写出 | 用户同意过的使用须知，`{ version, accepted_at }`（版本从 1 起，时刻为 Unix 毫秒），见「使用须知的确认」。只经 `usage_notice_acceptance` / `accept_usage_notice` 读写，不进 `ConfigDto`。旧配置没有这一项按没确认过读入；读不懂（类型对不上、版本号是 0、缺了时刻）时同样按没确认过、记一条警告，不算配置损坏，下次启动重新展示须知。记录里不认识的键不保留。旧版本把它当未知顶层键原样保留，不加数据格式号 |
+| `download_restricted_curseforge_files` | `false` | 作者关掉了第三方分发、download-url 端点也不给地址的 CurseForge 文件，是否拼出 CDN 地址、探测能下就直接下载（见「下载源与下载引擎」的拼出的 CurseForge 地址）。默认关：作者没有允许经第三方取这个文件，要不要这样取由用户自己决定；关着时不拼地址、不发探测请求，照旧请用户到网页手动下载。老配置缺这个键按 `false` 读入。经 `get_config` / `update_config` 读写（出参字段同名，更新参数 `downloadRestrictedCurseforgeFiles`），门面上是 `set_download_restricted_curseforge_files`，读取用 `config().download_restricted_curseforge_files`。设置页「下载」分区的开关「自动下载受限的 CurseForge 文件」与首次启动向导的「下载」一步是同一项（向导共五步：游戏目录、Java、账户、下载、外观），切换它时前端让平台整合包摘要的缓存（`modpack-summary`）失效。发现页装单个 Mod 或资源的面板遇到作者关掉第三方分发的工程（`distribution_allowed` 为 false）：开关关着时照旧拦住安装、提示到网页下载；开着时不拦，提示会先尝试直接下载。手动下载清单的弹窗（`pages/discover/BlockedFilesModal.tsx`）按这一项的开关状态给出一条提示；从失败的任务打开且开关开着时，底栏有「重新安装」，不用先认领全部文件 |
 
 ### 游戏目录
 
@@ -1115,7 +1120,7 @@ versions/<实例名>/
 
 ## 测试与守卫
 
-- **Rust**：`cargo test --workspace`。涉及网络的流程用 wiremock 在本地模拟端点；命令层测试经过参数校验、实例互斥和任务登记，断言错误码、文件系统副作用和事件里的 `task_id`。CurseForge 的 key 生产只认环境变量与构建时内嵌的值，门面级测试经仅测试用的 `Petalfall::with_curseforge_key` 注入。
+- **Rust**：`cargo test --workspace`。涉及网络的流程用 wiremock 在本地模拟端点；命令层测试经过参数校验、实例互斥和任务登记，断言错误码、文件系统副作用和事件里的 `task_id`。CurseForge 的 key 生产只认环境变量与构建时内嵌的值，门面级测试经仅测试用的 `Petalfall::with_curseforge_key` 注入。同样仅测试用的还有 `with_curseforge_base`（API 根地址）、`with_curseforge_cdn_scope`（下载凭据的作用域指到某一个 wiremock 服务器）与 `with_curseforge_cdn_base`（按文件编号拼出的 CDN 地址与它的探测都指到本地 wiremock，只在同时用了 `with_curseforge_key` 时生效）；平台层直接构造客户端的测试用 `CurseForgeClient::with_cdn_base_url` 换 CDN 根地址，探测的用例断言 mock 收到的每个请求都是 HEAD、不带 `x-api-key` 与 Range。
 - **前端**：`pnpm test`（vitest + jsdom）。测试覆盖 DTO 适配、状态容器、页面与外壳组件、模拟后端，并有一个整应用冒烟测试：紧凑、常规、宽三档窗口宽度各配日樱、夜樱两种外观，逐个页面与主要弹窗渲染一遍，任何组合抛错即失败。
   - 进程数取逻辑处理器的一半（`vitest.config.ts` 的 `maxWorkers`）：一核一进程会和负责模块转换的主进程抢同一批物理核，满载时用例慢到超时。
   - 挂载 `LauncherProvider` 渲染整页、流程弹窗或外壳的测试文件在 `// @vitest-environment jsdom` 的下一行写 `// @module-tag heavy-page`，单例超时放到 30 秒（`HEAVY_PAGE_TEST_TIMEOUT_MS`）；标签名写错时 vitest 直接报错。一次超时的用例不会停下，它余下的异步步骤会落进同一文件的下一个用例，把后面整串带挂。
