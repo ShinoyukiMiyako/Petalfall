@@ -288,6 +288,7 @@ describe("设置页常规分区：游戏启动后关闭与自动备份", () => {
     const afterLaunch = row("游戏启动后");
     expect(afterLaunch.querySelector('[role="radiogroup"]')?.getAttribute("aria-label")).toBe("游戏启动后");
     expect(reflowing.has(afterLaunch)).toBe(true);
+    expect(reflowing.has(row("游戏语言跟随系统语言"))).toBe(false);
     expect(reflowing.has(row("跳过首次无障碍引导"))).toBe(false);
     // 换到会多出提醒行的选项后让位仍挂在同一行上
     await choose(`关闭${APP_NAME}`);
@@ -297,7 +298,7 @@ describe("设置页常规分区：游戏启动后关闭与自动备份", () => {
 });
 
 describe("设置页常规分区：按片订阅", () => {
-  it("游戏运行中 20 批日志：四个设置行一次都不重渲染；改了语言之后才重渲染", async () => {
+  it("游戏运行中 20 批日志：五个设置行一次都不重渲染；改了语言之后才重渲染", async () => {
     ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
     await mountGeneral();
     expect(languageTrigger().textContent).toBe("简体中文");

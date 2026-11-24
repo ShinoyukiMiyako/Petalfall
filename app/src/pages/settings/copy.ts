@@ -37,6 +37,8 @@ export const GENERAL_COPY = {
   launchTitle: "启动",
   launchSubtitle: `按下「启动游戏」之后${APP_NAME}做什么`,
   afterLaunch: "游戏启动后",
+  followSystemGameLanguage: "游戏语言跟随系统语言",
+  followSystemGameLanguageDesc: "启动前给还没设过语言的实例设上 Windows 的显示语言，导入的整合包自带的默认英文也照此换掉；在游戏里选过的语言不动",
   skipAccessibilityOnboarding: "跳过首次无障碍引导",
   skipAccessibilityOnboardingDesc: "实例第一次启动时不显示 Minecraft 的讲述人与无障碍提示；只影响还没启动过游戏的目录，未隔离的实例共用一个目录，需要讲述人时关掉",
   advancedTitle: "高级",

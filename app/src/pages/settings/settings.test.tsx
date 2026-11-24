@@ -489,6 +489,59 @@ describe("设置页：常规", () => {
     });
   });
 
+  describe("游戏语言跟随系统语言", () => {
+    const FOLLOW = "游戏语言跟随系统语言";
+    const SKIP = "跳过首次无障碍引导";
+    const stored = async () => (await mockInvoke<{ follow_system_game_language: boolean }>("get_config")).follow_system_game_language;
+
+    it("放在「启动」卡里、排在跳过无障碍引导上面、默认开，说明写清对哪些实例生效", async () => {
+      await mount("general");
+      const toggle = button(FOLLOW);
+      expect(section("启动").contains(toggle)).toBe(true);
+      expect(toggle.getAttribute("role")).toBe("switch");
+      expect(toggle.getAttribute("aria-checked")).toBe("true");
+      expect(toggle.compareDocumentPosition(button(SKIP)) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+      expect(section("启动").textContent).toContain("启动前给还没设过语言的实例设上 Windows 的显示语言，导入的整合包自带的默认英文也照此换掉；在游戏里选过的语言不动");
+    });
+
+    it("关掉写入 followSystemGameLanguage: false，再打开写回 true；控件、状态层与 mock 读回都跟着变，相邻的跳过无障碍引导不动", async () => {
+      await mount("general");
+      await click(button(FOLLOW));
+      expect(callsOf(ipc, "update_config")).toEqual([{ followSystemGameLanguage: false }]);
+      expect(button(FOLLOW).getAttribute("aria-checked")).toBe("false");
+      expect(button(SKIP).getAttribute("aria-checked")).toBe("true");
+      expect(launcher.state.settings).toMatchObject({ followSystemGameLanguage: false, skipAccessibilityOnboarding: true });
+      expect(await stored()).toBe(false);
+
+      await click(button(FOLLOW));
+      expect(callsOf(ipc, "update_config")).toEqual([{ followSystemGameLanguage: false }, { followSystemGameLanguage: true }]);
+      expect(button(FOLLOW).getAttribute("aria-checked")).toBe("true");
+      expect(await stored()).toBe(true);
+    });
+
+    it("配置里已经关掉：打开设置页时开关就是关的", async () => {
+      await mockInvoke("update_config", { followSystemGameLanguage: false });
+      await mount("general");
+      expect(button(FOLLOW).getAttribute("aria-checked")).toBe("false");
+      expect(button(SKIP).getAttribute("aria-checked")).toBe("true");
+    });
+
+    it("写入中开关先显示关；失败后回到开，error 通知标题点名设置项、正文给原因，配置没变", async () => {
+      const write = deferred<null>();
+      ipc.overrides.set("update_config", () => write.promise);
+      await mount("general");
+      await click(button(FOLLOW));
+      expect(callsOf(ipc, "update_config")).toEqual([{ followSystemGameLanguage: false }]);
+      expect(button(FOLLOW).getAttribute("aria-checked")).toBe("false");
+
+      write.reject(new IpcError("config_io", "磁盘已满"));
+      await flush();
+      expect(button(FOLLOW).getAttribute("aria-checked")).toBe("true");
+      expect(toasts()).toContainEqual({ tone: "error", title: `没能保存「${FOLLOW}」`, body: "磁盘已满" });
+      expect(await stored()).toBe(true);
+    });
+  });
+
   it("client_id：展开输入、保存后写入并提示，不回显已保存的值", async () => {
     await mount("general");
     expect(text()).toContain("已配置");

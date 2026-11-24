@@ -39,6 +39,7 @@ function loaded(state: LauncherState): Settings {
 const selectAfterLaunch = (state: LauncherState): AfterLaunch => loaded(state).afterLaunch;
 const selectAutoBackup = (state: LauncherState): boolean => loaded(state).worldBackup.auto;
 const selectSkipAccessibilityOnboarding = (state: LauncherState): boolean => loaded(state).skipAccessibilityOnboarding;
+const selectFollowSystemGameLanguage = (state: LauncherState): boolean => loaded(state).followSystemGameLanguage;
 const selectLanguage = (state: LauncherState): Language => loaded(state).language;
 const selectHasClientId = (state: LauncherState): boolean => loaded(state).hasClientId;
 
@@ -77,6 +78,17 @@ function AfterLaunchRow() {
         onChange={write.set}
         options={AFTER_LAUNCH_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
       />
+    </SettingRow>
+  );
+}
+
+function FollowSystemGameLanguageRow() {
+  const follow = useLauncherSelector(selectFollowSystemGameLanguage);
+  const actions = useLauncherActions();
+  const write = useSettingWrite(follow, GENERAL_COPY.followSystemGameLanguage, (followSystemGameLanguage: boolean) => actions.updateSettings({ followSystemGameLanguage }));
+  return (
+    <SettingRow title={GENERAL_COPY.followSystemGameLanguage} description={GENERAL_COPY.followSystemGameLanguageDesc}>
+      <Toggle checked={write.value} onChange={write.set} ariaLabel={GENERAL_COPY.followSystemGameLanguage} />
     </SettingRow>
   );
 }
@@ -213,6 +225,7 @@ export function GeneralSection() {
         {/* 「游戏启动后」的说明随选项换行、提醒行出没时，下面一行滑过去 */}
         <RowFlow>
           <AfterLaunchRow />
+          <FollowSystemGameLanguageRow />
           <SkipAccessibilityOnboardingRow />
         </RowFlow>
       </Card>
