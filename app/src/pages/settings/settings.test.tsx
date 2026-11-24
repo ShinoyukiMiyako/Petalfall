@@ -580,6 +580,90 @@ describe("设置页：下载", () => {
     await click(button("查看任务"));
     expect(nav.route).toEqual({ page: "tasks" });
   });
+
+  it("配置还在读：骨架与读到后的分区逐张对应，卡头有没有副标题、几行设置行都一样", async () => {
+    const config = deferred<unknown>();
+    ipc.overrides.set("get_config", () => config.promise);
+    await mount("download");
+    /** 逐张卡片的样子：卡头有没有副标题、卡里直接排着几行设置行。 */
+    const shapes = (root: Element) =>
+      [...root.querySelectorAll("[data-pad]")].map((card) => ({
+        subtitle: card.querySelector('[class*="subtitle"]') !== null,
+        rows: card.querySelectorAll(':scope > [class*="row"]').length,
+      }));
+    const layer = document.querySelector('[role="region"] [aria-busy="true"] > [aria-hidden="true"]');
+    if (layer === null) throw new Error("内容列里没有骨架");
+    const skeleton = shapes(layer);
+    expect(skeleton).toEqual([
+      { subtitle: true, rows: 1 },
+      { subtitle: false, rows: 2 },
+      { subtitle: false, rows: 1 },
+    ]);
+
+    await act(async () => {
+      config.resolve(await mockInvoke("get_config", {}));
+      await settle(20);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    const region = document.querySelector('[role="region"]');
+    if (region === null || region.querySelector('[aria-busy="true"]') !== null) throw new Error("分区内容还没换上");
+    expect(shapes(region)).toEqual(skeleton);
+  });
+
+  describe("自动下载受限的 CurseForge 文件", () => {
+    const RESTRICTED = "自动下载受限的 CurseForge 文件";
+    const stored = async () => (await mockInvoke<{ download_restricted_curseforge_files: boolean }>("get_config")).download_restricted_curseforge_files;
+
+    it("在「CurseForge」卡里，卡排在「速度」之后；默认关，说明写清作者不允许、打开后怎么下、下不到的怎么办", async () => {
+      await mount("download");
+      const toggle = button(RESTRICTED);
+      expect(section("CurseForge").contains(toggle)).toBe(true);
+      expect(toggle.getAttribute("role")).toBe("switch");
+      expect(toggle.getAttribute("aria-checked")).toBe("false");
+      expect(all('[role="region"] h3').map((h) => h.textContent)).toEqual(["下载源", "速度", "CurseForge"]);
+      expect(section("CurseForge").textContent).toContain(
+        `有些作者不允许启动器下载自己的文件。打开后，${APP_NAME}按文件编号拼出地址直接下载；下不到的仍由你到 CurseForge 网页手动下载。`,
+      );
+    });
+
+    it("打开写入 downloadRestrictedCurseforgeFiles: true，再关掉写回 false；控件、状态层与 mock 读回都跟着变", async () => {
+      await mount("download");
+      await click(button(RESTRICTED));
+      expect(callsOf(ipc, "update_config")).toEqual([{ downloadRestrictedCurseforgeFiles: true }]);
+      expect(button(RESTRICTED).getAttribute("aria-checked")).toBe("true");
+      expect(launcher.state.settings?.downloadRestrictedCurseforgeFiles).toBe(true);
+      expect(await stored()).toBe(true);
+
+      await click(button(RESTRICTED));
+      expect(callsOf(ipc, "update_config")).toEqual([{ downloadRestrictedCurseforgeFiles: true }, { downloadRestrictedCurseforgeFiles: false }]);
+      expect(button(RESTRICTED).getAttribute("aria-checked")).toBe("false");
+      expect(launcher.state.settings?.downloadRestrictedCurseforgeFiles).toBe(false);
+      expect(await stored()).toBe(false);
+    });
+
+    it("配置里已经打开：打开设置页时开关就是开的", async () => {
+      await mockInvoke("update_config", { downloadRestrictedCurseforgeFiles: true });
+      await mount("download");
+      expect(button(RESTRICTED).getAttribute("aria-checked")).toBe("true");
+    });
+
+    it("写入中开关先显示开；失败后回到关，error 通知标题点名设置项、正文给原因，配置没变", async () => {
+      const write = deferred<null>();
+      ipc.overrides.set("update_config", () => write.promise);
+      await mount("download");
+      await click(button(RESTRICTED));
+      expect(callsOf(ipc, "update_config")).toEqual([{ downloadRestrictedCurseforgeFiles: true }]);
+      expect(button(RESTRICTED).getAttribute("aria-checked")).toBe("true");
+
+      write.reject(new IpcError("config_io", "磁盘已满"));
+      await flush();
+      expect(button(RESTRICTED).getAttribute("aria-checked")).toBe("false");
+      expect(toasts()).toContainEqual({ tone: "error", title: `没能保存「${RESTRICTED}」`, body: "磁盘已满" });
+      expect(await stored()).toBe(false);
+    });
+  });
 });
 
 /** 去掉退场中的块之后的文字。 */

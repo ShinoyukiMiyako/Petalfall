@@ -36,8 +36,8 @@ type GatedSection = Exclude<SettingsSection, "appearance">;
 const SECTION_SKELETON: Readonly<Record<GatedSection, readonly SkeletonShape[]>> = {
   // 启动（两行）、界面、高级
   general: [card(true, 2), card(false, 1), card(false, 1)],
-  // 下载源（三张单选卡与版本列表源）、速度（同时下载数、下载队列）
-  download: [card(true, 1, 90), card(false, 2)],
+  // 下载源（三张单选卡与版本列表源）、速度（同时下载数、下载队列）、CurseForge（一行开关）
+  download: [card(true, 1, 90), card(false, 2), card(false, 1)],
   // 运行时（自动下载与运行时列表）、下载运行时（一行下拉）、显卡（开关与说明）
   java: [card(true, 1, 158), card(false, 0, 30), card(true, 1, 30)],
   // 内存（自动分配与滑杆）、版本隔离、新实例（一行开关）、游戏目录（路径、其他文件夹、数据目录）、存档备份（三行）

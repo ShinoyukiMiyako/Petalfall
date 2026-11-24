@@ -89,6 +89,9 @@ export const DOWNLOAD_COPY = {
   tasksBusy: (n: number) => `现在有 ${n} 个任务在队列里`,
   tasksIdle: "队列空闲",
   viewTasks: "查看任务",
+  curseforgeTitle: "CurseForge",
+  restricted: "自动下载受限的 CurseForge 文件",
+  restrictedDesc: `有些作者不允许启动器下载自己的文件。打开后，${APP_NAME}按文件编号拼出地址直接下载；下不到的仍由你到 CurseForge 网页手动下载。`,
 } as const;
 
 export const SOURCE_OPTIONS = [

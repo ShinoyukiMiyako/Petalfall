@@ -1,4 +1,4 @@
-// 下载：文件下载源（三张单选卡）、版本列表源、同时下载的文件数与下载队列入口。
+// 下载：文件下载源（三张单选卡）、版本列表源、同时下载的文件数与下载队列入口、CurseForge 上作者不允许第三方分发的文件要不要自动下载。
 
 import { useState } from "react";
 import type { Settings } from "../../../domain/adapt";
@@ -13,6 +13,7 @@ import { Select } from "../../../ui/Select";
 import { SettingRow } from "../../../ui/SettingRow";
 import { Slider } from "../../../ui/Slider";
 import { Tag } from "../../../ui/Tag";
+import { Toggle } from "../../../ui/Toggle";
 import { CONCURRENCY, DOWNLOAD_COPY, SOURCE_OPTIONS } from "../copy";
 import { useLoadedSettings } from "../SettingsGate";
 import { useSettingWrite } from "../write";
@@ -107,6 +108,23 @@ function TasksRow() {
   );
 }
 
+/** 打开等于绕开作者在 CurseForge 上关掉的第三方分发，所以缺省关着，由用户自己决定。 */
+function CurseForgeCard() {
+  const settings = useLoadedSettings();
+  const actions = useLauncherActions();
+  const write = useSettingWrite(settings.downloadRestrictedCurseforgeFiles, DOWNLOAD_COPY.restricted, (downloadRestrictedCurseforgeFiles: boolean) =>
+    actions.updateSettings({ downloadRestrictedCurseforgeFiles }),
+  );
+  return (
+    <Card>
+      <CardHeader title={DOWNLOAD_COPY.curseforgeTitle} icon="lock" />
+      <SettingRow title={DOWNLOAD_COPY.restricted} description={DOWNLOAD_COPY.restrictedDesc}>
+        <Toggle checked={write.value} onChange={write.set} ariaLabel={DOWNLOAD_COPY.restricted} />
+      </SettingRow>
+    </Card>
+  );
+}
+
 export function DownloadSection() {
   return (
     <>
@@ -116,6 +134,7 @@ export function DownloadSection() {
         <ConcurrencyRow />
         <TasksRow />
       </Card>
+      <CurseForgeCard />
     </>
   );
 }
