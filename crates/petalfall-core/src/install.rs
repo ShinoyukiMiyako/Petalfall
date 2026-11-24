@@ -12,7 +12,7 @@ use petalfall_install::{
 use petalfall_version::VersionJson;
 
 use crate::error::Result;
-use crate::event::{CoreEvent, EventSink, emit};
+use crate::event::{CoreEvent, EventSink, InstallPhase, emit};
 use crate::facade::{Petalfall, make_context};
 
 /// 可安装的 Mod 加载器选择。
@@ -103,6 +103,26 @@ impl Petalfall {
         loader_version: Option<&str>,
         events: Option<&EventSink>,
     ) -> Result<InstallOutcome> {
+        self.install_reporting(id, loader, loader_version, events, None)
+            .await
+    }
+
+    /// 同 [`Petalfall::install`]，另把走到的每一步经 `phases` 报出，供把安装嵌进自己步骤表的任务（导入整合包）
+    /// 接着报步骤。依次报 Metadata、Libraries、Assets、Natives，Fabric / Quilt 接着报 LoaderProfile、
+    /// LoaderLibraries，Forge / NeoForge 接着报 Java、LoaderInstaller、LoaderLibraries、LoaderProcessors。
+    /// `phases` 为 `None` 时一步都不报。
+    pub(crate) async fn install_reporting(
+        &self,
+        id: &str,
+        loader: Option<LoaderChoice>,
+        loader_version: Option<&str>,
+        events: Option<&EventSink>,
+        phases: Option<&(dyn Fn(InstallPhase) + Send + Sync)>,
+    ) -> Result<InstallOutcome> {
+        // 测速选源可能要等几秒，算在读元数据这一步里，不让上一步的进度停在那里。
+        if let Some(report) = phases {
+            report(InstallPhase::Metadata);
+        }
         self.prepare_sources().await?;
         let layout = self.layout();
         let pool = self.download_pool_reporting(events);
@@ -115,7 +135,8 @@ impl Petalfall {
             self.runtime(),
             &policy,
             self.cancel_token(),
-        );
+        )
+        .with_phases(phases);
 
         emit(events, CoreEvent::stage(format!("开始安装原版 {id}")));
         let vanilla = VanillaInstaller::new(cx)
@@ -218,6 +239,7 @@ impl Petalfall {
             .map(|j| j.major_version)
             .unwrap_or(8);
 
+        cx.enter(InstallPhase::Java);
         emit(
             events,
             CoreEvent::stage(format!(
@@ -886,5 +908,219 @@ mod tests {
             .unwrap_err();
         // 清单里没有该版本 -> 安装器报 InstallerEntryMissing，经门面冒泡为 Install 变体。
         assert!(matches!(err, crate::error::CoreError::Install(_)));
+    }
+
+    /// 空壳原版 test（不声明任何文件）与它上面的 Fabric 0.15.0（一个加载器库）。
+    async fn mount_vanilla_and_fabric(server: &MockServer) {
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/manifest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                    "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
+                    "time":"t","releaseTime":"t"}}]}}"#
+            )))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/test.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"id":"test","type":"release","mainClass":"net.minecraft.client.main.Main"}"#,
+            ))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/versions/loader/test/0.15.0/profile/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"id":"fabric-loader-0.15.0-test","inheritsFrom":"test","mainClass":"Knot",
+                    "libraries":[{{"name":"net.example:loader:0.15.0","url":"{base}/"}}]}}"#
+            )))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/net/example/loader/0.15.0/loader-0.15.0.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"loader-jar".to_vec()))
+            .mount(server)
+            .await;
+    }
+
+    fn phase_events(events: &[CoreEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, CoreEvent::Phase { .. }))
+            .count()
+    }
+
+    /// 带回调装原版：依次报读元数据、库、资源、natives，各一次；步骤只经回调报，不自己发步骤事件（步骤表归
+    /// 调用方）。同一版本再装一遍（原版已装过）报的步骤一模一样，不跳、不倒退、不重复。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_reporting_announces_the_vanilla_steps_in_order() {
+        use InstallPhase::*;
+        let server = MockServer::start().await;
+        mount_vanilla_and_fabric(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        let petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc.clone())
+            .with_manifest_url(format!("{}/manifest.json", server.uri()));
+
+        for round in ["首次", "原版已装过"] {
+            let seen = std::sync::Mutex::new(Vec::new());
+            let record = |phase: InstallPhase| seen.lock().unwrap().push(phase);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let outcome = petalfall
+                .install_reporting("test", None, None, Some(&tx), Some(&record))
+                .await
+                .unwrap();
+            drop(tx);
+
+            assert_eq!(outcome.vanilla.id, "test", "{round}");
+            assert!(outcome.loader.is_none(), "{round}");
+            assert_eq!(
+                *seen.lock().unwrap(),
+                vec![Metadata, Libraries, Assets, Natives],
+                "{round}"
+            );
+            let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+            assert_eq!(phase_events(&events), 0, "{round}: {events:?}");
+        }
+    }
+
+    /// 带回调装 Fabric：原版四步之后报取 profile、下加载器库；加载器已装过时再装一遍，步骤照旧。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_reporting_announces_the_fabric_steps_after_the_vanilla_ones() {
+        use InstallPhase::*;
+        let server = MockServer::start().await;
+        mount_vanilla_and_fabric(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        let petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc.clone())
+            .with_manifest_url(format!("{}/manifest.json", server.uri()))
+            .with_fabric_base(server.uri());
+
+        for round in ["首次", "加载器已装过"] {
+            let seen = std::sync::Mutex::new(Vec::new());
+            let record = |phase: InstallPhase| seen.lock().unwrap().push(phase);
+            let outcome = petalfall
+                .install_reporting(
+                    "test",
+                    Some(LoaderChoice::Fabric),
+                    Some("0.15.0"),
+                    None,
+                    Some(&record),
+                )
+                .await
+                .unwrap();
+
+            let loader = outcome.loader.expect("应装上 Fabric 加载器");
+            assert_eq!(loader.id, "fabric-loader-0.15.0-test", "{round}");
+            assert_eq!(
+                *seen.lock().unwrap(),
+                vec![
+                    Metadata,
+                    Libraries,
+                    Assets,
+                    Natives,
+                    LoaderProfile,
+                    LoaderLibraries
+                ],
+                "{round}"
+            );
+        }
+        assert!(
+            mc.join("versions")
+                .join("fabric-loader-0.15.0-test")
+                .join("fabric-loader-0.15.0-test.json")
+                .is_file()
+        );
+    }
+
+    /// Forge 在解析 Java 之前报 Java 这一步：找不到 Java 999 时停在这一步，后面的安装器、库、处理器都没报。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_reporting_announces_java_before_resolving_it_for_forge() {
+        use InstallPhase::*;
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/manifest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                    "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
+                    "time":"t","releaseTime":"t"}}]}}"#
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/test.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"id":"test","type":"release","mainClass":"net.minecraft.client.main.Main",
+                    "javaVersion":{"component":"jre-legacy","majorVersion":999}}"#,
+            ))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        let mut petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc)
+            .with_manifest_url(format!("{base}/manifest.json"));
+        petalfall.set_auto_download_java(false);
+
+        let seen = std::sync::Mutex::new(Vec::new());
+        let record = |phase: InstallPhase| seen.lock().unwrap().push(phase);
+        let err = petalfall
+            .install_reporting(
+                "test",
+                Some(LoaderChoice::Forge),
+                Some("47.2.0"),
+                None,
+                Some(&record),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, crate::error::CoreError::NoJava { major: 999 }),
+            "实际：{err:?}"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Metadata, Libraries, Assets, Natives, Java]
+        );
+    }
+
+    /// 不带回调的 install 一条步骤事件都不发：装原版与装 Fabric 都只有阶段文字与下载快照。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_without_a_callback_announces_no_steps() {
+        let server = MockServer::start().await;
+        mount_vanilla_and_fabric(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        let petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc.clone())
+            .with_manifest_url(format!("{}/manifest.json", server.uri()))
+            .with_fabric_base(server.uri());
+
+        for loader in [None, Some(LoaderChoice::Fabric)] {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            petalfall
+                .install("test", loader, Some("0.15.0"), Some(&tx))
+                .await
+                .unwrap();
+            drop(tx);
+            let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+            assert_eq!(phase_events(&events), 0, "{loader:?}: {events:?}");
+            // 事件确实收到了：阶段文字一条不少，证明上面的「零条」不是因为通道里什么都没有。
+            let stages: Vec<&str> = events
+                .iter()
+                .filter_map(|event| match event {
+                    CoreEvent::Stage(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(stages.contains(&"开始安装原版 test"), "{stages:?}");
+            assert_eq!(
+                stages
+                    .contains(&"Fabric 加载器安装完成：fabric-loader-0.15.0-test（loader 0.15.0）"),
+                loader.is_some(),
+                "{stages:?}"
+            );
+        }
     }
 }

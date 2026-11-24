@@ -13,10 +13,14 @@
 //!    存档的 `session.lock`、符号链接与目录联接；日志、崩溃报告、natives、版本 jar 与 JSON 不在白名单里，结构上就进不了包。
 //!
 //! 写包在阻塞线程里进行，先写到目标旁边的临时文件，回读校验通过后才换到目标位置。
+//!
+//! 导出按固定的四步报步骤（`CoreEvent::Phase`）：解析实例并算哈希、向 Modrinth 认 Mod、收集要打包的文件并
+//! 写包、回读校验，每次都报全。预览不属于任何任务，同一次规划走下来不报步骤。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use petalfall_instance::{DiscoveredVersion, MarkerStore, PETALFALL_META_DIR};
@@ -30,8 +34,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use crate::error::{CoreError, Result};
-use crate::event::{CoreEvent, DownloadProgress, EventSink, emit};
+use crate::event::{CoreEvent, DownloadProgress, EventSink, InstallPhase, emit};
 use crate::facade::{PROGRESS_EVENT_INTERVAL, Petalfall};
+use crate::instance_install::PhaseAnnouncer;
 use crate::modfs::{BACKUP_SUFFIX, MODS_DIR, bounded_map, local_concurrency, try_exists};
 use crate::modpack::read_instance_modpack;
 
@@ -45,6 +50,14 @@ const HASHES_BATCH: usize = 500;
 const OPTIONS_FILE: &str = "options.txt";
 /// 存档的占用锁文件。
 const SESSION_LOCK: &str = "session.lock";
+/// 导出的步骤表。表是固定的，每一步都报：哪一步瞬间过去（没有启用的 Mod 时认 Mod 那一步）也照报，
+/// 跳过一步前端写的步号会断档。
+const EXPORT_PHASES: [InstallPhase; 4] = [
+    InstallPhase::ExportHash,
+    InstallPhase::ExportIdentify,
+    InstallPhase::ExportPack,
+    InstallPhase::ExportVerify,
+];
 
 /// 可以一起打包的额外内容。顺序即界面顺序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -431,7 +444,7 @@ impl Petalfall {
     /// 只读，要联网问 Modrinth。
     pub async fn preview_modpack_export(&self, id: &str) -> Result<ModpackExportPreview> {
         Ok(self
-            .plan_export(id, &ExportExtra::ALL, None, None)
+            .plan_export(id, &ExportExtra::ALL, None, None, None)
             .await?
             .preview())
     }
@@ -440,6 +453,8 @@ impl Petalfall {
     ///
     /// 先按此刻的盘面重新规划，再在阻塞线程里写到临时文件并回读校验，通过后改名到目标位置。取消在
     /// 算哈希时按文件、联网时立即、写包时按 64 KiB 观察。失败时临时文件已删，目标文件不动。
+    ///
+    /// 步骤按 `EXPORT_PHASES` 四步报全；开工前就已取消的不报任何一步。
     pub async fn export_modpack(
         &self,
         id: &str,
@@ -448,8 +463,11 @@ impl Petalfall {
         events: Option<&EventSink>,
     ) -> Result<ModpackExportOutcome> {
         self.ensure_not_cancelled()?;
+        // 校验那一步是在写包的阻塞线程里进入的，播报器要能带过去。
+        let phases = Arc::new(PhaseAnnouncer::new(events, EXPORT_PHASES.to_vec()));
+        phases.enter(InstallPhase::ExportHash);
         let plan = self
-            .plan_export(id, &options.extras, Some(target), events)
+            .plan_export(id, &options.extras, Some(target), events, Some(&*phases))
             .await?;
 
         let mut skipped = plan.mod_skipped.clone();
@@ -514,7 +532,7 @@ impl Petalfall {
             CoreEvent::stage(format!("打包 {override_count} 个文件")),
         );
         let written = self
-            .write_pack_reporting(pack, target.part_path(), bytes_total, events)
+            .write_pack_reporting(pack, target.part_path(), bytes_total, events, phases)
             .await?;
 
         if let Err(source) = tokio::fs::rename(target.part_path(), target.destination()).await {
@@ -542,13 +560,14 @@ impl Petalfall {
         })
     }
 
-    /// 在阻塞线程里写包，把写包进度节流成下载进度事件（结束时补发终值）。
+    /// 在阻塞线程里写包，把写包进度节流成下载进度事件（结束时补发终值）；写完最后一个文件时进入校验这一步。
     async fn write_pack_reporting(
         &self,
         pack: ExportPack,
         part: &Path,
         bytes_total: u64,
         events: Option<&EventSink>,
+        phases: Arc<PhaseAnnouncer>,
     ) -> Result<petalfall_modpack::WrittenPack> {
         let (tx, rx) = watch::channel(DownloadProgress {
             total: pack.overrides.len() as u64,
@@ -566,7 +585,7 @@ impl Petalfall {
         let part = part.to_path_buf();
         let written = tokio::task::spawn_blocking(move || {
             let started = Instant::now();
-            let mut verifying = false;
+            let mut last_file = LastFileWritten::default();
             let is_cancelled = || cancel.as_ref().is_some_and(|t| t.is_cancelled());
             let mut on_progress = |p: WriteProgress| {
                 let secs = started.elapsed().as_secs_f64();
@@ -584,8 +603,8 @@ impl Petalfall {
                     speed,
                 });
                 // 最后一个文件写完之后紧接着收尾与回读校验。
-                if !verifying && p.files_done == p.files_total {
-                    verifying = true;
+                if last_file.reached(p) {
+                    phases.enter(InstallPhase::ExportVerify);
                     emit(verify_sink.as_ref(), CoreEvent::stage("校验导出的整合包"));
                 }
             };
@@ -616,13 +635,15 @@ impl Petalfall {
         }
     }
 
-    /// `extras` 是要遍历的额外项，别的额外项不碰盘。
+    /// `extras` 是要遍历的额外项，别的额外项不碰盘。`phases` 是导出任务的步骤播报器，第一步（算哈希）由导出在
+    /// 开工时报，这里报认 Mod 与凑包两步；预览不属于任何任务，传 `None`。
     async fn plan_export(
         &self,
         id: &str,
         extras: &[ExportExtra],
         target: Option<&ModpackExportTarget>,
         events: Option<&EventSink>,
+        phases: Option<&PhaseAnnouncer>,
     ) -> Result<ExportPlan> {
         let version = self.resolve_instance(id).await?;
         let (minecraft, loader) = exportable(&version).await?;
@@ -658,8 +679,15 @@ impl Petalfall {
         )
         .await?;
 
+        if let Some(phases) = phases {
+            phases.enter(InstallPhase::ExportIdentify);
+        }
         let (indexed, bundled) = self.identify_on_modrinth(id, hashed, events).await?;
 
+        // 认完 Mod 起就是在凑要打包的文件（停用的 jar、额外项）并写包，额外项里的存档可能要走很久。
+        if let Some(phases) = phases {
+            phases.enter(InstallPhase::ExportPack);
+        }
         let disabled = listing
             .disabled
             .into_iter()
@@ -1107,10 +1135,28 @@ async fn forward_progress(mut rx: watch::Receiver<DownloadProgress>, sink: Event
     }
 }
 
+/// 写包进度里最后一个文件写完的那一刻，写包回调据此转入校验一步。写包在每块之后、每个文件写完时与收尾时都回调，
+/// 文件数追平总数之后收尾还要再回调一次，只认第一次追平；没有要打包的文件时收尾那一下就追平，校验这一步照样报到。
+#[derive(Debug, Default)]
+struct LastFileWritten {
+    seen: bool,
+}
+
+impl LastFileWritten {
+    fn reached(&mut self, progress: WriteProgress) -> bool {
+        if self.seen || progress.files_done != progress.files_total {
+            return false;
+        }
+        self.seen = true;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Read;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
     use crate::config::PetalfallConfig;
@@ -2209,7 +2255,10 @@ mod tests {
         mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
         let walked = |plan: &ExportPlan| plan.extras.keys().copied().collect::<Vec<_>>();
 
-        let none = fixture.petalfall.plan_export(ID, &[], None, None).await;
+        let none = fixture
+            .petalfall
+            .plan_export(ID, &[], None, None, None)
+            .await;
         assert_eq!(walked(&none.unwrap()), Vec::<ExportExtra>::new());
 
         let some = fixture
@@ -2223,6 +2272,7 @@ mod tests {
                 ],
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2232,7 +2282,7 @@ mod tests {
 
         let all = fixture
             .petalfall
-            .plan_export(ID, &ExportExtra::ALL, None, None);
+            .plan_export(ID, &ExportExtra::ALL, None, None, None);
         assert_eq!(walked(&all.await.unwrap()), ExportExtra::ALL);
     }
 
@@ -2354,6 +2404,433 @@ mod tests {
         assert!(!target.part_path().exists());
         assert!(leftovers(&fixture.root).is_empty());
         assert!(fixture.server.received_requests().await.unwrap().is_empty());
+    }
+
+    // ---- 导出的步骤 ----
+
+    /// 收下通道里的全部事件；发送端要先全部释放。
+    async fn drain(mut rx: tokio::sync::mpsc::UnboundedReceiver<CoreEvent>) -> Vec<CoreEvent> {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    }
+
+    /// 步骤事件的下标，按出现先后；每一条带的都必须是导出那张完整的表。
+    fn export_steps(events: &[CoreEvent]) -> Vec<usize> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                CoreEvent::Phase { plan, index } => {
+                    assert_eq!(plan.as_slice(), EXPORT_PHASES.as_slice());
+                    Some(*index)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 进入 `phase` 那条步骤事件在事件序列里的位置。
+    fn step_at(events: &[CoreEvent], phase: InstallPhase) -> usize {
+        events
+            .iter()
+            .position(|e| matches!(e, CoreEvent::Phase { plan, index } if plan[*index] == phase))
+            .unwrap_or_else(|| panic!("没有报 {phase:?}：{events:?}"))
+    }
+
+    /// 以 `prefix` 开头的那条阶段文字在事件序列里的位置。
+    fn stage_at(events: &[CoreEvent], prefix: &str) -> usize {
+        events
+            .iter()
+            .position(|e| matches!(e, CoreEvent::Stage(s) if s.starts_with(prefix)))
+            .unwrap_or_else(|| panic!("没有「{prefix}」：{events:?}"))
+    }
+
+    /// 四步报全，每一步落在它盖住的那段工作开头：算哈希是开工后的第一条事件，认 Mod 在读完 Mod 之后、问
+    /// Modrinth 之前，凑包在问完之后、两条告警与「打包」之前，校验在「打包」之后、「校验」与「已导出」之前。
+    /// 写包进度都落在「打包」与「已导出」之间；节流转发的终值快照常常晚于进入校验一步，所以不要求它们排在校验之前。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_export_announces_its_four_steps_in_order() {
+        use InstallPhase::*;
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        let target = ModpackExportTarget::new(fixture.root.join("分步.mrpack"));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = fixture
+            .petalfall
+            .export_modpack(
+                ID,
+                &options(vec![ExportExtra::Config], false),
+                &target,
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        drop(tx);
+        let events = drain(rx).await;
+
+        assert_eq!((outcome.indexed_files, outcome.override_files), (3, 4));
+        assert_eq!(export_steps(&events), [0, 1, 2, 3]);
+        let (hash, identify, pack, verify) = (
+            step_at(&events, ExportHash),
+            step_at(&events, ExportIdentify),
+            step_at(&events, ExportPack),
+            step_at(&events, ExportVerify),
+        );
+        let reading = stage_at(&events, "读取 5 个 Mod 文件");
+        let querying = stage_at(&events, "向 Modrinth 查询 5 个 Mod");
+        let packing = stage_at(&events, "打包 4 个文件");
+        let verifying = stage_at(&events, "校验导出的整合包");
+        let done = stage_at(
+            &events,
+            &format!("已导出到 {}", target.destination().display()),
+        );
+        assert_eq!(hash, 0, "开工后的第一条事件就是第一步：{events:?}");
+        assert!(
+            hash < reading && reading < identify && identify < querying,
+            "{events:?}"
+        );
+        assert!(querying < pack && pack < packing, "{events:?}");
+        assert!(
+            packing < verify && verify < verifying && verifying < done,
+            "{events:?}"
+        );
+        assert_eq!(done, events.len() - 1, "{events:?}");
+
+        let warnings: Vec<usize> = (0..events.len())
+            .filter(|&i| matches!(events[i], CoreEvent::Warning(_)))
+            .collect();
+        assert_eq!(warnings.len(), 2, "{events:?}");
+        assert!(
+            warnings.iter().all(|&i| pack < i && i < packing),
+            "{events:?}"
+        );
+        let downloads: Vec<usize> = (0..events.len())
+            .filter(|&i| matches!(events[i], CoreEvent::Download(_)))
+            .collect();
+        assert!(!downloads.is_empty(), "应有打包进度");
+        assert!(
+            downloads.iter().all(|&i| packing < i && i < done),
+            "{events:?}"
+        );
+    }
+
+    /// 没有启用的 Mod 时不问 Modrinth，认 Mod 这一步瞬间过去也照报：表是固定的，跳过一步步号会断档。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_instance_without_enabled_mods_still_announces_every_step() {
+        use InstallPhase::*;
+        let fixture = fixture().await;
+        for name in ["a.jar", "b.jar", "c.jar", "d.jar", "e.jar"] {
+            std::fs::remove_file(fixture.dir.join("mods").join(name)).unwrap();
+        }
+        let target = ModpackExportTarget::new(fixture.root.join("没有 Mod.mrpack"));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = fixture
+            .petalfall
+            .export_modpack(
+                ID,
+                &options(vec![ExportExtra::Config], true),
+                &target,
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        drop(tx);
+        let events = drain(rx).await;
+
+        assert_eq!(
+            (
+                outcome.indexed_files,
+                outcome.override_files,
+                outcome.disabled_mods
+            ),
+            (0, 3, 1),
+            "停用的 x.jar 加两个配置文件"
+        );
+        assert_eq!(export_steps(&events), [0, 1, 2, 3]);
+        let identify = step_at(&events, ExportIdentify);
+        assert!(
+            stage_at(&events, "读取 0 个 Mod 文件") < identify,
+            "{events:?}"
+        );
+        assert!(identify < step_at(&events, ExportPack), "{events:?}");
+        assert!(
+            step_at(&events, ExportPack) < stage_at(&events, "打包 3 个文件"),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::Stage(s) if s.starts_with("向 Modrinth"))),
+            "{events:?}"
+        );
+        assert!(fixture.server.received_requests().await.unwrap().is_empty());
+    }
+
+    /// 没有要打包的文件（Mod 全在 Modrinth 上、不带额外项）时写包不进逐个文件的循环，收尾后的那一下回调照样
+    /// 转到校验：这一步与「校验导出的整合包」都报到。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_export_with_nothing_to_bundle_still_reaches_verification() {
+        use InstallPhase::*;
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        for name in ["d.jar", "e.jar"] {
+            std::fs::remove_file(fixture.dir.join("mods").join(name)).unwrap();
+        }
+        let target = ModpackExportTarget::new(fixture.root.join("只有清单.mrpack"));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = fixture
+            .petalfall
+            .export_modpack(ID, &options(Vec::new(), false), &target, Some(&tx))
+            .await
+            .unwrap();
+        drop(tx);
+        let events = drain(rx).await;
+
+        assert_eq!((outcome.indexed_files, outcome.override_files), (3, 0));
+        assert!(outcome.bundled_mods.is_empty());
+        assert_eq!(
+            entry_names(target.destination()),
+            vec!["modrinth.index.json"]
+        );
+        assert_eq!(export_steps(&events), [0, 1, 2, 3]);
+        let verify = step_at(&events, ExportVerify);
+        assert!(stage_at(&events, "打包 0 个文件") < verify, "{events:?}");
+        let verifying = stage_at(&events, "校验导出的整合包");
+        assert!(verify < verifying, "{events:?}");
+        assert!(verifying < stage_at(&events, "已导出到 "), "{events:?}");
+    }
+
+    fn write_progress(
+        files_done: u64,
+        files_total: u64,
+        bytes_done: u64,
+        bytes_total: u64,
+    ) -> WriteProgress {
+        WriteProgress {
+            files_done,
+            files_total,
+            bytes_done,
+            bytes_total,
+        }
+    }
+
+    /// 按写包回调的先后把进度逐份喂给同一个 [`LastFileWritten`]，记下每一份是否转入校验。
+    fn verify_turns(progress: &[WriteProgress]) -> Vec<bool> {
+        let mut last_file = LastFileWritten::default();
+        progress.iter().map(|p| last_file.reached(*p)).collect()
+    }
+
+    /// 只在第一次写完的文件数追平总数时转入校验，收尾那一下再追平不算。
+    #[test]
+    fn verification_starts_once_when_the_last_file_is_written() {
+        // 两个文件各 8 字节、每块 4 字节：前一个的两块、写完它、后一个的两块、写完它、收尾（终点换成实际写入的）。
+        let two = [
+            write_progress(0, 2, 4, 16),
+            write_progress(0, 2, 8, 16),
+            write_progress(1, 2, 8, 16),
+            write_progress(1, 2, 12, 16),
+            write_progress(1, 2, 16, 16),
+            write_progress(2, 2, 16, 16),
+            write_progress(2, 2, 16, 16),
+        ];
+        assert_eq!(
+            verify_turns(&two),
+            [false, false, false, false, false, true, false]
+        );
+        // 没有要打包的文件：只有收尾那一下，它就追平。
+        assert_eq!(verify_turns(&[write_progress(0, 0, 0, 0)]), [true]);
+        // 只有一个文件：两块、写完、收尾。
+        let one = [
+            write_progress(0, 1, 5, 9),
+            write_progress(0, 1, 9, 9),
+            write_progress(1, 1, 9, 9),
+            write_progress(1, 1, 9, 9),
+        ];
+        assert_eq!(verify_turns(&one), [false, false, true, false]);
+    }
+
+    /// 随机的文件数（含 0）与每个文件的块数（含 0，空文件不回调块），照写包回调的形状造序列：恰好一次转入校验，
+    /// 落在最后一个文件写完那一下；没有文件时落在收尾那一下。
+    #[test]
+    fn verification_starts_right_after_the_last_file_for_any_pack_shape() {
+        let seed = fastrand::get_seed();
+        let chunks: Vec<Vec<u64>> = (0..fastrand::usize(0..=6))
+            .map(|_| {
+                (0..fastrand::usize(0..=4))
+                    .map(|_| fastrand::u64(1..=4096))
+                    .collect()
+            })
+            .collect();
+        let files = chunks.len() as u64;
+        let total: u64 = chunks.iter().flatten().sum();
+        let mut sequence = Vec::new();
+        let mut bytes = 0;
+        for (done, file) in (0..).zip(&chunks) {
+            for chunk in file {
+                bytes += chunk;
+                sequence.push(write_progress(done, files, bytes, total));
+            }
+            sequence.push(write_progress(done + 1, files, bytes, total));
+        }
+        sequence.push(write_progress(files, files, bytes, bytes));
+
+        let expected = sequence.len() - if files == 0 { 1 } else { 2 };
+        let turned: Vec<usize> = verify_turns(&sequence)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(at, turned)| turned.then_some(at))
+            .collect();
+        assert_eq!(turned, vec![expected], "seed {seed}：{sequence:?}");
+    }
+
+    /// 预览不属于任何任务，规划时不带播报器：事件出口在，也只有两条阶段文字，一条步骤都不报。
+    /// 预览本身连事件出口都没有，这里直接走它用的那次规划。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn planning_for_a_preview_announces_no_steps() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let plan = fixture
+            .petalfall
+            .plan_export(ID, &ExportExtra::ALL, None, Some(&tx), None)
+            .await
+            .unwrap();
+        drop(tx);
+
+        assert_eq!((plan.indexed.len(), plan.bundled.len()), (3, 2));
+        assert_eq!(
+            drain(rx).await,
+            vec![
+                CoreEvent::stage("读取 5 个 Mod 文件"),
+                CoreEvent::stage("向 Modrinth 查询 5 个 Mod"),
+            ]
+        );
+    }
+
+    /// 在认 Mod 这一步取消：联网的等待立即放弃，以取消错误返回，后面的步骤一条都不再报。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_during_a_step_announces_no_later_steps() {
+        let fixture = fixture().await;
+        Mock::given(method("GET"))
+            .and(path("/versions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([]))
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .mount(&fixture.server)
+            .await;
+        let token = CancellationToken::new();
+        let petalfall = fixture.petalfall.clone().with_cancel(token.clone());
+        let target = ModpackExportTarget::new(fixture.root.join("中途取消.mrpack"));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let watcher = tokio::spawn(async move {
+            let mut events = Vec::new();
+            while let Some(event) = rx.recv().await {
+                if matches!(&event, CoreEvent::Phase { plan, index } if plan[*index] == InstallPhase::ExportIdentify)
+                {
+                    token.cancel();
+                }
+                events.push(event);
+            }
+            events
+        });
+
+        let started = Instant::now();
+        let err = petalfall
+            .export_modpack(
+                ID,
+                &options(vec![ExportExtra::Config], false),
+                &target,
+                Some(&tx),
+            )
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        drop(tx);
+        let events = watcher.await.unwrap();
+
+        assert!(err.is_cancelled(), "{err:?}");
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "取消后应立即放弃等待 Modrinth：{elapsed:?}"
+        );
+        assert_eq!(
+            events,
+            vec![
+                CoreEvent::Phase {
+                    plan: EXPORT_PHASES.to_vec(),
+                    index: 0
+                },
+                CoreEvent::stage("读取 5 个 Mod 文件"),
+                CoreEvent::Phase {
+                    plan: EXPORT_PHASES.to_vec(),
+                    index: 1
+                },
+                CoreEvent::stage("向 Modrinth 查询 5 个 Mod"),
+            ]
+        );
+        assert!(!target.destination().exists());
+        assert!(!target.part_path().exists());
+    }
+
+    /// 开工前就已取消的导出连第一步都不报，一条事件都没有。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pre_cancelled_export_announces_no_step() {
+        let fixture = fixture().await;
+        let token = CancellationToken::new();
+        token.cancel();
+        let petalfall = fixture.petalfall.clone().with_cancel(token);
+        let target = ModpackExportTarget::new(fixture.root.join("先取消.mrpack"));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let err = petalfall
+            .export_modpack(ID, &options(Vec::new(), false), &target, Some(&tx))
+            .await
+            .unwrap_err();
+        drop(tx);
+
+        assert!(err.is_cancelled(), "{err:?}");
+        assert_eq!(drain(rx).await, Vec::<CoreEvent>::new());
+    }
+
+    /// 没有事件出口时播报器照样按表推进、只是不发：校验那一步在阻塞线程里进入也不出错，导出照常成功。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_export_without_an_event_sink_succeeds() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        let target = ModpackExportTarget::new(fixture.root.join("无出口.mrpack"));
+
+        let outcome = fixture
+            .petalfall
+            .export_modpack(
+                ID,
+                &options(vec![ExportExtra::Config], false),
+                &target,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!((outcome.indexed_files, outcome.override_files), (3, 4));
+        assert_eq!(outcome.bundled_mods, vec!["d.jar", "e.jar"]);
+        assert_eq!(
+            entry_names(target.destination()),
+            vec![
+                "modrinth.index.json",
+                "overrides/config/sodium-options.json",
+                "overrides/config/sub/deep.toml",
+                "overrides/mods/d.jar",
+                "overrides/mods/e.jar",
+            ]
+        );
+        assert!(leftovers(&fixture.root).is_empty());
     }
 
     /// 把清单里的正式 CDN 地址改写到本地 mock，导入侧对清单地址的白名单校验不变。

@@ -10,7 +10,7 @@
 use petalfall_download::SourcePlan;
 use serde::Deserialize;
 
-use crate::context::InstallContext;
+use crate::context::{InstallContext, InstallPhase};
 use crate::error::{Error, Result};
 use crate::forge_versions::compare_versions;
 use crate::layout::checked_segment;
@@ -238,12 +238,15 @@ impl<'a> LoaderInstaller<'a> {
         game_version: &str,
         loader_version: Option<&str>,
     ) -> Result<LoaderSummary> {
+        // 取 profile 的这一步放在这里报、不放进 fetch_profile：新建实例只调 fetch_profile，那一步由它的门面自己报。
+        self.cx.enter(InstallPhase::LoaderProfile);
         let (raw, version, loader_version) =
             self.fetch_profile(game_version, loader_version).await?;
         let id = version.id.clone();
         // id 来自加载器 meta，原样拼进 versions/<id>/<id>.json。
         checked_segment(&id, || "加载器 profile 的版本 id".to_owned())?;
 
+        self.cx.enter(InstallPhase::LoaderLibraries);
         let tasks = plan::library_tasks(&version, self.cx.runtime, self.cx.layout)?;
         let libraries = self.cx.run_batch(tasks, "加载器库", None).await?;
 
@@ -727,5 +730,48 @@ mod tests {
         assert!(!dir.path().join("escaped.json").exists());
         assert!(!dir.path().join("versions").exists());
         assert!(!layout.libraries_dir().exists());
+    }
+
+    /// install 先报取 profile、再报下加载器库；只取 profile 时一步都不报，那一步归调用它的门面报。报下加载器库
+    /// 时 profile 已经落定、库还没开始下，库文件不在盘上。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_reports_profile_then_libraries_while_fetch_profile_reports_nothing() {
+        let server = MockServer::start().await;
+        mount_profile(
+            &server,
+            ResponseTemplate::new(200).set_body_bytes(b"jar".to_vec()),
+        )
+        .await;
+
+        let client = petalfall_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::layout::GameLayout::new(dir.path());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let library = layout.library_path(LOADER_JAR_PATH.trim_start_matches('/'));
+        let entered = std::sync::Mutex::new(Vec::new());
+        let record = |phase: InstallPhase| {
+            entered.lock().unwrap().push((phase, library.exists()));
+        };
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy)
+            .with_phases(Some(&record));
+        let installer = LoaderInstaller::fabric(cx).with_base_url(server.uri());
+
+        installer
+            .fetch_profile("1.21", Some("0.15.11"))
+            .await
+            .unwrap();
+        assert_eq!(*entered.lock().unwrap(), Vec::new());
+
+        installer.install("1.21", Some("0.15.11")).await.unwrap();
+        assert_eq!(
+            *entered.lock().unwrap(),
+            vec![
+                (InstallPhase::LoaderProfile, false),
+                (InstallPhase::LoaderLibraries, false),
+            ]
+        );
+        assert_eq!(std::fs::read(&library).unwrap(), b"jar");
     }
 }

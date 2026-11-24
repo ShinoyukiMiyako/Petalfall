@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use petalfall_base::PathLocks;
@@ -24,8 +25,9 @@ use crate::InstanceError;
 use crate::config::WorldBackupSettings;
 use crate::data_format::GuardMode;
 use crate::error::{CoreError, Result};
-use crate::event::{CoreEvent, DownloadProgress, EventSink, emit};
+use crate::event::{CoreEvent, DownloadProgress, EventSink, InstallPhase, emit};
 use crate::facade::Petalfall;
+use crate::instance_install::PhaseAnnouncer;
 
 /// 字节进度事件的最小间隔，与下载进度的节流一致。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -218,6 +220,12 @@ impl Petalfall {
     /// （生产是回收站），最后把临时目录改名就位。`file` 必须是清单里登记过的名字，不在清单里或盘上已经
     /// 没有时报 [`CoreError::WorldBackupNotFound`]。任何一步失败，现在的存档都原样不动。
     ///
+    /// 步骤表固定为校验（[`InstallPhase::RestoreVerify`]）、解压（[`InstallPhase::RestoreExtract`]）、就位
+    /// （[`InstallPhase::RestoreCommit`]）三步；找不到备份、存档正被游戏打开这类动手前就拒绝的情况一步都不报。
+    /// 校验只查得出条目名与目录结构的问题；数据损坏、没有 level.dat 或读不懂要解出来才知道，这样的备份报到
+    /// 解压这一步才失败。现在的存档不在时没有东西要移走，但解好的目录仍要改名就位，就位这一步照报；解完发现
+    /// 已取消就不报它。
+    ///
     /// 动手之前先核对当前游戏目录的数据格式记号，同 [`Petalfall::backup_world`]。
     pub async fn restore_world_backup(
         &self,
@@ -238,9 +246,20 @@ impl Petalfall {
         }
         ensure_not_in_use(&paths.world_dir).await?;
 
+        let announcer = Arc::new(PhaseAnnouncer::new(
+            events,
+            vec![
+                InstallPhase::RestoreVerify,
+                InstallPhase::RestoreExtract,
+                InstallPhase::RestoreCommit,
+            ],
+        ));
+        announcer.enter(InstallPhase::RestoreVerify);
         emit(events, CoreEvent::stage("正在校验备份"));
         let cancel = self.cancel_token().cloned();
-        let mut reporter = Reporter::new(events).with_first_stage("正在解压备份");
+        let mut reporter = Reporter::new(events)
+            .with_first_phase(Arc::clone(&announcer), InstallPhase::RestoreExtract)
+            .with_first_stage("正在解压备份");
         let (saves, name) = (paths.saves_dir.clone(), world.to_owned());
         let staged = blocking(move || {
             let is_cancelled = || cancel.as_ref().is_some_and(CancellationToken::is_cancelled);
@@ -259,6 +278,7 @@ impl Petalfall {
             return Err(InstanceError::Cancelled.into());
         }
 
+        announcer.enter(InstallPhase::RestoreCommit);
         if path_exists(&paths.world_dir).await? {
             emit(events, CoreEvent::stage("正在把现在的存档移入回收站"));
         }
@@ -781,6 +801,9 @@ struct Reporter {
     last_sent: Option<Instant>,
     latest: Option<PackProgress>,
     unsent: bool,
+    /// 第一次收到进度时先报的步骤，排在 `first_stage` 之前。恢复存档的解压这一步只能这样进入：校验与解压
+    /// 都在阻塞线程里的同一次调用中，第一次进度回调就是校验通过、开始解压的那一刻。
+    first_phase: Option<(Arc<PhaseAnnouncer>, InstallPhase)>,
     /// 第一次收到进度时先发的阶段：解压在校验通过后才开始报进度。
     first_stage: Option<&'static str>,
 }
@@ -793,8 +816,14 @@ impl Reporter {
             last_sent: None,
             latest: None,
             unsent: false,
+            first_phase: None,
             first_stage: None,
         }
+    }
+
+    fn with_first_phase(mut self, announcer: Arc<PhaseAnnouncer>, phase: InstallPhase) -> Self {
+        self.first_phase = Some((announcer, phase));
+        self
     }
 
     fn with_first_stage(mut self, stage: &'static str) -> Self {
@@ -803,6 +832,9 @@ impl Reporter {
     }
 
     fn update(&mut self, progress: PackProgress) {
+        if let Some((announcer, phase)) = self.first_phase.take() {
+            announcer.enter(phase);
+        }
         if let Some(stage) = self.first_stage.take() {
             emit(self.sink.as_ref(), CoreEvent::stage(stage));
         }
@@ -2189,5 +2221,351 @@ mod tests {
             outcome.failed[0].1
         );
         assert_eq!(disk_state(tmp.path()), before);
+    }
+
+    const RESTORE_PLAN: [InstallPhase; 3] = [
+        InstallPhase::RestoreVerify,
+        InstallPhase::RestoreExtract,
+        InstallPhase::RestoreCommit,
+    ];
+
+    /// 事件流的骨架：步骤写成「步骤 <步骤> <下标>」，阶段照抄，连着的一串进度快照并成一条「进度」。步骤事件
+    /// 带的表另由 assert_restore_plans 核对。
+    fn timeline(events: &[CoreEvent]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for event in events {
+            let item = match event {
+                CoreEvent::Phase { plan, index } => format!("步骤 {:?} {index}", plan[*index]),
+                CoreEvent::Stage(text) => text.clone(),
+                CoreEvent::Warning(text) => format!("告警 {text}"),
+                CoreEvent::Download(_) => "进度".to_owned(),
+                other => format!("{other:?}"),
+            };
+            if item != "进度" || out.last().is_none_or(|last| last != "进度") {
+                out.push(item);
+            }
+        }
+        out
+    }
+
+    fn assert_restore_plans(events: &[CoreEvent]) {
+        for event in events {
+            if let CoreEvent::Phase { plan, .. } = event {
+                assert_eq!(plan.as_slice(), RESTORE_PLAN.as_slice());
+            }
+        }
+    }
+
+    /// 完整恢复一次：校验在「正在校验备份」之前，解压在「正在解压备份」与第一条进度快照之前，就位在最后一条
+    /// 进度快照之后、「正在把现在的存档移入回收站」之前。额外区域文件的份数（含零份）与大小随机。
+    #[tokio::test]
+    async fn restore_reports_verify_extract_and_commit_around_their_stages() {
+        let seed = fastrand::u64(..);
+        let mut rng = fastrand::Rng::with_seed(seed);
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
+        let dir = world(&saves, "w", "备份时");
+        let extra = rng.usize(0..=6);
+        for n in 0..extra {
+            let mut bytes = vec![0u8; rng.usize(1..=256 * 1024)];
+            rng.fill(&mut bytes);
+            write(&dir.join("region").join(format!("r.{n}.1.mca")), &bytes);
+        }
+        let backup = petalfall
+            .backup_world("a", "w", BackupKind::Manual, None)
+            .await
+            .unwrap()
+            .backup;
+        write(&dir.join("level.dat"), &level_dat("现在的"));
+
+        let disposer = RecordingDisposer::new(tmp.path().join("trash"));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        petalfall
+            .restore_world_backup("a", "w", &backup.file, disposer.clone(), Some(&tx))
+            .await
+            .unwrap();
+        assert_eq!(disposer.seen(), vec![dir.clone()], "seed {seed}");
+        assert_eq!(
+            parse_level_name(&std::fs::read(dir.join("level.dat")).unwrap()).as_deref(),
+            Some("备份时"),
+            "seed {seed}"
+        );
+        let events = drain(&mut rx);
+        assert_eq!(
+            timeline(&events),
+            vec![
+                "步骤 RestoreVerify 0",
+                "正在校验备份",
+                "步骤 RestoreExtract 1",
+                "正在解压备份",
+                "进度",
+                "步骤 RestoreCommit 2",
+                "正在把现在的存档移入回收站",
+            ],
+            "seed {seed}"
+        );
+        assert_restore_plans(&events);
+        // 就位之前的那条进度快照是解压的终点，不是半途。
+        let files = 2 + extra as u64;
+        let last = last_download(&events);
+        assert_eq!((last.total, last.finished), (files, files), "seed {seed}");
+    }
+
+    /// 现在的存档文件夹不在时没有东西要移走，「移入回收站」不发，但解好的目录仍要改名就位，就位这一步照报。
+    /// 备份里只有一个 level.dat，是解压这一步只解一个文件的边界。
+    #[tokio::test]
+    async fn restore_into_a_missing_world_still_reports_the_commit_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
+        let dir = saves.join("w");
+        write(&dir.join("level.dat"), &level_dat("只有它"));
+        let backup = petalfall
+            .backup_world("a", "w", BackupKind::Manual, None)
+            .await
+            .unwrap()
+            .backup;
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let disposer = RecordingDisposer::new(tmp.path().join("trash"));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = petalfall
+            .restore_world_backup("a", "w", &backup.file, disposer.clone(), Some(&tx))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            RestoreOutcome {
+                world: "w".into(),
+                previous_in_recycle_bin: false,
+            }
+        );
+        assert!(disposer.seen().is_empty());
+        assert_eq!(
+            parse_level_name(&std::fs::read(dir.join("level.dat")).unwrap()).as_deref(),
+            Some("只有它")
+        );
+        let events = drain(&mut rx);
+        assert_eq!(
+            timeline(&events),
+            vec![
+                "步骤 RestoreVerify 0",
+                "正在校验备份",
+                "步骤 RestoreExtract 1",
+                "正在解压备份",
+                "进度",
+                "步骤 RestoreCommit 2",
+            ]
+        );
+        assert_restore_plans(&events);
+        let last = last_download(&events);
+        assert_eq!((last.total, last.finished), (1, 1));
+    }
+
+    /// 校验不过的备份（不是 zip、有越界条目）只报到校验这一步：之后没有别的步骤事件，也没有进度快照。
+    #[tokio::test]
+    async fn backup_failing_verification_reports_only_the_verify_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
+        let dir = world(&saves, "w", "w");
+        let backup = petalfall
+            .backup_world("a", "w", BackupKind::Auto, None)
+            .await
+            .unwrap()
+            .backup;
+        let zip = backups_root(&petalfall)
+            .join("instances")
+            .join("a")
+            .join("w")
+            .join(&backup.file);
+        type Corrupt = fn(&Path);
+        type Expected = fn(&CoreError) -> bool;
+        let cases: [(&str, Corrupt, Expected); 2] = [
+            (
+                "不是 zip",
+                |zip| std::fs::write(zip, b"not a zip archive").unwrap(),
+                |err| {
+                    matches!(
+                        err,
+                        CoreError::Instance(InstanceError::BackupArchive { .. })
+                    )
+                },
+            ),
+            (
+                "越界条目",
+                |zip| {
+                    let mut writer = zip::ZipWriter::new(std::fs::File::create(zip).unwrap());
+                    let options = zip::write::SimpleFileOptions::default();
+                    writer.start_file("w/level.dat", options).unwrap();
+                    writer.write_all(&level_dat("w")).unwrap();
+                    writer.start_file("../escaped.txt", options).unwrap();
+                    writer.write_all(b"evil").unwrap();
+                    writer.finish().unwrap();
+                },
+                |err| {
+                    matches!(
+                        err,
+                        CoreError::Instance(InstanceError::BackupEntryUnsafe {
+                            reason: "parent_traversal",
+                            ..
+                        })
+                    )
+                },
+            ),
+        ];
+        for (label, corrupt, expected) in cases {
+            corrupt(&zip);
+            let before = snapshot(&dir);
+            let disposer = RecordingDisposer::new(tmp.path().join("trash"));
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let err = petalfall
+                .restore_world_backup("a", "w", &backup.file, disposer.clone(), Some(&tx))
+                .await
+                .unwrap_err();
+            assert!(expected(&err), "{label}: {err:?}");
+            let events = drain(&mut rx);
+            assert_eq!(
+                timeline(&events),
+                vec!["步骤 RestoreVerify 0", "正在校验备份"],
+                "{label}"
+            );
+            assert_restore_plans(&events);
+            assert!(disposer.seen().is_empty(), "{label}");
+            assert_eq!(snapshot(&dir), before, "{label}");
+        }
+    }
+
+    /// 没有 level.dat 的备份条目名与结构都合格，过得了校验，要解出来才发现读不到存档：报到解压这一步就失败，
+    /// 不报就位，现在的存档原样不动。
+    #[tokio::test]
+    async fn backup_without_level_dat_fails_inside_the_extract_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
+        let dir = saves.join("w");
+        write(&dir.join("region").join("r.0.0.mca"), b"region-bytes");
+        let backup = petalfall
+            .backup_world("a", "w", BackupKind::Manual, None)
+            .await
+            .unwrap()
+            .backup;
+        write(&dir.join("level.dat"), &level_dat("现在的"));
+        let before = snapshot(&dir);
+
+        let disposer = RecordingDisposer::new(tmp.path().join("trash"));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = petalfall
+            .restore_world_backup("a", "w", &backup.file, disposer.clone(), Some(&tx))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CoreError::Instance(InstanceError::BackupLevelUnreadable { .. })
+            ),
+            "{err:?}"
+        );
+        let events = drain(&mut rx);
+        assert_eq!(
+            timeline(&events),
+            vec![
+                "步骤 RestoreVerify 0",
+                "正在校验备份",
+                "步骤 RestoreExtract 1",
+                "正在解压备份",
+                "进度",
+            ]
+        );
+        assert_restore_plans(&events);
+        assert!(disposer.seen().is_empty());
+        assert_eq!(snapshot(&dir), before);
+        assert!(!saves.join(format!("w{RESTORE_SUFFIX}")).exists());
+    }
+
+    /// 取消在动手前就已触发：等锁那里就按取消返回，一条步骤事件都不报。解完才发现取消、不报就位的那条路要在
+    /// 阻塞线程解完与回到异步侧检查之间触发取消，测试里没有确定的办法卡进这个空档，不在这里覆盖。
+    #[tokio::test]
+    async fn restore_cancelled_before_it_starts_reports_no_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
+        world(&saves, "w", "w");
+        let backup = petalfall
+            .backup_world("a", "w", BackupKind::Auto, None)
+            .await
+            .unwrap()
+            .backup;
+
+        let token = CancellationToken::new();
+        token.cancel();
+        let disposer = RecordingDisposer::new(tmp.path().join("trash"));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = petalfall
+            .clone()
+            .with_cancel(token)
+            .restore_world_backup("a", "w", &backup.file, disposer.clone(), Some(&tx))
+            .await
+            .unwrap_err();
+        assert!(err.is_cancelled(), "{err:?}");
+        assert_eq!(timeline(&drain(&mut rx)), Vec::<String>::new());
+        assert!(disposer.seen().is_empty());
+    }
+
+    /// 备份与导出存档只有打包一段，不分步：事件流里只有打包的阶段与进度快照，一条步骤事件都没有。
+    #[tokio::test]
+    async fn backup_and_export_report_no_steps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
+        world(&saves, "w", "w");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        petalfall
+            .backup_world("a", "w", BackupKind::Manual, Some(&tx))
+            .await
+            .unwrap();
+        assert_eq!(timeline(&drain(&mut rx)), vec!["正在打包「w」", "进度"]);
+
+        let dest = tmp.path().join("w.zip");
+        petalfall
+            .export_world("a", "w", &dest, Some(&tx))
+            .await
+            .unwrap();
+        assert_eq!(timeline(&drain(&mut rx)), vec!["正在打包「w」", "进度"]);
+    }
+
+    /// 不收事件（events 为 None）时播报器没有出口，照样按表走，恢复结果与收事件时一样。
+    #[tokio::test]
+    async fn restore_without_an_event_sink_still_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
+        let dir = world(&saves, "w", "备份时");
+        let mut at_backup = snapshot(&dir);
+        at_backup.remove("session.lock");
+        let backup = petalfall
+            .backup_world("a", "w", BackupKind::Manual, None)
+            .await
+            .unwrap()
+            .backup;
+        write(&dir.join("region").join("r.0.0.mca"), b"changed");
+
+        let disposer = RecordingDisposer::new(tmp.path().join("trash"));
+        let outcome = petalfall
+            .restore_world_backup("a", "w", &backup.file, disposer.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            RestoreOutcome {
+                world: "w".into(),
+                previous_in_recycle_bin: true,
+            }
+        );
+        assert_eq!(disposer.seen(), vec![dir.clone()]);
+        assert_eq!(snapshot(&dir), at_backup);
+        assert!(!saves.join(format!("w{RESTORE_SUFFIX}")).exists());
     }
 }

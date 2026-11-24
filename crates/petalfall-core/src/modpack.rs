@@ -19,6 +19,11 @@
 //!
 //! 任何一步失败或取消，都按未完成标记删掉这个实例目录；标记里的任务 id 保证只删本次建的目录。
 //! 原版与加载器的自然版本目录留着：它们是完整可用的版本，别的实例也可能在用。
+//!
+//! 进度按步骤报（`CoreEvent::Phase`）。开工时还没读到包（平台整合包要先下载），加载器、有没有要放的文件与覆盖
+//! 文件都不知道，只能先按原版包预排一份表（`import_prelude_plan`）；读完包把还没报到的步骤改写成确切的表
+//! （`import_plan`），已经报过的拿包、读包两步原样不动。准备与落盘分两步调时，报到哪随准备结果交给落盘一步
+//! 接着报，不从头报。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -39,10 +44,12 @@ use serde::{Deserialize, Serialize};
 use crate::blocked::{BlockedFile, CLAIMS_DIR, ClaimedCopy, PACK_CACHE_DIR, place_claimed};
 use crate::data_format::{GameDirCheck, GuardMode};
 use crate::error::{CoreError, Result};
-use crate::event::{CoreEvent, EventSink, emit};
+use crate::event::{CoreEvent, EventSink, InstallPhase, emit};
 use crate::facade::Petalfall;
 use crate::install::LoaderChoice;
-use crate::instance_install::{MarkerSettlement, now_millis, template_stage};
+use crate::instance_install::{
+    MarkerSettlement, PhaseAnnouncer, PhaseCursor, now_millis, template_stage,
+};
 use crate::resources::{
     curseforge_fallback_url, is_safe_file_name, join_landing, task_for_file_url,
 };
@@ -261,6 +268,8 @@ pub struct PreparedModpack {
     claimed: Vec<ClaimedCopy>,
     /// 平台整合包下载到的缓存目录，只属于这一次导入；本地文件为 `None`。
     cache_dir: Option<PathBuf>,
+    /// 步骤报到了哪，表已改写成确切的：落盘一步接着报，前端看到的是同一个任务的下一步。
+    phases: PhaseCursor,
 }
 
 /// 清单里的远程文件准备成的样子：要下载的，与认领到暂存位、直接复制的。
@@ -268,6 +277,13 @@ pub struct PreparedModpack {
 struct RemotePlan {
     downloads: Vec<RemoteDownload>,
     claimed: Vec<ClaimedCopy>,
+}
+
+impl RemotePlan {
+    /// 导入时有没有文件要放进实例：排步骤表与报这一步看的是同一个条件，两处不能各算各的。
+    fn places_files(&self) -> bool {
+        !self.downloads.is_empty() || !self.claimed.is_empty()
+    }
 }
 
 impl PreparedModpack {
@@ -298,6 +314,69 @@ fn natural_versions(manifest: &PackManifest) -> Vec<String> {
         ));
     }
     versions
+}
+
+/// 拿到包与读包两步。读包之前就要报，预排的表与确切的表在这一段必须相同，两张表都从这里起头。
+fn pack_phases(source: &ModpackSource) -> Vec<InstallPhase> {
+    let mut plan = Vec::new();
+    if matches!(source, ModpackSource::Platform { .. }) {
+        plan.push(InstallPhase::ModpackDownload);
+    }
+    plan.push(InstallPhase::ModpackRead);
+    plan
+}
+
+/// 开工时预排的步骤表：包还没读，加载器不知道，先按原版包排，放文件与解覆盖文件都算上。读完包由
+/// [`import_plan`] 改写成确切的。
+fn import_prelude_plan(source: &ModpackSource) -> Vec<InstallPhase> {
+    use InstallPhase::*;
+    let mut plan = pack_phases(source);
+    plan.extend([
+        Metadata,
+        Libraries,
+        Assets,
+        Natives,
+        ModpackFiles,
+        ModpackOverrides,
+    ]);
+    plan
+}
+
+/// 读完包之后确切的步骤表。装游戏走的是 [`Petalfall::install_reporting`]，原版与加载器的几步照它实际报的顺序
+/// 排：原版四步在前，加载器各步在后（Fabric / Quilt 是 LoaderProfile、LoaderLibraries，Forge / NeoForge 是
+/// Java、LoaderInstaller、LoaderLibraries、LoaderProcessors），没有 Verify。新建实例的表（`install_plan`）走的是
+/// 另一条路，不能照搬：那里 Fabric / Quilt 的 LoaderProfile 排在 Libraries 之前、没有 LoaderLibraries，
+/// Forge / NeoForge 末尾还有 Verify。没有文件要放、包里没有覆盖文件、配置没开默认设置时，对应的一步不排，
+/// 免得前端画出一步永远走不到的步骤。
+fn import_plan(
+    source: &ModpackSource,
+    loader: Option<PackLoaderKind>,
+    places_files: bool,
+    has_overrides: bool,
+    template: bool,
+) -> Vec<InstallPhase> {
+    use InstallPhase::*;
+    let mut plan = pack_phases(source);
+    plan.extend([Metadata, Libraries, Assets, Natives]);
+    match loader {
+        None => {}
+        Some(PackLoaderKind::Fabric | PackLoaderKind::Quilt) => {
+            plan.extend([LoaderProfile, LoaderLibraries]);
+        }
+        Some(PackLoaderKind::Forge | PackLoaderKind::NeoForge) => {
+            plan.extend([Java, LoaderInstaller, LoaderLibraries, LoaderProcessors]);
+        }
+    }
+    if places_files {
+        plan.push(ModpackFiles);
+    }
+    if has_overrides {
+        plan.push(ModpackOverrides);
+    }
+    if template {
+        plan.push(Template);
+    }
+    plan
 }
 
 /// 下载来的包只是导入的中间产物；删不掉不影响任何实例，留日志即可。下载在建目录之前就失败时目录不存在。
@@ -409,6 +488,8 @@ impl Petalfall {
     /// 改为从暂存位复制）。
     /// `name` 缺省用整合包自己的名字。
     ///
+    /// 步骤报到读包为止；读完包把步骤表改写成确切的，报到哪随准备结果交给落盘一步接着报。
+    ///
     /// 不动游戏目录。之后交给 [`Petalfall::import_modpack`]，不导入了就 [`PreparedModpack::discard`]。
     pub async fn prepare_modpack(
         &self,
@@ -417,6 +498,7 @@ impl Petalfall {
         selection: &ImportSelection,
         events: Option<&EventSink>,
     ) -> Result<PreparedModpack> {
+        let announcer = PhaseAnnouncer::new(events, import_prelude_plan(source));
         let (pack_path, cache_dir) = match source {
             ModpackSource::File { path } => (path.clone(), None),
             ModpackSource::Platform {
@@ -424,23 +506,36 @@ impl Petalfall {
                 project_id,
                 version_id,
             } => {
+                // 用认领到的手动下载副本时这一步也照报：表是读包之前排的，这一步瞬间就过去。
+                announcer.enter(InstallPhase::ModpackDownload);
                 self.download_platform_pack(*platform, project_id, version_id, events)
                     .await?
             }
         };
+        announcer.enter(InstallPhase::ModpackRead);
         match self
             .read_prepared(source, name, selection, &pack_path, events)
             .await
         {
-            Ok((name, archive, remote)) => Ok(PreparedModpack {
-                source: source.clone(),
-                name,
-                pack_path,
-                archive,
-                remote: remote.downloads,
-                claimed: remote.claimed,
-                cache_dir,
-            }),
+            Ok((name, archive, remote)) => {
+                let phases = announcer.revise(import_plan(
+                    source,
+                    archive.manifest.loader.as_ref().map(|loader| loader.kind),
+                    remote.places_files(),
+                    !archive.overrides.is_empty(),
+                    self.config().new_instance_template,
+                ));
+                Ok(PreparedModpack {
+                    source: source.clone(),
+                    name,
+                    pack_path,
+                    archive,
+                    remote: remote.downloads,
+                    claimed: remote.claimed,
+                    cache_dir,
+                    phases,
+                })
+            }
             Err(err) => {
                 remove_pack_cache(cache_dir.as_deref()).await;
                 Err(err)
@@ -451,7 +546,7 @@ impl Petalfall {
     /// 导入的第二步：建实例目录、写下带 `task_id` 的未完成标记，装游戏与加载器、下载远程文件、
     /// 解出覆盖文件、写整合包信息。任何一步失败都删掉这个实例目录；任务被强行放弃（future 被丢弃）
     /// 或这里删不掉时，由调用方经 [`Petalfall::discard_modpack_import`] 按实例名再清一次。平台整合包的
-    /// 下载缓存不论成败都删掉。
+    /// 下载缓存不论成败都删掉。步骤接着准备一步报到的地方往下报。
     ///
     /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，不下载、
     /// 不建实例目录。游戏目录原本不在时，建好 `versions/` 就补写记号，之后才建实例目录、落任何数据。
@@ -469,7 +564,9 @@ impl Petalfall {
             remote,
             claimed,
             cache_dir,
+            phases,
         } = prepared;
+        let announcer = PhaseAnnouncer::resume(events, phases);
         let outcome = self
             .import_into_new_dir(
                 &archive,
@@ -481,6 +578,7 @@ impl Petalfall {
                     claimed,
                 },
                 task_id,
+                &announcer,
                 events,
             )
             .await;
@@ -591,6 +689,7 @@ impl Petalfall {
         name: String,
         remote: RemotePlan,
         task_id: &str,
+        announcer: &PhaseAnnouncer,
         events: Option<&EventSink>,
     ) -> Result<ModpackInstallOutcome> {
         let checked = self.guard_game_dir(GuardMode::Use).await?;
@@ -622,6 +721,7 @@ impl Petalfall {
                 &name,
                 &version_dir,
                 remote,
+                announcer,
                 events,
             )
             .await;
@@ -649,6 +749,7 @@ impl Petalfall {
         name: &str,
         version_dir: &Path,
         remote: RemotePlan,
+        announcer: &PhaseAnnouncer,
         events: Option<&EventSink>,
     ) -> Result<InstanceModpack> {
         let manifest = &archive.manifest;
@@ -669,12 +770,14 @@ impl Petalfall {
             .filter(is_new)
             .collect();
         self.record_base_versions(&landing).await?;
+        let report_phase = |phase| announcer.enter(phase);
         let installed = self
-            .install(
+            .install_reporting(
                 &manifest.minecraft,
                 loader.map(|l| loader_choice(l.kind)),
                 loader_version,
                 events,
+                Some(&report_phase),
             )
             .await;
         // 成败都核对一遍：装失败时后面的目录没落下；早期 Forge 的 legacy 安装器不一定按算出的 id 落目录。
@@ -722,6 +825,9 @@ impl Petalfall {
                 source,
             })?;
 
+        if remote.places_files() {
+            announcer.enter(InstallPhase::ModpackFiles);
+        }
         if !remote.claimed.is_empty() {
             emit(
                 events,
@@ -742,6 +848,7 @@ impl Petalfall {
 
         let override_files = archive.overrides.len();
         if override_files > 0 {
+            announcer.enter(InstallPhase::ModpackOverrides);
             emit(
                 events,
                 CoreEvent::stage(format!("解出 {override_files} 个覆盖文件")),
@@ -759,6 +866,11 @@ impl Petalfall {
 
         // 覆盖文件之后才补：包里自带的 options.txt 是作者调好的，按只补缺的规则原样留着，缺的服务器列表
         // 之类由默认设置补上。导入的实例一律隔离，套不套只看配置这一道闸。失败与其他步骤一样让导入失败。
+        // 报不报这一步只看准备时排定的表、不看配置：准备与落盘是两次调用，调用方可以在两次之间改配置或换一个门面，
+        // 再读一遍配置会报出表外的步骤。表里有而配置已关时照报这一步，套默认设置自己按配置跳过。
+        if announcer.plans(InstallPhase::Template) {
+            announcer.enter(InstallPhase::Template);
+        }
         let template = self.apply_template(name).await?;
         if let crate::template::TemplateOutcome::Applied { copied, .. } = &template
             && !copied.is_empty()
@@ -4201,10 +4313,42 @@ mod tests {
             .unwrap();
         assert_eq!(report.missing, Vec::<u32>::new());
 
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let outcome = petalfall
-            .install_modpack(&source, Some("网页下的包"), &none, "task-b2", None)
+            .install_modpack(&source, Some("网页下的包"), &none, "task-b2", Some(&tx))
             .await
             .unwrap();
+        drop(tx);
+        // 用暂存副本也照报下载整合包一步；包里没有远程文件，放文件一步读包之后从表里去掉，不报。
+        let phases = drain_phases(&mut rx);
+        let prelude = import_prelude_plan(&source);
+        let exact = {
+            use InstallPhase::*;
+            vec![
+                ModpackDownload,
+                ModpackRead,
+                Metadata,
+                Libraries,
+                Assets,
+                Natives,
+                ModpackOverrides,
+                Template,
+            ]
+        };
+        assert_eq!(phases[..2], [(prelude.clone(), 0), (prelude, 1)]);
+        // 读包之后的每一条都带改写后的表本身：放文件一步真的从表里去掉了，不只是没报。
+        assert!(
+            phases[2..].iter().all(|(plan, _)| *plan == exact),
+            "{phases:?}"
+        );
+        assert_eq!(
+            phases
+                .iter()
+                .map(|(plan, index)| plan[*index])
+                .collect::<Vec<_>>(),
+            exact
+        );
+        assert_phase_protocol(&phases);
         assert_eq!(outcome.modpack.platform, Some(Platform::CurseForge));
         assert_eq!(outcome.modpack.version_id.as_deref(), Some("7001"));
         assert_eq!(
@@ -5690,5 +5834,479 @@ mod tests {
         );
         assert_eq!(server.received_requests().await.unwrap().len(), 0);
         assert_eq!(disk_state(tmp.path()), before);
+    }
+
+    /// 收下通道里已到的步骤事件：(步骤表, 下标)，按发出顺序；别的事件不要。
+    fn drain_phases(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<CoreEvent>,
+    ) -> Vec<(Vec<InstallPhase>, usize)> {
+        let mut phases = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let CoreEvent::Phase { plan, index } = event {
+                phases.push((plan, index));
+            }
+        }
+        phases
+    }
+
+    /// 步骤事件守协议：下标落在表内且严格变大；后一条可以带改写过的表，但前一条走到的那一段（`..=index`）原样不变。
+    fn assert_phase_protocol(phases: &[(Vec<InstallPhase>, usize)]) {
+        for (plan, index) in phases {
+            assert!(*index < plan.len(), "下标越界：{phases:?}");
+        }
+        for pair in phases.windows(2) {
+            let ((before, at), (after, next)) = (&pair[0], &pair[1]);
+            assert!(next > at, "下标没有变大：{phases:?}");
+            assert_eq!(
+                after[..=*at],
+                before[..=*at],
+                "改写动了走过的步骤：{phases:?}"
+            );
+        }
+    }
+
+    /// 两张表逐项照契约的顺序：预排的表按原版包排、放文件与解覆盖文件都算上；确切的表在原版四步之后接加载器各步，
+    /// 没有的步骤不排。
+    #[test]
+    fn import_plans_list_the_steps_in_contract_order() {
+        use InstallPhase::*;
+        let local = ModpackSource::File {
+            path: PathBuf::from("pack.mrpack"),
+        };
+        let platform = platform_source("pv");
+        assert_eq!(
+            import_prelude_plan(&local),
+            [
+                ModpackRead,
+                Metadata,
+                Libraries,
+                Assets,
+                Natives,
+                ModpackFiles,
+                ModpackOverrides
+            ]
+        );
+        assert_eq!(
+            import_prelude_plan(&platform),
+            [
+                ModpackDownload,
+                ModpackRead,
+                Metadata,
+                Libraries,
+                Assets,
+                Natives,
+                ModpackFiles,
+                ModpackOverrides
+            ]
+        );
+        assert_eq!(
+            import_plan(&local, None, false, true, false),
+            [
+                ModpackRead,
+                Metadata,
+                Libraries,
+                Assets,
+                Natives,
+                ModpackOverrides
+            ]
+        );
+        assert_eq!(
+            import_plan(&platform, Some(PackLoaderKind::Fabric), true, true, true),
+            [
+                ModpackDownload,
+                ModpackRead,
+                Metadata,
+                Libraries,
+                Assets,
+                Natives,
+                LoaderProfile,
+                LoaderLibraries,
+                ModpackFiles,
+                ModpackOverrides,
+                Template
+            ]
+        );
+        assert_eq!(
+            import_plan(&local, Some(PackLoaderKind::NeoForge), true, false, true),
+            [
+                ModpackRead,
+                Metadata,
+                Libraries,
+                Assets,
+                Natives,
+                Java,
+                LoaderInstaller,
+                LoaderLibraries,
+                LoaderProcessors,
+                ModpackFiles,
+                Template
+            ]
+        );
+        // 没有文件要放、没有覆盖文件、不套默认设置：只剩拿包、读包与装原版。
+        assert_eq!(
+            import_plan(&platform, None, false, false, false),
+            [
+                ModpackDownload,
+                ModpackRead,
+                Metadata,
+                Libraries,
+                Assets,
+                Natives
+            ]
+        );
+    }
+
+    /// 每种来源、加载器与有无文件、覆盖文件、模板的组合：确切的表与预排的表在拿包、读包一段相同（平台 2 步、
+    /// 本地 1 步），其后是原版四步、加载器各步与按有无排的收尾几步；读包之后改写得了，改写后整张表能按顺序
+    /// 报完（某步重复出现或改动了走过的步骤都会在这里崩）。
+    #[test]
+    fn import_plans_keep_the_prelude_prefix_for_every_pack_shape() {
+        use InstallPhase::*;
+        let local = ModpackSource::File {
+            path: PathBuf::from("pack.mrpack"),
+        };
+        let platform = platform_source("pv");
+        let loaders = [
+            None,
+            Some(PackLoaderKind::Fabric),
+            Some(PackLoaderKind::Quilt),
+            Some(PackLoaderKind::Forge),
+            Some(PackLoaderKind::NeoForge),
+        ];
+        for (source, fetched) in [
+            (&local, vec![ModpackRead]),
+            (&platform, vec![ModpackDownload, ModpackRead]),
+        ] {
+            let prelude = import_prelude_plan(source);
+            assert_eq!(prelude[..fetched.len()], fetched[..]);
+            for loader in loaders {
+                for shape in 0..8u8 {
+                    let (files, overrides, template) =
+                        (shape & 1 != 0, shape & 2 != 0, shape & 4 != 0);
+                    let plan = import_plan(source, loader, files, overrides, template);
+                    let case = format!(
+                        "{source:?} {loader:?} files={files} overrides={overrides} template={template}"
+                    );
+                    assert_eq!(plan[..fetched.len()], prelude[..fetched.len()], "{case}");
+                    let rest = &plan[fetched.len()..];
+                    assert_eq!(rest[..4], [Metadata, Libraries, Assets, Natives], "{case}");
+                    let loader_steps: &[InstallPhase] = match loader {
+                        None => &[],
+                        Some(PackLoaderKind::Fabric | PackLoaderKind::Quilt) => {
+                            &[LoaderProfile, LoaderLibraries]
+                        }
+                        Some(PackLoaderKind::Forge | PackLoaderKind::NeoForge) => {
+                            &[Java, LoaderInstaller, LoaderLibraries, LoaderProcessors]
+                        }
+                    };
+                    let tail: Vec<InstallPhase> = [
+                        (files, ModpackFiles),
+                        (overrides, ModpackOverrides),
+                        (template, Template),
+                    ]
+                    .into_iter()
+                    .filter_map(|(on, phase)| on.then_some(phase))
+                    .collect();
+                    assert_eq!(
+                        rest[4..],
+                        [loader_steps, tail.as_slice()].concat()[..],
+                        "{case}"
+                    );
+
+                    let announcer = PhaseAnnouncer::new(None, prelude.clone());
+                    for phase in &fetched {
+                        announcer.enter(*phase);
+                    }
+                    let announcer = PhaseAnnouncer::resume(None, announcer.revise(plan.clone()));
+                    for phase in rest {
+                        announcer.enter(*phase);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 一步到位导入带远程文件与覆盖文件的包：读包一步带预排的表，之后带确切的表一路报到最后一步（套默认设置），
+    /// 每一步都报到、下标逐个变大，走过的步骤不被改写。不给事件出口时同一个包照常导入。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn importing_a_pack_reports_each_step_against_the_revised_plan() {
+        use InstallPhase::*;
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let uri = server.uri();
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    cf_file_with(11, 1, "jei.jar", Some(format!("{uri}/f/11")), b"jei"),
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": [cf_mod(1, 6)]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/f/11"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"jei".to_vec()))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("步骤包.zip");
+        write_curseforge_pack(
+            &pack,
+            &curseforge_vanilla_manifest(serde_json::json!([
+                { "projectID": 1, "fileID": 11, "required": true }
+            ])),
+            &[("overrides/config/a.txt", b"cfg")],
+        );
+        let petalfall = petalfall(tmp.path(), &server).with_curseforge_key("k");
+        let source = ModpackSource::File { path: pack };
+        let none = ImportSelection::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = petalfall
+            .install_modpack(&source, Some("报步骤"), &none, "task-steps", Some(&tx))
+            .await
+            .unwrap();
+        drop(tx);
+        let phases = drain_phases(&mut rx);
+
+        let prelude = import_prelude_plan(&source);
+        let exact = vec![
+            ModpackRead,
+            Metadata,
+            Libraries,
+            Assets,
+            Natives,
+            ModpackFiles,
+            ModpackOverrides,
+            Template,
+        ];
+        assert_ne!(
+            prelude, exact,
+            "确切的表要与预排的不同，才看得出读包之后改写了"
+        );
+        assert_eq!(phases[0], (prelude, 0));
+        assert!(
+            phases[1..].iter().all(|(plan, _)| *plan == exact),
+            "{phases:?}"
+        );
+        assert_eq!(
+            phases.iter().map(|(_, index)| *index).collect::<Vec<_>>(),
+            (0..exact.len()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            phases.last().map(|(plan, index)| plan[*index]),
+            Some(Template)
+        );
+        assert_phase_protocol(&phases);
+        let dir = outcome.version_dir;
+        assert_eq!(
+            std::fs::read(dir.join("mods").join("jei.jar")).unwrap(),
+            b"jei"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("config").join("a.txt")).unwrap(),
+            b"cfg"
+        );
+
+        let quiet = petalfall
+            .install_modpack(&source, Some("不报步骤"), &none, "task-quiet", None)
+            .await
+            .unwrap();
+        let dir = quiet.version_dir;
+        assert_eq!(
+            std::fs::read(dir.join("mods").join("jei.jar")).unwrap(),
+            b"jei"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("config").join("a.txt")).unwrap(),
+            b"cfg"
+        );
+        assert_eq!(
+            (quiet.modpack.remote_files, quiet.modpack.override_files),
+            (1, 1)
+        );
+    }
+
+    /// 准备与落盘分两步调：准备一步只报下载整合包、读包（带预排的表），落盘一步带确切的表从装原版接着报，不从头
+    /// 报；Fabric 的两步排在原版四步之后，一直报到套默认设置。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prepare_then_import_continues_the_steps_instead_of_restarting() {
+        use InstallPhase::*;
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        mount_fabric(&server).await;
+        let uri = server.uri();
+        let mut manifest =
+            index(serde_json::json!({"minecraft": "test", "fabric-loader": "0.15.0"}));
+        manifest["files"] = serde_json::json!([{
+            "path": "mods/core.jar", "hashes": { "sha1": sha1_hex(b"core") },
+            "downloads": ["https://cdn.modrinth.com/data/x/core.jar"], "fileSize": 4
+        }]);
+        Mock::given(method("GET"))
+            .and(path("/cdn/core.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"core".to_vec()))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("built.mrpack");
+        write_pack(&built, &manifest, &[("overrides/config/a.txt", b"cfg")]);
+        let bytes = std::fs::read(&built).unwrap();
+        mount_platform_pack(&server, "pv-steps", &sha1_hex(&bytes), bytes).await;
+        let petalfall = petalfall(tmp.path(), &server);
+        let source = platform_source("pv-steps");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut prepared = petalfall
+            .prepare_modpack(
+                &source,
+                Some("分两步"),
+                &ImportSelection::default(),
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        let prelude = import_prelude_plan(&source);
+        let prepared_phases = drain_phases(&mut rx);
+        assert_eq!(prepared_phases, vec![(prelude.clone(), 0), (prelude, 1)]);
+        // 清单只认 https 地址，准备好之后把任务地址换到本地 mock 再导入。
+        for download in &mut prepared.remote {
+            download.task.url = format!("{uri}/cdn/core.jar");
+        }
+        let outcome = petalfall
+            .import_modpack(prepared, "task-two-steps", Some(&tx))
+            .await
+            .unwrap();
+        drop(tx);
+        let imported = drain_phases(&mut rx);
+
+        let exact = vec![
+            ModpackDownload,
+            ModpackRead,
+            Metadata,
+            Libraries,
+            Assets,
+            Natives,
+            LoaderProfile,
+            LoaderLibraries,
+            ModpackFiles,
+            ModpackOverrides,
+            Template,
+        ];
+        assert!(
+            imported.iter().all(|(plan, _)| *plan == exact),
+            "{imported:?}"
+        );
+        assert_eq!(
+            imported.iter().map(|(_, index)| *index).collect::<Vec<_>>(),
+            (2..exact.len()).collect::<Vec<_>>(),
+            "落盘一步从装原版接着报"
+        );
+        let all: Vec<_> = prepared_phases.into_iter().chain(imported).collect();
+        assert_phase_protocol(&all);
+        let dir = outcome.version_dir;
+        assert_eq!(
+            std::fs::read(dir.join("mods").join("core.jar")).unwrap(),
+            b"core"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("config").join("a.txt")).unwrap(),
+            b"cfg"
+        );
+        assert_eq!(
+            outcome.modpack.loader.map(|loader| loader.kind),
+            Some(PackLoaderKind::Fabric)
+        );
+    }
+
+    /// 准备与落盘用的是同一游戏目录上两个配置不同的门面：报不报套默认设置只看准备时排定的表，套不套照旧看落盘
+    /// 时的配置。准备时关、落盘时开：表里没有这一步，一路不报（不崩），默认设置照样补上；准备时开、落盘时关：
+    /// 这一步照表报到，默认设置不补。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn template_step_follows_the_prepared_plan_when_the_config_changes_before_import() {
+        use InstallPhase::*;
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("测试包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/options.txt", b"lang:en_us")],
+        );
+        let source = ModpackSource::File { path: pack };
+        let none = ImportSelection::default();
+        let mut off = petalfall(tmp.path(), &server);
+        off.set_new_instance_template(false);
+        let on = petalfall(tmp.path(), &server);
+        assert!(on.config().new_instance_template);
+        let servers: Vec<u8> = (0..fastrand::usize(1..2048))
+            .map(|_| fastrand::u8(..))
+            .collect();
+        let template = on.template_dir();
+        assert_eq!(template, off.template_dir());
+        std::fs::create_dir_all(&template).unwrap();
+        std::fs::write(template.join("servers.dat"), &servers).unwrap();
+        let without_template = vec![
+            ModpackRead,
+            Metadata,
+            Libraries,
+            Assets,
+            Natives,
+            ModpackOverrides,
+        ];
+        let with_template = [&without_template[..], &[Template][..]].concat();
+
+        for (prepare_with, import_with, name, exact, applied) in [
+            (&off, &on, "准备时关", without_template, true),
+            (&on, &off, "准备时开", with_template, false),
+        ] {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let prepared = prepare_with
+                .prepare_modpack(&source, Some(name), &none, Some(&tx))
+                .await
+                .unwrap();
+            let outcome = import_with
+                .import_modpack(prepared, &format!("task-{name}"), Some(&tx))
+                .await
+                .unwrap();
+            drop(tx);
+            let phases = drain_phases(&mut rx);
+
+            assert_eq!(phases[0], (import_prelude_plan(&source), 0), "{name}");
+            assert!(
+                phases[1..].iter().all(|(plan, _)| *plan == exact),
+                "{name}：{phases:?}"
+            );
+            // 报到的步骤与准备时排定的表逐项相同：准备时关的一路里没有 Template，准备时开的一路最后一步是它。
+            assert_eq!(
+                phases
+                    .iter()
+                    .map(|(plan, index)| plan[*index])
+                    .collect::<Vec<_>>(),
+                exact,
+                "{name}"
+            );
+            assert_phase_protocol(&phases);
+            let dir = outcome.version_dir;
+            assert_eq!(
+                std::fs::read(dir.join("options.txt")).unwrap(),
+                b"lang:en_us",
+                "{name}"
+            );
+            let copied = dir.join("servers.dat");
+            if applied {
+                assert_eq!(std::fs::read(&copied).unwrap(), servers, "{name}");
+            } else {
+                assert!(!copied.exists(), "{name}");
+            }
+        }
     }
 }

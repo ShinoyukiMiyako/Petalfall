@@ -725,23 +725,61 @@ fn install_plan(request: &InstanceRequest) -> Vec<InstallPhase> {
 
 /// 按开工时排定的步骤表报步骤。报来的步骤不在表里、比上一步靠前或报了两遍，说明表排错了：前端拿到这样的
 /// 下标只会算出倒退的进度，直接崩。
-struct PhaseAnnouncer<'a> {
-    events: Option<&'a EventSink>,
+///
+/// 开工时还排不准的任务（导入整合包读到包之前不知道加载器与有没有远程文件）先按已知情况排一份，读清楚后经
+/// [`revise`](Self::revise) 改写还没报到的步骤，再经 [`resume`](Self::resume) 接着报。
+///
+/// 事件出口自己拿一份，不借用：导出整合包与恢复存档有的步骤是在阻塞线程里进入的（写完最后一个文件转校验、
+/// 校验通过转解压），播报器要能放进 `Arc` 带过去。
+pub(crate) struct PhaseAnnouncer {
+    events: Option<EventSink>,
     plan: Vec<InstallPhase>,
     /// 下一步最小的合法下标。
     next: AtomicUsize,
 }
 
-impl<'a> PhaseAnnouncer<'a> {
-    fn new(events: Option<&'a EventSink>, plan: Vec<InstallPhase>) -> Self {
+/// 报到一半的步骤表与下一步最小的合法下标：改写步骤表之后交给 [`PhaseAnnouncer::resume`] 接着报。
+#[derive(Debug, Clone)]
+pub(crate) struct PhaseCursor {
+    plan: Vec<InstallPhase>,
+    next: usize,
+}
+
+impl PhaseAnnouncer {
+    pub(crate) fn new(events: Option<&EventSink>, plan: Vec<InstallPhase>) -> Self {
+        Self::resume(events, PhaseCursor { plan, next: 0 })
+    }
+
+    /// 接着 `cursor` 报：已经报过的步骤不能再报，下标照旧只许变大。
+    pub(crate) fn resume(events: Option<&EventSink>, cursor: PhaseCursor) -> Self {
         Self {
-            events,
-            plan,
-            next: AtomicUsize::new(0),
+            events: events.cloned(),
+            plan: cursor.plan,
+            next: AtomicUsize::new(cursor.next),
         }
     }
 
-    fn enter(&self, phase: InstallPhase) {
+    /// 把还没报到的步骤改写成 `plan`。自己不发事件，下一次 [`enter`](Self::enter) 发出的事件带新表。
+    ///
+    /// 已经报过的步骤（前端据此算过进度、画过「第几步」）必须原样留在新表的同一位置，否则前端拿到的是一份
+    /// 前后对不上的表：新表的前 `next` 项与旧表不同就是契约错误，直接崩。
+    pub(crate) fn revise(self, plan: Vec<InstallPhase>) -> PhaseCursor {
+        let next = self.next.into_inner();
+        assert!(
+            plan.get(..next) == self.plan.get(..next),
+            "改写步骤表动了已经报过的前 {next} 步：旧表 {:?}，新表 {plan:?}",
+            self.plan
+        );
+        PhaseCursor { plan, next }
+    }
+
+    /// 这次的表里有没有 `phase`。可有可无的步骤报不报照这个判断，不再读一遍排表时读过的状态：那份状态在
+    /// 排表之后可能变了，再读会报出表外的步骤。
+    pub(crate) fn plans(&self, phase: InstallPhase) -> bool {
+        self.plan.contains(&phase)
+    }
+
+    pub(crate) fn enter(&self, phase: InstallPhase) {
         let index = self
             .plan
             .iter()
@@ -754,7 +792,7 @@ impl<'a> PhaseAnnouncer<'a> {
             self.plan
         );
         emit(
-            self.events,
+            self.events.as_ref(),
             CoreEvent::Phase {
                 plan: self.plan.clone(),
                 index,
@@ -1172,6 +1210,208 @@ mod tests {
         let announcer =
             PhaseAnnouncer::new(None, vec![InstallPhase::Metadata, InstallPhase::Libraries]);
         announcer.enter(InstallPhase::Template);
+    }
+
+    /// 导入整合包开工时预排的表（加载器、远程文件与覆盖文件都还不知道）。
+    fn prelude_plan() -> Vec<InstallPhase> {
+        use InstallPhase::*;
+        vec![
+            ModpackDownload,
+            ModpackRead,
+            Metadata,
+            Libraries,
+            Assets,
+            Natives,
+            ModpackFiles,
+            ModpackOverrides,
+        ]
+    }
+
+    /// 改写本身不发事件；改写之后的每一条步骤事件都带新表，下标按新表算，跳过的步骤不占事件。
+    #[test]
+    fn steps_after_a_revision_carry_the_revised_plan() {
+        use InstallPhase::*;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let announcer = PhaseAnnouncer::new(Some(&tx), prelude_plan());
+        announcer.enter(ModpackDownload);
+        announcer.enter(ModpackRead);
+        let exact = vec![
+            ModpackDownload,
+            ModpackRead,
+            Metadata,
+            Libraries,
+            Assets,
+            Natives,
+            Java,
+            LoaderInstaller,
+            LoaderLibraries,
+            LoaderProcessors,
+            ModpackOverrides,
+            Template,
+        ];
+        let cursor = announcer.revise(exact.clone());
+        let before_resume = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            phases_of(&before_resume),
+            vec![(prelude_plan(), 0), (prelude_plan(), 1)]
+        );
+
+        let resumed = PhaseAnnouncer::resume(Some(&tx), cursor);
+        resumed.enter(Metadata);
+        resumed.enter(LoaderProcessors);
+        resumed.enter(Template);
+        drop(resumed);
+        drop(tx);
+        assert_eq!(
+            phases_of(&drain(rx)),
+            vec![(exact.clone(), 2), (exact.clone(), 9), (exact, 11)]
+        );
+    }
+
+    /// 只改还没报到的步骤都不算违约，紧挨着已报前缀的那一步也可以换掉；一步都没报时整张表随便改；表里每一步
+    /// 都报过之后还可以往后接。随机切一刀：前 `cut` 步报过，后面换成随机挑的另一些步骤，接着报的下标从 `cut` 起。
+    #[test]
+    fn revising_only_the_unreported_steps_is_allowed() {
+        use InstallPhase::*;
+        let seed = fastrand::get_seed();
+
+        // 一步都没报：从预排的表改成毫不相干的表，第一步的下标是 0。
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let cursor = PhaseAnnouncer::new(Some(&tx), prelude_plan()).revise(vec![Verify, Template]);
+        PhaseAnnouncer::resume(Some(&tx), cursor).enter(Verify);
+        drop(tx);
+        assert_eq!(phases_of(&drain(rx)), vec![(vec![Verify, Template], 0)]);
+
+        // 紧挨着已报前缀的那一步（ModpackRead）被删掉，Metadata 顶到下标 1。
+        let announcer = PhaseAnnouncer::new(None, prelude_plan());
+        announcer.enter(ModpackDownload);
+        let cursor = announcer.revise(vec![ModpackDownload, Metadata, Libraries]);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        PhaseAnnouncer::resume(Some(&tx), cursor).enter(Metadata);
+        drop(tx);
+        assert_eq!(
+            phases_of(&drain(rx)),
+            vec![(vec![ModpackDownload, Metadata, Libraries], 1)]
+        );
+
+        // 整张表都报完了：新表原样保留全部旧步骤，再接一步。
+        let announcer = PhaseAnnouncer::new(None, vec![ModpackRead, Metadata]);
+        announcer.enter(ModpackRead);
+        announcer.enter(Metadata);
+        let cursor = announcer.revise(vec![ModpackRead, Metadata, Template]);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        PhaseAnnouncer::resume(Some(&tx), cursor).enter(Template);
+        drop(tx);
+        assert_eq!(
+            phases_of(&drain(rx)),
+            vec![(vec![ModpackRead, Metadata, Template], 2)]
+        );
+
+        let prelude = prelude_plan();
+        let cut = fastrand::usize(0..=prelude.len());
+        let mut tail = vec![
+            Java,
+            LoaderProfile,
+            LoaderInstaller,
+            LoaderLibraries,
+            LoaderProcessors,
+            Verify,
+            Template,
+        ];
+        fastrand::shuffle(&mut tail);
+        tail.truncate(fastrand::usize(1..=tail.len()));
+        let revised = [&prelude[..cut], &tail[..]].concat();
+        let announcer = PhaseAnnouncer::new(None, prelude.clone());
+        for phase in &prelude[..cut] {
+            announcer.enter(*phase);
+        }
+        let cursor = announcer.revise(revised.clone());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let resumed = PhaseAnnouncer::resume(Some(&tx), cursor);
+        for phase in &tail {
+            resumed.enter(*phase);
+        }
+        drop(resumed);
+        drop(tx);
+        assert_eq!(
+            phases_of(&drain(rx)),
+            (cut..revised.len())
+                .map(|i| (revised.clone(), i))
+                .collect::<Vec<_>>(),
+            "seed {seed}，切在 {cut}，后接 {tail:?}"
+        );
+    }
+
+    /// 表里有的步骤答有、没有的答没有，报没报过都不影响；改写之后按新表答：新加的答有，删掉的答没有。
+    #[test]
+    fn plans_answers_against_the_current_plan() {
+        use InstallPhase::*;
+        let announcer = PhaseAnnouncer::new(None, prelude_plan());
+        for phase in prelude_plan() {
+            assert!(announcer.plans(phase), "{phase:?}");
+        }
+        for phase in [Template, Verify, Java, LoaderProfile, LoaderProcessors] {
+            assert!(!announcer.plans(phase), "{phase:?}");
+        }
+        announcer.enter(ModpackDownload);
+        announcer.enter(ModpackRead);
+        assert!(announcer.plans(ModpackDownload), "报过的步骤仍在表里");
+
+        let revised = vec![ModpackDownload, ModpackRead, Metadata, Natives, Template];
+        let resumed = PhaseAnnouncer::resume(None, announcer.revise(revised.clone()));
+        for phase in &revised {
+            assert!(resumed.plans(*phase), "{phase:?}");
+        }
+        for phase in [Libraries, Assets, ModpackFiles, ModpackOverrides, Verify] {
+            assert!(!resumed.plans(phase), "{phase:?}");
+        }
+    }
+
+    /// 接着报时已报过的步骤不能再报：回到更早的一步。
+    #[test]
+    #[should_panic(expected = "报在了它后面的步骤之后")]
+    fn a_resumed_announcer_refuses_to_go_back() {
+        use InstallPhase::*;
+        let announcer = PhaseAnnouncer::new(None, prelude_plan());
+        announcer.enter(ModpackDownload);
+        announcer.enter(ModpackRead);
+        let resumed = PhaseAnnouncer::resume(None, announcer.revise(prelude_plan()));
+        resumed.enter(ModpackDownload);
+    }
+
+    /// 接着报时已报过的步骤不能再报：把改写前最后报的那一步再报一遍。
+    #[test]
+    #[should_panic(expected = "报了两遍")]
+    fn a_resumed_announcer_refuses_the_last_reported_step_again() {
+        use InstallPhase::*;
+        let announcer = PhaseAnnouncer::new(None, prelude_plan());
+        announcer.enter(ModpackRead);
+        let resumed = PhaseAnnouncer::resume(None, announcer.revise(prelude_plan()));
+        resumed.enter(ModpackRead);
+    }
+
+    /// 已报前缀的最后一步（下标 1）被换掉，哪怕后面原样不动也是违约。
+    #[test]
+    #[should_panic(expected = "改写步骤表动了已经报过的前 2 步")]
+    fn revising_the_last_reported_step_panics() {
+        use InstallPhase::*;
+        let announcer = PhaseAnnouncer::new(None, prelude_plan());
+        announcer.enter(ModpackDownload);
+        announcer.enter(ModpackRead);
+        let mut revised = prelude_plan();
+        revised[1] = Metadata;
+        announcer.revise(revised);
+    }
+
+    /// 新表比已报前缀还短，同样是动了已报过的步骤。
+    #[test]
+    #[should_panic(expected = "改写步骤表动了已经报过的前 3 步")]
+    fn revising_to_a_plan_shorter_than_the_reported_prefix_panics() {
+        use InstallPhase::*;
+        let announcer = PhaseAnnouncer::new(None, prelude_plan());
+        announcer.enter(ModpackDownload);
+        announcer.enter(Metadata);
+        announcer.revise(vec![ModpackDownload, ModpackRead]);
     }
 
     #[test]

@@ -16,11 +16,14 @@ use tokio::sync::watch;
 use crate::error::{Error, Result};
 use crate::layout::GameLayout;
 
-/// 新建、补全实例一路上的各步，按执行先后排。下载批次之间的几步由安装器经 [`InstallContext::enter`]
-/// 报出，其余由门面报；整份步骤表由门面开工前按请求排定。
+/// 新建、补全实例一路上的各步。枚举只列出有哪些步骤，声明顺序不是执行顺序：实际先后以各任务排定的步骤表为准，
+/// 同一步在不同任务的表里可以排在不同位置（导入整合包时 Fabric / Quilt 的 LoaderProfile、LoaderLibraries 排在
+/// Natives 之后，Template 排在 `Modpack*` 之后）。下载批次之间的几步由安装器经 [`InstallContext::enter`]
+/// 报出，其余由门面报；整份步骤表由门面开工前按请求排定，导入整合包读完包后再改写还没走到的步骤。
 ///
-/// 把实例移到另一个游戏目录也是一份多步任务，借用同一套步骤事件让前端写「第几步，共几步」：末尾四步只出现在
-/// 移动的步骤表里，安装与补全不会排到它们。
+/// 把实例移到另一个游戏目录也是一份多步任务，借用同一套步骤事件让前端写「第几步，共几步」：`Move*` 四步只出现在
+/// 移动的步骤表里，安装与补全不会排到它们。导入整合包同理，`Modpack*` 四步只出现在导入的步骤表里；导出整合包的
+/// `Export*` 四步、恢复存档备份的 `Restore*` 三步也各自只出现在自己的步骤表里。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallPhase {
     Metadata,
@@ -42,6 +45,28 @@ pub enum InstallPhase {
     MoveVerify,
     /// 移动：换位提交、迁记录、清原件。
     MoveCommit,
+    /// 导入整合包：下载平台整合包本体（只有平台来源才有）。
+    ModpackDownload,
+    /// 导入整合包：读清单、定实例名、把远程文件换成下载任务。
+    ModpackRead,
+    /// 导入整合包：放入认领到的文件、下载整合包的远程文件。
+    ModpackFiles,
+    /// 导入整合包：解出覆盖文件。
+    ModpackOverrides,
+    /// 导出整合包：逐个读启用的 Mod 文件、算哈希。
+    ExportHash,
+    /// 导出整合包：向 Modrinth 查这些 Mod，查得到的只写进清单。
+    ExportIdentify,
+    /// 导出整合包：把要打包的文件写进包。
+    ExportPack,
+    /// 导出整合包：读回写好的包校验。
+    ExportVerify,
+    /// 恢复存档备份：解压之前校验备份。
+    RestoreVerify,
+    /// 恢复存档备份：解到存档旁的临时目录。
+    RestoreExtract,
+    /// 恢复存档备份：现在的存档交出去（生产是回收站），解好的换上。
+    RestoreCommit,
 }
 
 impl InstallPhase {
@@ -63,6 +88,17 @@ impl InstallPhase {
             Self::MoveCopy => "move_copy",
             Self::MoveVerify => "move_verify",
             Self::MoveCommit => "move_commit",
+            Self::ModpackDownload => "modpack_download",
+            Self::ModpackRead => "modpack_read",
+            Self::ModpackFiles => "modpack_files",
+            Self::ModpackOverrides => "modpack_overrides",
+            Self::ExportHash => "export_hash",
+            Self::ExportIdentify => "export_identify",
+            Self::ExportPack => "export_pack",
+            Self::ExportVerify => "export_verify",
+            Self::RestoreVerify => "restore_verify",
+            Self::RestoreExtract => "restore_extract",
+            Self::RestoreCommit => "restore_commit",
         }
     }
 }
