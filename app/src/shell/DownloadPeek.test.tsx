@@ -66,6 +66,17 @@ describe("下载入口的总进度", () => {
     expect(overallTrack([a, b, task("d")])).not.toBe(base);
     expect(overallTrack([{ ...a, totalBytes: 900, batchFiles: 40 }, b])).not.toBe(base);
   });
+
+  it("环的标识：分步任务换批次也变，并行时加权值往下走，环跟得下来", () => {
+    const plan = ["metadata", "libraries", "assets", "natives"] as const;
+    const libraries = task("a", { totalBytes: 60, batchFiles: 40, progress: 0.2, phase: { plan, index: 1, batch: { total: 40, totalBytes: 60 }, fraction: 0.5 } });
+    const assets = task("a", { totalBytes: 900, batchFiles: 3000, progress: 0.4, phase: { plan, index: 2, batch: { total: 3000, totalBytes: 900 }, fraction: 0 } });
+    const other = task("b", { totalBytes: 100, progress: 1 });
+    // 另一个任务已经下完：分步任务的批次从 60 变成 900，它在加权里的份额变大，总进度从 0.7 掉到 0.46
+    expect(overallProgress([libraries, other])).toBeCloseTo(0.7);
+    expect(overallProgress([assets, other])).toBeCloseTo(0.46);
+    expect(overallTrack([assets, other])).not.toBe(overallTrack([libraries, other]));
+  });
 });
 
 describe("快览的列表与失败点", () => {

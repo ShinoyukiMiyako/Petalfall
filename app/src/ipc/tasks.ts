@@ -23,13 +23,16 @@ export type CoreEvent =
   | { kind: "stage"; task_id: string | null; step?: number; message: string }
   | { kind: "warning"; task_id: string | null; step?: number; message: string }
   | {
-      /** 新建、补全实例这类分步任务进入了某一步。后端只在上一批下载返回之后才报下一步。 */
+      /** 分步任务（新建、补全、导入与移动实例，导出整合包，恢复存档备份）进入了某一步。后端只在上一批下载返回之后才报下一步。 */
       kind: "phase";
       task_id: string | null;
       step?: number;
-      /** 整份步骤表的键（domain/types 的 INSTALL_PHASES），开工时排定、全程不变。 */
+      /**
+       * 整份步骤表的键（domain/types 的 INSTALL_PHASES）。开工时排定；导入整合包读完包才知道后面的步骤，
+       * 后来的事件可以带一份改写过的表，已经走过的步骤（下标不大于上一条的 index）不变。
+       */
       plan: string[];
-      /** 当前一步在 plan 里的下标，只增不减。 */
+      /** 当前一步在 plan 里的下标，严格变大。 */
       index: number;
     }
   | {

@@ -42,6 +42,15 @@ export function attemptTaskId(task: Pick<Task, "id" | "attempt">): string {
  */
 export function progressTrack(task: Task): string {
   if (task.phase !== null) return `${attemptTaskId(task)}:phased`;
+  return batchTrack(task);
+}
+
+/**
+ * 任务当前这一批的标识：同一次尝试里总字节与文件数不变即同一批。按「这一批的字节」画的地方（下载任务页的总进度环）用它，
+ * 分步任务也一样：它的 progress 是整次尝试的，bytes 与 totalBytes 却仍是当前这一批的，拿 progressTrack 当标识的话
+ * 换批次时标识不变，环只增不减，第一批下完就停在满格不动了。
+ */
+export function batchTrack(task: Task): string {
   return `${attemptTaskId(task)}:${task.totalBytes === null ? "count" : task.totalBytes}:${task.batchFiles}`;
 }
 
@@ -159,6 +168,13 @@ export const WORLD_TASK_COMMANDS: ReadonlySet<string> = new Set(["backup_world",
  */
 export const MOVE_TASK_COMMAND = "move_instance";
 
+/** 会报步骤的任务命令（新建、导入整合包、补全与移动实例，导出整合包，恢复存档备份）。开工到第一条步骤事件之间 phase 还是 null，只能靠命令认出它分步。 */
+export const PHASED_TASK_COMMANDS: ReadonlySet<string> = new Set([...INSTANCE_TASK_COMMANDS, MOVE_TASK_COMMAND, "export_modpack", "restore_world_backup"]);
+
+export function isPhasedTask(task: Pick<Task, "spec">): boolean {
+  return PHASED_TASK_COMMANDS.has(task.spec.command);
+}
+
 /**
  * 共用一份存档的实例（不隔离）的锁键。隔离结果读不出来的（null）不算：拿不准时不排，撞上了后端照样拒绝，
  * 按 instance_busy 失败、可以重试。
@@ -263,8 +279,8 @@ function transferredAfter(task: Task, added: number): number {
 }
 
 /**
- * 一批下载的进度快照。一次安装连跑好几批，每批从 0 重新计。分步任务按步折成整体进度，只进不退（见 phaseBatch）；
- * 其余任务按当前批次如实显示，批次内只进不退，新批次（已下字节变少，或批次大小、文件数变了）从头开始。
+ * 一批下载的进度快照。一次安装连跑好几批，每批从 0 重新计。分步任务按步折成整体进度，只进不退，这一步那批的比例另记在
+ * phase.fraction（见 phaseBatch）；其余任务按当前批次如实显示，批次内只进不退，新批次（已下字节变少，或批次大小、文件数变了）从头开始。
  * 累计字节跨批次往上加，分步任务不算进当前一步的快照也照样记账。
  */
 export function applyTaskDownload(tasks: readonly Task[], attemptId: string, event: DownloadSnapshot): Task[] {
@@ -283,8 +299,8 @@ export function applyTaskDownload(tasks: readonly Task[], attemptId: string, eve
       speedBps: event.speed,
     };
     if (t.phase === null) return { ...counted, progress: sameBatch ? Math.max(t.progress, fraction) : fraction };
-    const phase = phaseBatch(t.phase, event);
-    return phase === null ? counted : { ...counted, phase, progress: Math.max(t.progress, phaseProgress(phase, fraction)) };
+    const phase = phaseBatch(t.phase, event, fraction);
+    return phase === null ? counted : { ...counted, phase, progress: Math.max(t.progress, phaseProgress(phase, phase.fraction)) };
   });
 }
 
@@ -303,10 +319,21 @@ export const PHASE_WEIGHT: Readonly<Record<InstallPhase, number>> = {
   loader_processors: 6,
   verify: 2,
   template: 1,
+  modpack_download: 2,
+  modpack_read: 1,
+  modpack_files: 12,
+  modpack_overrides: 2,
   move_dependencies: 2,
   move_copy: 6,
   move_verify: 3,
   move_commit: 1,
+  export_hash: 3,
+  export_identify: 2,
+  export_pack: 8,
+  export_verify: 3,
+  restore_verify: 2,
+  restore_extract: 8,
+  restore_commit: 1,
 };
 
 function phaseProgress(phase: TaskPhase, fraction: number): number {
@@ -316,27 +343,55 @@ function phaseProgress(phase: TaskPhase, fraction: number): number {
   return (before + weights[phase.index] * fraction) / whole;
 }
 
-/** 进入下一步：整体进度推到这一步的起点。步骤表中途变了、越界或没往前走是后端的契约错误，直接报错。 */
+/**
+ * 进入下一步：整体进度推到这一步的起点。后来的步骤事件可以带一份改写过的步骤表：导入整合包开工时还没读到包，只能先按已知情况
+ * 预排，读完包才把后面的步骤换成确切的。表的总权重随之变了，新起点可能比已走到的低，整体进度照样不退，等新表追上来。
+ * 越界、没往前走、或改了已走过的步骤（上一条的第 0 步到当前一步）是后端的契约错误，直接报错。
+ */
 export function applyTaskPhase(tasks: readonly Task[], attemptId: string, plan: readonly InstallPhase[], index: number): Task[] {
   return tasks.map((t) => {
     if (t.status !== "running" || attemptTaskId(t) !== attemptId) return t;
     if (!Number.isInteger(index) || index < 0 || index >= plan.length) throw new Error(`任务 ${t.id} 的步骤表只有 ${plan.length} 步，收到了第 ${index} 步`);
-    if (t.phase !== null && t.phase.plan.join() !== plan.join()) throw new Error(`任务 ${t.id} 的步骤表中途变了：${t.phase.plan.join()} -> ${plan.join()}`);
     if (t.phase !== null && index <= t.phase.index) throw new Error(`任务 ${t.id} 已在第 ${t.phase.index} 步，又收到了第 ${index} 步`);
-    const phase: TaskPhase = { plan, index, batch: null };
+    const walked = t.phase === null ? [] : t.phase.plan.slice(0, t.phase.index + 1);
+    if (walked.some((key, i) => plan[i] !== key)) throw new Error(`任务 ${t.id} 已走过的步骤变了：${walked.join()} -> ${plan.slice(0, walked.length).join()}`);
+    const phase: TaskPhase = { plan, index, batch: null, fraction: 0 };
     return { ...t, phase, progress: Math.max(t.progress, phaseProgress(phase, 0)) };
   });
 }
 
 /**
- * 这条快照算不算进当前这一步，算的话返回认下它那批之后的步骤，不算为 null。后端只在上一批返回之后才报下一步，
- * 上一批晚到的快照都已下完：已下完、又不是这一步认下的那批，就是上一步的，不算。
+ * 这条快照算不算进当前这一步，算的话返回认下它那批、记下比例（fraction 是这条快照完成了多少）之后的步骤，不算为 null。
+ * 后端只在上一批返回之后才报下一步，上一批晚到的快照都已下完：已下完、又不是这一步认下的那批，就是上一步的，不算。
  * 一出现就已下完的批次（文件全都现成）同样不算，它那一步的份额在下一步开始时一并补上。
+ * 续的是认下的那批时比例只进不退：失败的文件退回时有效字节变少，那还是同一批。换了一批就从这一批自己的比例算起。
  */
-function phaseBatch(phase: TaskPhase, event: DownloadSnapshot): TaskPhase | null {
-  if (phase.batch !== null && phase.batch.total === event.total && phase.batch.totalBytes === event.totalBytes) return phase;
+function phaseBatch(phase: TaskPhase, event: DownloadSnapshot, fraction: number): TaskPhase | null {
+  if (phase.batch !== null && phase.batch.total === event.total && phase.batch.totalBytes === event.totalBytes) return { ...phase, fraction: Math.max(phase.fraction, fraction) };
   if (event.finished >= event.total) return null;
-  return { ...phase, batch: { total: event.total, totalBytes: event.totalBytes } };
+  return { ...phase, batch: { total: event.total, totalBytes: event.totalBytes }, fraction };
+}
+
+/** 阶段进度条画什么：value 是当前这一步完成了多少，给不出为 null；track 是它的平滑标识，用法同 progressTrack。 */
+export interface StageProgress {
+  value: number | null;
+  track: string;
+}
+
+/**
+ * 分步任务当前这一步的进度。这一步还没认下批次时给不出（null）：不按步骤的种类去猜它会不会报批次，同一步在不同情形下
+ * 两样都有（校验只在缺文件时下载；打包先要遍历一遍要收的文件；等别的 Forge 安装让出来时停在准备 Java 上）。
+ * 刚进一步就马上有批次的情形由界面去抹平，见任务行的 StageBar。
+ * 换步、同一步里换了一批或换了尝试，进度都从新的起点算，track 随之变，进度条直接跳过去，不从上一步（上一批）的满格往回走。
+ * 完成时 track 不变：这一步有批次的从原处走满，给不出进度的直接换成满格。
+ */
+export function stageProgress(task: Task): StageProgress {
+  const attempt = attemptTaskId(task);
+  if (task.phase === null) return { value: task.status === "done" ? 1 : 0, track: `${attempt}:stage` };
+  const { index, batch, fraction } = task.phase;
+  const track = batch === null ? `${attempt}:stage:${index}` : `${attempt}:stage:${index}:${batch.totalBytes === null ? "count" : batch.totalBytes}:${batch.total}`;
+  if (task.status === "done") return { value: 1, track };
+  return { value: batch === null ? null : fraction, track };
 }
 
 // ---------------------------------------------------------------- 组合任务的进度

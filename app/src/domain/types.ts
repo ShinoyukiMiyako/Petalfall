@@ -127,7 +127,11 @@ export interface TaskSpec {
   args: Record<string, unknown>;
 }
 
-/** 新建、补全实例的各步，取值与后端 InstallPhase::key 一一对应。移动实例借用同一套步骤事件，末尾四步只出现在移动的步骤表里。 */
+/**
+ * 分步任务的各步，取值与后端 InstallPhase::key 一一对应。不带前缀的是新建、补全实例的步骤，导入整合包也会走到；
+ * 别的任务借用同一套步骤事件，各自的步骤按前缀分：modpack_ 只出现在导入整合包的步骤表里，move_ 是移动实例，
+ * export_ 是导出整合包，restore_ 是恢复存档备份。
+ */
 export const INSTALL_PHASES = [
   "metadata",
   "loader_profile",
@@ -140,20 +144,36 @@ export const INSTALL_PHASES = [
   "loader_processors",
   "verify",
   "template",
+  "modpack_download",
+  "modpack_read",
+  "modpack_files",
+  "modpack_overrides",
   "move_dependencies",
   "move_copy",
   "move_verify",
   "move_commit",
+  "export_hash",
+  "export_identify",
+  "export_pack",
+  "export_verify",
+  "restore_verify",
+  "restore_extract",
+  "restore_commit",
 ] as const;
 export type InstallPhase = (typeof INSTALL_PHASES)[number];
 
 export interface TaskPhase {
-  /** 这次尝试的整份步骤表，开工时由后端排定、全程不变。 */
+  /**
+   * 这次尝试的整份步骤表，以最近一条步骤事件带来的为准。已走过的步骤全程不变，还没走到的部分后端可以改写：导入整合包开工时
+   * 还没读到包（平台整合包要先下载），加载器、有没有远程文件与覆盖文件都不知道，只能先预排一份，读完包再换成确切的。
+   */
   plan: readonly InstallPhase[];
   /** 当前一步在 plan 里的下标。 */
   index: number;
   /** 这一步认下的那批下载；还没认下为 null。上一步晚到的收尾快照不会被认下。 */
   batch: { total: number; totalBytes: number | null } | null;
+  /** 这一步认下的那批下载完成了多少（0-1），同一批内只进不退（失败的文件退回时有效字节会变少）；还没认下批次时为 0。 */
+  fraction: number;
 }
 
 /**

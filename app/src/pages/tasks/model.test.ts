@@ -223,13 +223,13 @@ describe("行内元信息", () => {
     const VANILLA: readonly InstallPhase[] = ["metadata", "libraries", "assets", "natives"];
 
     it("这一步还没认下下载：只写在第几步，上一批留下的字节与速度不写", () => {
-      const t = task("r", { kind: "game", status: "running", bytes: 50e6, totalBytes: 50e6, speedBps: 3 * MB, phase: { plan: VANILLA, index: 3, batch: null } });
+      const t = task("r", { kind: "game", status: "running", bytes: 50e6, totalBytes: 50e6, speedBps: 3 * MB, phase: { plan: VANILLA, index: 3, batch: null, fraction: 0 } });
       expect(rowMeta(t, ctx({ etaSpeed: 2 * MB }))).toEqual({ left: "解压本地库 · 第 4/4 步", right: "", danger: false });
       expect(rowMeta({ ...t, attempt: 2 }, ctx()).left).toBe("解压本地库 · 第 4/4 步 · 第 2 次尝试");
     });
 
     it("认下了这一步的那批：在第几步之后写这一批的量，右侧照常是速度与剩余时间", () => {
-      const t = task("r", { kind: "game", status: "running", bytes: 24_800_000, totalBytes: 124_000_000, speedBps: 4 * MB, phase: { plan: VANILLA, index: 2, batch: { total: 3000, totalBytes: 124_000_000 } } });
+      const t = task("r", { kind: "game", status: "running", bytes: 24_800_000, totalBytes: 124_000_000, speedBps: 4 * MB, phase: { plan: VANILLA, index: 2, batch: { total: 3000, totalBytes: 124_000_000 }, fraction: 0.2 } });
       const meta = rowMeta(t, ctx({ etaSpeed: 4 * MB, speed: 4 * MB, bytes: 24_800_000 }));
       expect(meta.left).toBe(`下载资源文件 · 第 3/4 步 · ${TASKS_COPY.row.transfer(formatBytes(24_800_000), formatBytes(124_000_000))}`);
       // 剩余 99.2 MB（这一批的），4 MB/s → 23.7 秒 → 约 25 秒
@@ -382,6 +382,18 @@ describe("吞吐采样与总览", () => {
     expect(overviewTrack([{ ...a, attempt: 2 }, b])).not.toBe(base);
   });
 
+  it("总进度环的标识：分步任务换批次也变。它自己的进度条整次尝试只认一个标识，环画的却是这一批的字节", () => {
+    const plan: readonly InstallPhase[] = ["metadata", "libraries"];
+    const first = task("p", { status: "running", bytes: 200, totalBytes: 200, batchFiles: 1, phase: { plan, index: 0, batch: { total: 1, totalBytes: 200 }, fraction: 1 } });
+    const next = { ...first, bytes: 0, totalBytes: 9000, batchFiles: 40, phase: { plan, index: 1, batch: { total: 40, totalBytes: 9000 }, fraction: 0 } };
+    // 第一批下完是 100%，下一批从 0 起：标识不变的话环只增不减，会一直停在满格
+    expect(overviewOf(bucketTasks([first])).fraction).toBe(1);
+    expect(overviewOf(bucketTasks([next])).fraction).toBe(0);
+    expect(overviewTrack([next])).not.toBe(overviewTrack([first]));
+    // 同一批里进度变了，标识不变
+    expect(overviewTrack([{ ...next, bytes: 4500, progress: 0.5 }])).toBe(overviewTrack([next]));
+  });
+
   it("曲线：画窗口再多一个点，不足时左侧补 0；最新的一点在右缘外一格，滑一格后正好落在右缘", () => {
     const step = 100 / (THROUGHPUT_SAMPLES - 1);
     const right = (THROUGHPUT_SAMPLES * step).toFixed(2);
@@ -526,7 +538,7 @@ describe("任务表的结构比较", () => {
   });
 
   it("分步任务换了一步、认下了一批：只是进度，结构相同", () => {
-    const stepped = { ...running, phase: { plan: ["metadata", "libraries"] as const, index: 1, batch: { total: 40, totalBytes: 10 * MB } } };
+    const stepped = { ...running, phase: { plan: ["metadata", "libraries"] as const, index: 1, batch: { total: 40, totalBytes: 10 * MB }, fraction: 0.75 } };
     expect(sameTaskLayout([running, queued], [stepped, queued])).toBe(true);
   });
 

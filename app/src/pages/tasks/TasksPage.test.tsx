@@ -4,6 +4,7 @@ import { MotionConfig } from "framer-motion";
 import { act } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../../ipc/errors";
+import { LOADING_DELAY_MS } from "../../lib/loading-gate";
 import { COMPLETION_HOLD_S, SPEED_REFRESH_MS } from "../../lib/progress-display";
 import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
 import { CORE_EVENT, type TaskJournalDto, type TaskRecordDto } from "../../ipc/tasks";
@@ -13,7 +14,7 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import type { RouteOf } from "../../state/route";
 import { focusByKeyboard, render, stepFrames, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import type { InstanceDto } from "../../ipc/instances";
+import type { InstanceDto, InstanceSettingsDto } from "../../ipc/instances";
 import { bootOverrides, callsOf, cancelledError, configDto, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { PickFolderProvider } from "../discover/platform";
 import TasksPage from "./index";
@@ -1035,6 +1036,150 @@ describe("下载任务页：进行中", () => {
     expect(row("安装 1.21.1").textContent).toContain("取消于 0%");
     // 占位实例随取消撤掉，不给「查看实例」
     expect(hasButton(row("安装 1.21.1"), "查看实例")).toBe(false);
+  });
+});
+
+describe("下载任务页：分步任务的两条进度条", () => {
+  const TITLE = "安装 1.21.1";
+  const VANILLA = ["metadata", "libraries", "assets", "natives"];
+
+  /** 行里在场的进度条，按 DOM 顺序：整体在前，这一步在后。 */
+  const bars = (title: string) => [...row(title).querySelectorAll<HTMLElement>('[role="progressbar"]')].filter(live);
+  const nowOf = (title: string) => bars(title).map((bar) => bar.getAttribute("aria-valuenow"));
+
+  /** 新建一个原版实例并让安装停在后端：返回这一次尝试的 taskId 与放行安装的把手。 */
+  async function creating(): Promise<{ attempt: string; install: Deferred<unknown> }> {
+    const install = deferred<unknown>();
+    ipc.overrides.set("install_version", () => install.promise);
+    await mount();
+    await act(() => launcher.actions.createInstance({ name: "新的世界", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" }));
+    await flush();
+    return { attempt: `${launcher.state.tasks[0].id}#1`, install };
+  }
+
+  const step = (attempt: string, index: number) => act(() => emit(CORE_EVENT, { kind: "phase", task_id: attempt, plan: VANILLA, index }));
+  const batch = (attempt: string, files: number, finished: number, bytes: number, totalBytes: number) =>
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: attempt, total: files, finished, bytes, total_bytes: totalBytes, transferred: bytes, speed: 4 * MB }));
+
+  it("步骤报来之前两条就都在、都是空的，名称分开说整体与这一步", async () => {
+    await creating();
+    expect(bars(TITLE).map((bar) => bar.getAttribute("aria-label"))).toEqual(["安装 1.21.1 的进度", "安装 1.21.1 当前这一步的进度"]);
+    expect(nowOf(TITLE)).toEqual(["0", "0"]);
+  });
+
+  it("这一步的那批下载走到哪，下面那条画到哪；整体那条只挪这一步占的份额，文字写出在干什么", async () => {
+    const { attempt } = await creating();
+    await step(attempt, 0);
+    await step(attempt, 1);
+    await batch(attempt, 40, 10, 15 * MB, 60 * MB);
+    // 权重 1、7、11、1：第 2 步走了四分之一，整体 (1 + 7 × 0.25) / 20 = 13.75%
+    expect(nowOf(TITLE)).toEqual(["14", "25"]);
+    expect(row(TITLE).textContent).toContain("下载游戏本体与库文件 · 第 2/4 步");
+  });
+
+  it("进到下一步：下面那条从头走，整体那条不倒退", async () => {
+    const { attempt } = await creating();
+    await step(attempt, 1);
+    await batch(attempt, 40, 30, 45 * MB, 60 * MB);
+    expect(nowOf(TITLE)).toEqual(["31", "75"]);
+    await step(attempt, 2);
+    // 第 3 步刚开始：前两步的份额 (1 + 7) / 20 记满，这一步还没有批次
+    expect(nowOf(TITLE)).toEqual(["40", "0"]);
+    expect(row(TITLE).textContent).toContain("下载资源文件 · 第 3/4 步");
+    // 上一步晚到的已下完快照不算进这一步
+    await batch(attempt, 40, 40, 60 * MB, 60 * MB);
+    expect(nowOf(TITLE)).toEqual(["40", "0"]);
+    await batch(attempt, 3000, 600, 20 * MB, 100 * MB);
+    expect(nowOf(TITLE)).toEqual(["51", "20"]);
+  });
+
+  /** 下面那条此刻是不是不定进度。 */
+  const sweeping = (title: string) => bars(title)[1].hasAttribute("data-indeterminate");
+
+  it("这一步给不出进度：等过加载延迟才换成不定进度，不报百分数；整体那条照常", async () => {
+    const { attempt } = await creating();
+    await step(attempt, 3);
+    // 刚进这一步先不换：多数步骤紧跟着就有第一条快照，换过去再换回来只是闪一下
+    expect(nowOf(TITLE)).toEqual(["95", "0"]);
+    await advance(LOADING_DELAY_MS - 1);
+    expect(sweeping(TITLE)).toBe(false);
+    await advance(1);
+    const [total, stage] = bars(TITLE);
+    expect(total.getAttribute("aria-valuenow")).toBe("95");
+    expect(stage.hasAttribute("data-indeterminate")).toBe(true);
+    expect(stage.hasAttribute("aria-valuenow")).toBe(false);
+    expect(row(TITLE).textContent).toContain("解压本地库 · 第 4/4 步");
+  });
+
+  it("延迟之内就来了这一步的快照：直接画比例，不经过不定进度", async () => {
+    const { attempt } = await creating();
+    await step(attempt, 1);
+    await advance(LOADING_DELAY_MS - 50);
+    await batch(attempt, 40, 10, 15 * MB, 60 * MB);
+    expect(nowOf(TITLE)).toEqual(["14", "25"]);
+    await advance(LOADING_DELAY_MS);
+    expect(nowOf(TITLE)).toEqual(["14", "25"]);
+  });
+
+  it("接连两步都给不出：一直是不定进度，不逐步重新等；等到有快照的一步，停够最短时长再换回比例", async () => {
+    const { attempt } = await creating();
+    await step(attempt, 0);
+    await advance(LOADING_DELAY_MS);
+    expect(sweeping(TITLE)).toBe(true);
+    await step(attempt, 1);
+    expect(sweeping(TITLE)).toBe(true);
+    // 不定进度已经显示了不止最短时长：快照一到就换回比例
+    await advance(LOADING_DELAY_MS);
+    await batch(attempt, 40, 20, 30 * MB, 60 * MB);
+    expect(nowOf(TITLE)).toEqual(["23", "50"]);
+  });
+
+  it("失败与取消的分步任务：行里一条进度条都不画", async () => {
+    const { install } = await creating();
+    install.reject(new IpcError("network_failed", "dns lookup failed"));
+    await flush();
+    expect(launcher.state.tasks[0].status).toBe("failed");
+    await advance(COMPLETION_HOLD_S * 1000 + 500);
+    expect(bars(TITLE)).toEqual([]);
+  });
+
+  it("完成收尾时两条都推到满格", async () => {
+    // 安装结束后要把封面写进新实例的设置、把它固定到侧栏：安装是拦下来的，假后端里没有这个实例，这两处由用例接住
+    const settings: InstanceSettingsDto = {
+      description: null,
+      cover: null,
+      cover_image: null,
+      background: "follow",
+      background_image: null,
+      isolation: "follow_global",
+      memory_mb: null,
+      java: "auto",
+      jvm_args: "",
+      resolution: { width: 854, height: 480 },
+      fullscreen: false,
+    };
+    ipc.overrides.set("get_instance_settings", () => settings);
+    ipc.overrides.set("set_instance_settings", (args) => args.settings);
+    ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+    const { attempt, install } = await creating();
+    await step(attempt, 1);
+    await batch(attempt, 40, 10, 15 * MB, 60 * MB);
+    install.resolve({ id: "新的世界", mc_version: "1.21.1", loader: null, libraries: 40, assets: 0, natives: 0, template: null });
+    await flush();
+    expect(launcher.state.tasks[0].status).toBe("done");
+    expect(callsOf(ipc, "set_instance_settings")).toEqual([{ id: "新的世界", settings: { ...settings, cover: "grass" } }]);
+    expect(nowOf(TITLE)).toEqual(["100", "100"]);
+  });
+
+  it("排队中的分步任务也占着下面那条的位置；不分步的任务只有一条", async () => {
+    ipc.overrides.set("install_version", () => deferred<unknown>().promise);
+    await mount();
+    for (const major of [8, 17, 21]) await act(() => launcher.actions.installJava(major));
+    await act(() => launcher.actions.createInstance({ name: "新的世界", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" }));
+    await flush();
+    expect(row(TITLE).textContent).toContain("排队中 · 第 1 位");
+    expect(nowOf(TITLE)).toEqual(["0", "0"]);
+    expect(bars("Java 8")).toHaveLength(1);
   });
 });
 

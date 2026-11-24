@@ -7,7 +7,7 @@ import { formatBytes, formatPlaytime, formatRelative, formatSpeed, percent } fro
 import { MAX_PARALLEL_TASKS } from "../../domain/limits";
 import type { Task, TaskKind } from "../../domain/types";
 import type { RouteOf, TaskFilter } from "../../state/route";
-import { attemptTaskId, DOWNLOADS_WHEN_RUNNING, progressTrack } from "../../state/tasks";
+import { attemptTaskId, batchTrack, DOWNLOADS_WHEN_RUNNING } from "../../state/tasks";
 import { CHART_CEILING_DECAY, CHART_MIN_CEILING_BPS, CHART_STEP, CHART_VIEW, ETA_WINDOW_SAMPLES, THROUGHPUT_KEPT, THROUGHPUT_SAMPLES } from "./constants";
 import { TASKS_COPY } from "./copy";
 
@@ -399,10 +399,12 @@ export function overviewOf(b: TaskBuckets): Overview {
 
 /**
  * 总进度环的平滑标识：活动任务连同各自所在的批次。有任务结束或入队、某个任务换了批次时标识就变，
- * 环直接跳到按新集合加权的值，不从旧值倒退着动画过去；标识不变时只增不减。与标题栏下载入口的汇总环同一规则。
+ * 环直接跳到按新集合加权的值，不从旧值倒退着动画过去；标识不变时只增不减。
+ * 环画的是各任务当前这一批的字节，所以分步任务也按批次认（batchTrack），不用它整次尝试不变的 progressTrack：
+ * 那样换批次时标识不变，第一批下完环就停在满格。标题栏下载入口的汇总环（shell/DownloadPeek 的 overallTrack）同理。
  */
 export function overviewTrack(active: readonly Task[]): string {
-  return active.map(progressTrack).sort().join("\n");
+  return active.map(batchTrack).sort().join("\n");
 }
 
 /**

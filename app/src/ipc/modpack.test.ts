@@ -9,7 +9,7 @@ import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
 import { acquireMockInstance } from "./mock/handlers/instances";
 import { reset as resetLaunchMock } from "./mock/handlers/launch";
-import { MOCK_DOWNLOADS_DIR, seedMockDownloads } from "./mock/handlers/modpack";
+import { MOCK_DOWNLOADS_DIR, seedMockDownloads, setMockModpackPace } from "./mock/handlers/modpack";
 import { mockRevealedPaths } from "./mock/handlers/instances";
 import {
   EXPORT_EXTRAS,
@@ -476,11 +476,296 @@ describe("整合包 mock：可选文件与需要手动下载的文件", () => {
   });
 });
 
+describe("整合包 mock：导入的步骤事件", () => {
+  type PhaseEvent = Extract<CoreEvent, { kind: "phase" }>;
+  type DownloadEvent = Extract<CoreEvent, { kind: "download" }>;
+  const FABULOUSLY: ModpackSource = { ...platform, version_id: "fo-641" };
+  const RLCRAFT: ModpackSource = { kind: "platform", platform: "curseforge", project_id: "285109", version_id: "4612979" };
+  const BLOCKED: ModpackSource = { kind: "file", path: "D:\\Downloads\\Blocked-Pack.zip" };
+  // 与后端 import_prelude_plan 同一份预排的表：读到包之前按没有加载器、远程文件与覆盖文件都有排
+  const PRELUDE_FILE = ["modpack_read", "metadata", "libraries", "assets", "natives", "modpack_files", "modpack_overrides"];
+  const PRELUDE_PLATFORM = ["modpack_download", ...PRELUDE_FILE];
+  const VANILLA = ["metadata", "libraries", "assets", "natives"];
+  // 种子配置里「新实例沿用默认设置」是开着的，确切的表以套默认设置收尾
+  const PACK_TAIL = ["modpack_files", "modpack_overrides", "template"];
+  const FABRIC_FILE = ["modpack_read", ...VANILLA, "loader_profile", "loader_libraries", ...PACK_TAIL];
+  const FABRIC_PLATFORM = ["modpack_download", ...FABRIC_FILE];
+  const FORGE_PLATFORM = ["modpack_download", "modpack_read", ...VANILLA, "java", "loader_installer", "loader_libraries", "loader_processors", ...PACK_TAIL];
+
+  async function run(taskId: string, source: ModpackSource, name: string | null): Promise<{ result: unknown; events: CoreEvent[] }> {
+    const events: CoreEvent[] = [];
+    const off = await listen<CoreEvent>(CORE_EVENT, (e) => events.push(e));
+    const result = await installModpack(taskId, mockGameDir(), source, name, []).catch((e: unknown) => e);
+    off();
+    return { result, events };
+  }
+
+  const phasesOf = (events: readonly CoreEvent[]) => events.filter((e): e is PhaseEvent => e.kind === "phase");
+  const walkedOf = (events: readonly CoreEvent[]) => phasesOf(events).map((p) => p.plan[p.index]);
+
+  /** 每一步与记在它上面的下载快照：快照归它前面最近那条步骤事件的那一步。 */
+  function downloadsByStep(events: readonly CoreEvent[]): [string, DownloadEvent[]][] {
+    const steps: [string, DownloadEvent[]][] = [];
+    for (const e of events) {
+      if (e.kind === "phase") steps.push([e.plan[e.index], []]);
+      if (e.kind !== "download") continue;
+      const current = steps.at(-1);
+      if (current === undefined) throw new Error("进入第一步之前就有下载快照");
+      current[1].push(e);
+    }
+    return steps;
+  }
+
+  const snapshotCounts = (events: readonly CoreEvent[]) => downloadsByStep(events).map(([key, batch]) => [key, batch.length]);
+  const batchSizes = (events: readonly CoreEvent[]) => downloadsByStep(events).flatMap(([, batch]) => (batch.length === 0 ? [] : [[batch[0].total, batch[0].total_bytes]]));
+
+  /** 协议的规则：下标严格变大，已走过的步骤（上一条的第 0 步到它当时那一步）与上一条原样相同。 */
+  function expectWalkRules(phases: readonly PhaseEvent[]): void {
+    for (let i = 1; i < phases.length; i++) {
+      const before = phases[i - 1];
+      expect(phases[i].index, `第 ${i} 条`).toBeGreaterThan(before.index);
+      expect(phases[i].plan.slice(0, before.index + 1), `第 ${i} 条`).toEqual(before.plan.slice(0, before.index + 1));
+    }
+  }
+
+  it("平台整合包：下载与读包两步带预排的表，读完包换成确切的表；下标逐条加一，已走过的步骤不变，最后一步是表里的最后一步", async () => {
+    const { result, events } = await run("t-steps", FABULOUSLY, null);
+    expect(result).toMatchObject({ version_id: "Fabulously Optimized" });
+    const phases = phasesOf(events);
+    expect(phases.slice(0, 2)).toEqual([
+      { task_id: "t-steps", kind: "phase", plan: PRELUDE_PLATFORM, index: 0 },
+      { task_id: "t-steps", kind: "phase", plan: PRELUDE_PLATFORM, index: 1 },
+    ]);
+    expect(phases.slice(2).map((p) => p.plan)).toEqual(Array.from({ length: FABRIC_PLATFORM.length - 2 }, () => FABRIC_PLATFORM));
+    expect(phases.map((p) => p.index)).toEqual(FABRIC_PLATFORM.map((_, i) => i));
+    expect(walkedOf(events)).toEqual(FABRIC_PLATFORM);
+    expectWalkRules(phases);
+    // 读包的阶段文字夹在读包与装原版两步之间，最后一条仍是导入完成
+    const read = events.findIndex((e) => e.kind === "stage" && e.message === "读取整合包 Fabulously Optimized：48 个远程文件，57 个覆盖文件");
+    expect(read).toBeGreaterThan(events.indexOf(phases[1]));
+    expect(read).toBeLessThan(events.indexOf(phases[2]));
+    expect(events.at(-1)).toEqual({ task_id: "t-steps", kind: "stage", message: "整合包已导入为实例 Fabulously Optimized" });
+  });
+
+  it("报下载的步骤各推一批 5 条快照、批与批的文件数和总字节都不同；读包、natives、取 profile、解覆盖文件、套默认设置只报步骤", async () => {
+    const { events } = await run("t-batches", FABULOUSLY, "下载批次");
+    expect(snapshotCounts(events)).toEqual([
+      ["modpack_download", 5],
+      ["modpack_read", 0],
+      ["metadata", 5],
+      ["libraries", 5],
+      ["assets", 5],
+      ["natives", 0],
+      ["loader_profile", 0],
+      ["loader_libraries", 5],
+      ["modpack_files", 5],
+      ["modpack_overrides", 0],
+      ["template", 0],
+    ]);
+    // 整合包本体是目录里这个版本的文件大小，远程文件是清单里的 48 个
+    const sizes = batchSizes(events);
+    expect(sizes).toEqual([
+      [1, 2_412_544],
+      [2, 196_608],
+      [40, 20_971_520],
+      [1_200, 24_576_000],
+      [24, 7_864_320],
+      [48, 96_468_992],
+    ]);
+    expect(new Set(sizes.map(([files]) => files)).size).toBe(sizes.length);
+    expect(new Set(sizes.map(([, bytes]) => bytes)).size).toBe(sizes.length);
+    for (const [key, batch] of downloadsByStep(events)) {
+      if (batch.length === 0) continue;
+      const [first] = batch;
+      // 第一条还没下完（前端不认一出现就下完的批次），字节只增不减，最后一条全部下完；整批的文件数与总字节不变
+      expect(first.finished, key).toBeLessThan(first.total);
+      expect(first.bytes, key).toBeGreaterThan(0);
+      const bytes = batch.map((b) => b.bytes);
+      expect(bytes, key).toEqual([...bytes].sort((a, b) => a - b));
+      expect(batch[batch.length - 1], key).toMatchObject({ finished: first.total, bytes: first.total_bytes, transferred: first.total_bytes });
+      expect(new Set(batch.map((b) => `${b.total}:${b.total_bytes}`)).size, key).toBe(1);
+    }
+  });
+
+  it("本地文件：没有下载整合包本体这一步，读包是第 0 步；Fabric 的确切表排进取 profile 与加载器库", async () => {
+    const { events } = await run("t-local-steps", local, null);
+    const phases = phasesOf(events);
+    expect(phases[0]).toEqual({ task_id: "t-local-steps", kind: "phase", plan: PRELUDE_FILE, index: 0 });
+    expect(phases.slice(1).map((p) => p.plan)).toEqual(Array.from({ length: FABRIC_FILE.length - 1 }, () => FABRIC_FILE));
+    expect(walkedOf(events)).toEqual(FABRIC_FILE);
+    expect(phases.flatMap((p) => p.plan)).not.toContain("modpack_download");
+    expectWalkRules(phases);
+    expect(batchSizes(events)[0]).toEqual([2, 196_608]);
+  });
+
+  it("Forge 整合包：确切的表在 natives 之后排进 Java、加载器安装器、加载器库与处理器，Java 与处理器只报步骤", async () => {
+    const { result, events } = await run("t-forge", RLCRAFT, "硬核生存");
+    expect(result).toMatchObject({ version_id: "硬核生存" });
+    const phases = phasesOf(events);
+    expect(phases.slice(0, 2).map((p) => p.plan)).toEqual([PRELUDE_PLATFORM, PRELUDE_PLATFORM]);
+    expect(phases.slice(2).map((p) => p.plan)).toEqual(Array.from({ length: FORGE_PLATFORM.length - 2 }, () => FORGE_PLATFORM));
+    expect(walkedOf(events)).toEqual(FORGE_PLATFORM);
+    expectWalkRules(phases);
+    expect(snapshotCounts(events)).toEqual([
+      ["modpack_download", 5],
+      ["modpack_read", 0],
+      ["metadata", 5],
+      ["libraries", 5],
+      ["assets", 5],
+      ["natives", 0],
+      ["java", 0],
+      ["loader_installer", 5],
+      ["loader_libraries", 5],
+      ["loader_processors", 0],
+      ["modpack_files", 5],
+      ["modpack_overrides", 0],
+      ["template", 0],
+    ]);
+    const sizes = batchSizes(events);
+    expect(sizes).toEqual([
+      [1, 57_671_680],
+      [2, 196_608],
+      [40, 20_971_520],
+      [1_200, 24_576_000],
+      [1, 6_291_456],
+      [24, 7_864_320],
+      [182, 524_288_000],
+    ]);
+    expect(new Set(sizes.map(([files, bytes]) => `${files}:${bytes}`)).size).toBe(sizes.length);
+  });
+
+  it("关掉「新实例沿用默认设置」：确切的表没有套默认设置，以解覆盖文件收尾", async () => {
+    await updateConfig({ newInstanceTemplate: false });
+    const { events } = await run("t-no-template", { kind: "file", path: "D:\\Downloads\\Pack.zip" }, null);
+    const exact = FABRIC_FILE.filter((key) => key !== "template");
+    expect(walkedOf(events)).toEqual(exact);
+    expect(phasesOf(events).at(-1)).toEqual({ task_id: "t-no-template", kind: "phase", plan: exact, index: exact.length - 1 });
+  });
+
+  it("受限文件没认领完：读包时整体失败，只报过读包那一步；都认领后放入手动下载的文件与远程文件的下载都在 modpack_files 这一步里", async () => {
+    const first = await run("t-blocked-steps", BLOCKED, "受限包");
+    const files = blockedFilesOf(first.result);
+    if (files === null) throw new Error("应以 distribution_blocked 失败");
+    expect(files.map((f) => f.file_id)).toEqual([5000001, 5000002]);
+    expect(first.events).toEqual([
+      { task_id: "t-blocked-steps", kind: "phase", plan: PRELUDE_FILE, index: 0 },
+      { task_id: "t-blocked-steps", kind: "stage", message: "读取整合包 Blocked-Pack：48 个远程文件，57 个覆盖文件" },
+    ]);
+
+    seedMockDownloads(["blocked-a.jar", "blocked-b.jar"]);
+    expect(await claimBlockedFiles(MOCK_DOWNLOADS_DIR, files)).toMatchObject({ missing: [] });
+    const second = await run("t-blocked-steps-2", BLOCKED, "受限包");
+    expect(second.result).toMatchObject({ version_id: "受限包" });
+    expect(walkedOf(second.events)).toEqual(FABRIC_FILE);
+    const at = (key: string) => second.events.findIndex((e) => e.kind === "phase" && e.plan[e.index] === key);
+    const filesStep = second.events.slice(at("modpack_files") + 1, at("modpack_overrides"));
+    expect(filesStep.filter((e) => e.kind !== "download")).toEqual([
+      { task_id: "t-blocked-steps-2", kind: "stage", message: "放入 2 个手动下载的文件" },
+      { task_id: "t-blocked-steps-2", kind: "stage", message: "开始下载 Blocked-Pack 的 48 个文件" },
+    ]);
+    expect(filesStep.filter((e): e is DownloadEvent => e.kind === "download").map((e) => [e.total, e.finished])).toEqual([
+      [48, 9],
+      [48, 19],
+      [48, 28],
+      [48, 38],
+      [48, 48],
+    ]);
+    expect(second.events.filter((e) => e.kind === "stage" && e.message === "放入 2 个手动下载的文件")).toHaveLength(1);
+  });
+
+  it("走到装资源那一步时取消：这一拍就以 cancelled 结束，之后不再报步骤与下载，不建实例，名字照常可用", async () => {
+    const events: CoreEvent[] = [];
+    const cancel: { pending: Promise<boolean> | null } = { pending: null };
+    const off = await listen<CoreEvent>(CORE_EVENT, (e) => {
+      events.push(e);
+      if (e.kind === "phase" && e.plan[e.index] === "assets") cancel.pending = cancelTask("t-mid");
+    });
+    const error = await installModpack("t-mid", mockGameDir(), local, "半途", []).catch((e: unknown) => e);
+    off();
+    expect(error).toMatchObject({ code: "cancelled" });
+    expect(await cancel.pending).toBe(true);
+    expect(walkedOf(events)).toEqual(["modpack_read", "metadata", "libraries", "assets"]);
+    expect(events.at(-1)).toEqual({ task_id: "t-mid", kind: "phase", plan: FABRIC_FILE, index: 3 });
+    expect((await listInstances()).map((i) => i.id)).not.toContain("半途");
+    expect((await installModpack("t-after-mid", mockGameDir(), local, "半途", [])).version_id).toBe("半途");
+  });
+
+  it("节奏：默认的快节奏在假时钟上也走得完、步数最多的 Forge 平台包不超过原来的 60 ms；预览节奏下报下载的一步走 1.5 秒、别的步骤 0.6 秒，整次 14.1 秒", async () => {
+    // 先在真实计时器下走一趟桥：假后端经动态 import 载入，假时钟推不动那段 I/O
+    await listInstances();
+    vi.useFakeTimers();
+    const start = Date.now();
+    const fastAt: number[] = [];
+    const fast = installModpack("t-fast", mockGameDir(), RLCRAFT, "快节奏", []).then(() => fastAt.push(Date.now()));
+    // 开着假计时器的别的用例按原来的 4 拍 x 15 ms 推进时钟
+    await vi.advanceTimersByTimeAsync(60);
+    expect(fastAt).toHaveLength(1);
+    expect(fastAt[0] - start).toBeLessThanOrEqual(60);
+    await fast;
+
+    setMockModpackPace("preview");
+    try {
+      const marks: [string, number][] = [];
+      const off = await listen<CoreEvent>(CORE_EVENT, (e) => {
+        if (e.kind === "phase") marks.push([e.plan[e.index], Date.now()]);
+        if (e.kind === "stage" && e.message === "整合包已导入为实例 慢节奏") marks.push(["done", Date.now()]);
+      });
+      const begin = Date.now();
+      const slow = installModpack("t-preview", mockGameDir(), RLCRAFT, "慢节奏", []);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect((await slow).version_id).toBe("慢节奏");
+      off();
+      expect(marks[0]).toEqual(["modpack_download", begin]);
+      expect(marks.slice(0, -1).map(([key, at], i) => [key, marks[i + 1][1] - at])).toEqual([
+        ["modpack_download", 1500],
+        ["modpack_read", 600],
+        ["metadata", 1500],
+        ["libraries", 1500],
+        ["assets", 1500],
+        ["natives", 600],
+        ["java", 600],
+        ["loader_installer", 1500],
+        ["loader_libraries", 1500],
+        ["loader_processors", 600],
+        ["modpack_files", 1500],
+        ["modpack_overrides", 600],
+        ["template", 600],
+      ]);
+      expect(marks[marks.length - 1]).toEqual(["done", begin + 14_100]);
+    } finally {
+      setMockModpackPace("fast");
+    }
+  });
+});
+
 describe("导出整合包 mock", () => {
   const FABRIC = "1.20.1-Fabric";
   const DEST = "D:\\分享\\测试包 2.0.mrpack";
   const base: ModpackExportOptions = { destination: DEST, name: "测试包", version: "2.0", summary: null, extras: ["config", "options"], include_disabled: true };
   const errorOf = (p: Promise<unknown>) => p.then(() => null, (e: unknown) => e);
+  // 与后端同一份步骤表，每次导出都报全
+  const EXPORT_PLAN = ["export_hash", "export_identify", "export_pack", "export_verify"];
+  type PhaseEvent = Extract<CoreEvent, { kind: "phase" }>;
+  const phasesOf = (events: readonly CoreEvent[]) => events.filter((e): e is PhaseEvent => e.kind === "phase");
+
+  /**
+   * 订阅好之后给出「这次导出走到 key 那一步」时兑现的 Promise。快节奏每拍只让出一次事件循环，等计时器会等过整次导出；
+   * 步骤事件是同步推出的，它兑现时导出还停在这一步里。
+   */
+  async function untilPhase(taskId: string, key: string): Promise<{ reached: Promise<void> }> {
+    let reach = (): void => {
+      throw new Error("Promise 的执行函数同步运行，reach 应已换成 resolve");
+    };
+    const reached = new Promise<void>((resolve) => {
+      reach = resolve;
+    });
+    const off = await listen<CoreEvent>(CORE_EVENT, (e) => {
+      if (e.task_id !== taskId || e.kind !== "phase" || e.plan[e.index] !== key) return;
+      off();
+      reach();
+    });
+    return { reached };
+  }
 
   it("预览按卷宗分组：Modrinth 来源的进索引，没有来源的打包进文件，停用的单列；额外项的默认勾选与后端同一规则", async () => {
     const preview = await previewModpackExport(FABRIC);
@@ -573,9 +858,10 @@ describe("导出整合包 mock", () => {
     expect(await errorOf(exportModpack("t-busy", mockGameDir(), FABRIC, base))).toMatchObject({ code: "instance_busy", detail: { id: FABRIC, activity: "renaming" } });
     renaming.release();
 
+    const { reached } = await untilPhase("t-hold", "export_pack");
     const running = exportModpack("t-hold", mockGameDir(), FABRIC, base);
-    // 命令经异步的桥才到假后端：等它占住实例、停在第一段打包进度上
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    // 命令经异步的桥才到假后端：等它占住实例、停在打包这一步上
+    await reached;
     expect(() => acquireMockInstance(FABRIC, "renaming")).toThrow(expect.objectContaining({ code: "instance_busy", detail: { id: FABRIC, activity: "modifying" } }));
     // 与游戏启动兼容
     expect(() => acquireMockInstance(FABRIC, "launching").release()).not.toThrow();
@@ -612,8 +898,9 @@ describe("导出整合包 mock", () => {
   });
 
   it("导出进行中批量启停与忽略更新照常可用；改过的盘面在下一次预览里体现，忽略更新的 Mod 仍走索引", async () => {
+    const { reached } = await untilPhase("t-mods", "export_pack");
     const running = exportModpack("t-mods", mockGameDir(), FABRIC, base);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await reached;
     expect(await setModsEnabled(FABRIC, ["AANobbMI-0.5.3.jar"], false)).toEqual([
       { status: "ok", file_name: "AANobbMI-0.5.3.jar", path: "C:/Games/.minecraft/versions/1.20.1-Fabric/mods/AANobbMI-0.5.3.jar.disabled" },
     ]);
@@ -660,6 +947,115 @@ describe("导出整合包 mock", () => {
     // 不带停用的 Mod、不带额外项：只剩不在 Modrinth 上的那一个
     const without = await exportModpack("t-ok2", mockGameDir(), FABRIC, { ...base, include_disabled: false, extras: [] });
     expect([without.override_files, without.disabled_mods, without.bytes]).toEqual([1, 0, 4096 + 512 * 3]);
+  });
+
+  it("步骤事件：固定四步按表报全、下标依次 0 到 3；每一步排在它那条阶段文字之前，打包快照都落在打包与校验两步之间", async () => {
+    const events: CoreEvent[] = [];
+    const off = await listen<CoreEvent>(CORE_EVENT, (e) => events.push(e));
+    await exportModpack("t-steps", mockGameDir(), FABRIC, base);
+    off();
+    const step = (index: number) => ({ task_id: "t-steps", kind: "phase", plan: EXPORT_PLAN, index });
+    const stage = (message: string) => ({ task_id: "t-steps", kind: "stage", message });
+    expect(phasesOf(events)).toEqual([step(0), step(1), step(2), step(3)]);
+    // 3 个 Mod 里 2 个走索引、1 个不在 Modrinth 上；打包 config 37 个、options 1 个、那个 Mod 与 1 个停用的 Mod
+    expect(events.filter((e) => e.kind !== "download")).toEqual([
+      step(0),
+      stage("读取 3 个 Mod 文件"),
+      step(1),
+      stage("向 Modrinth 查询 3 个 Mod"),
+      step(2),
+      { task_id: "t-steps", kind: "warning", message: "1 个 Mod 不在 Modrinth 上，已直接打包进文件" },
+      stage("打包 40 个文件"),
+      step(3),
+      stage("校验导出的整合包"),
+      stage(`已导出到 ${DEST}`),
+    ]);
+    const at = (index: number) => events.findIndex((e) => e.kind === "phase" && e.index === index);
+    const packing = events.slice(at(2) + 1, at(3));
+    expect(packing.map((e) => e.kind)).toEqual(["warning", "stage", "download", "download", "download", "download", "download"]);
+    expect(packing.flatMap((e) => (e.kind === "download" ? [[e.finished, e.total]] : []))).toEqual([
+      [0, 40],
+      [10, 40],
+      [20, 40],
+      [30, 40],
+      [40, 40],
+    ]);
+    expect(events.filter((e) => e.kind === "download")).toHaveLength(5);
+  });
+
+  it("没有 Mod、不打包任何文件的导出：四步照样按表报全", async () => {
+    const VANILLA = "1.21";
+    const preview = await previewModpackExport(VANILLA);
+    expect([preview.indexed.length, preview.bundled.length]).toEqual([0, 0]);
+    const events: CoreEvent[] = [];
+    const off = await listen<CoreEvent>(CORE_EVENT, (e) => events.push(e));
+    const outcome = await exportModpack("t-empty", mockGameDir(), VANILLA, { ...base, extras: [], include_disabled: false });
+    off();
+    expect([outcome.indexed_files, outcome.override_files]).toEqual([0, 0]);
+    expect(phasesOf(events)).toEqual(EXPORT_PLAN.map((_, index) => ({ task_id: "t-empty", kind: "phase", plan: EXPORT_PLAN, index })));
+    expect(events.some((e) => e.kind === "warning")).toBe(false);
+  });
+
+  it.each([
+    ["export_identify", ["export_hash", "export_identify"], 0],
+    ["export_pack", ["export_hash", "export_identify", "export_pack"], 1],
+  ] as const)("走到 %s 时取消：这一拍就以 cancelled 结束，之后不再报步骤，打包进度停在原处，实例放开", async (key, walked, snapshots) => {
+    const events: CoreEvent[] = [];
+    const cancel: { pending: Promise<boolean> | null } = { pending: null };
+    const off = await listen<CoreEvent>(CORE_EVENT, (e) => {
+      events.push(e);
+      if (e.kind === "phase" && e.plan[e.index] === key) cancel.pending = cancelTask("t-mid");
+    });
+    const error = await errorOf(exportModpack("t-mid", mockGameDir(), FABRIC, base));
+    off();
+    expect(error).toMatchObject({ code: "cancelled" });
+    expect(await cancel.pending).toBe(true);
+    expect(phasesOf(events).map((p) => p.plan[p.index])).toEqual(walked);
+    const afterStep = events.slice(events.findIndex((e) => e.kind === "phase" && e.plan[e.index] === key) + 1);
+    expect(afterStep.some((e) => e.kind === "phase")).toBe(false);
+    expect(events.filter((e) => e.kind === "download")).toHaveLength(snapshots);
+    expect(events.some((e) => e.kind === "stage" && e.message === "校验导出的整合包")).toBe(false);
+    expect(() => acquireMockInstance(FABRIC, "renaming").release()).not.toThrow();
+  });
+
+  it("节奏：默认的快节奏在假时钟上也走得完、不超过原来的 60 ms；预览节奏下不报进度的三步各 0.6 秒、打包一步按拍推 1.2 秒，整次 3 秒", async () => {
+    // 先在真实计时器下走一趟桥：假后端经动态 import 载入，假时钟推不动那段 I/O
+    await listInstances();
+    vi.useFakeTimers();
+    const start = Date.now();
+    const fastAt: number[] = [];
+    const fast = exportModpack("t-fast", mockGameDir(), FABRIC, base).then(() => fastAt.push(Date.now()));
+    // 开着假计时器的别的用例按原来的 4 拍 x 15 ms 推进时钟
+    await vi.advanceTimersByTimeAsync(60);
+    expect(fastAt).toHaveLength(1);
+    expect(fastAt[0] - start).toBeLessThanOrEqual(60);
+    await fast;
+
+    setMockModpackPace("preview");
+    try {
+      const marks: [string, number][] = [];
+      const packed: number[] = [];
+      const off = await listen<CoreEvent>(CORE_EVENT, (e) => {
+        if (e.kind === "phase") marks.push([e.plan[e.index], Date.now()]);
+        if (e.kind === "download") packed.push(Date.now());
+        if (e.kind === "stage" && e.message === `已导出到 ${DEST}`) marks.push(["done", Date.now()]);
+      });
+      const begin = Date.now();
+      const slow = exportModpack("t-preview", mockGameDir(), FABRIC, base);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect((await slow).path).toBe(DEST);
+      off();
+      expect(marks.map(([key, at]) => [key, at - begin])).toEqual([
+        ["export_hash", 0],
+        ["export_identify", 600],
+        ["export_pack", 1200],
+        ["export_verify", 2400],
+        ["done", 3000],
+      ]);
+      expect(packed.map((at) => at - begin)).toEqual([1200, 1500, 1800, 2100, 2400]);
+    } finally {
+      setMockModpackPace("fast");
+    }
   });
 
   it("在资源管理器里选中：与后端一样只放行这次导出写成的文件与备份区里的路径，别的路径、相对路径报 invalid_argument", async () => {

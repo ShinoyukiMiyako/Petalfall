@@ -24,7 +24,7 @@ import { usePaintedOnce } from "../lib/usePaintedOnce";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { clearableFinishedCount, findInstance } from "../state/selectors";
 import type { LauncherState } from "../state/store";
-import { isActiveTask, progressTrack } from "../state/tasks";
+import { batchTrack, isActiveTask, progressTrack } from "../state/tasks";
 import { Appear } from "../ui/Appear";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
@@ -60,9 +60,11 @@ export function overallProgress(tasks: readonly Task[]): number | null {
 /**
  * 总进度环的标识：活动任务连同各自所在的批次。有任务结束或入队、某个任务换了批次时标识就变，
  * 环直接跳到按新集合加权的值，不从旧值倒退着动画过去；标识不变时只增不减。
+ * 权重是各任务当前这一批的大小，所以分步任务也按批次认（batchTrack），不用它整次尝试不变的 progressTrack：
+ * 它换批次时权重跟着变，几个任务并行时加权值可能往下走，标识不变的话环就停在偏高的旧值上。
  */
 export function overallTrack(tasks: readonly Task[]): string {
-  return tasks.filter(isActiveTask).map(progressTrack).sort().join("\n");
+  return tasks.filter(isActiveTask).map(batchTrack).sort().join("\n");
 }
 
 const NOT_FINISHING: ReadonlySet<string> = new Set();

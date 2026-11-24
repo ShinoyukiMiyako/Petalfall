@@ -899,7 +899,7 @@ export const TASK_TEXT = {
   attempt: (k: number) => `第 ${k} 次尝试`,
 } as const;
 
-/** 新建、补全实例的各步；键与后端 InstallPhase::key 一致。「校验游戏文件」「解压本地库」与启动阶段表同一说法。 */
+/** 新建、补全、导入与移动实例，导出整合包，恢复存档备份的各步；键与后端 InstallPhase::key 一致。「校验游戏文件」「解压本地库」与启动阶段表同一说法，「包内自带」与导入预览同一说法。 */
 export const INSTALL_PHASE_LABEL: Readonly<Record<InstallPhase, string>> = {
   metadata: "获取版本信息",
   loader_profile: "获取加载器信息",
@@ -912,10 +912,21 @@ export const INSTALL_PHASE_LABEL: Readonly<Record<InstallPhase, string>> = {
   loader_processors: "执行加载器安装器",
   verify: "校验游戏文件",
   template: "沿用默认设置",
+  modpack_download: "下载整合包",
+  modpack_read: "读取整合包",
+  modpack_files: "下载 Mod 与其他文件",
+  modpack_overrides: "解出包内自带的文件",
   move_dependencies: "补齐共用的游戏文件",
   move_copy: "复制实例与存档备份",
   move_verify: "校验复制出的文件",
   move_commit: "移入目标游戏目录",
+  export_hash: "读取 Mod 文件",
+  export_identify: "向 Modrinth 查询 Mod",
+  export_pack: "打包文件",
+  export_verify: "校验导出的整合包",
+  restore_verify: "校验备份",
+  restore_extract: "解压备份",
+  restore_commit: "换上恢复出的存档",
 };
 
 /** 分步任务当前在第几步。long 用在横幅这类整句处，short 用在胶囊、任务行这类窄处。 */

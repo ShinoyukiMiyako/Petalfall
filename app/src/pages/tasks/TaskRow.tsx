@@ -1,11 +1,12 @@
-// 任务行：类型图标（带结局角标）、标题与类别标、详情、进度条（仅活动任务）、元信息行、右侧操作。
+// 任务行：类型图标（带结局角标）、标题与类别标、详情、进度条（仅活动任务；分步任务两条，上面整体、下面这一步）、元信息行、右侧操作。
 
 import { Icon, type IconName } from "../../art/Icon";
 import { TASK_KIND_LABEL, taskStatusLabel } from "../../copy/flows";
 import type { Task, TaskStatus } from "../../domain/types";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { useDisplayCount, useDisplaySpeed } from "../../lib/progress-display";
 import { cx } from "../../lib/util";
-import { isActiveTask, progressTrack, settledOnRestart } from "../../state/tasks";
+import { isActiveTask, isPhasedTask, progressTrack, settledOnRestart, stageProgress } from "../../state/tasks";
 import { Button } from "../../ui/Button";
 import { IconButton } from "../../ui/IconButton";
 import { ListRow } from "../../ui/ListRow";
@@ -69,6 +70,22 @@ function TaskMeta({ task, context }: { task: Task; context: TaskMetaContext }) {
   );
 }
 
+/**
+ * 分步任务这一步走了多少。整体进度条在一步里只挪一小段，装到「执行加载器安装器」这类给不出进度的步骤还会停住不动，
+ * 单看它分不清是在干活还是卡住了：这一条照当前这一步的那批进度走，这一步给不出进度时画不定进度。
+ * 排队中与整体进度条一样是静态空轨道。
+ *
+ * 给不出进度不马上换成不定进度：多数步骤进来几十毫秒就有第一条快照，换过去再换回来只是闪一下（减少动画时不定进度是
+ * 整条满宽的脉冲，闪得更显眼）。用全站加载态的那个门：等够 LOADING_DELAY_MS 仍给不出才换，换了至少停留同样长；
+ * 接连几步都给不出时一直是不定进度，不逐步重新等。
+ */
+function StageBar({ task }: { task: Task }) {
+  const stage = stageProgress(task);
+  const gate = useLoadingGate(task.status === "running" && stage.value === null);
+  const value = task.status === "queued" ? 0 : gate.view === "skeleton" ? null : stage.value === null ? 0 : stage.value;
+  return <ProgressBar className={styles.stageBar} value={value} size="sm" track={stage.track} label={TASKS_COPY.row.stageLabel(task.title)} />;
+}
+
 export interface TaskRowProps {
   task: Task;
   /**
@@ -129,6 +146,8 @@ export function TaskRow({ task, finishing, meta, hasInstance, retryBlocked, onCa
               label={TASKS_COPY.row.progressLabel(task.title)}
             />
           )}
+          {/* 按任务的命令给，不等第一条步骤事件：槽位从排队起就占着，轮到运行、步骤报来时行高不变，下面的行不被顶开 */}
+          {active && isPhasedTask(task) && <StageBar task={task} />}
           <TaskMeta task={task} context={meta} />
         </span>
       }

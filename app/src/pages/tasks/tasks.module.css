@@ -377,6 +377,12 @@
   gap: var(--sk-space-6);
 }
 
+/* 这一步的进度条用次要文字色，不用主色：上下两条摆在一起时一眼分得出上面是整体、下面是这一步。
+   它是要读的图形，对轨道按非文字 3:1 验收（tasks-contrast.test.ts） */
+.rowFoot > .stageBar {
+  --bar-fill: var(--sk-text-2);
+}
+
 .rowMeta {
   display: flex;
   justify-content: space-between;

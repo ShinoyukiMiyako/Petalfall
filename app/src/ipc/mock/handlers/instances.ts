@@ -904,7 +904,7 @@ function mockInstallPlan(loader: LoaderChoice | null, useTemplate: boolean): Ins
 /** 只补全、不重装时的步骤表，与后端 repair_instance 的 Complete 一致。 */
 const MOCK_COMPLETE_PLAN: readonly InstallPhase[] = ["libraries", "assets", "natives"];
 
-function phase(taskId: string, plan: readonly InstallPhase[], key: InstallPhase): void {
+export function phase(taskId: string, plan: readonly InstallPhase[], key: InstallPhase): void {
   const index = plan.indexOf(key);
   if (index === -1) throw new Error(`步骤 ${key} 不在这次的步骤表 ${plan.join()} 里`);
   emitMockEvent(CORE_EVENT, { kind: "phase", task_id: taskId, plan: [...plan], index });
@@ -1637,6 +1637,9 @@ export function autoBackupMockWorlds(id: string, worlds: readonly string[]): str
   });
 }
 
+/** 与后端同一份步骤表：每次恢复都按这三步报全，现在的存档不在时换上那一步也照报。 */
+const RESTORE_PLAN: readonly InstallPhase[] = ["restore_verify", "restore_extract", "restore_commit"];
+
 async function restoreWorldBackup(args: MockArgs): Promise<RestoreResultDto> {
   const taskId = str(args, "taskId");
   const id = str(args, "id");
@@ -1647,10 +1650,13 @@ async function restoreWorldBackup(args: MockArgs): Promise<RestoreResultDto> {
     const instance = requireInstance(id);
     const entry = worldBackups(id, world).find((b) => b.file === file);
     if (entry === undefined) throw backupNotFound(id, world, file);
+    phase(taskId, RESTORE_PLAN, "restore_verify");
     stage(taskId, "正在校验备份");
+    phase(taskId, RESTORE_PLAN, "restore_extract");
     stage(taskId, "正在解压备份");
     await fakePack(taskId, entry.size_bytes);
     const existing = instance.content.worlds.find((w) => w.dir_name === world);
+    phase(taskId, RESTORE_PLAN, "restore_commit");
     if (existing !== undefined) stage(taskId, "正在把现在的存档移入回收站");
     const restored: WorldDto = {
       dir_name: world,

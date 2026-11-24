@@ -391,7 +391,7 @@ describe("分步任务的步骤不进任务日志", () => {
     const [task] = store.getState().tasks;
     expect(task.status).toBe("running");
     emit(CORE_EVENT, { kind: "phase", task_id: `${task.id}#1`, plan: ["metadata", "libraries", "assets", "natives"], index: 1 });
-    expect(store.getState().tasks[0].phase).toEqual({ plan: ["metadata", "libraries", "assets", "natives"], index: 1, batch: null });
+    expect(store.getState().tasks[0].phase).toEqual({ plan: ["metadata", "libraries", "assets", "natives"], index: 1, batch: null, fraction: 0 });
     await vi.advanceTimersByTimeAsync(TASK_JOURNAL_DEBOUNCE_MS);
     const saved = callsOf(ipc, "save_task_journal").at(-1);
     if (saved === undefined) throw new Error("新建入队后应写回任务日志");

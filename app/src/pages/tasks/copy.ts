@@ -57,6 +57,7 @@ export const TASKS_COPY = {
     viewInstance: "查看实例",
     failedTag: "失败",
     progressLabel: (title: string) => joinMixed(title, "的进度"),
+    stageLabel: (title: string) => joinMixed(title, "当前这一步的进度"),
     sizePending: "大小待定",
     waitingData: "等待数据",
     transfer: (done: string, total: string) => `${done} / ${total}`,

@@ -404,7 +404,7 @@ describe("胶囊宽度：文字槽与布局测量的依据", () => {
   });
 
   it("安装中：百分比不进依据，换步骤进", () => {
-    const phase = (index: number) => ({ plan: ["metadata", "libraries", "assets"] as const, index, batch: null });
+    const phase = (index: number) => ({ plan: ["metadata", "libraries", "assets"] as const, index, batch: null, fraction: 0 });
     const task: Task = { ...installTask("A", "t1", "running", 0.2), phase: phase(0) };
     const at = (t: Task) => key({ kind: "installing", task: t, queuePosition: null });
     expect(at({ ...task, progress: 0.7 })).toBe(at(task));

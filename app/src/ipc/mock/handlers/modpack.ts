@@ -10,6 +10,7 @@
 // 认领状态不影响结果。探不到（401、403、404、410）仍要手动下载的那一支不在夹具里。
 // 导出读 Mod mock 里的同一份 mods 目录与卷宗，额外项的文件数与体积用固定表（浏览器里没有磁盘）。
 
+import type { InstallPhase } from "../../../domain/types";
 import type { PlatformId } from "../../discover";
 import { IpcError } from "../../errors";
 import { checkInstanceName, type InstanceDto, type NameRule } from "../../instances";
@@ -36,9 +37,9 @@ import type {
 import { DISTRIBUTION_BLOCKED, EXPORT_EXTRAS, parseBlockedFiles } from "../../modpack";
 import { findMockSource, type MockPackManifest } from "../catalog";
 import type { MockArgs, MockHandlers } from "../types";
-import { ensureMockGameDir, MOCK_DATA_DIR, mockDownloadRestrictedCurseforgeFiles, tauriArgError } from "./config";
-import { MOCK_GAME_DIR, argReader, emitCoreEvent, parsePlatform, runMockTask, simulateDownload } from "./discover";
-import { NAME_MESSAGES, acquireMockInstance, acquireMockInstanceWithBases, addMockInstance, ensureMockSavesSettledForReading, handlers as instanceHandlers, markMockSavesRead, recordMockExport, mockInstanceIds, mockInstanceWorlds, type MockInstanceHold } from "./instances";
+import { ensureMockGameDir, MOCK_DATA_DIR, mockDownloadRestrictedCurseforgeFiles, mockNewInstanceTemplate, tauriArgError } from "./config";
+import { MOCK_GAME_DIR, argReader, emitCoreEvent, parsePlatform, runMockTask } from "./discover";
+import { NAME_MESSAGES, acquireMockInstance, acquireMockInstanceWithBases, addMockInstance, ensureMockSavesSettledForReading, handlers as instanceHandlers, markMockSavesRead, recordMockExport, mockInstanceIds, mockInstanceWorlds, MOCK_INSTALL_STEPS, MOCK_STEP_MS, phase, type MockInstanceHold } from "./instances";
 import { DISABLED_SUFFIX, ledgerKey, mockInstance, mockModsDir, placeMockPackMods } from "./mods";
 import { isMockTaskCancelled } from "./tasks";
 
@@ -326,6 +327,131 @@ function loaderDto(loader: PackLoader | null) {
   return loader === null ? null : { kind: loader.kind, version: loader.version };
 }
 
+// ---------------------------------------------------------------- 导入与导出共用的节奏
+
+/**
+ * 假导入与假导出的节奏。默认的快节奏给 vitest：一次导入要走三四十拍，几十次导入、导出大多跑在真实计时器上，而 Windows 上的
+ * 计时器哪怕设 0 ms 也要等约 15 ms，所以快节奏每拍只让出一次事件循环、不经计时器。浏览器预览由 mock 的入口换成与假安装
+ * 同一拍（MOCK_STEP_MS）：导入里报下载的一步走 1.5 秒、整次十几秒，导出整次 3 秒，总进度与阶段进度两条都看得清。
+ */
+export type MockModpackPace = "fast" | "preview";
+/** 每一拍的毫秒数；0 是只让出一次事件循环。 */
+const PACE_STEP_MS: Readonly<Record<MockModpackPace, number>> = { fast: 0, preview: MOCK_STEP_MS };
+/** 一批假下载推的快照条数，与假安装一致。 */
+const BATCH_SNAPSHOTS = MOCK_INSTALL_STEPS;
+/** 不报下载的一步停的拍数：预览里看得见它，又比报下载的步骤短。 */
+const IDLE_STEPS = 2;
+let paceStepMs = PACE_STEP_MS.fast;
+
+/** 换假导入与假导出的节奏。不随 reset 复位：它与命令延迟一样是看界面用的开关，不是假数据。 */
+export function setMockModpackPace(pace: MockModpackPace): void {
+  paceStepMs = PACE_STEP_MS[pace];
+}
+
+/**
+ * 等一拍，等完查取消。快节奏在 Node 里用 setImmediate：开着假计时器的用例照样要推时钟才走，假时钟上每拍约 1 ms，
+ * 一次导入或导出都不超过原来的 4 拍 x 15 ms；浏览器里没有 setImmediate，退回 0 ms 的计时器。
+ */
+async function paceTick(taskId: string): Promise<void> {
+  await new Promise<void>((resolve) => {
+    if (paceStepMs > 0) setTimeout(resolve, paceStepMs);
+    else if (typeof setImmediate === "function") setImmediate(resolve);
+    else setTimeout(resolve, 0);
+  });
+  cancelledCheck(taskId);
+}
+
+/** 不报进度的一步：停 IDLE_STEPS 拍，期间被取消即以 cancelled 拒绝。 */
+async function idleStep(taskId: string): Promise<void> {
+  for (let tick = 0; tick < IDLE_STEPS; tick++) await paceTick(taskId);
+}
+
+// ---------------------------------------------------------------- 导入的步骤
+
+interface MockBatch {
+  files: number;
+  bytes: number;
+}
+
+/**
+ * 一批假下载：BATCH_SNAPSHOTS 条快照，每条之前等一拍。字节按拍匀速走，单个文件的一批也看得出在走；文件数跟着取整，
+ * 最后一条才全部下完（前端不认一出现就下完的批次）。速度按预览的节奏算，测试不看它。
+ */
+async function fakeBatch(taskId: string, batch: MockBatch): Promise<void> {
+  const speed = Math.round(batch.bytes / ((BATCH_SNAPSHOTS * MOCK_STEP_MS) / 1000));
+  for (let step = 1; step <= BATCH_SNAPSHOTS; step++) {
+    await paceTick(taskId);
+    const bytes = Math.round((batch.bytes * step) / BATCH_SNAPSHOTS);
+    const finished = step === BATCH_SNAPSHOTS ? batch.files : Math.floor((batch.files * step) / BATCH_SNAPSHOTS);
+    emitCoreEvent({ task_id: taskId, kind: "download", total: batch.files, finished, bytes, total_bytes: batch.bytes, transferred: bytes, speed });
+  }
+}
+
+/** 装原版与加载器那几步。 */
+type RuntimeStep = "metadata" | "libraries" | "assets" | "natives" | "loader_profile" | "java" | "loader_installer" | "loader_libraries" | "loader_processors";
+
+/**
+ * 装原版与加载器各步的假下载，null 是这一步不报下载。同一次导入里任意两批的文件数与总字节不会都相同：前端按这两项认批次。
+ * Java 按本机已有合适的版本走，不下载。
+ */
+const RUNTIME_BATCHES: Readonly<Record<RuntimeStep, MockBatch | null>> = {
+  metadata: { files: 2, bytes: 196_608 },
+  libraries: { files: 40, bytes: 20_971_520 },
+  assets: { files: 1_200, bytes: 24_576_000 },
+  natives: null,
+  loader_profile: null,
+  java: null,
+  loader_installer: { files: 1, bytes: 6_291_456 },
+  loader_libraries: { files: 24, bytes: 7_864_320 },
+  loader_processors: null,
+};
+
+function isRuntimeStep(key: InstallPhase): key is RuntimeStep {
+  return key in RUNTIME_BATCHES;
+}
+
+/** 拿到包与读包：平台整合包先下载本体。读完包也改不了这两步，预排的表与确切的表都以它们开头。 */
+function packSteps(source: ModpackSource): InstallPhase[] {
+  return source.kind === "platform" ? ["modpack_download", "modpack_read"] : ["modpack_read"];
+}
+
+/** 与后端 import_prelude_plan 一致：读到包之前只知道来源，加载器、有没有远程文件与覆盖文件都不知道，按没有加载器、两样都有预排。 */
+function preludePlan(source: ModpackSource): InstallPhase[] {
+  return [...packSteps(source), "metadata", "libraries", "assets", "natives", "modpack_files", "modpack_overrides"];
+}
+
+/** 与后端 install_reporting 同一顺序：Fabric、Quilt 先取 profile 再下库；Forge、NeoForge 先找 Java，再下安装器、下库、跑处理器。 */
+function loaderSteps(loader: PackLoader | null): InstallPhase[] {
+  if (loader === null) return [];
+  switch (loader.kind) {
+    case "fabric":
+    case "quilt":
+      return ["loader_profile", "loader_libraries"];
+    case "forge":
+    case "neoforge":
+      return ["java", "loader_installer", "loader_libraries", "loader_processors"];
+  }
+}
+
+/** 读完包之后的确切步骤表，与后端同一规则；claimedFiles 是要放入的手动下载的文件数。 */
+function exactPlan(source: ModpackSource, manifest: MockPackManifest, claimedFiles: number): InstallPhase[] {
+  const plan: InstallPhase[] = [...packSteps(source), "metadata", "libraries", "assets", "natives", ...loaderSteps(manifest.loader)];
+  if (claimedFiles > 0 || manifest.remoteFiles > 0) plan.push("modpack_files");
+  if (manifest.overrideFiles > 0) plan.push("modpack_overrides");
+  if (mockNewInstanceTemplate()) plan.push("template");
+  return plan;
+}
+
+/** 进入一步：有假下载的推一批快照，没有的停 IDLE_STEPS 拍；期间被取消即以 cancelled 拒绝。 */
+async function walk(taskId: string, plan: readonly InstallPhase[], key: InstallPhase, batch: MockBatch | null): Promise<void> {
+  phase(taskId, plan, key);
+  if (batch !== null) {
+    await fakeBatch(taskId, batch);
+    return;
+  }
+  await idleStep(taskId);
+}
+
 function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
   const read = argReader("install_modpack", args);
   const taskId = read.string("taskId");
@@ -353,8 +479,13 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
     hold = acquireMockInstanceWithBases(name, "installing", [pack.minecraft]);
 
     const { manifest } = pack;
+    // 与后端一样，读到包之前先按来源预排一份步骤表，读完再把还没走到的步骤换成确切的
+    const prelude = preludePlan(source);
+    if (source.kind === "platform") await walk(taskId, prelude, "modpack_download", { files: 1, bytes: pack.packBytes });
+    await walk(taskId, prelude, "modpack_read", null);
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `读取整合包 ${pack.name}：${manifest.remoteFiles} 个远程文件，${manifest.overrideFiles} 个覆盖文件` });
     // 开关打开时受限文件与其余远程文件一起下载，没有放入手动下载文件这一步
+    let claimedFiles = 0;
     if (fixture === "blocked" && !mockDownloadRestrictedCurseforgeFiles()) {
       // 与后端一样在读包时判定：还有没认领到的受限文件就整体失败，不建实例
       const missing = unclaimedBlocked();
@@ -362,9 +493,21 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
         const names = missing.map((f) => f.file_name).join("、");
         throw new IpcError(DISTRIBUTION_BLOCKED, `这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：${names}`, { files: missing });
       }
-      emitCoreEvent({ task_id: taskId, kind: "stage", message: `放入 ${BLOCKED_FIXTURE.length} 个手动下载的文件` });
+      claimedFiles = BLOCKED_FIXTURE.length;
     }
-    await simulateDownload(taskId, `${pack.name} 的 ${manifest.remoteFiles} 个文件`, manifest.remoteBytes);
+    const plan = exactPlan(source, manifest, claimedFiles);
+    for (const key of plan) if (isRuntimeStep(key)) await walk(taskId, plan, key, RUNTIME_BATCHES[key]);
+    if (plan.includes("modpack_files")) {
+      phase(taskId, plan, "modpack_files");
+      if (claimedFiles > 0) emitCoreEvent({ task_id: taskId, kind: "stage", message: `放入 ${claimedFiles} 个手动下载的文件` });
+      if (manifest.remoteFiles > 0) {
+        emitCoreEvent({ task_id: taskId, kind: "stage", message: `开始下载 ${pack.name} 的 ${manifest.remoteFiles} 个文件` });
+        await fakeBatch(taskId, { files: manifest.remoteFiles, bytes: manifest.remoteBytes });
+      }
+    }
+    if (plan.includes("modpack_overrides")) await walk(taskId, plan, "modpack_overrides", null);
+    // mock 不真的套默认设置，只按配置报这一步，步骤表与后端一致
+    if (plan.includes("template")) await walk(taskId, plan, "template", null);
     const modpack = {
       platform: pack.platform,
       project_id: source.kind === "platform" ? source.project_id : null,
@@ -637,7 +780,8 @@ function validateExport(id: string, options: ModpackExportOptions): ModpackExpor
   return { destination, name, version, summary: summaryText === "" ? null : summaryText, extras, include_disabled: options.include_disabled };
 }
 
-const exportTick = () => new Promise<void>((resolve) => setTimeout(resolve, 15));
+/** 与后端同一份步骤表：每次导出都按这四步报全，没有 Mod 时认 Mod 那一步也照报。 */
+const EXPORT_PLAN: readonly InstallPhase[] = ["export_hash", "export_identify", "export_pack", "export_verify"];
 
 function cancelledCheck(taskId: string): void {
   if (isMockTaskCancelled(taskId)) throw new IpcError("cancelled", "已取消");
@@ -668,19 +812,25 @@ function exportModpack(args: MockArgs): Promise<ModpackExportOutcomeDto> {
     }
   }
   return runMockTask(taskId, async () => {
+    // 与后端同一规则：任务一开工就报第一步，排在规划与读 Mod 文件之前
+    phase(taskId, EXPORT_PLAN, "export_hash");
     const plan = planExport(id);
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `读取 ${plan.indexed.length + plan.bundled.length} 个 Mod 文件` });
-    cancelledCheck(taskId);
+    await idleStep(taskId);
+    phase(taskId, EXPORT_PLAN, "export_identify");
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `向 Modrinth 查询 ${plan.indexed.length + plan.bundled.length} 个 Mod` });
-    if (plan.bundled.length > 0) emitCoreEvent({ task_id: taskId, kind: "warning", message: `${plan.bundled.length} 个 Mod 不在 Modrinth 上，已直接打包进文件` });
+    await idleStep(taskId);
 
     const extras = plan.extras.filter((e) => options.extras.includes(e.extra));
     const carried = options.include_disabled ? plan.disabled : [];
     const files = extras.reduce((n, e) => n + e.files, 0) + plan.bundled.length + carried.length;
     const bytes = extras.reduce((n, e) => n + e.bytes, 0) + [...plan.bundled, ...carried].reduce((n, m) => n + m.size, 0);
+    phase(taskId, EXPORT_PLAN, "export_pack");
+    // 与后端同一先后：查询回来、进了打包这一步之后才报哪些 Mod 不在 Modrinth 上，排在「打包」阶段文字之前
+    if (plan.bundled.length > 0) emitCoreEvent({ task_id: taskId, kind: "warning", message: `${plan.bundled.length} 个 Mod 不在 Modrinth 上，已直接打包进文件` });
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `打包 ${files} 个文件` });
     for (let quarter = 0; quarter <= 4; quarter++) {
-      cancelledCheck(taskId);
+      if (quarter > 0) await paceTick(taskId);
       emitCoreEvent({
         task_id: taskId,
         kind: "download",
@@ -691,10 +841,10 @@ function exportModpack(args: MockArgs): Promise<ModpackExportOutcomeDto> {
         transferred: 0,
         speed: quarter === 0 ? 0 : 8 * MB,
       });
-      if (quarter < 4) await exportTick();
     }
+    phase(taskId, EXPORT_PLAN, "export_verify");
     emitCoreEvent({ task_id: taskId, kind: "stage", message: "校验导出的整合包" });
-    cancelledCheck(taskId);
+    await idleStep(taskId);
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `已导出到 ${options.destination}` });
     return {
       path: options.destination,

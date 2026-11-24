@@ -38,7 +38,7 @@ describe("任务的适配：任务日志", () => {
       spec: { command: "install_version", args: { id: "1.21.1", targetName: "生存" } },
       game_dir: "D:\\Games\\.minecraft",
     };
-    const task = { ...taskFromRecord(record), phase: { plan: ["metadata", "libraries"] as const, index: 1, batch: { total: 40, totalBytes: 50_000_000 } } };
+    const task = { ...taskFromRecord(record), phase: { plan: ["metadata", "libraries"] as const, index: 1, batch: { total: 40, totalBytes: 50_000_000 }, fraction: 0.5 } };
     expect(taskToRecord(task)).toEqual(record);
     expect(taskFromRecord(record).phase).toBeNull();
   });

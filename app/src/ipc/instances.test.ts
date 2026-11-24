@@ -1055,6 +1055,91 @@ describe("mock：存档备份", () => {
     expect((await listWorldBackups(ID, WORLD)).backups).toHaveLength(3);
   });
 
+  describe("恢复的步骤事件", () => {
+    // 与后端同一份步骤表，每次恢复都报全
+    const RESTORE_PLAN = ["restore_verify", "restore_extract", "restore_commit"];
+    const step = (taskId: string, index: number) => ({ task_id: taskId, kind: "phase", plan: RESTORE_PLAN, index });
+    const stage = (taskId: string, message: string) => ({ task_id: taskId, kind: "stage", message });
+
+    async function recorded(): Promise<CoreEvent[]> {
+      const events: CoreEvent[] = [];
+      await onCoreEvent((e) => events.push(e));
+      return events;
+    }
+
+    it("固定三步按表报全、下标依次 0 到 2；校验与解压排在各自的阶段文字之前，解压进度都在解压与换上之间，换上排在移入回收站之前", async () => {
+      vi.useFakeTimers();
+      const events = await recorded();
+      const [newest] = (await listWorldBackups(ID, WORLD)).backups;
+      const done = restoreWorldBackup("t-steps", mockGameDir(), ID, WORLD, newest.file);
+      await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
+      expect(await done).toEqual({ world: WORLD, previous_in_recycle_bin: true });
+      expect(events.filter((e) => e.kind === "phase")).toEqual([step("t-steps", 0), step("t-steps", 1), step("t-steps", 2)]);
+      expect(events.filter((e) => e.kind !== "download")).toEqual([
+        step("t-steps", 0),
+        stage("t-steps", "正在校验备份"),
+        step("t-steps", 1),
+        stage("t-steps", "正在解压备份"),
+        step("t-steps", 2),
+        stage("t-steps", "正在把现在的存档移入回收站"),
+      ]);
+      const at = (index: number) => events.findIndex((e) => e.kind === "phase" && e.index === index);
+      const extracting = events.slice(at(1) + 2, at(2));
+      expect(extracting.map((e) => e.kind)).toEqual(Array.from({ length: MOCK_INSTALL_STEPS }, () => "download"));
+      expect(extracting.at(-1)).toMatchObject({ finished: 24, total: 24 });
+      expect(events.filter((e) => e.kind === "download")).toHaveLength(MOCK_INSTALL_STEPS);
+    });
+
+    it("现在的存档已经不在：换上那一步照报，之后没有移入回收站", async () => {
+      vi.useFakeTimers();
+      // 删除实例不动备份：另一个隔离实例改成这个名字后，备份还在，存档已经不在了
+      const [newest] = (await listWorldBackups(ID, WORLD)).backups;
+      await deleteInstance(ID);
+      await renameInstance("RLCraft", ID);
+      expect((await listInstanceContent(ID)).worlds.map((w) => w.dir_name)).not.toContain(WORLD);
+      expect((await listWorldBackups(ID, WORLD)).backups.map((b) => b.file)).toContain(newest.file);
+
+      const events = await recorded();
+      const done = restoreWorldBackup("t-absent", mockGameDir(), ID, WORLD, newest.file);
+      await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
+      expect(await done).toEqual({ world: WORLD, previous_in_recycle_bin: false });
+      expect(events.filter((e) => e.kind === "phase")).toEqual([step("t-absent", 0), step("t-absent", 1), step("t-absent", 2)]);
+      expect(events.at(-1)).toEqual(step("t-absent", 2));
+      expect(events.filter((e) => e.kind === "stage").map((e) => (e.kind === "stage" ? e.message : null))).toEqual(["正在校验备份", "正在解压备份"]);
+      expect((await listInstanceContent(ID)).worlds.map((w) => w.dir_name)).toContain(WORLD);
+    });
+
+    it("解压途中取消：以 cancelled 结束，不再报换上那一步，存档不动", async () => {
+      vi.useFakeTimers();
+      const events = await recorded();
+      const [newest] = (await listWorldBackups(ID, WORLD)).backups;
+      const failed = rejection(restoreWorldBackup("t-cancel-restore", mockGameDir(), ID, WORLD, newest.file));
+      await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
+      expect(await cancelTask("t-cancel-restore")).toBe(true);
+      await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
+      expect(isCancelled(await failed)).toBe(true);
+      expect(events.filter((e) => e.kind === "phase")).toEqual([step("t-cancel-restore", 0), step("t-cancel-restore", 1)]);
+      expect(events.some((e) => e.kind === "stage" && e.message === "正在把现在的存档移入回收站")).toBe(false);
+      expect((await listInstanceContent(ID)).worlds.find((w) => w.dir_name === WORLD)).toMatchObject({ name: "樱花谷" });
+    });
+  });
+
+  it("备份与导出存档只有打包一段：不报步骤事件，阶段文字与打包进度照旧", async () => {
+    vi.useFakeTimers();
+    const events: CoreEvent[] = [];
+    await onCoreEvent((e) => events.push(e));
+    await backupDone("t-plain-backup");
+    const exported = exportWorld("t-plain-export", mockGameDir(), ID, WORLD, "D:\\out\\a.zip");
+    await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
+    expect((await exported).path).toBe("D:\\out\\a.zip");
+    expect(events.filter((e) => e.kind === "phase")).toEqual([]);
+    for (const taskId of ["t-plain-backup", "t-plain-export"]) {
+      const own = events.filter((e) => e.task_id === taskId);
+      expect(own.filter((e) => e.kind !== "download"), taskId).toEqual([{ task_id: taskId, kind: "stage", message: `正在打包「${WORLD}」` }]);
+      expect(own.filter((e) => e.kind === "download"), taskId).toHaveLength(MOCK_INSTALL_STEPS);
+    }
+  });
+
   it("取消：进行中的备份以 cancelled 拒绝，备份表不变、实例放开", async () => {
     vi.useFakeTimers();
     const failed = rejection(backupWorld("t-cancel", mockGameDir(), ID, WORLD));

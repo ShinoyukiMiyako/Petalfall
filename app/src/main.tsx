@@ -44,6 +44,9 @@ function assertWebViewSupport(): void {
 async function enableBrowserMockPersistence(): Promise<void> {
   const mock = await import("./ipc/mock");
   mock.enableMockPersistence(window.localStorage, APP_SLUG);
+  // 浏览器预览是给人看的：假导入、假导出放慢到每一步都看得清。测试不走这里，仍是快节奏
+  const { setMockModpackPace } = await import("./ipc/mock/handlers/modpack");
+  setMockModpackPace("preview");
 }
 
 async function boot(container: HTMLElement): Promise<void> {

@@ -88,3 +88,24 @@ describe("任务行的结局角标", () => {
     expect(badgeRatio(appearance, tone)).toBeCloseTo(INK_PINNED[tone][isNight(appearance) ? "night" : "day"], 4);
   });
 });
+
+// 分步任务下面那条「这一步的进度」：填充走到哪是要读的图形，按非文字 3:1 验收，对的是进度条自己的轨道。
+// 不用主色是为了与上面的整体进度条分开，所以也不能退到 text-3（日樱对轨道不到 2:1）。
+const barCss = readCss(new URL("../../ui/ProgressBar.module.css", import.meta.url));
+
+function stageBarRatio(appearance: AppearanceName): number {
+  const tokens = tokensOf(appearance);
+  const track = resolveColor(declarationOf(barCss, ".bar", "background"), tokens, cardGround(tokens));
+  return contrast(resolveColor(declarationOf(css, ".rowFoot > .stageBar", "--bar-fill"), tokens, track), track);
+}
+
+describe("分步任务这一步的进度条", () => {
+  it("填充取次要文字 text-2，轨道是进度条通用的 bg-3", () => {
+    expect(declarationOf(css, ".rowFoot > .stageBar", "--bar-fill")).toBe("var(--sk-text-2)");
+    expect(declarationOf(barCss, ".bar", "background")).toBe("var(--sk-bg-3)");
+  });
+
+  it.each(Object.keys(APPEARANCES) as AppearanceName[])("%s：填充对轨道不低于 3:1", (appearance) => {
+    expect(stageBarRatio(appearance)).toBeGreaterThanOrEqual(3);
+  });
+});
