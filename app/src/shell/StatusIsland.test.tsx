@@ -959,7 +959,10 @@ describe("状态岛", () => {
       if (dismissAt === null) throw new Error("「收起」应当被「完整日志」压过");
       expect(crashAt !== null).toBe(dx > GAP + DISMISS_W + GAP);
       const expected = [{ label: LAUNCH_COPY.dismiss, startTime: dismissAt }, ...(crashAt === null ? [] : [{ label: LAUNCH_COPY.viewCrash, startTime: crashAt }])];
-      expect(holds.map((h) => ({ label: h.button.textContent, startTime: h.startTime }))).toEqual(expected);
+      expect(holds.map((h) => h.button.textContent)).toEqual(expected.map((e) => e.label));
+      // 起步时刻不做精确相等：这里按「帧数 × 每帧毫秒」算，实现按「关键帧偏移 × 总时长」算，两种算法的浮点结果偶尔差一个末位（约 1e-12 毫秒）。
+      // 比到小数点后 6 位：相邻两个关键帧隔 8 毫秒多，错开一帧照样挂
+      expected.forEach((e, i) => expect(holds[i].startTime, e.label).toBeCloseTo(e.startTime, 6));
       expect(holds.map((h) => h.button)).toEqual(expected.map((e) => buttonOf(e.label)));
       for (const hold of holds) {
         // 从全透明淡到按钮自己的透明度，淡入用 fade.in；起步之前停在第一帧
@@ -1026,10 +1029,13 @@ describe("状态岛", () => {
       expect(away.button.closest(`.${styles.action}`)?.hasAttribute("inert")).toBe(true);
       expect(fadeIns.some(isFadeOut)).toBe(false);
       const vacated = frameAt + QUICK_MS;
-      expect(fadeIns.map((h) => ({ button: h.button, startTime: h.startTime, fill: h.fill }))).toEqual([
-        { button: buttonOf(LAUNCH_COPY.dismiss), startTime: Math.max(passedAt, vacated), fill: "backwards" },
-        { button: buttonOf(LAUNCH_COPY.viewCrash), startTime: vacated, fill: "backwards" },
+      expect(fadeIns.map((h) => ({ button: h.button, fill: h.fill }))).toEqual([
+        { button: buttonOf(LAUNCH_COPY.dismiss), fill: "backwards" },
+        { button: buttonOf(LAUNCH_COPY.viewCrash), fill: "backwards" },
       ]);
+      // passedAt 与上面的 clearOf 同一种算法，和实现的浮点结果偶尔差一个末位，同样比到小数点后 6 位；vacated 两边是同一个式子，照旧精确比
+      expect(fadeIns[0].startTime).toBeCloseTo(Math.max(passedAt, vacated), 6);
+      expect(fadeIns[1].startTime).toBe(vacated);
     });
 
     const JAVA_PARAMS = { mc_version: "1.20.1", current: 8, major: 17, pinned_by: "global" };
