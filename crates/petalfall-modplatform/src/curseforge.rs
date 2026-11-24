@@ -7,9 +7,10 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use petalfall_base::retry::RetryPolicy;
-use petalfall_download::{DownloadCredential, DownloadTask};
+use petalfall_base::retry::{RetryPolicy, retry_async};
+use petalfall_download::{CredentialScope, DownloadCredential, DownloadTask};
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
@@ -40,6 +41,15 @@ const _: () = assert!(
 /// CurseForge 网站根地址，工程没给网页链接时用它拼文件页。
 const CURSEFORGE_WEBSITE: &str = "https://www.curseforge.com";
 
+/// CurseForge 文件 CDN 的根地址，平台给出的下载地址都在这个主机下。
+const CURSEFORGE_CDN_BASE: &str = "https://edge.forgecdn.net";
+
+/// [`CurseForgeClient::probe_derived_download`] 每次尝试的总时长上限，收紧的原因见该方法。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// [`CurseForgeClient::probe_derived_download`] 最多试几次（含首次）。
+const PROBE_MAX_ATTEMPTS: u32 = 2;
+
 /// 文件列表一页的条数。官方文档写明 `pageSize` 的默认值与上限都是 50。
 pub const MOD_FILES_PAGE_SIZE: u32 = 50;
 
@@ -55,8 +65,11 @@ const _: () = assert!(MOD_FILES_MAX_PAGES * MOD_FILES_PAGE_SIZE <= 10_000);
 pub struct CurseForgeClient {
     http: reqwest::Client,
     base_url: String,
+    cdn_base_url: String,
     api_key: String,
     retry: RetryPolicy,
+    // 做成字段而不直接用常量：测试要把它缩到毫秒级才能测超时而不拖慢测试，又不该为此多一个公开接口。
+    probe_timeout: Duration,
 }
 
 impl CurseForgeClient {
@@ -65,8 +78,10 @@ impl CurseForgeClient {
         Self {
             http,
             base_url: CURSEFORGE_BASE.to_string(),
+            cdn_base_url: CURSEFORGE_CDN_BASE.to_string(),
             api_key: api_key.into(),
             retry: RetryPolicy::default(),
+            probe_timeout: PROBE_TIMEOUT,
         }
     }
 
@@ -81,6 +96,13 @@ impl CurseForgeClient {
     /// 注入自定义根地址（末尾斜杠会被去除），供 mock 测试与镜像使用。
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into().trim_end_matches('/').to_string();
+        self
+    }
+
+    /// 把 [`Self::derived_download_url`] 拼地址用的 CDN 根地址换掉（末尾斜杠会被去除），供 mock 测试使用。
+    /// 缺省是 `https://edge.forgecdn.net`。
+    pub fn with_cdn_base_url(mut self, base: impl Into<String>) -> Self {
+        self.cdn_base_url = base.into().trim_end_matches('/').to_string();
         self
     }
 
@@ -333,6 +355,128 @@ impl CurseForgeClient {
     pub fn download_credential(&self) -> petalfall_download::Result<DownloadCredential> {
         DownloadCredential::curseforge(&self.api_key)
     }
+
+    /// 按文件编号与文件名拼出文件在 CDN 上的地址。作者关掉第三方分发的文件，平台的文件对象与
+    /// download-url 端点都不给地址，文件却仍在 CDN 上，按平台给其他文件的地址规律就能拼出来。
+    ///
+    /// 平台给出的地址都是 `{CDN}/files/{编号整除 1000}/{编号除以 1000 的余数}/{转义后的文件名}`：余数不补零
+    /// （9752012 落在 `9752/12`），不是取编号的前几位。文件名按 UTF-8 逐字节百分号转义、十六进制小写，
+    /// 只有字母数字与 `-_.!*()` 原样保留，所以空格是 `%20`、加号是 `%2b`。这套规则是拿平台给出的地址逐字节
+    /// 核对出来的，平台没有承诺过，拼出的地址只是候选，下载前先用 [`Self::probe_derived_download`] 确认。
+    ///
+    /// 返回 `None` 的情形：编号小于 1000（核对过的地址里没有这么小的编号，第一段会是 0，规律未经证实）；
+    /// 文件名为空、是 `.` 或 `..`、含 `/` 或 `\`、含控制字符。这些名字要么会改变地址的路径层级，要么不是
+    /// 平台会给出的文件名，拼进地址只会取到别的东西或者发出一个莫名其妙的请求。
+    pub fn derived_download_url(&self, file_id: u32, file_name: &str) -> Option<String> {
+        if file_id < 1000
+            || matches!(file_name, "" | "." | "..")
+            || file_name.contains(['/', '\\'])
+            || file_name.chars().any(char::is_control)
+        {
+            return None;
+        }
+        Some(format!(
+            "{}/files/{}/{}/{}",
+            self.cdn_base_url,
+            file_id / 1000,
+            file_id % 1000,
+            escape_cdn_file_name(file_name)
+        ))
+    }
+
+    /// 探测 [`Self::derived_download_url`] 拼出的地址能不能下：发一个 HEAD，跟随跳转，看最终状态。
+    ///
+    /// 最终 2xx 返回跳转之后的最终地址；401、403、404、410 返回 `None`，表示 CDN 上没有这个文件或不带凭据不给取，
+    /// 调用方照旧让用户去网页手动下载。401 也算在里面：这条请求故意不带 key（见下文），CDN 回 401 说的正是不带
+    /// 凭据拿不到。其余状态报 [`Error::Status`]，传输失败（含下面的单次超时）报 [`Error::Http`]。可重试的（5xx、
+    /// 429、408、超时与连接类）沿用本客户端重试策略的退避参数，但最多试 2 次。
+    ///
+    /// 每次尝试另设 10 秒的总时长上限，从开始连接算到响应收齐，跟随跳转也算在里面。比别的请求收得紧：探测只取
+    /// 响应头，正常一两个往返就回来；它又挡在整合包预览与导入前面，预览逐个文件串行探测，照共享客户端的设置
+    /// （读超时 30 秒、没有总时长上限）与默认的 4 次尝试，卡住一个探测就要干等两分钟左右。收紧之后单个探测最坏
+    /// 约 20 秒再加一次退避。
+    ///
+    /// 交回最终地址而不是拼出的地址：第一跳 edge.forgecdn.net 对带 Range 的请求直接回 404、不跳转，整合包摘要
+    /// 拿拼出的地址做范围读取就会失败；跳转后的 mediafilez.forgecdn.net 对范围请求正常回 206。调用方之后的下载与
+    /// 范围读取一律对最终地址发。
+    ///
+    /// 最终地址交回前先查主机：必须与拼地址用的 CDN 根同源，或是 https 下的 forgecdn.net 及其子域（与 CDN 下载
+    /// 凭据同一个范围）。落到别处的 2xx 报 [`Error::Status`]，地址是跳到的那一个、状态是它回的 2xx，不重试；落到
+    /// 别处的其他状态照上面的映射处理。拼出的地址本是猜的，交回的地址会被原样拿去下载，CDN 的跳转一旦指向平台
+    /// 之外，不能把用户的下载带过去。
+    ///
+    /// 不带 `x-api-key`：这条路取的是作者没开放给第三方分发的文件，不该以启动器 key 的名义去要；平台给了地址的
+    /// 文件照常挂 CDN 下载凭据（[`Self::download_credential`]），不受影响。何况探测自动跟随跳转（线上是
+    /// edge.forgecdn.net 302 到 mediafilez.forgecdn.net），落点要等跟完才核对，而 reqwest 跟随跳转时不摘自定义头，
+    /// 带上 key 的话，跳到哪里 key 就先送到哪里。
+    ///
+    /// 用 HEAD 而不是带 Range 的 GET：edge.forgecdn.net 对带 Range 的请求回 404，会把能下的文件判成不能下。
+    /// HEAD 跟随跳转后仍是 HEAD。跟不跟跳转由构造时传入的 HTTP 客户端决定，共享客户端
+    /// （`petalfall_base::http::build_client`）跟随；不跟随的客户端会把 3xx 报成 [`Error::Status`]。
+    /// 探测打的是 CDN，与文件下载同类，不经元数据请求的节流闸。
+    pub async fn probe_derived_download(&self, url: &str) -> Result<Option<String>> {
+        const CONTEXT: &str = "curseforge.probe_derived_download";
+        let retry = RetryPolicy {
+            max_attempts: self.retry.max_attempts.min(PROBE_MAX_ATTEMPTS),
+            ..self.retry.clone()
+        };
+        retry_async(&retry, || async {
+            let response = self
+                .http
+                .head(url)
+                .timeout(self.probe_timeout)
+                .send()
+                .await
+                .map_err(|source| Error::Http {
+                    context: CONTEXT.to_string(),
+                    source,
+                })?;
+            let landed = response.url();
+            match response.status().as_u16() {
+                // 落在 CDN 之外的 2xx 不走这一支，同其余状态一样报 Status。
+                200..=299 if self.is_cdn_landing(landed)? => Ok(Some(landed.to_string())),
+                401 | 403 | 404 | 410 => Ok(None),
+                status => Err(Error::Status {
+                    url: landed.to_string(),
+                    status,
+                }),
+            }
+        })
+        .await
+    }
+
+    /// 探测跳转后落到的地址能不能交给下载：与拼地址用的 CDN 根同源，或在 https 的 forgecdn.net 及其子域下。
+    /// 后者直接用 CDN 下载凭据的作用域：两处说的是同一个 CDN，主机范围不该各写一份。
+    fn is_cdn_landing(&self, landed: &reqwest::Url) -> Result<bool> {
+        if CredentialScope::curseforge_cdn().allows(landed) {
+            return Ok(true);
+        }
+        let base = reqwest::Url::parse(&self.cdn_base_url).map_err(|source| {
+            petalfall_base::Error::UrlParse {
+                url: self.cdn_base_url.clone(),
+                source,
+            }
+        })?;
+        Ok(base.origin() == landed.origin())
+    }
+}
+
+/// CDN 地址里文件名段的转义：字母数字与 `-_.!*()` 原样，其余按 UTF-8 逐字节写成小写十六进制的 `%xx`。
+/// 逐字节照抄平台的写法：CDN 对等价写法（十六进制大小写、加号转不转义）是否一视同仁没有核对过。
+/// `url` 与 `percent-encoding` 都写大写十六进制，`url` 还不转义路径里的加号，对不上，所以手写。
+fn escape_cdn_file_name(name: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut escaped = String::with_capacity(name.len());
+    for &byte in name.as_bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.!*()".contains(&byte) {
+            escaped.push(char::from(byte));
+        } else {
+            escaped.push('%');
+            escaped.push(char::from(HEX[usize::from(byte >> 4)]));
+            escaped.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    escaped
 }
 
 /// 校验从环境读到的 key 值：为空或纯空白视为未配置。抽出纯函数便于单测（不触碰进程级环境）。
@@ -1732,5 +1876,481 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"jar-bytes");
+    }
+
+    /// 平台接口给出的（文件编号，文件名，downloadUrl）原样抄录。前六条覆盖余数不补零、加号与空格，
+    /// 其余覆盖逗号、感叹号、撇号、方括号、`&`、等号、两字节与三字节的 UTF-8。
+    const PLATFORM_URLS: &[(u32, &str, &str)] = &[
+        (
+            9773637,
+            "jei-1.21.1-neoforge-19.76.1.481.jar",
+            "https://edge.forgecdn.net/files/9773/637/jei-1.21.1-neoforge-19.76.1.481.jar",
+        ),
+        (
+            9752012,
+            "jei-1.21.11-neoforge-27.55.0.122.jar",
+            "https://edge.forgecdn.net/files/9752/12/jei-1.21.11-neoforge-27.55.0.122.jar",
+        ),
+        (
+            9752005,
+            "jei-1.21.11-fabric-27.55.0.122.jar",
+            "https://edge.forgecdn.net/files/9752/5/jei-1.21.11-fabric-27.55.0.122.jar",
+        ),
+        (
+            717862,
+            "JourneyMap2.6.1_MC1.5.2.zip",
+            "https://edge.forgecdn.net/files/717/862/JourneyMap2.6.1_MC1.5.2.zip",
+        ),
+        (
+            3819445,
+            "badwithernocookiereloaded-3.10.18+(Fabric+1.18.2).jar",
+            "https://edge.forgecdn.net/files/3819/445/badwithernocookiereloaded-3.10.18%2b(Fabric%2b1.18.2).jar",
+        ),
+        (
+            4798914,
+            "Vanilla Plus Scape and Run-1.zip",
+            "https://edge.forgecdn.net/files/4798/914/Vanilla%20Plus%20Scape%20and%20Run-1.zip",
+        ),
+        (
+            2268030,
+            "Jump, jump, jump! [MAP].zip",
+            "https://edge.forgecdn.net/files/2268/30/Jump%2c%20jump%2c%20jump!%20%5bMAP%5d.zip",
+        ),
+        (
+            2274053,
+            "Foxy's Mansion.zip",
+            "https://edge.forgecdn.net/files/2274/53/Foxy%27s%20Mansion.zip",
+        ),
+        (
+            2287729,
+            "Pat & Jen Lucky Block Race.zip",
+            "https://edge.forgecdn.net/files/2287/729/Pat%20%26%20Jen%20Lucky%20Block%20Race.zip",
+        ),
+        (
+            2406437,
+            "[1.8+] The mysterious Well 1.3 (by McTsts).zip",
+            "https://edge.forgecdn.net/files/2406/437/%5b1.8%2b%5d%20The%20mysterious%20Well%201.3%20(by%20McTsts).zip",
+        ),
+        (
+            7269882,
+            "0y70djXnkpI=.zip",
+            "https://edge.forgecdn.net/files/7269/882/0y70djXnkpI%3d.zip",
+        ),
+        (
+            2834725,
+            "!  §b§lFaith§5§lni.zip",
+            "https://edge.forgecdn.net/files/2834/725/!%20%20%c2%a7b%c2%a7lFaith%c2%a75%c2%a7lni.zip",
+        ),
+        (
+            6102453,
+            "DÜNYA'NIN EN ZOR SKY BLOCK MODU.zip",
+            "https://edge.forgecdn.net/files/6102/453/D%c3%9cNYA%27NIN%20EN%20ZOR%20SKY%20BLOCK%20MODU.zip",
+        ),
+        (
+            9081929,
+            "V1.0.2LABİRENT.zip",
+            "https://edge.forgecdn.net/files/9081/929/V1.0.2LAB%c4%b0RENT.zip",
+        ),
+        (
+            8280973,
+            "builb — kopia — kopia.zip",
+            "https://edge.forgecdn.net/files/8280/973/builb%20%e2%80%94%20kopia%20%e2%80%94%20kopia.zip",
+        ),
+        (
+            7252512,
+            "迷宫教学.zip",
+            "https://edge.forgecdn.net/files/7252/512/%e8%bf%b7%e5%ae%ab%e6%95%99%e5%ad%a6.zip",
+        ),
+    ];
+
+    fn offline_client() -> CurseForgeClient {
+        CurseForgeClient::new(petalfall_base::http::build_client().unwrap(), "test-key")
+    }
+
+    #[test]
+    fn derived_download_url_matches_the_urls_the_platform_gave() {
+        let client = offline_client();
+        for &(file_id, file_name, expected) in PLATFORM_URLS {
+            assert_eq!(
+                client.derived_download_url(file_id, file_name).as_deref(),
+                Some(expected),
+                "{file_id} {file_name:?}"
+            );
+        }
+    }
+
+    /// 编号拆成两段：前一段整除 1000，后一段是余数且不补零，两段拼回去必须是原编号。边界取 1000、
+    /// 各处进位与 u32 上限，其余随机；根地址末尾的斜杠不能拼出双斜杠。
+    #[test]
+    fn derived_download_url_splits_any_id_by_thousands_without_padding() {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut state = seed | 1;
+        let random = std::iter::repeat_with(move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            1000 + (state % (u64::from(u32::MAX) - 999)) as u32
+        });
+        let edges = [
+            1000,
+            1001,
+            1999,
+            10_000,
+            10_010,
+            999_999,
+            1_000_000,
+            u32::MAX,
+        ];
+        let client = offline_client().with_cdn_base_url("http://cdn.test/");
+        for id in edges.into_iter().chain(random.take(500)) {
+            let url = client.derived_download_url(id, "a.jar").unwrap();
+            let rest = url
+                .strip_prefix("http://cdn.test/files/")
+                .unwrap_or_else(|| panic!("种子 {seed}：{id} 拼成了 {url}"));
+            let [high, low, name] = rest.split('/').collect::<Vec<_>>()[..] else {
+                panic!("种子 {seed}：{id} 拼成了 {url}");
+            };
+            assert_eq!(name, "a.jar", "种子 {seed}：{url}");
+            assert!(
+                low == "0" || !low.starts_with('0'),
+                "种子 {seed}：{id} 的余数段补了零：{url}"
+            );
+            let (high, low): (u64, u64) = (high.parse().unwrap(), low.parse().unwrap());
+            assert!(low < 1000, "种子 {seed}：{url}");
+            assert_eq!(high * 1000 + low, u64::from(id), "种子 {seed}：{url}");
+        }
+    }
+
+    #[test]
+    fn derived_download_url_refuses_ids_and_names_it_cannot_vouch_for() {
+        let client = offline_client();
+        for file_id in [0, 1, 999] {
+            assert_eq!(
+                client.derived_download_url(file_id, "a.jar"),
+                None,
+                "{file_id}"
+            );
+        }
+        assert_eq!(
+            client.derived_download_url(1000, "a.jar").as_deref(),
+            Some("https://edge.forgecdn.net/files/1/0/a.jar")
+        );
+        for name in [
+            "",
+            ".",
+            "..",
+            "mods/a.jar",
+            "..\\a.jar",
+            "a\nb.jar",
+            "a\tb.jar",
+            "a\0b.jar",
+            "a\u{7f}.jar",
+            "a\u{85}.jar",
+        ] {
+            assert_eq!(client.derived_download_url(9773637, name), None, "{name:?}");
+        }
+        // 只拦整段是 `.` 或 `..` 的名字，带点的普通名字照拼。
+        assert_eq!(
+            client.derived_download_url(9773637, "..jar").as_deref(),
+            Some("https://edge.forgecdn.net/files/9773/637/..jar")
+        );
+    }
+
+    /// CDN 指到 mock，退避几乎不等，好数清请求次数。客户端的策略许试 5 次，比探测的封顶宽，探测只试 2 次
+    /// 才能看出封顶生效。
+    fn probe_client(server: &MockServer) -> CurseForgeClient {
+        client(server)
+            .with_cdn_base_url(server.uri())
+            .with_retry(RetryPolicy {
+                max_attempts: 5,
+                initial_delay: std::time::Duration::from_millis(1),
+                max_delay: std::time::Duration::from_millis(1),
+                multiplier: 1.0,
+                jitter: false,
+            })
+    }
+
+    /// mock 收到的请求路径，顺带断言每个请求都是 HEAD、没带 x-api-key、没带 Range。
+    async fn probe_requests(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| {
+                assert_eq!(request.method.as_str(), "HEAD", "{}", request.url);
+                assert!(
+                    request.headers.get("x-api-key").is_none(),
+                    "探测带了 key：{}",
+                    request.url
+                );
+                assert!(
+                    request.headers.get("range").is_none(),
+                    "探测带了 Range：{}",
+                    request.url
+                );
+                request.url.path().to_owned()
+            })
+            .collect()
+    }
+
+    /// 线上是 edge 302 到 mediafilez 再回 200：跟着跳过去，两跳都不带 key，交回的是跳转终点而不是拼出的地址。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn probe_follows_the_cdn_redirect_without_the_api_key() {
+        let server = MockServer::start().await;
+        let edge = "/files/3819/445/badwithernocookiereloaded-3.10.18%2b(Fabric%2b1.18.2).jar";
+        let media =
+            "/mediafilez/files/3819/445/badwithernocookiereloaded-3.10.18%2b(Fabric%2b1.18.2).jar";
+        Mock::given(method("HEAD"))
+            .and(path(edge))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}{media}", server.uri())),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path(media))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = probe_client(&server);
+        let url = client
+            .derived_download_url(
+                3819445,
+                "badwithernocookiereloaded-3.10.18+(Fabric+1.18.2).jar",
+            )
+            .unwrap();
+        assert_eq!(url, format!("{}{edge}", server.uri()));
+        assert_eq!(
+            client
+                .probe_derived_download(&url)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(format!("{}{media}", server.uri()).as_str())
+        );
+        assert_eq!(probe_requests(&server).await, vec![edge, media]);
+    }
+
+    /// 直接 2xx 交回探测的地址本身（没有跳转，最终地址就是它，转义原样保留）；401、403、404、410 交回 None，
+    /// 既不报错也不重试。401 是 CDN 对不带凭据的请求的回法，探测本就不带 key，同样算下不到。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn probe_maps_final_status_to_the_landing_url_or_none() {
+        let server = MockServer::start().await;
+        let cases = [
+            (200u16, 9773637, true),
+            (204, 9773638, true),
+            (401, 5281004, false),
+            (403, 9752012, false),
+            (404, 9752005, false),
+            (410, 4798914, false),
+        ];
+        for (status, file_id, _) in cases {
+            Mock::given(method("HEAD"))
+                .and(path(format!(
+                    "/files/{}/{}/a.jar",
+                    file_id / 1000,
+                    file_id % 1000
+                )))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let client = probe_client(&server);
+        for (status, file_id, available) in cases {
+            let url = client.derived_download_url(file_id, "a.jar").unwrap();
+            let expected = available.then(|| {
+                format!(
+                    "{}/files/{}/{}/a.jar",
+                    server.uri(),
+                    file_id / 1000,
+                    file_id % 1000
+                )
+            });
+            assert_eq!(
+                client.probe_derived_download(&url).await.unwrap(),
+                expected,
+                "{status}"
+            );
+        }
+        assert_eq!(probe_requests(&server).await.len(), cases.len());
+
+        // 文件名里的转义原样交回：交回的地址会被原样拿去下载，不能被改写成别的写法。
+        let escaped = "/files/3819/445/a%20b%2bc.jar";
+        Mock::given(method("HEAD"))
+            .and(path(escaped))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let url = client.derived_download_url(3819445, "a b+c.jar").unwrap();
+        assert_eq!(
+            client.probe_derived_download(&url).await.unwrap(),
+            Some(format!("{}{escaped}", server.uri()))
+        );
+    }
+
+    /// CDN 跳到别的主机（与拼地址用的 CDN 根不同源，也不是 forgecdn.net）：那边回 200 也不交回，报 Status，
+    /// 地址是跳到的那一个；不重试，那边只被探了一次。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn probe_refuses_a_redirect_off_the_cdn() {
+        let cdn = MockServer::start().await;
+        let elsewhere = MockServer::start().await;
+        let edge = "/files/9773/637/a.jar";
+        let foreign = format!("{}/files/9773/637/a.jar", elsewhere.uri());
+        Mock::given(method("HEAD"))
+            .and(path(edge))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", foreign.as_str()))
+            .expect(1)
+            .mount(&cdn)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path(edge))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&elsewhere)
+            .await;
+
+        let client = probe_client(&cdn);
+        let url = client.derived_download_url(9773637, "a.jar").unwrap();
+        let err = client.probe_derived_download(&url).await.unwrap_err();
+
+        assert!(
+            matches!(&err, Error::Status { url, status: 200 } if url == &foreign),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            format!("HTTP 状态码 200: {foreign}"),
+            "错误里写明跳到了哪个主机"
+        );
+        assert_eq!(probe_requests(&cdn).await, vec![edge]);
+        assert_eq!(probe_requests(&elsewhere).await, vec![edge]);
+    }
+
+    /// 能交回的落点：与 CDN 根同源（协议、主机、端口都一样），或是 https 下的 forgecdn.net 本身及其子域；
+    /// 只差端口、只差协议、名字里带 forgecdn 却不是它的子域，都不算。
+    #[test]
+    fn cdn_landing_is_the_cdn_origin_or_forgecdn_over_https() {
+        let client = offline_client().with_cdn_base_url("http://127.0.0.1:8080/");
+        let landing = |url: &str| {
+            client
+                .is_cdn_landing(&reqwest::Url::parse(url).unwrap())
+                .unwrap()
+        };
+        for ok in [
+            "http://127.0.0.1:8080/mediafilez/files/1/0/a.jar",
+            "https://mediafilez.forgecdn.net/files/1/0/a.jar",
+            "https://edge.forgecdn.net/files/1/0/a.jar",
+            "https://forgecdn.net/files/1/0/a.jar",
+            "https://MEDIAFILEZ.ForgeCDN.net/files/1/0/a.jar",
+        ] {
+            assert!(landing(ok), "{ok}");
+        }
+        for refused in [
+            "http://127.0.0.1:8081/files/1/0/a.jar",
+            "https://127.0.0.1:8080/files/1/0/a.jar",
+            "http://localhost:8080/files/1/0/a.jar",
+            "http://mediafilez.forgecdn.net/files/1/0/a.jar",
+            "https://evilforgecdn.net/files/1/0/a.jar",
+            "https://forgecdn.net.evil.com/files/1/0/a.jar",
+            "https://example.com/files/1/0/a.jar",
+        ] {
+            assert!(!landing(refused), "{refused}");
+        }
+    }
+
+    /// 其余状态是错误而不是「不能下」：500 可重试，但客户端的策略许试 5 次，探测也只试 2 次，仍失败就报 Status。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn probe_reports_server_errors_after_retrying() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/files/9773/637/a.jar"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let client = probe_client(&server);
+        let url = client.derived_download_url(9773637, "a.jar").unwrap();
+        let err = client.probe_derived_download(&url).await.unwrap_err();
+        assert!(matches!(err, Error::Status { status: 500, .. }), "{err:?}");
+        assert_eq!(probe_requests(&server).await.len(), 2);
+    }
+
+    /// 每次尝试的时长上限管的是整次请求，跟随跳转也算在里面：两跳各拖 200 毫秒，单看哪一跳都没到 300 毫秒的
+    /// 上限，合起来超了，照样算超时。超时报 Http、照可重试处理，同样封顶 2 次，所以第一跳恰好被打了两次。
+    /// 生产上的上限是 10 秒，这里缩短只为不拖慢测试。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn probe_times_out_the_whole_redirect_chain_and_retries_at_most_twice() {
+        assert_eq!(offline_client().probe_timeout, Duration::from_secs(10));
+        let server = MockServer::start().await;
+        let edge = "/files/9773/637/a.jar";
+        let media = "/mediafilez/files/9773/637/a.jar";
+        let hop = Duration::from_millis(200);
+        Mock::given(method("HEAD"))
+            .and(path(edge))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}{media}", server.uri()))
+                    .set_delay(hop),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path(media))
+            .respond_with(ResponseTemplate::new(200).set_delay(hop))
+            .mount(&server)
+            .await;
+
+        let mut client = probe_client(&server);
+        client.probe_timeout = Duration::from_millis(300);
+        let url = client.derived_download_url(9773637, "a.jar").unwrap();
+        let err = client.probe_derived_download(&url).await.unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                Error::Http { context, source }
+                    if context == "curseforge.probe_derived_download" && source.is_timeout()
+            ),
+            "{err:?}"
+        );
+        let edge_hits = probe_requests(&server)
+            .await
+            .into_iter()
+            .filter(|requested| requested == edge)
+            .count();
+        assert_eq!(edge_hits, 2);
+    }
+
+    /// 连不上是传输错误，报 Http，同样不当成「不能下」。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn probe_reports_connection_failures_as_http_errors() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let client = offline_client().with_retry(RetryPolicy {
+            max_attempts: 1,
+            ..RetryPolicy::default()
+        });
+        let err = client
+            .probe_derived_download(&format!("http://{closed}/files/9773/637/a.jar"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::Http { context, .. } if context == "curseforge.probe_derived_download"),
+            "{err:?}"
+        );
     }
 }
