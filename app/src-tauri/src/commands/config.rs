@@ -89,6 +89,8 @@ pub struct ConfigDto {
     pub world_backup: WorldBackupSettings,
     /// 作者关掉了第三方分发的 CurseForge 文件拿不到下载地址时，是否拼出 CDN 地址直接下载。
     pub download_restricted_curseforge_files: bool,
+    /// 游戏语言是否跟随系统显示语言。
+    pub follow_system_game_language: bool,
 }
 
 pub(crate) fn config_dto(petalfall: &Petalfall) -> ConfigDto {
@@ -129,6 +131,7 @@ pub(crate) fn config_dto(petalfall: &Petalfall) -> ConfigDto {
         new_instance_template: config.new_instance_template,
         world_backup: config.world_backup,
         download_restricted_curseforge_files: config.download_restricted_curseforge_files,
+        follow_system_game_language: config.follow_system_game_language,
     }
 }
 
@@ -187,6 +190,7 @@ pub(crate) struct ConfigPatch {
     new_instance_template: Option<bool>,
     world_backup: Option<WorldBackupSettings>,
     download_restricted_curseforge_files: Option<bool>,
+    follow_system_game_language: Option<bool>,
 }
 
 /// 未解析的配置修改，字段与 `update_config` 的入参一一对应。
@@ -213,6 +217,7 @@ pub(crate) struct RawConfigPatch {
     pub new_instance_template: Option<bool>,
     pub world_backup: Option<WorldBackupInput>,
     pub download_restricted_curseforge_files: Option<bool>,
+    pub follow_system_game_language: Option<bool>,
 }
 
 /// 更新全局配置：字段全可选，未提供者不动。先把全部参数校验完再拿写锁：有一个非法就整体拒绝，
@@ -241,6 +246,7 @@ pub async fn update_config(
     new_instance_template: Option<bool>,
     world_backup: Option<WorldBackupInput>,
     download_restricted_curseforge_files: Option<bool>,
+    follow_system_game_language: Option<bool>,
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
     let raw = RawConfigPatch {
@@ -265,6 +271,7 @@ pub async fn update_config(
         new_instance_template,
         world_backup,
         download_restricted_curseforge_files,
+        follow_system_game_language,
     };
     update_config_with(&facade, raw).await
 }
@@ -324,6 +331,7 @@ async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
         new_instance_template: raw.new_instance_template,
         world_backup: raw.world_backup.map(validate_world_backup).transpose()?,
         download_restricted_curseforge_files: raw.download_restricted_curseforge_files,
+        follow_system_game_language: raw.follow_system_game_language,
     })
 }
 
@@ -389,6 +397,9 @@ fn apply_patch(petalfall: &mut Petalfall, patch: ConfigPatch) -> Result<(), Comm
     }
     if let Some(enabled) = patch.download_restricted_curseforge_files {
         petalfall.set_download_restricted_curseforge_files(enabled);
+    }
+    if let Some(enabled) = patch.follow_system_game_language {
+        petalfall.set_follow_system_game_language(enabled);
     }
     Ok(())
 }
@@ -1344,6 +1355,100 @@ mod tests {
         let raw: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(raw["download_restricted_curseforge_files"], false);
+    }
+
+    /// 游戏语言默认跟随系统语言；update_config 带 followSystemGameLanguage 关掉后 get_config 回读为关，并落了盘。
+    /// 同一补丁里别的参数非法时整体拒绝，这一项也不生效；不带这一项的补丁不动它。
+    #[tokio::test]
+    async fn follow_system_game_language_patch_reads_back_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let path = dir.path().join("config.json");
+        let initial = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(initial["follow_system_game_language"], true);
+
+        let err = update_config_with(
+            &facade,
+            RawConfigPatch {
+                follow_system_game_language: Some(false),
+                download_source: Some("fastest".into()),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        assert!(read_config(&facade).await.follow_system_game_language);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                follow_system_game_language: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        let dto = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(dto["follow_system_game_language"], false);
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(raw["follow_system_game_language"], false);
+        let reloaded = petalfall_core::ConfigStore::at(&path).load().await.unwrap();
+        assert!(!reloaded.follow_system_game_language);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                check_updates: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!read_config(&facade).await.follow_system_game_language);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                follow_system_game_language: Some(true),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(read_config(&facade).await.follow_system_game_language);
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(raw["follow_system_game_language"], true);
+    }
+
+    /// 老配置文件里没有 follow_system_game_language：读回按开着（加开关之前启动前就一直在补语言），改别的设置
+    /// 落盘后键按开着写进文件。
+    #[tokio::test]
+    async fn old_config_without_the_key_follows_the_system_language() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, br#"{"download_concurrency": 12}"#).unwrap();
+        let config = petalfall_core::ConfigStore::at(&path).load().await.unwrap();
+        let petalfall = Petalfall::open(config, dir.path().to_path_buf(), path.clone()).unwrap();
+        let facade = Facade::new(petalfall);
+
+        let dto = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(dto["follow_system_game_language"], true);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                check_updates: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(raw["follow_system_game_language"], true);
     }
 
     /// 老配置文件里没有这个键：读回按开着，改别的设置落盘后键按开着写进文件。

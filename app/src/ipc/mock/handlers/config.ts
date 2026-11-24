@@ -83,6 +83,7 @@ function seedConfig(): ConfigDto {
     extra_java_paths: [],
     prefer_dedicated_gpu: false,
     skip_accessibility_onboarding: true,
+    follow_system_game_language: true,
     new_instance_template: true,
     world_backup: { auto: true, keep_per_world: 5, max_total_gb: 20 },
   };
@@ -428,6 +429,7 @@ function updateConfig(args: MockArgs): void {
   if (args.language !== undefined) next.language = oneOf(args.language, UI_LANGUAGES, "的界面语言");
   if (args.preferDedicatedGpu !== undefined) next.prefer_dedicated_gpu = requireBoolean(args, "preferDedicatedGpu");
   if (args.skipAccessibilityOnboarding !== undefined) next.skip_accessibility_onboarding = requireBoolean(args, "skipAccessibilityOnboarding");
+  if (args.followSystemGameLanguage !== undefined) next.follow_system_game_language = requireBoolean(args, "followSystemGameLanguage");
   if (args.newInstanceTemplate !== undefined) next.new_instance_template = requireBoolean(args, "newInstanceTemplate");
   if (args.worldBackup !== undefined) next.world_backup = parseWorldBackup(args.worldBackup);
   config = next;
@@ -532,7 +534,8 @@ type LaterConfigFields =
   | "prefer_dedicated_gpu"
   | "skip_accessibility_onboarding"
   | "new_instance_template"
-  | "download_restricted_curseforge_files";
+  | "download_restricted_curseforge_files"
+  | "follow_system_game_language";
 type StoredConfigSnapshot = Omit<ConfigSnapshot, "config" | "usageNotice"> & {
   config: Omit<ConfigDto, LaterConfigFields> & Partial<Pick<ConfigDto, LaterConfigFields>>;
   usageNotice?: UsageNoticeAcceptanceDto | null;
@@ -545,14 +548,15 @@ export const persist: MockPersist = {
   snapshot: (): ConfigSnapshot => ({ config, extras, disk: [...disk], withVersions: [...withVersions], versions: [...versions], firstRunCompleted, usageNotice }),
   restore: (data) => {
     const saved = data as StoredConfigSnapshot;
-    // 与后端配置的 serde(default) 一致：手动 Java、独显偏好、跳过无障碍引导、沿用默认设置与自动下载受限文件是后加的字段，
-    // 之前存下的快照没有它们，按默认值读入
+    // 与后端配置的 serde(default) 一致：手动 Java、独显偏好、跳过无障碍引导、沿用默认设置、自动下载受限文件与游戏语言跟随
+    // 系统语言是后加的字段，之前存下的快照没有它们，按默认值读入
     config = {
       extra_java_paths: [],
       prefer_dedicated_gpu: false,
       skip_accessibility_onboarding: true,
       new_instance_template: true,
       download_restricted_curseforge_files: false,
+      follow_system_game_language: true,
       ...saved.config,
     };
     extras = saved.extras;

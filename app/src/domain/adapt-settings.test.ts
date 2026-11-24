@@ -37,6 +37,25 @@ describe("全局设置的适配：跳过首次无障碍引导", () => {
   });
 });
 
+describe("全局设置的适配：游戏语言跟随系统语言", () => {
+  it("开与关都原样进 Settings，不被默认值盖掉，相邻的跳过无障碍引导不受牵连", () => {
+    expect(settingsFromDto(configDto({ follow_system_game_language: true, skip_accessibility_onboarding: false }))).toMatchObject({
+      followSystemGameLanguage: true,
+      skipAccessibilityOnboarding: false,
+    });
+    expect(settingsFromDto(configDto({ follow_system_game_language: false, skip_accessibility_onboarding: true }))).toMatchObject({
+      followSystemGameLanguage: false,
+      skipAccessibilityOnboarding: true,
+    });
+  });
+
+  it("补丁键是 followSystemGameLanguage，false 也写出去；没给时不出现这个键", () => {
+    expect(settingsPatchToConfig({ followSystemGameLanguage: false })).toEqual({ followSystemGameLanguage: false });
+    expect(settingsPatchToConfig({ followSystemGameLanguage: true, checkUpdates: false })).toEqual({ followSystemGameLanguage: true, checkUpdates: false });
+    expect("followSystemGameLanguage" in settingsPatchToConfig({ skipAccessibilityOnboarding: false })).toBe(false);
+  });
+});
+
 describe("全局设置的适配：新实例沿用默认设置", () => {
   it("开与关都原样进 Settings，不被默认值盖掉", () => {
     expect(settingsFromDto(configDto({ new_instance_template: true })).newInstanceTemplate).toBe(true);

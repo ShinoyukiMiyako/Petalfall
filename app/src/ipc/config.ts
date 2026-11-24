@@ -87,6 +87,11 @@ export interface ConfigDto {
   prefer_dedicated_gpu: boolean;
   /** 实例第一次启动时不显示 Minecraft 的讲述人与无障碍提示；已经启动过的实例不受影响。 */
   skip_accessibility_onboarding: boolean;
+  /**
+   * 游戏语言跟随系统显示语言：启动前给还没设过语言的实例补上语言，导入整合包时去掉包里写着默认英文的那一行。
+   * 缺省开，较早的 config.json 没有这个键时读成开。
+   */
+  follow_system_game_language: boolean;
   /** 新建实例与导入整合包时沿用默认设置（数据目录里的模板）；与 template_info 的 enabled 是同一项。 */
   new_instance_template: boolean;
   world_backup: WorldBackupSettings;
@@ -120,6 +125,7 @@ export interface ConfigPatch {
   language?: UiLanguage;
   preferDedicatedGpu?: boolean;
   skipAccessibilityOnboarding?: boolean;
+  followSystemGameLanguage?: boolean;
   newInstanceTemplate?: boolean;
   /** 三个字段都必须给出；越界报 invalid_argument，detail.field 为 world_backup.keep_per_world 或 world_backup.max_total_gb。 */
   worldBackup?: WorldBackupSettings;

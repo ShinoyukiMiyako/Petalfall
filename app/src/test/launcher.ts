@@ -149,6 +149,7 @@ export function configDto(overrides: Partial<ConfigDto> = {}): ConfigDto {
     extra_java_paths: [],
     prefer_dedicated_gpu: false,
     skip_accessibility_onboarding: true,
+    follow_system_game_language: true,
     new_instance_template: true,
     world_backup: { auto: true, keep_per_world: 5, max_total_gb: 20 },
     ...overrides,

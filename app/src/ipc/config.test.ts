@@ -107,6 +107,24 @@ describe("跳过首次无障碍引导", () => {
   });
 });
 
+describe("游戏语言跟随系统语言", () => {
+  it("默认开，补丁改了读回一致；不带这个键的补丁不动它，相邻的跳过无障碍引导也不跟着变", async () => {
+    expect(await getConfig()).toMatchObject({ follow_system_game_language: true, skip_accessibility_onboarding: true });
+    await updateConfig({ followSystemGameLanguage: false });
+    expect(await getConfig()).toMatchObject({ follow_system_game_language: false, skip_accessibility_onboarding: true });
+    await updateConfig({ skipAccessibilityOnboarding: false });
+    expect(await getConfig()).toMatchObject({ follow_system_game_language: false, skip_accessibility_onboarding: false });
+    await updateConfig({ followSystemGameLanguage: true });
+    expect(await getConfig()).toMatchObject({ follow_system_game_language: true, skip_accessibility_onboarding: false });
+  });
+
+  it("不是布尔值是 Tauri 参数错误，归为 unknown，同一次补丁里的其它字段也不生效", async () => {
+    const error = await rejection(invoke("update_config", { checkUpdates: false, followSystemGameLanguage: "false" }));
+    expect(error).toMatchObject({ code: "unknown", message: "invalid args `followSystemGameLanguage` for command `update_config`: expected a boolean" });
+    expect(await getConfig()).toMatchObject({ follow_system_game_language: true, check_updates: true });
+  });
+});
+
 describe("新实例沿用默认设置", () => {
   it("默认开，补丁改了读回一致，template_info 的 enabled 跟着变；不带这个键的补丁不动它", async () => {
     expect((await getConfig()).new_instance_template).toBe(true);

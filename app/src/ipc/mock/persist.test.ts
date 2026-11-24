@@ -145,6 +145,30 @@ describe("mock 持久化", () => {
     expect(await third.mockInvoke("get_config")).toMatchObject({ ...expected, skip_accessibility_onboarding: true });
   });
 
+  it("游戏语言跟随系统语言：关掉后刷新仍是关；早先的快照没有这个键时按默认开读入", async () => {
+    type StoredConfig = { data: { config: Record<string, unknown> } };
+    const KEY = "slug.mock.config";
+    const storage = new MemoryStorage();
+    const first = await reload();
+    first.enableMockPersistence(storage, PREFIX);
+    await first.mockInvoke("update_config", { followSystemGameLanguage: false, downloadConcurrency: 20 });
+
+    const second = await reload();
+    second.enableMockPersistence(storage, PREFIX);
+    const expected = { follow_system_game_language: false, download_concurrency: 20 };
+    expect(await second.mockInvoke("get_config")).toMatchObject(expected);
+
+    const raw = storage.getItem(KEY);
+    if (raw === null) throw new Error(`存储里没有 ${KEY}`);
+    const saved = JSON.parse(raw) as StoredConfig;
+    delete saved.data.config.follow_system_game_language;
+    storage.setItem(KEY, JSON.stringify(saved));
+
+    const third = await reload();
+    third.enableMockPersistence(storage, PREFIX);
+    expect(await third.mockInvoke("get_config")).toMatchObject({ ...expected, follow_system_game_language: true });
+  });
+
   it("自动下载受限的 CurseForge 文件：打开后刷新仍是开；早先的快照没有这个键时按默认关读入", async () => {
     type StoredConfig = { data: { config: Record<string, unknown> } };
     const KEY = "slug.mock.config";
