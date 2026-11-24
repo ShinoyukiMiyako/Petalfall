@@ -7,6 +7,11 @@
 //!
 //! 语言码查这个版本的资源索引而不按版本号判断：同一种语言 1.11 起写 `zh_cn`，更早写 `zh_CN`，索引里的
 //! 写法就是这个版本认的写法；哪个版本有哪些语言（`zh_hk` 只有新版才有）也一并由索引说了算。
+//!
+//! 整合包带着模组的默认设置（见 [`MOD_DEFAULT_OPTIONS`]）时，options.txt 要等模组第一次启动时铺出来，缺的行
+//! 补进模组那份文件。整合包里写着游戏默认语言的 `lang:` 行不算作者的选择，导入时去掉（见
+//! [`drop_pack_default_language`]），之后与没写一样由这里补。补语言与去掉默认语言行都听配置里的
+//! `follow_system_game_language`。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -63,7 +68,8 @@ const DEFAULT_LANGUAGES: [(&str, &str); 26] = [
 ];
 
 /// 模组放默认设置的位置（YOSBR、Default Options）。这两个模组只在 options.txt 不存在时才把它铺过去，
-/// 启动器抢先写一份，整合包作者调好的设置就全作废了。
+/// 启动器抢先写一份，整合包作者调好的设置就全作废了。所以 options.txt 还没有时不新建，缺的行补进这份
+/// 文件，由模组连同作者的设置一起铺过去。
 const MOD_DEFAULT_OPTIONS: [&str; 2] = [
     "config/yosbr/options.txt",
     "config/defaultoptions/options.txt",
@@ -232,18 +238,65 @@ fn fill_options(
     (!lines.is_empty()).then(|| with_lines(existing.unwrap_or_default(), &lines))
 }
 
-/// 等着模组铺过去的默认设置。
-async fn pending_mod_defaults(working_dir: &Path) -> Result<Option<&'static str>> {
-    for relative in MOD_DEFAULT_OPTIONS {
-        let path = working_dir.join(relative);
-        let exists = tokio::fs::try_exists(&path)
-            .await
-            .map_err(|source| petalfall_base::Error::Io { path, source })?;
-        if exists {
-            return Ok(Some(relative));
-        }
+/// 第一行连同行尾的长度。`\r\n` 算一个行尾，单独的 `\r` 与 `\n` 各算一个，与 [`has_line`] 的切法一致。
+fn first_line_len(bytes: &[u8]) -> usize {
+    match bytes.iter().position(|byte| matches!(byte, b'\n' | b'\r')) {
+        None => bytes.len(),
+        Some(at) if bytes[at] == b'\r' && bytes.get(at + 1) == Some(&b'\n') => at + 2,
+        Some(at) => at + 1,
     }
-    Ok(None)
+}
+
+/// 去掉写着游戏默认语言的 `lang:` 行后的完整内容，其余逐字节保留；没有 `lang:` 行、或文件里还写着别的语言时
+/// 返回 `None`。缺 `lang:` 时游戏用的就是默认语言，所以去掉这些行不改变游戏读到的结果。
+fn without_default_language(options: &[u8]) -> Option<Vec<u8>> {
+    if !has_line(options, LANG_KEY) || names_another_language(options) {
+        return None;
+    }
+    let mut kept = Vec::with_capacity(options.len());
+    let mut rest = options;
+    while !rest.is_empty() {
+        let (line, tail) = rest.split_at(first_line_len(rest));
+        if !line.starts_with(LANG_KEY) {
+            kept.extend_from_slice(line);
+        }
+        rest = tail;
+    }
+    Some(kept)
+}
+
+/// 文件的内容，不存在时为 `None`。
+async fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(petalfall_base::Error::Io {
+            path: path.to_owned(),
+            source,
+        }
+        .into()),
+    }
+}
+
+/// 去掉整合包带来的默认语言行，返回改过的文件（相对工作目录），按 options.txt、[`MOD_DEFAULT_OPTIONS`] 的顺序。
+///
+/// 整合包里的 `lang:en_us` 多半是作者把自己的 options.txt 整份带进来的，不是特意让玩家用英文；去掉它之后
+/// 启动前的补全才会按系统语言来。写着别的语言的是作者有意选的，原样留着。只在导入的那一刻做：这时文件一定
+/// 来自整合包，之后再出现的 `lang:en_us` 可能是玩家自己在游戏里选的。
+pub(crate) async fn drop_pack_default_language(working_dir: &Path) -> Result<Vec<&'static str>> {
+    let mut changed = Vec::new();
+    for relative in std::iter::once(OPTIONS_FILE).chain(MOD_DEFAULT_OPTIONS) {
+        let path = working_dir.join(relative);
+        let Some(options) = read_optional(&path).await? else {
+            continue;
+        };
+        let Some(content) = without_default_language(&options) else {
+            continue;
+        };
+        petalfall_base::fs::atomic_write(&path, &content).await?;
+        changed.push(relative);
+    }
+    Ok(changed)
 }
 
 /// 决定要补哪些行所需的启动时状态。
@@ -254,6 +307,9 @@ pub(crate) struct OptionsInputs<'a> {
     pub(crate) asset_index_id: Option<&'a str>,
     /// 配置里的 `skip_accessibility_onboarding`。
     pub(crate) skip_onboarding: bool,
+    /// 配置里的 `follow_system_game_language`。关掉时不补 `lang:`；已有语言的大小写照样跟着版本走，那是让
+    /// 文件里已有的选择在这个版本继续生效，不是替玩家选语言。
+    pub(crate) follow_system: bool,
 }
 
 /// 补全的经过，由调用方写进启动日志。
@@ -278,6 +334,8 @@ pub(crate) async fn fill_missing_options(
     report
 }
 
+/// options.txt 在就补它；不在而模组的默认设置在，就补那份文件、不新建 options.txt（见
+/// [`MOD_DEFAULT_OPTIONS`]）；都不在才新建。
 async fn fill(
     inputs: &OptionsInputs<'_>,
     layout: &GameLayout,
@@ -285,20 +343,35 @@ async fn fill(
     report: &mut OptionsReport,
 ) -> Result<()> {
     let path = working_dir.join(OPTIONS_FILE);
-    let existing = match tokio::fs::read(&path).await {
-        Ok(bytes) => Some(bytes),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(source) => return Err(petalfall_base::Error::Io { path, source }.into()),
-    };
-    let existing = existing.as_deref();
-    if existing.is_none()
-        && let Some(pending) = pending_mod_defaults(working_dir).await?
-    {
+    if let Some(existing) = read_optional(&path).await? {
+        return fill_file(&path, Some(&existing), inputs, layout, report).await;
+    }
+    let mut pending = false;
+    for relative in MOD_DEFAULT_OPTIONS {
+        let defaults = working_dir.join(relative);
+        let Some(existing) = read_optional(&defaults).await? else {
+            continue;
+        };
+        pending = true;
         report.notes.push(format!(
-            "{pending} 会在第一次启动时铺默认设置，游戏语言与无障碍引导留给它决定"
+            "options.txt 还没有，{relative} 会在第一次启动时铺过去，缺的行补进这份文件"
         ));
+        fill_file(&defaults, Some(&existing), inputs, layout, report).await?;
+    }
+    if pending {
         return Ok(());
     }
+    fill_file(&path, None, inputs, layout, report).await
+}
+
+/// 补全一份文件：`existing` 是它现有的内容，文件不存在时为 `None`。
+async fn fill_file(
+    path: &Path,
+    existing: Option<&[u8]>,
+    inputs: &OptionsInputs<'_>,
+    layout: &GameLayout,
+    report: &mut OptionsReport,
+) -> Result<()> {
     let language = if lacks(existing, LANG_KEY) {
         choose_language(inputs, layout, report).await
     } else {
@@ -317,7 +390,7 @@ async fn fill(
     let Some(content) = filled.or(respelled) else {
         return Ok(());
     };
-    petalfall_base::fs::atomic_write(&path, &content).await?;
+    petalfall_base::fs::atomic_write(path, &content).await?;
     if let (Some(code), Some(system)) = (&language, inputs.system) {
         report
             .notes
@@ -363,6 +436,12 @@ async fn choose_language(
     layout: &GameLayout,
     report: &mut OptionsReport,
 ) -> Option<String> {
+    if !inputs.follow_system {
+        report
+            .notes
+            .push("「游戏语言跟随系统语言」已在设置里关闭，游戏语言保持默认".to_owned());
+        return None;
+    }
     let Some(system) = inputs.system else {
         report
             .notes
@@ -975,6 +1054,18 @@ mod tests {
                 system,
                 asset_index_id,
                 skip_onboarding,
+                follow_system: true,
+            };
+            fill_missing_options(&inputs, &self.layout, &self.working_dir).await
+        }
+
+        /// 关掉「游戏语言跟随系统语言」的一次补全；系统语言是中文，索引也在，只差这个开关。
+        async fn fill_without_following(&self, skip_onboarding: bool) -> OptionsReport {
+            let inputs = OptionsInputs {
+                system: Some("zh-CN"),
+                asset_index_id: Some("lang-test"),
+                skip_onboarding,
+                follow_system: false,
             };
             fill_missing_options(&inputs, &self.layout, &self.working_dir).await
         }
@@ -993,10 +1084,14 @@ mod tests {
         }
 
         fn options(&self) -> Option<Vec<u8>> {
-            match std::fs::read(self.working_dir.join(OPTIONS_FILE)) {
+            self.read(OPTIONS_FILE)
+        }
+
+        fn read(&self, relative: &str) -> Option<Vec<u8>> {
+            match std::fs::read(self.working_dir.join(relative)) {
                 Ok(bytes) => Some(bytes),
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-                Err(err) => panic!("读 options.txt 失败：{err}"),
+                Err(err) => panic!("读 {relative} 失败：{err}"),
             }
         }
     }
@@ -1221,27 +1316,311 @@ mod tests {
         assert!(report.failures.is_empty(), "{:?}", report.failures);
     }
 
-    /// 这两个模组只在 options.txt 不存在时铺整合包作者调好的默认设置，抢先写一份就把它们顶掉了，所以语言和
-    /// 引导都不写，开关开着也一样。
+    fn pending_note(pending: &str) -> String {
+        format!("options.txt 还没有，{pending} 会在第一次启动时铺过去，缺的行补进这份文件")
+    }
+
+    const FOLLOWING_OFF: &str = "「游戏语言跟随系统语言」已在设置里关闭，游戏语言保持默认";
+
+    /// 这两个模组只在 options.txt 不存在时铺整合包作者调好的默认设置，抢先写一份就把它们顶掉了。所以缺的行
+    /// 补进模组那份文件，options.txt 留给模组去铺。
     #[tokio::test]
-    async fn mod_defaults_waiting_to_be_copied_keep_the_options_file_absent() {
-        for pending in [
-            "config/yosbr/options.txt",
-            "config/defaultoptions/options.txt",
-        ] {
+    async fn mod_defaults_waiting_to_be_copied_get_the_missing_lines() {
+        for pending in MOD_DEFAULT_OPTIONS {
             let scene = scene(V1_21_1);
-            scene.write(pending, b"fov:0.8\n");
+            scene.write(pending, b"version:3955\r\nfov:0.8\r\n\xff\xfe:1\r\n");
 
             let notes = scene.fill(Some("zh-CN")).await;
 
             assert_eq!(scene.options(), None, "{pending}");
             assert_eq!(
+                scene.read(pending).unwrap(),
+                b"version:3955\r\nfov:0.8\r\n\xff\xfe:1\r\nlang:zh_cn\r\nonboardAccessibility:false\r\n",
+                "{pending}"
+            );
+            assert_eq!(
                 notes,
-                [format!(
-                    "{pending} 会在第一次启动时铺默认设置，游戏语言与无障碍引导留给它决定"
-                )]
+                [
+                    pending_note(pending).as_str(),
+                    "游戏语言设为 zh_cn，跟随系统语言 zh-CN",
+                    SKIPPED
+                ]
             );
         }
+    }
+
+    /// 模组那份文件里已有的语言与引导设置是作者定的，一个字节都不动；写着游戏默认语言的也一样，启动前不改
+    /// 已有的行，那一行只在导入时去掉。
+    #[tokio::test]
+    async fn mod_defaults_that_already_say_everything_stay_untouched() {
+        for original in [
+            &b"version:3955\nlang:ja_jp\nonboardAccessibility:true\nfov:0.8\n"[..],
+            &b"version:3955\nlang:en_us\nonboardAccessibility:false\n"[..],
+        ] {
+            let scene = scene(V1_21_1);
+            let pending = "config/defaultoptions/options.txt";
+            scene.write(pending, original);
+
+            let notes = scene.fill(Some("zh-CN")).await;
+
+            assert_eq!(scene.read(pending).unwrap(), original);
+            assert_eq!(scene.options(), None);
+            assert_eq!(notes, [pending_note(pending)]);
+        }
+    }
+
+    /// 模组那份文件里的语言同样跟着这一局的版本改大小写，铺过去之后游戏才认。
+    #[tokio::test]
+    async fn language_in_mod_defaults_is_respelled_for_the_version_being_launched() {
+        let scene = scene(V1_21_1);
+        let pending = "config/yosbr/options.txt";
+        scene.write(pending, b"lang:zh_CN\nonboardAccessibility:false\n");
+
+        let notes = scene.fill(Some("zh-CN")).await;
+
+        assert_eq!(
+            scene.read(pending).unwrap(),
+            b"lang:zh_cn\nonboardAccessibility:false\n"
+        );
+        assert_eq!(scene.options(), None);
+        assert_eq!(notes, [pending_note(pending).as_str(), RESPELLED]);
+    }
+
+    /// 两个模组的默认设置都在时各补各的。
+    #[tokio::test]
+    async fn every_pending_mod_defaults_file_is_filled() {
+        let scene = scene(V1_21_1);
+        scene.write("config/yosbr/options.txt", b"fov:0.8\n");
+        scene.write(
+            "config/defaultoptions/options.txt",
+            b"lang:zh_tw\nfov:0.6\n",
+        );
+
+        scene.fill(Some("zh-CN")).await;
+
+        assert_eq!(
+            scene.read("config/yosbr/options.txt").unwrap(),
+            b"fov:0.8\nlang:zh_cn\nonboardAccessibility:false\n"
+        );
+        assert_eq!(
+            scene.read("config/defaultoptions/options.txt").unwrap(),
+            b"lang:zh_tw\nfov:0.6\nonboardAccessibility:false\n"
+        );
+        assert_eq!(scene.options(), None);
+    }
+
+    /// YOSBR 每次启动都会建一份空的默认设置，整合包常把它原样带进来。它是已有的文件，补法与空的 options.txt
+    /// 相同：缺的行照补，不声明数据版本。
+    #[tokio::test]
+    async fn empty_mod_defaults_are_filled_like_an_empty_options_file() {
+        let pending = "config/yosbr/options.txt";
+
+        let skipping = scene(V1_21_1);
+        skipping.write(pending, b"");
+        skipping.fill(Some("zh-CN")).await;
+        assert_eq!(
+            skipping.read(pending).unwrap(),
+            b"lang:zh_cn\nonboardAccessibility:false\n"
+        );
+        assert_eq!(skipping.options(), None);
+
+        let showing = scene(V1_21_1);
+        showing.write(pending, b"");
+        let report = showing
+            .fill_with(Some("zh-CN"), Some("lang-test"), false)
+            .await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(showing.read(pending).unwrap(), b"lang:zh_cn\n");
+        assert_eq!(showing.options(), None);
+    }
+
+    /// 关掉「游戏语言跟随系统语言」：不补语言，引导那一行照补，原因记进启动日志。
+    #[tokio::test]
+    async fn language_switch_off_only_adds_the_onboarding_line() {
+        let fresh = scene(V1_21_1);
+        let report = fresh.fill_without_following(true).await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(fresh.options().unwrap(), b"onboardAccessibility:false\n");
+        assert_eq!(report.notes, [FOLLOWING_OFF, SKIPPED]);
+
+        let existing = scene(V1_21_1);
+        existing.write(OPTIONS_FILE, b"fov:0.5\n");
+        existing.fill_without_following(true).await;
+        assert_eq!(
+            existing.options().unwrap(),
+            b"fov:0.5\nonboardAccessibility:false\n"
+        );
+
+        let pending = scene(V1_21_1);
+        pending.write("config/defaultoptions/options.txt", b"fov:0.8\n");
+        pending.fill_without_following(true).await;
+        assert_eq!(
+            pending.read("config/defaultoptions/options.txt").unwrap(),
+            b"fov:0.8\nonboardAccessibility:false\n"
+        );
+        assert_eq!(pending.options(), None);
+    }
+
+    /// 两个开关都关掉时什么都不写，文件也不创建。
+    #[tokio::test]
+    async fn both_switches_off_write_nothing() {
+        let scene = scene(V1_21_1);
+        let report = scene.fill_without_following(false).await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.notes, [FOLLOWING_OFF]);
+        assert_eq!(scene.options(), None);
+    }
+
+    /// 关掉「游戏语言跟随系统语言」也照样改大小写：那是让文件里已有的语言在这个版本继续生效。
+    #[tokio::test]
+    async fn language_switch_off_still_respells_the_existing_language() {
+        let scene = scene(V1_8_9);
+        scene.write(OPTIONS_FILE, b"lang:zh_cn\nonboardAccessibility:false\n");
+
+        let report = scene.fill_without_following(true).await;
+
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.notes, [RESPELLED]);
+        assert_eq!(
+            scene.options().unwrap(),
+            b"lang:zh_CN\nonboardAccessibility:false\n"
+        );
+    }
+
+    #[test]
+    fn default_language_lines_are_dropped_and_every_other_byte_stays() {
+        let cases: [(&[u8], &[u8]); 6] = [
+            (
+                b"version:3955\nlang:en_us\nfov:0.5\n",
+                b"version:3955\nfov:0.5\n",
+            ),
+            (
+                b"version:3955\r\nlang:en_us\r\n\xff\xfe:1\r\nfov:0.5",
+                b"version:3955\r\n\xff\xfe:1\r\nfov:0.5",
+            ),
+            // 1.11 之前的写法
+            (b"lang:en_US\nfov:0.5\n", b"fov:0.5\n"),
+            // 末行没有换行
+            (b"fov:0.5\nlang:en_us", b"fov:0.5\n"),
+            // 只有这一行
+            (b"lang:en_us\n", b""),
+            // 重复的行一起去掉，单独的 \r 也是行尾
+            (b"lang:en_us\rfov:0.5\rlang:EN_US\r", b"fov:0.5\r"),
+        ];
+        for (options, expected) in cases {
+            assert_eq!(
+                without_default_language(options).as_deref(),
+                Some(expected),
+                "{:?}",
+                String::from_utf8_lossy(options)
+            );
+        }
+    }
+
+    /// 没有语言行、写着别的语言、默认语言与别的语言并存（游戏取后一行，去掉哪行都可能改变结果）、键名只是
+    /// 以 lang 开头，都不动。
+    #[test]
+    fn files_without_a_plain_default_language_are_left_alone() {
+        let cases: [&[u8]; 6] = [
+            b"",
+            b"version:3955\nfov:0.5\n",
+            b"lang:zh_cn\nfov:0.5\n",
+            b"lang:ja_jp",
+            b"lang:en_us\nlang:zh_cn\n",
+            b"language:en_us\n# lang:en_us\n",
+        ];
+        for options in cases {
+            assert_eq!(
+                without_default_language(options),
+                None,
+                "{:?}",
+                String::from_utf8_lossy(options)
+            );
+        }
+    }
+
+    /// 导入时三处一起看：写着默认语言的去掉那一行，写着别的语言的、没有的都不动，返回的是改过的文件。
+    #[tokio::test]
+    async fn pack_default_language_is_dropped_from_every_options_file() {
+        let scene = scene(V1_21_1);
+        scene.write(OPTIONS_FILE, b"version:3955\nlang:en_us\nfov:0.5\n");
+        scene.write("config/yosbr/options.txt", b"lang:ja_jp\nfov:0.8\n");
+        scene.write(
+            "config/defaultoptions/options.txt",
+            b"version:3955\r\nfov:0.6\r\nlang:en_us\r\nonboardAccessibility:false\r\n",
+        );
+        scene.write("config/fancymenu/options.txt", b"lang:en_us\n");
+
+        let changed = drop_pack_default_language(&scene.working_dir)
+            .await
+            .unwrap();
+
+        assert_eq!(changed, [OPTIONS_FILE, "config/defaultoptions/options.txt"]);
+        assert_eq!(scene.options().unwrap(), b"version:3955\nfov:0.5\n");
+        assert_eq!(
+            scene.read("config/yosbr/options.txt").unwrap(),
+            b"lang:ja_jp\nfov:0.8\n"
+        );
+        assert_eq!(
+            scene.read("config/defaultoptions/options.txt").unwrap(),
+            b"version:3955\r\nfov:0.6\r\nonboardAccessibility:false\r\n"
+        );
+        assert_eq!(
+            scene.read("config/fancymenu/options.txt").unwrap(),
+            b"lang:en_us\n",
+            "别的模组自己的 options.txt 不是游戏设置"
+        );
+
+        // 再来一次没有可去掉的
+        assert!(
+            drop_pack_default_language(&scene.working_dir)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// 导入时去掉默认语言行之后，启动前的补全把语言补进同一份文件：两步合起来就是整合包的英文换成系统语言，
+    /// 作者的其他设置原样铺过去。
+    #[tokio::test]
+    async fn dropped_pack_language_is_filled_from_the_system_at_launch() {
+        let scene = scene(V1_21_1);
+        let pending = "config/defaultoptions/options.txt";
+        scene.write(
+            pending,
+            b"version:3955\nfov:0.8\nlang:en_us\nonboardAccessibility:false\n",
+        );
+
+        drop_pack_default_language(&scene.working_dir)
+            .await
+            .unwrap();
+        scene.fill(Some("zh-CN")).await;
+
+        assert_eq!(
+            scene.read(pending).unwrap(),
+            b"version:3955\nfov:0.8\nonboardAccessibility:false\nlang:zh_cn\n"
+        );
+        assert_eq!(scene.options(), None);
+    }
+
+    /// 模组的默认设置读不了（这里是个目录）时照实报错，不当成没有而抢先建 options.txt。
+    #[tokio::test]
+    async fn unreadable_mod_defaults_are_reported_and_no_options_file_is_created() {
+        let scene = scene(V1_21_1);
+        std::fs::create_dir_all(scene.working_dir.join("config/defaultoptions/options.txt"))
+            .unwrap();
+
+        let report = scene
+            .fill_with(Some("zh-CN"), Some("lang-test"), true)
+            .await;
+
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert!(
+            matches!(&report.failures[0], CoreError::Base(petalfall_base::Error::Io { path, .. }) if path.ends_with("config/defaultoptions/options.txt")),
+            "{:?}",
+            report.failures
+        );
+        assert_eq!(scene.options(), None);
     }
 
     /// options.txt 已经在了，模组不会再铺默认设置，缺的行照常补。

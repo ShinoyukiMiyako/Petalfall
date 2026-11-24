@@ -417,6 +417,13 @@ impl Petalfall {
         self.config.new_instance_template = enabled;
     }
 
+    /// 设置游戏语言是否跟随系统显示语言。
+    ///
+    /// 只管之后的启动与整合包导入；已经写进 options.txt 的语言不跟着改，分不出它是启动器补的还是玩家选的。
+    pub fn set_follow_system_game_language(&mut self, enabled: bool) {
+        self.config.follow_system_game_language = enabled;
+    }
+
     /// 设置作者关掉了第三方分发的 CurseForge 文件拿不到下载地址时，是否拼出 CDN 地址直接下载。
     pub fn set_download_restricted_curseforge_files(&mut self, enabled: bool) {
         self.config.download_restricted_curseforge_files = enabled;
@@ -874,6 +881,12 @@ mod tests {
         assert!(petalfall.config().download_restricted_curseforge_files);
         petalfall.set_download_restricted_curseforge_files(false);
         assert!(!petalfall.config().download_restricted_curseforge_files);
+
+        assert!(petalfall.config().follow_system_game_language);
+        petalfall.set_follow_system_game_language(false);
+        assert!(!petalfall.config().follow_system_game_language);
+        petalfall.set_follow_system_game_language(true);
+        assert!(petalfall.config().follow_system_game_language);
     }
 
     /// 改版本列表源只写配置：清单地址仍是官方地址，镜像优先体现在源计划给出的首个候选上。

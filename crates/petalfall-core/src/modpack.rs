@@ -864,6 +864,15 @@ impl Petalfall {
             .await??;
         }
 
+        // 包里写着游戏默认语言的那一行不算作者的选择：去掉之后，启动前的补全才会按系统语言来（见
+        // game_lang）。放在套默认设置之前：模板里的语言是玩家自己存下的，不在此列。
+        if self.config().follow_system_game_language {
+            let changed = crate::game_lang::drop_pack_default_language(version_dir).await?;
+            if !changed.is_empty() {
+                tracing::info!(name, files = ?changed, "已去掉整合包自带的默认语言行");
+            }
+        }
+
         // 覆盖文件之后才补：包里自带的 options.txt 是作者调好的，按只补缺的规则原样留着，缺的服务器列表
         // 之类由默认设置补上。导入的实例一律隔离，套不套只看配置这一道闸。失败与其他步骤一样让导入失败。
         // 报不报这一步只看准备时排定的表、不看配置：准备与落盘是两次调用，调用方可以在两次之间改配置或换一个门面，
@@ -1995,6 +2004,7 @@ mod tests {
     }
 
     /// 包里自带的 options.txt 压过默认设置，包里没有的服务器列表由默认设置补上；配置里关掉时一个都不补。
+    /// 包里写着游戏默认语言的那一行在套默认设置之前就去掉了，文件还在，所以默认设置的 options.txt 照样不进来。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn imported_instance_gets_missing_files_from_the_template() {
         let server = MockServer::start().await;
@@ -2004,7 +2014,7 @@ mod tests {
         write_pack(
             &pack,
             &index(serde_json::json!({"minecraft": "test"})),
-            &[("overrides/options.txt", b"lang:en_us")],
+            &[("overrides/options.txt", b"guiScale:3\nlang:en_us\n")],
         );
         let petalfall = petalfall(tmp.path(), &server);
         let servers: Vec<u8> = (0..fastrand::usize(1..2048))
@@ -2030,7 +2040,7 @@ mod tests {
         let dir = outcome.version_dir;
         assert_eq!(
             std::fs::read(dir.join("options.txt")).unwrap(),
-            b"lang:en_us"
+            b"guiScale:3\n"
         );
         assert_eq!(std::fs::read(dir.join("servers.dat")).unwrap(), servers);
         let mut stages = Vec::new();
@@ -2069,9 +2079,119 @@ mod tests {
         let dir = outcome.version_dir;
         assert_eq!(
             std::fs::read(dir.join("options.txt")).unwrap(),
-            b"lang:en_us"
+            b"guiScale:3\n"
         );
         assert!(!dir.join("servers.dat").exists());
+    }
+
+    /// 整合包里写着游戏默认语言的那一行在导入时去掉：游戏自己的 options.txt 与两个模组的默认设置一起看，其余
+    /// 字节不动；写着别的语言的是作者有意选的，原样留着。关掉「游戏语言跟随系统语言」时三份文件都与包里的
+    /// 逐字节相同。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn imported_pack_loses_its_default_language_lines() {
+        const OPTIONS: &[u8] = b"version:3955\nlang:en_us\nfov:0.5\n";
+        const DEFAULT_OPTIONS: &[u8] =
+            b"version:3955\r\nfov:0.8\r\nlang:en_us\r\nonboardAccessibility:false\r\n";
+        const YOSBR: &[u8] = b"lang:ja_jp\nfov:0.6\n";
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("测试包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[
+                ("overrides/options.txt", OPTIONS),
+                (
+                    "overrides/config/defaultoptions/options.txt",
+                    DEFAULT_OPTIONS,
+                ),
+                ("overrides/config/yosbr/options.txt", YOSBR),
+            ],
+        );
+        let read = |dir: &Path, relative: &str| std::fs::read(dir.join(relative)).unwrap();
+
+        let outcome = petalfall(tmp.path(), &server)
+            .install_modpack(
+                &ModpackSource::File { path: pack.clone() },
+                Some("跟随系统"),
+                &ImportSelection::default(),
+                "task-l",
+                None,
+            )
+            .await
+            .unwrap();
+        let dir = outcome.version_dir;
+        assert_eq!(read(&dir, "options.txt"), b"version:3955\nfov:0.5\n");
+        assert_eq!(
+            read(&dir, "config/defaultoptions/options.txt"),
+            b"version:3955\r\nfov:0.8\r\nonboardAccessibility:false\r\n"
+        );
+        assert_eq!(read(&dir, "config/yosbr/options.txt"), YOSBR);
+
+        let mut off = Petalfall::for_test(
+            PetalfallConfig {
+                follow_system_game_language: false,
+                ..PetalfallConfig::default()
+            },
+            tmp.path().join("data-off"),
+            tmp.path().join("mc-off"),
+        )
+        .with_manifest_url(format!("{}/manifest.json", server.uri()));
+        off.set_isolation_policy(IsolationPolicy::Disabled);
+        let outcome = off
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("不跟随"),
+                &ImportSelection::default(),
+                "task-m",
+                None,
+            )
+            .await
+            .unwrap();
+        let dir = outcome.version_dir;
+        assert_eq!(read(&dir, "options.txt"), OPTIONS);
+        assert_eq!(
+            read(&dir, "config/defaultoptions/options.txt"),
+            DEFAULT_OPTIONS
+        );
+        assert_eq!(read(&dir, "config/yosbr/options.txt"), YOSBR);
+    }
+
+    /// 去掉默认语言行只针对整合包带来的文件：默认设置里的 options.txt 是玩家自己存下的，补进实例时连同里面的
+    /// 语言原样进来。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn language_in_the_template_survives_the_import() {
+        const TEMPLATE: &[u8] = b"lang:en_us\nfov:0.9\n";
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("测试包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/config/a.txt", b"config-a")],
+        );
+        let petalfall = petalfall(tmp.path(), &server);
+        let template = petalfall.template_dir();
+        std::fs::create_dir_all(&template).unwrap();
+        std::fs::write(template.join("options.txt"), TEMPLATE).unwrap();
+
+        let outcome = petalfall
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("带模板"),
+                &ImportSelection::default(),
+                "task-n",
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(outcome.version_dir.join("options.txt")).unwrap(),
+            TEMPLATE
+        );
     }
 
     /// 同名旧实例在启动器之外被删掉后，名字下的游玩记录还留着；导入同名整合包得到的是一个没玩过的新实例。
@@ -6239,7 +6359,7 @@ mod tests {
         write_pack(
             &pack,
             &index(serde_json::json!({"minecraft": "test"})),
-            &[("overrides/options.txt", b"lang:en_us")],
+            &[("overrides/options.txt", b"guiScale:3\nlang:en_us\n")],
         );
         let source = ModpackSource::File { path: pack };
         let none = ImportSelection::default();
@@ -6296,9 +6416,10 @@ mod tests {
             );
             assert_phase_protocol(&phases);
             let dir = outcome.version_dir;
+            // 包里的设置留着，写着游戏默认语言的那一行在导入时去掉了。
             assert_eq!(
                 std::fs::read(dir.join("options.txt")).unwrap(),
-                b"lang:en_us",
+                b"guiScale:3\n",
                 "{name}"
             );
             let copied = dir.join("servers.dat");

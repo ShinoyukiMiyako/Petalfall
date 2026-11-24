@@ -263,6 +263,10 @@ pub struct PetalfallConfig {
     /// 地址直接下载。默认关：作者没有允许经第三方取这个文件，要不要这样取由用户自己决定；关着时照旧请用户到网页
     /// 手动下载。旧配置没有这一项时按关着读入。
     pub download_restricted_curseforge_files: bool,
+    /// 游戏语言是否跟随系统显示语言：启动前给还没有 `lang:` 的 options.txt 补上语言，导入整合包时去掉包里写着
+    /// 游戏默认语言的那一行。关掉后两处都不做，已经写进文件的语言不跟着改。旧配置没有这一项时按开着读入：
+    /// 加这个开关之前启动前就一直在补语言。
+    pub follow_system_game_language: bool,
     /// 这个版本不认识的顶层设置（多半是更新的版本写的），原样留着、落盘时原样写回。
     ///
     /// 配置整份按内存里的值落盘：不留着的话，降级之后随便改一项设置，新版本的设置就从文件里消失了，
@@ -309,6 +313,7 @@ impl Default for PetalfallConfig {
             ui_shape: UiShape::default(),
             usage_notice: None,
             download_restricted_curseforge_files: false,
+            follow_system_game_language: true,
             unrecognized: serde_json::Map::new(),
             carried_over: CarriedOver::default(),
         }
@@ -751,6 +756,7 @@ mod tests {
             !c.download_restricted_curseforge_files,
             "受限的 CurseForge 文件默认不自动下载"
         );
+        assert!(c.follow_system_game_language, "游戏语言默认跟随系统语言");
         assert_eq!(
             (c.ui_shape.recent_cards, c.ui_shape.repair_banner),
             (0, false),
@@ -940,6 +946,43 @@ mod tests {
                 .unwrap()
                 .download_restricted_curseforge_files
         );
+    }
+
+    /// 旧配置没有 follow_system_game_language 时按开着载入；关掉后整份落盘，文件顶层写着这个键，再读回还是关着，
+    /// 且由字段认领、不落进不认识的设置里。
+    #[tokio::test]
+    async fn follow_system_game_language_defaults_on_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = ConfigStore::at(&path);
+
+        tokio::fs::write(&path, br#"{"download_concurrency": 12}"#)
+            .await
+            .unwrap();
+        let mut loaded = store.load().await.unwrap();
+        assert!(loaded.follow_system_game_language);
+        assert_eq!(loaded.download_concurrency, 12);
+
+        loaded.follow_system_game_language = false;
+        store.save(&loaded).await.unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["follow_system_game_language"], false);
+        assert_eq!(raw["download_concurrency"], 12);
+
+        let reloaded = store.load().await.unwrap();
+        assert!(!reloaded.follow_system_game_language);
+        assert!(
+            reloaded.unrecognized.is_empty(),
+            "这个键由字段认领，不该当作不认识的设置：{:?}",
+            reloaded.unrecognized
+        );
+        assert_eq!(reloaded, loaded);
+
+        tokio::fs::write(&path, br#"{"follow_system_game_language": true}"#)
+            .await
+            .unwrap();
+        assert!(store.load().await.unwrap().follow_system_game_language);
     }
 
     /// 旧配置没有 world_backup 时按默认值载入：自动备份开、每个存档 5 份、总量 20 GB。
@@ -2238,6 +2281,7 @@ mod tests {
         assert_eq!(raw["skip_accessibility_onboarding"], true);
         assert_eq!(raw["new_instance_template"], true);
         assert_eq!(raw["download_restricted_curseforge_files"], false);
+        assert_eq!(raw["follow_system_game_language"], true);
         assert_eq!(
             raw["world_backup"],
             serde_json::json!({"auto": true, "keep_per_world": 5, "max_total_gb": 20})

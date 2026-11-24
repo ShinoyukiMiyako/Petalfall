@@ -1277,6 +1277,7 @@ impl Petalfall {
             system: system.as_deref(),
             asset_index_id: merged.asset_index.as_ref().map(|index| index.id.as_str()),
             skip_onboarding: self.config().skip_accessibility_onboarding,
+            follow_system: self.config().follow_system_game_language,
         };
         let report = crate::game_lang::fill_missing_options(&inputs, layout, working_dir).await;
         for note in report.notes {
@@ -6060,6 +6061,66 @@ mod tests {
         assert_eq!(
             std::fs::read(mc.join("options.txt")).unwrap(),
             b"onboardAccessibility:false\n"
+        );
+    }
+
+    /// 关掉「游戏语言跟随系统语言」：中文系统也不写语言，引导那一行照补。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn language_switch_off_writes_no_language() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
+        let java = fake_java(&fx.root, 17, 0);
+        let mut petalfall = chinese_system(&fx);
+        petalfall.set_follow_system_game_language(false);
+
+        let (_, events) = play_to_exit(&petalfall, VERSION, java).await;
+
+        assert_eq!(
+            std::fs::read(mc.join("options.txt")).unwrap(),
+            b"onboardAccessibility:false\n"
+        );
+        let info = log_texts(&events, LauncherLevel::Info);
+        assert!(
+            info.contains(&"「游戏语言跟随系统语言」已在设置里关闭，游戏语言保持默认".to_owned()),
+            "{info:?}"
+        );
+    }
+
+    /// 整合包带着模组的默认设置：语言补进那份文件，不抢先建 options.txt，模组才会把作者的设置铺过去。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mod_defaults_get_the_language_and_no_options_file_is_created() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, "14w21b", "snapshot", "minecraft/lang/zh_CN.lang");
+        let instance = mc.join("versions").join("14w21b");
+        let defaults = instance
+            .join("config")
+            .join("defaultoptions")
+            .join("options.txt");
+        std::fs::create_dir_all(defaults.parent().unwrap()).unwrap();
+        std::fs::write(
+            &defaults,
+            b"version:3955\nfov:0.8\nonboardAccessibility:false\n",
+        )
+        .unwrap();
+        let java = fake_java(&fx.root, 17, 0);
+
+        let (_, events) = play_to_exit(&chinese_system(&fx), "14w21b", java).await;
+
+        assert_eq!(
+            std::fs::read(&defaults).unwrap(),
+            b"version:3955\nfov:0.8\nonboardAccessibility:false\nlang:zh_CN\n"
+        );
+        assert!(!instance.join("options.txt").exists());
+        assert!(!mc.join("options.txt").exists());
+        let info = log_texts(&events, LauncherLevel::Info);
+        assert!(
+            info.contains(
+                &"options.txt 还没有，config/defaultoptions/options.txt 会在第一次启动时铺过去，缺的行补进这份文件"
+                    .to_owned()
+            ),
+            "{info:?}"
         );
     }
 

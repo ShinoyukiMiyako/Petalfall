@@ -561,6 +561,7 @@ fn config_samples() -> Vec<PetalfallConfig> {
                 accepted_at: 1_763_200_000_000,
             }),
             download_restricted_curseforge_files: true,
+            follow_system_game_language: false,
             unrecognized: unrecognized.clone(),
             // 不参与序列化：只由 ConfigStore 读入时收下各段不认识的键、落盘时写回，填不进样本。
             carried_over: CarriedOver::default(),
