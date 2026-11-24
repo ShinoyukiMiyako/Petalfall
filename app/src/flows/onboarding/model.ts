@@ -2,7 +2,7 @@
 
 import { samePath } from "../../domain/paths";
 
-export const STEPS = ["gameDir", "java", "account", "appearance"] as const;
+export const STEPS = ["gameDir", "java", "account", "download", "appearance"] as const;
 export type StepId = (typeof STEPS)[number];
 
 export type StepStatus = "current" | "done" | "skipped" | "future";
@@ -34,9 +34,9 @@ export function canSkip(index: number): boolean {
   return index > 0;
 }
 
-/** 第二、三步底栏另有「直接开始」，用默认值一键收尾。 */
+/** 第一步与最后一步之间的各步底栏另有「直接开始」，用默认值一键收尾；最后一步的主按钮本身就是收尾。 */
 export function canStartNow(index: number): boolean {
-  return index === 1 || index === 2;
+  return index > 0 && index < LAST_STEP;
 }
 
 function withItem(set: ReadonlySet<StepId>, id: StepId, present: boolean): ReadonlySet<StepId> {

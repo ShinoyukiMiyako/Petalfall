@@ -101,7 +101,7 @@ describe("底栏", () => {
     expect(next).toMatch(/justify-content:\s*center/);
   });
 
-  it("后置箭头在「下一步」时透明并缩小，到第四步淡入并沿 pop 弹到原大；减少动画不缩放", () => {
+  it("后置箭头在「下一步」时透明并缩小，到最后一步淡入并沿 pop 弹到原大；减少动画不缩放", () => {
     const hiddenSelector = '.primaryAction[data-face="next"] .primaryArrow';
     const hidden = declarations(hiddenSelector);
     expect(hidden).toMatch(/(^|[\s;])opacity:\s*0\s*;/);

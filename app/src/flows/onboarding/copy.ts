@@ -24,6 +24,11 @@ export const STEP_COPY: Readonly<Record<StepId, { name: string; title: string; d
     title: "用什么账户进游戏",
     desc: "正版玩家用微软账户；只玩单机或离线服，可以先建一个离线账户。现在跳过也没关系。",
   },
+  download: {
+    name: "下载",
+    title: "受限的 CurseForge 文件怎么处理",
+    desc: `CurseForge 上有些作者不允许启动器下载自己的文件。默认遇到时列成清单，由你到网页下载；也可以让${APP_NAME}直接去下。之后可以在 设置 > 下载 里改。`,
+  },
   appearance: {
     name: "外观",
     title: "挑一个你喜欢的样子",
@@ -96,6 +101,12 @@ export const LOGIN_OPTIONS: readonly { kind: "microsoft" | "offline" | "authlib"
   { kind: "offline", name: "离线账户", desc: "无需联网，单人与离线服使用", icon: "user", online: false },
   { kind: "authlib", name: "外置登录", desc: "LittleSkin 等第三方认证服务器", icon: "server", online: true },
 ];
+
+export const DOWNLOAD_STEP_COPY = {
+  restricted: "自动下载受限的 CurseForge 文件",
+  restrictedDesc: `${APP_NAME}按文件编号拼出地址直接下载；下不到的仍由你到 CurseForge 网页手动下载。`,
+  saveFailed: "没能保存「自动下载受限的 CurseForge 文件」",
+} as const;
 
 export const APPEARANCE_STEP_COPY = {
   mode: "明暗",

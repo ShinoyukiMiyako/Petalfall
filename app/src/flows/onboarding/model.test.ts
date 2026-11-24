@@ -10,21 +10,30 @@ import {
   extraCandidates,
   INITIAL_WIZARD,
   jumpTo,
+  LAST_STEP,
   pickedExtras,
+  STEPS,
   stepStatus,
 } from "./model";
 
+const ALL = [0, 1, 2, 3, 4];
+
 describe("向导步骤推进", () => {
-  it("第一步不能跳过，第二、三步有「直接开始」", () => {
-    expect([0, 1, 2, 3].map(canSkip)).toEqual([false, true, true, true]);
-    expect([0, 1, 2, 3].map(canStartNow)).toEqual([false, true, true, false]);
+  it("五步：「下载」排在账户之后、外观之前，外观是最后一步", () => {
+    expect(STEPS).toEqual(["gameDir", "java", "account", "download", "appearance"]);
+    expect(LAST_STEP).toBe(4);
+  });
+
+  it("第一步不能跳过，第一步与最后一步之间的各步有「直接开始」", () => {
+    expect(ALL.map(canSkip)).toEqual([false, true, true, true, true]);
+    expect(ALL.map(canStartNow)).toEqual([false, true, true, true, false]);
     expect(() => advance(INITIAL_WIZARD, "skip")).toThrow("第一步不能跳过");
   });
 
   it("下一步与跳过分别记作完成与已跳过；后来用下一步离开时不再算跳过", () => {
     const s1 = advance(INITIAL_WIZARD, "next");
     const s2 = advance(s1, "skip");
-    expect([0, 1, 2, 3].map((i) => stepStatus(s2, i))).toEqual(["done", "skipped", "current", "future"]);
+    expect(ALL.map((i) => stepStatus(s2, i))).toEqual(["done", "skipped", "current", "future", "future"]);
     const again = advance(jumpTo(s2, 1), "next");
     expect(stepStatus(again, 1)).toBe("done");
     expect(again.index).toBe(2);
@@ -32,7 +41,7 @@ describe("向导步骤推进", () => {
 
   it("只能点回到过的步，后退与点回方向为 -1", () => {
     const s = advance(advance(INITIAL_WIZARD, "next"), "next");
-    expect([0, 1, 2, 3].map((i) => canJumpTo(s, i))).toEqual([true, true, false, false]);
+    expect(ALL.map((i) => canJumpTo(s, i))).toEqual([true, true, false, false, false]);
     const jumped = jumpTo(s, 0);
     expect([jumped.index, jumped.direction, jumped.reached]).toEqual([0, -1, 2]);
     expect(canJumpTo(jumped, 2)).toBe(true);
@@ -43,10 +52,12 @@ describe("向导步骤推进", () => {
   });
 
   it("最后一步不前进；收尾失败时回到第一步", () => {
-    const last = advance(advance(advance(INITIAL_WIZARD, "next"), "skip"), "skip");
-    expect(last.index).toBe(3);
+    const last = advance(advance(advance(advance(INITIAL_WIZARD, "next"), "skip"), "skip"), "skip");
+    expect(last.index).toBe(4);
+    expect(ALL.map((i) => stepStatus(last, i))).toEqual(["done", "skipped", "skipped", "skipped", "current"]);
     expect(() => advance(last, "next")).toThrow("最后一步");
-    expect(backToStart(last)).toMatchObject({ index: 0, direction: -1, reached: 3 });
+    expect(() => advance(last, "skip")).toThrow("最后一步");
+    expect(backToStart(last)).toMatchObject({ index: 0, direction: -1, reached: 4 });
   });
 });
 

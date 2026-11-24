@@ -1,9 +1,9 @@
-// 首次启动向导：四步交代游戏目录、Java、账户与外观。只有第一步必填，后三步都能跳过，
-// 第二、三步还能「直接开始」用默认值收尾；每步的默认值就是推荐值，一路「下一步」就能得到可用的启动器。
+// 首次启动向导：依次交代游戏目录、Java、账户、受限的 CurseForge 文件与外观（步骤表见 model.ts 的 STEPS）。只有第一步必填，
+// 之后各步都能跳过，第一步与最后一步之间的各步还能「直接开始」用默认值收尾；每步的默认值就是推荐值，一路「下一步」就能得到可用的启动器。
 //
 // 何时落盘：离开第一步时就把游戏目录、收下的文件夹与「向导已走过」一次写下（commitFirstRun），之后中途关掉窗口，
 // 下次打开直接进主界面，不会再从头走一遍；向导仍挂着，接着走后面几步。回到第一步改了目录或勾选再离开时重新提交，
-// 没改不重复提交。收尾只把向导卸载（finishFirstRun）。第二到四步的开关与外观在各步里即时写入。
+// 没改不重复提交。收尾只把向导卸载（finishFirstRun）。第一步之后各步的开关与外观在各步里即时写入。
 // 后端拒绝了游戏目录时停在（或回到）第一步，把原因写在输入框下。
 
 import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
@@ -47,6 +47,7 @@ import {
 import s from "./onboarding.module.css";
 import { StepAccount } from "./StepAccount";
 import { StepAppearance } from "./StepAppearance";
+import { StepDownload } from "./StepDownload";
 import { GameDirSkeleton, StepGameDir } from "./StepGameDir";
 import { StepJava } from "./StepJava";
 
@@ -330,6 +331,8 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
     body = <StepJava />;
   } else if (id === "account") {
     body = <StepAccount />;
+  } else if (id === "download") {
+    body = <StepDownload />;
   } else {
     body = <StepAppearance />;
   }
@@ -337,7 +340,7 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
   const ready = settings !== null;
   const busy = finishing !== null || committing;
   const last = wizard.index === LAST_STEP;
-  // 主按钮在第一步是提交中、在第四步是收尾中才转圈
+  // 主按钮在第一步是提交中、在最后一步是收尾中才转圈
   const primaryLoading = last ? finishing === "finish" : committing;
 
   return (
@@ -361,7 +364,7 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
               </StepPane>
             </AnimatePresence>
           </div>
-          {/* 随步骤出没的按钮淡入淡出、退场时立即让位；主按钮按最宽的文案定宽，换到第四步、点下转圈时宽度都不变 */}
+          {/* 随步骤出没的按钮淡入淡出、退场时立即让位；主按钮按最宽的文案定宽，换到最后一步、点下转圈时宽度都不变 */}
           <footer className={s.footer}>
             <div className={s.footerStart}>
               <Appear itemClassName={s.footerItem}>
@@ -393,7 +396,7 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
               </Appear>
               {/*
                * 主按钮从头到尾是同一颗按钮（聚焦着的按钮不丢焦点），每一步都一样宽，左边的「跳过」不被推走：
-               * - 「开始使用」与后置箭头排成一行撑出宽度。箭头常驻，前三步由样式表按 data-face 隐去，到第四步淡入，
+               * - 「开始使用」与后置箭头排成一行撑出宽度。箭头常驻，最后一步之前由样式表按 data-face 隐去，到最后一步淡入，
                *   不随按钮的 iconRight 来去一帧出没。
                * - 两条文案各一层叠着交叉淡化；「下一步」铺满按钮居中，停在原来不带图标的按钮上的位置。
                */}

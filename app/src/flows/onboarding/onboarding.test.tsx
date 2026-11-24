@@ -142,7 +142,9 @@ describe("首次启动向导：第一步", () => {
   it("默认目录来自后端；其他启动器的文件夹默认全部收下", async () => {
     await mount();
     expect(title()).toBe("游戏文件放在哪");
-    expect(text()).toContain("第 1 步，共 4 步");
+    expect(text()).toContain("第 1 步，共 5 步");
+    // 「下载」排在账户之后、外观之前
+    expect(all('ol[aria-label="向导步骤"] [class*="_railName_"]').map((name) => name.textContent)).toEqual(["游戏目录", "Java", "账户", "下载", "外观"]);
     expect(dirInput().value).toBe(DEFAULT_DIR);
     const boxes = all('[role="checkbox"]');
     expect(boxes.map((b) => b.getAttribute("aria-checked"))).toEqual(["true", "true"]);
@@ -697,7 +699,7 @@ describe("首次启动向导：推进与收尾", () => {
     for (const resolve of pending) act(() => resolve());
     await flush();
     expect(title()).toBe("看看这台电脑上的 Java");
-    expect(text()).toContain("第 2 步，共 4 步");
+    expect(text()).toContain("第 2 步，共 5 步");
   });
 
   it("回到第一步改了目录、提交还没回来时点步骤条：不重复提交，提交回来后只前进到下一步", async () => {
@@ -729,9 +731,11 @@ describe("首次启动向导：推进与收尾", () => {
     expect(launcher.state.firstRun).toBe(false);
   });
 
-  it("第四步：明暗立即作用于整个窗口并写后端，「开始使用」收尾", async () => {
+  it("最后一步外观：明暗立即作用于整个窗口并写后端，「开始使用」收尾", async () => {
     await mount();
-    for (let i = 0; i < 3; i++) await click(button("下一步"));
+    for (let i = 0; i < 4; i++) await click(button("下一步"));
+    expect(title()).toBe("挑一个你喜欢的样子");
+    expect(text()).toContain("第 5 步，共 5 步");
     // 与设置页同一组件、同一组选项：日樱、夜樱各画真实颜色，跟随系统叠画两幅（各按自己的明暗、当前强调色），三枚色块各画各的强调色
     const previews = all('[role="radiogroup"][aria-label="明暗"] [data-mode]').map((p) => [p.getAttribute("data-mode"), p.getAttribute("data-tint")]);
     expect(previews).toEqual([
@@ -754,6 +758,84 @@ describe("首次启动向导：推进与收尾", () => {
     await click(button("开始使用"));
     expect(callsOf(ipc, "complete_first_run")).toHaveLength(1);
     expect(launcher.state.firstRun).toBe(false);
+  });
+});
+
+describe("首次启动向导：第四步「下载」", () => {
+  const TITLE = "受限的 CurseForge 文件怎么处理";
+  const TOGGLE = "自动下载受限的 CurseForge 文件";
+  const toggle = () => button(TOGGLE);
+  const stored = async () => (await mockInvoke<ConfigDto>("get_config")).download_restricted_curseforge_files;
+
+  /** 一路「下一步」走到「下载」这一步。 */
+  async function reachDownload() {
+    await mount();
+    for (let i = 0; i < 3; i++) await click(button("下一步"));
+    expect(title()).toBe(TITLE);
+  }
+
+  it("排在账户之后、外观之前：第 4 步，共 5 步；说明讲清默认列清单、打开才直接下，开关默认关、进入不加载", async () => {
+    await reachDownload();
+    expect(text()).toContain("第 4 步，共 5 步");
+    expect(railItem("下载").getAttribute("aria-current")).toBe("step");
+    expect(railItem("外观").disabled).toBe(true);
+    expect(text()).toContain(`CurseForge 上有些作者不允许启动器下载自己的文件。默认遇到时列成清单，由你到网页下载；也可以让${APP_NAME}直接去下。之后可以在 设置 > 下载 里改。`);
+    expect(text()).toContain(`${APP_NAME}按文件编号拼出地址直接下载；下不到的仍由你到 CurseForge 网页手动下载。`);
+    expect(toggle().getAttribute("aria-checked")).toBe("false");
+    expect(document.querySelector("[data-step-pane]:not([inert]) [aria-busy='true']")).toBeNull();
+    // 底栏与其他中间步一样：上一步、直接开始、跳过、下一步都在且可点
+    expect(["上一步", "直接开始", "跳过", "下一步"].map((name) => button(name).disabled)).toEqual([false, false, false, false]);
+    expect(callsOf(ipc, "update_config")).toEqual([]);
+  });
+
+  it("点开关：updateSettings 收到 true，开关停在开、配置记下；再点写回 false", async () => {
+    await reachDownload();
+    await click(toggle());
+    expect(callsOf(ipc, "update_config")).toEqual([{ downloadRestrictedCurseforgeFiles: true }]);
+    expect(toggle().getAttribute("aria-checked")).toBe("true");
+    expect(await stored()).toBe(true);
+    await click(toggle());
+    expect(callsOf(ipc, "update_config")).toEqual([{ downloadRestrictedCurseforgeFiles: true }, { downloadRestrictedCurseforgeFiles: false }]);
+    expect(toggle().getAttribute("aria-checked")).toBe("false");
+    expect(await stored()).toBe(false);
+  });
+
+  it("写入中先显示开；写入失败回到关，通知写明没保存的是这一项，配置不变", async () => {
+    await reachDownload();
+    const write = deferred<null>();
+    ipc.overrides.set("update_config", () => write.promise);
+    await click(toggle());
+    expect(callsOf(ipc, "update_config")).toEqual([{ downloadRestrictedCurseforgeFiles: true }]);
+    expect(toggle().getAttribute("aria-checked")).toBe("true");
+    await act(async () => {
+      write.reject(new IpcError("io", "文件 IO 失败: config.json"));
+      await settle(20);
+    });
+    await flush();
+    expect(toggle().getAttribute("aria-checked")).toBe("false");
+    expect(launcher.state.toasts.map((t) => t.title)).toContain("没能保存「自动下载受限的 CurseForge 文件」");
+    expect(await stored()).toBe(false);
+  });
+
+  it("跳过：到外观，步骤条上「下载」标出「已跳过」，配置不变；上一步回到「下载」", async () => {
+    await reachDownload();
+    await click(button("跳过"));
+    expect(title()).toBe("挑一个你喜欢的样子");
+    expect(railItem("下载").textContent).toContain("已跳过");
+    expect(railItem("账户").textContent).not.toContain("已跳过");
+    expect(callsOf(ipc, "update_config")).toEqual([]);
+    await click(button("上一步"));
+    expect(title()).toBe(TITLE);
+  });
+
+  it("直接开始：打开开关后在这一步收尾，向导卸载，首次设置只提交过一次，开关的值留在配置里", async () => {
+    await reachDownload();
+    await click(toggle());
+    await click(button("直接开始"));
+    expect(callsOf(ipc, "complete_first_run")).toHaveLength(1);
+    expect(launcher.state.firstRun).toBe(false);
+    expect(document.querySelector("h1")).toBeNull();
+    expect(await stored()).toBe(true);
   });
 });
 
@@ -989,17 +1071,23 @@ describe("首次启动向导：换步动效", () => {
       ["开始使用", true, null],
     ];
 
-    it("从头到尾是同一颗按钮，底栏里不垫隐形的按钮：两条文案各一层叠着，到第四步、退回来只换当前层，箭头常驻", async () => {
+    it("从头到尾是同一颗按钮，底栏里不垫隐形的按钮：两条文案各一层叠着，到最后一步、退回来只换当前层，箭头常驻", async () => {
       await mount();
       const primary = button("下一步");
       expect(primaries()).toEqual([primary]);
       expect(primary.dataset.face).toBe("next");
       expect(faces(primary)).toEqual(ON_NEXT);
-      // 后置箭头在「下一步」时也挂着（样式表让它透明）：到第四步时淡入，不随步骤一帧出没
+      // 后置箭头在「下一步」时也挂着（样式表让它透明）：到最后一步时淡入，不随步骤一帧出没
       const arrow = arrows(primary);
       expect(arrow).toHaveLength(1);
 
       for (let i = 0; i < 3; i++) await click(button("下一步"));
+      // 倒数第二步「下载」仍是「下一步」那层
+      expect(title()).toBe("受限的 CurseForge 文件怎么处理");
+      expect(button("下一步")).toBe(primary);
+      expect(primary.dataset.face).toBe("next");
+      expect(faces(primary)).toEqual(ON_NEXT);
+      await click(button("下一步"));
       expect(title()).toBe("挑一个你喜欢的样子");
       expect(button("开始使用")).toBe(primary);
       expect(primaries()).toEqual([primary]);
@@ -1008,7 +1096,7 @@ describe("首次启动向导：换步动效", () => {
       expect(arrows(primary)).toEqual(arrow);
 
       await click(button("上一步"));
-      expect(title()).toBe("用什么账户进游戏");
+      expect(title()).toBe("受限的 CurseForge 文件怎么处理");
       expect(button("下一步")).toBe(primary);
       expect(primary.dataset.face).toBe("next");
       expect(faces(primary)).toEqual(ON_NEXT);
@@ -1034,7 +1122,7 @@ describe("首次启动向导：换步动效", () => {
 
     it("点下「开始使用」后按钮文案不换（换成更长的字会撑宽按钮、推走「跳过」），进行中的说法只给读屏", async () => {
       await mount();
-      for (let i = 0; i < 3; i++) await click(button("下一步"));
+      for (let i = 0; i < 4; i++) await click(button("下一步"));
       const primary = button("开始使用");
       let release: () => void = () => undefined;
       vi.spyOn(launcher.actions, "finishFirstRun").mockImplementation(() => new Promise<void>((resolve) => (release = resolve)));

@@ -275,7 +275,7 @@
   display: flex;
 }
 
-/* 主按钮按「开始使用」加后置箭头定宽，每一步都是这个宽度：第三步换到第四步、点下后转圈时，左边的「跳过」都不被推走 */
+/* 主按钮按「开始使用」加后置箭头定宽，每一步都是这个宽度：换到最后一步、点下后转圈时，左边的「跳过」都不被推走 */
 .primaryAction {
   flex: none;
 }
@@ -307,7 +307,7 @@
   transition: opacity var(--sk-dur-in) var(--sk-ease-out);
 }
 
-/* 后置箭头常驻：「下一步」时透明并缩小，到第四步淡入并弹到原大，与按钮图标位换图标的 pop 同一口径 */
+/* 后置箭头常驻：「下一步」时透明并缩小，到最后一步淡入并弹到原大，与按钮图标位换图标的 pop 同一口径 */
 .primaryArrow {
   transition:
     opacity var(--sk-dur-in) var(--sk-ease-out),
