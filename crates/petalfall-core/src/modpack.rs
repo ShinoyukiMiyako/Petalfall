@@ -872,6 +872,11 @@ impl Petalfall {
                 tracing::info!(name, files = ?changed, "已去掉整合包自带的默认语言行");
             }
         }
+        // 空的 options.txt（本来就空，或上一步去掉默认语言行后变空）不是谁的设置，留着却会挡住模组的默认
+        // 设置与下面的套默认设置，还让游戏把首次无障碍引导标成走过。不看语言开关。
+        if crate::game_lang::remove_blank_options_file(version_dir).await? {
+            tracing::info!(name, "整合包带来的 options.txt 是空的，已删掉");
+        }
 
         // 覆盖文件之后才补：包里自带的 options.txt 是作者调好的，按只补缺的规则原样留着，缺的服务器列表
         // 之类由默认设置补上。导入的实例一律隔离，套不套只看配置这一道闸。失败与其他步骤一样让导入失败。
@@ -2419,6 +2424,70 @@ mod tests {
         assert!(
             stages.iter().any(|s| s == "沿用默认设置：补上 options.txt"),
             "{stages:?}"
+        );
+    }
+
+    /// 整合包自带的 options.txt 本来就是空的也一样删掉，与语言开关无关：关掉「游戏语言跟随系统语言」时
+    /// 模板照样补得进来；写着默认语言的那份这时不去行，原样留着。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_blank_options_file_in_the_pack_is_removed_whatever_the_language_switch() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let blank_pack = tmp.path().join("空设置.mrpack");
+        write_pack(
+            &blank_pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/options.txt", b"\r\n \r\n")],
+        );
+        let english_pack = tmp.path().join("英文设置.mrpack");
+        write_pack(
+            &english_pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/options.txt", b"lang:en_us\n")],
+        );
+        let mut off = Petalfall::for_test(
+            PetalfallConfig {
+                follow_system_game_language: false,
+                ..PetalfallConfig::default()
+            },
+            tmp.path().join("data"),
+            tmp.path().join("mc"),
+        )
+        .with_manifest_url(format!("{}/manifest.json", server.uri()));
+        off.set_isolation_policy(IsolationPolicy::Disabled);
+        let template = off.template_dir();
+        std::fs::create_dir_all(&template).unwrap();
+        std::fs::write(template.join("options.txt"), b"fov:90").unwrap();
+
+        let blank = off
+            .install_modpack(
+                &ModpackSource::File { path: blank_pack },
+                Some("空设置"),
+                &ImportSelection::default(),
+                "task-k",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(blank.version_dir.join("options.txt")).unwrap(),
+            b"fov:90"
+        );
+
+        let english = off
+            .install_modpack(
+                &ModpackSource::File { path: english_pack },
+                Some("英文设置"),
+                &ImportSelection::default(),
+                "task-l",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(english.version_dir.join("options.txt")).unwrap(),
+            b"lang:en_us\n"
         );
     }
 

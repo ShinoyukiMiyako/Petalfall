@@ -238,22 +238,42 @@ fn with_lines(options: &[u8], lines: &[String]) -> Vec<u8> {
     written
 }
 
+/// 要不要声明数据版本。玩家要看引导（开关关着）时，游戏读到一份没有 `version:` 行的设置文件就把引导标成
+/// 走过（见 [`ONBOARDING_FIX_DATA_VERSION`]）。会让它读到这种文件的有三种：往新文件或空文件里只写了语言；
+/// 文件已经在、是空的（只有空白）；空的模组默认设置等着被模组铺成 options.txt（`blank_defaults_pending`，
+/// 这时新建一份声明了版本的 options.txt 挡在前面）。比这个版本老的游戏遇到更高的声明版本什么也不做，空文件
+/// 里也没有要迁移的内容。有内容的已有文件不加：声明版本会让它跳过自己需要的迁移，引导弹不弹本来就由它自己
+/// 的版本决定。文件不存在、也没有东西会被铺过来时不为这一行新建文件：游戏没有设置文件时自己会弹引导。
+fn declares_data_version(
+    existing: Option<&[u8]>,
+    writes_language: bool,
+    skip_onboarding: bool,
+    blank_defaults_pending: bool,
+) -> bool {
+    !skip_onboarding
+        && !existing.is_some_and(has_content)
+        && (writes_language || existing.is_some() || blank_defaults_pending)
+}
+
 /// 补上缺的行后的完整内容，与补上的那几行（不含行尾）；`existing` 是现有内容（文件不存在时为 `None`），
-/// 什么都不用补时返回 `None`。
+/// 什么都不用补时返回 `None`。`blank_defaults_pending` 见 [`declares_data_version`]。
 fn fill_options(
     existing: Option<&[u8]>,
     language: Option<&str>,
     skip_onboarding: bool,
+    blank_defaults_pending: bool,
 ) -> Option<(Vec<u8>, Vec<String>)> {
+    let language = language.filter(|_| lacks(existing, LANG_KEY));
     let mut lines = Vec::new();
-    if let Some(code) = language.filter(|_| lacks(existing, LANG_KEY)) {
-        // 玩家要看引导时，只写语言的新文件反而会让游戏把引导标成走过（见 ONBOARDING_FIX_DATA_VERSION）。
-        // 比这个版本老的游戏遇到更高的声明版本什么也不做，新文件里也没有要迁移的内容。空的（只有空白的）
-        // 已有文件与新文件一样：里面同样没有要迁移的内容，不声明版本的话关掉开关引导照样不弹。有内容的
-        // 已有文件不加：声明版本会让它跳过自己需要的迁移，引导弹不弹本来就由它自己的版本决定。
-        if !existing.is_some_and(has_content) && !skip_onboarding {
-            lines.push(format!("version:{ONBOARDING_FIX_DATA_VERSION}"));
-        }
+    if declares_data_version(
+        existing,
+        language.is_some(),
+        skip_onboarding,
+        blank_defaults_pending,
+    ) {
+        lines.push(format!("version:{ONBOARDING_FIX_DATA_VERSION}"));
+    }
+    if let Some(code) = language {
         lines.push(format!("lang:{code}"));
     }
     if skip_onboarding && lacks(existing, ONBOARDING_KEY) {
@@ -308,9 +328,8 @@ async fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
 /// 启动前的补全才会按系统语言来。写着别的语言的是作者有意选的，原样留着。只在导入的那一刻做：这时文件一定
 /// 来自整合包，之后再出现的 `lang:en_us` 可能是玩家自己在游戏里选的。
 ///
-/// options.txt 去掉这一行后什么都不剩时删掉它：空文件留着，游戏当它是老设置、直接把无障碍引导标成走过，
-/// 模组见它已经在就不铺默认设置，套默认设置也当它是包里自带的。模组那几份留成空文件：它们本来就可能是空的，
-/// 补全与套默认设置都认得（见 [`has_content`]）。位置上不是普通文件的没有行可去，不为它让导入失败。
+/// 去掉后只剩空白的 options.txt 由 [`remove_blank_options_file`] 接着删掉。位置上不是普通文件的没有行可去，
+/// 不为它让导入失败。
 pub(crate) async fn drop_pack_default_language(working_dir: &Path) -> Result<Vec<&'static str>> {
     let mut changed = Vec::new();
     for relative in std::iter::once(OPTIONS_FILE).chain(MOD_DEFAULT_OPTIONS) {
@@ -324,19 +343,31 @@ pub(crate) async fn drop_pack_default_language(working_dir: &Path) -> Result<Vec
         let Some(content) = without_default_language(&options) else {
             continue;
         };
-        if relative == OPTIONS_FILE && !has_content(&content) {
-            tokio::fs::remove_file(&path)
-                .await
-                .map_err(|source| petalfall_base::Error::Io {
-                    path: path.clone(),
-                    source,
-                })?;
-        } else {
-            petalfall_base::fs::atomic_write(&path, &content).await?;
-        }
+        petalfall_base::fs::atomic_write(&path, &content).await?;
         changed.push(relative);
     }
     Ok(changed)
+}
+
+/// 整合包带来的 options.txt 是空的（只有空白）时删掉它，返回删没删。本来就空的、去掉默认语言行后变空的都算，
+/// 所以不看语言开关。空文件不是谁的设置，留着却处处碍事：游戏当它是老设置、直接把无障碍引导标成走过，模组见
+/// 它已经在就不铺作者的默认设置，套默认设置也当它是包里自带的而不补模板。只在导入的那一刻做，这时文件一定
+/// 来自整合包。模组那几份空的默认设置不删：补全与套默认设置都认得（见 [`has_content`]）。
+pub(crate) async fn remove_blank_options_file(working_dir: &Path) -> Result<bool> {
+    let path = working_dir.join(OPTIONS_FILE);
+    if !is_regular_file(&path).await? {
+        return Ok(false);
+    }
+    let Some(options) = read_optional(&path).await? else {
+        return Ok(false);
+    };
+    if has_content(&options) {
+        return Ok(false);
+    }
+    tokio::fs::remove_file(&path)
+        .await
+        .map_err(|source| petalfall_base::Error::Io { path, source })?;
+    Ok(true)
 }
 
 /// 路径上是不是普通文件（不跟随符号链接）；不存在时为 `false`。
@@ -401,7 +432,7 @@ async fn fill(
 ) -> Result<()> {
     let path = working_dir.join(OPTIONS_FILE);
     if let Some(existing) = read_optional(&path).await? {
-        fill_file(&path, Some(&existing), inputs, layout, report).await?;
+        fill_file(&path, Some(&existing), inputs, layout, report, false).await?;
         return Ok(());
     }
     let mut pending = Vec::new();
@@ -419,14 +450,16 @@ async fn fill(
         }
     }
     if !unreadable && !pending.iter().any(|(_, _, existing)| has_content(existing)) {
-        fill_file(&path, None, inputs, layout, report).await?;
+        // 在场的几份全是空的：不新建 options.txt 的话，模组会把其中一份空文件铺过去。
+        let blank_defaults_pending = !pending.is_empty();
+        fill_file(&path, None, inputs, layout, report, blank_defaults_pending).await?;
         return Ok(());
     }
     let mut filled = Vec::new();
     for (relative, defaults, existing) in &pending {
         // 哪一份先被铺过去说不准，一份写不进去不耽误别的；说明只在这一份没出错时才记，排在它自己的几条前面。
         let at = report.notes.len();
-        match fill_file(defaults, Some(existing), inputs, layout, report).await {
+        match fill_file(defaults, Some(existing), inputs, layout, report, false).await {
             Ok(added) => {
                 report.notes.insert(
                     at,
@@ -446,13 +479,14 @@ async fn fill(
 }
 
 /// 补全一份文件，返回补上的那几行（不含行尾；只改了语言写法时为空）：`existing` 是它现有的内容，文件不存在时
-/// 为 `None`。
+/// 为 `None`。`blank_defaults_pending` 见 [`declares_data_version`]。
 async fn fill_file(
     path: &Path,
     existing: Option<&[u8]>,
     inputs: &OptionsInputs<'_>,
     layout: &GameLayout,
     report: &mut OptionsReport,
+    blank_defaults_pending: bool,
 ) -> Result<Vec<String>> {
     let language = if lacks(existing, LANG_KEY) {
         choose_language(inputs, layout, report).await
@@ -468,6 +502,7 @@ async fn fill_file(
         respelled.as_deref().or(existing),
         language.as_deref(),
         inputs.skip_onboarding,
+        blank_defaults_pending,
     );
     let (content, added) = match (filled, respelled) {
         (Some(filled), _) => filled,
@@ -487,6 +522,19 @@ async fn fill_file(
     }
     if inputs.skip_onboarding && lacks(existing, ONBOARDING_KEY) {
         report.notes.push("已跳过游戏的首次无障碍引导".to_owned());
+    }
+    // 只为引导写了数据版本时单独说一句：没写语言也没写引导那一行，不说就看不出文件为什么被动过。
+    if language.is_none()
+        && declares_data_version(
+            existing,
+            false,
+            inputs.skip_onboarding,
+            blank_defaults_pending,
+        )
+    {
+        report
+            .notes
+            .push("设置文件是空的，已写上数据版本，免得游戏把首次无障碍引导标成走过".to_owned());
     }
     Ok(added)
 }
@@ -865,7 +913,8 @@ mod tests {
             GameLanguage::Code(code) => Some(code),
             GameLanguage::GameDefault | GameLanguage::Unavailable => None,
         };
-        fill_options(existing, language.as_deref(), skip_onboarding).map(|(content, _)| content)
+        fill_options(existing, language.as_deref(), skip_onboarding, false)
+            .map(|(content, _)| content)
     }
 
     fn text(content: &str) -> Option<&[u8]> {
@@ -977,8 +1026,8 @@ mod tests {
                 text("fov:0.5\r\nonboardAccessibility:false\r\n"),
             ),
             ("en-US", V1_21_1, text("fov:0.5\r\n"), false, None),
-            // 已有文件是空的（只有空白）：里面没有要迁移的内容，与新文件一样，开关关掉又要写语言时带上
-            // 数据版本；原有的空白逐字节保留，换行跟着它走。
+            // 已有文件是空的（只有空白）：里面没有要迁移的内容，开关关掉时带上数据版本，没有语言可写也带，
+            // 不然游戏读到这份空文件就把引导标成走过；原有的空白逐字节保留，换行跟着它走。
             (
                 "zh-CN",
                 V1_21_1,
@@ -1000,7 +1049,14 @@ mod tests {
                 true,
                 text("lang:zh_cn\nonboardAccessibility:false\n"),
             ),
-            ("en-US", V1_21_1, text(""), false, None),
+            ("en-US", V1_21_1, text(""), false, text("version:3319\n")),
+            (
+                "en-US",
+                V1_21_1,
+                text("\r\n"),
+                false,
+                text("\r\nversion:3319\r\n"),
+            ),
             (
                 "en-US",
                 V1_21_1,
@@ -2014,11 +2070,14 @@ mod tests {
         );
     }
 
-    /// options.txt 里只有默认语言那一行时，去掉后整份删掉，不留空文件：空文件会让游戏把引导标成走过，还挡住
-    /// 模组的默认设置与套默认设置。模组那几份照旧留成空文件。
+    /// options.txt 里只有默认语言那一行时，去掉后成了空文件，接着整份删掉：空文件会让游戏把引导标成走过，
+    /// 还挡住模组的默认设置与套默认设置。模组那几份照旧留成空文件。
     #[tokio::test]
     async fn an_options_file_emptied_of_the_default_language_is_removed() {
-        for original in [&b"lang:en_us\n"[..], &b"\r\nlang:en_US\r\n \r\n"[..]] {
+        for (original, emptied) in [
+            (&b"lang:en_us\n"[..], &b""[..]),
+            (&b"\r\nlang:en_US\r\n \r\n"[..], &b"\r\n \r\n"[..]),
+        ] {
             let scene = scene(V1_21_1);
             scene.write(OPTIONS_FILE, original);
             scene.write("config/yosbr/options.txt", b"lang:en_us\n");
@@ -2026,10 +2085,127 @@ mod tests {
             let changed = drop_pack_default_language(&scene.working_dir)
                 .await
                 .unwrap();
-
             assert_eq!(changed, [OPTIONS_FILE, "config/yosbr/options.txt"]);
+            assert_eq!(scene.options().unwrap(), emptied);
+
+            assert!(remove_blank_options_file(&scene.working_dir).await.unwrap());
             assert_eq!(scene.options(), None);
             assert_eq!(scene.read("config/yosbr/options.txt").unwrap(), b"");
+        }
+    }
+
+    /// 只删空的 options.txt：有内容的、不存在的、位置上是目录的都不动，模组那几份空的默认设置也不删。
+    #[tokio::test]
+    async fn only_a_blank_options_file_is_removed() {
+        let blank = scene(V1_21_1);
+        blank.write(OPTIONS_FILE, b" \r\n\t\n");
+        for pending in MOD_DEFAULT_OPTIONS {
+            blank.write(pending, b"");
+        }
+        assert!(remove_blank_options_file(&blank.working_dir).await.unwrap());
+        assert_eq!(blank.options(), None);
+        for pending in MOD_DEFAULT_OPTIONS {
+            assert_eq!(blank.read(pending).unwrap(), b"", "{pending}");
+        }
+
+        let kept = scene(V1_21_1);
+        kept.write(OPTIONS_FILE, b"lang:en_us\n");
+        assert!(!remove_blank_options_file(&kept.working_dir).await.unwrap());
+        assert_eq!(kept.options().unwrap(), b"lang:en_us\n");
+
+        let absent = scene(V1_21_1);
+        assert!(
+            !remove_blank_options_file(&absent.working_dir)
+                .await
+                .unwrap()
+        );
+
+        let directory = scene(V1_21_1);
+        std::fs::create_dir_all(directory.working_dir.join(OPTIONS_FILE)).unwrap();
+        assert!(
+            !remove_blank_options_file(&directory.working_dir)
+                .await
+                .unwrap()
+        );
+        assert!(directory.working_dir.join(OPTIONS_FILE).is_dir());
+    }
+
+    /// 关着「跳过引导」又没有语言可写时，凡是会让游戏读到一份空设置文件的情形都写上数据版本：空的
+    /// options.txt；在场的模组默认设置全是空的（不建 options.txt 的话模组会把空文件铺过去）；与有内容的那份
+    /// 并存的空的模组默认设置。没有设置文件、也没有东西会被铺过来时不建文件。
+    #[tokio::test]
+    async fn switch_off_declares_the_data_version_wherever_a_blank_file_would_be_read() {
+        const VERSION_ONLY: &str =
+            "设置文件是空的，已写上数据版本，免得游戏把首次无障碍引导标成走过";
+
+        let blank_options = scene(V1_21_1);
+        blank_options.write(OPTIONS_FILE, b"");
+        let report = blank_options
+            .fill_with(Some("en-US"), Some("lang-test"), false)
+            .await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(blank_options.options().unwrap(), b"version:3319\n");
+        assert_eq!(report.notes, [VERSION_ONLY]);
+
+        let blank_defaults = scene(V1_21_1);
+        blank_defaults.write("config/yosbr/options.txt", b"");
+        let report = blank_defaults
+            .fill_with(Some("en-US"), Some("lang-test"), false)
+            .await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(blank_defaults.options().unwrap(), b"version:3319\n");
+        assert_eq!(
+            blank_defaults.read("config/yosbr/options.txt").unwrap(),
+            b""
+        );
+        assert_eq!(report.notes, [VERSION_ONLY]);
+
+        let mixed = scene(V1_21_1);
+        mixed.write("config/yosbr/options.txt", b"");
+        mixed.write("config/defaultoptions/options.txt", b"fov:0.6\n");
+        let report = mixed
+            .fill_with(Some("en-US"), Some("lang-test"), false)
+            .await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(
+            mixed.read("config/yosbr/options.txt").unwrap(),
+            b"version:3319\n"
+        );
+        assert_eq!(
+            mixed.read("config/defaultoptions/options.txt").unwrap(),
+            b"fov:0.6\n"
+        );
+        assert_eq!(mixed.options(), None);
+
+        // 开关开着时照旧写引导那一行，不声明版本。
+        let skipping = scene(V1_21_1);
+        skipping.write("config/yosbr/options.txt", b"");
+        skipping.fill(Some("en-US")).await;
+        assert_eq!(skipping.options().unwrap(), b"onboardAccessibility:false\n");
+    }
+
+    #[test]
+    fn data_version_is_declared_only_when_the_game_would_read_a_blank_file() {
+        // (现有内容, 要写语言, 开关, 空的模组默认设置在等, 期望)
+        type Case<'a> = (Option<&'a [u8]>, bool, bool, bool, bool);
+        let cases: [Case; 10] = [
+            (None, true, false, false, true),
+            (None, false, false, false, false),
+            (None, false, false, true, true),
+            (None, true, true, true, false),
+            (Some(b""), false, false, false, true),
+            (Some(b" \r\n"), true, false, false, true),
+            (Some(b""), false, true, false, false),
+            (Some(b"fov:0.5\n"), true, false, false, false),
+            (Some(b"fov:0.5\n"), false, false, true, false),
+            (Some(b"\xef\xbb\xbf"), true, false, false, false),
+        ];
+        for (existing, writes_language, skip_onboarding, pending, expected) in cases {
+            assert_eq!(
+                declares_data_version(existing, writes_language, skip_onboarding, pending),
+                expected,
+                "{existing:?} {writes_language} {skip_onboarding} {pending}"
+            );
         }
     }
 
