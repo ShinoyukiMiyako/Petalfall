@@ -11,13 +11,16 @@
 //! 整合包带着模组的默认设置（见 [`MOD_DEFAULT_OPTIONS`]）时，options.txt 要等模组第一次启动时铺出来，缺的行
 //! 补进模组那份文件；那几份全是空的不算，照常新建。整合包里写着游戏默认语言的 `lang:` 行不算作者的选择，
 //! 导入时去掉（见 [`drop_pack_default_language`]），之后与没写一样由这里补。补语言与去掉默认语言行都听
-//! 配置里的 `follow_system_game_language`。
+//! 配置里的 `follow_system_game_language`。补进模组那份文件的行按本机定，记账（见 [`FilledLines`]），
+//! 导出整合包时去掉。
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 use petalfall_install::GameLayout;
+use petalfall_instance::PETALFALL_META_DIR;
 use petalfall_version::AssetObjectsIndex;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 use crate::launch::read_asset_index;
@@ -235,12 +238,13 @@ fn with_lines(options: &[u8], lines: &[String]) -> Vec<u8> {
     written
 }
 
-/// 补上缺的行后的完整内容；`existing` 是现有内容（文件不存在时为 `None`），什么都不用补时返回 `None`。
+/// 补上缺的行后的完整内容，与补上的那几行（不含行尾）；`existing` 是现有内容（文件不存在时为 `None`），
+/// 什么都不用补时返回 `None`。
 fn fill_options(
     existing: Option<&[u8]>,
     language: Option<&str>,
     skip_onboarding: bool,
-) -> Option<Vec<u8>> {
+) -> Option<(Vec<u8>, Vec<String>)> {
     let mut lines = Vec::new();
     if let Some(code) = language.filter(|_| lacks(existing, LANG_KEY)) {
         // 玩家要看引导时，只写语言的新文件反而会让游戏把引导标成走过（见 ONBOARDING_FIX_DATA_VERSION）。
@@ -255,7 +259,7 @@ fn fill_options(
     if skip_onboarding && lacks(existing, ONBOARDING_KEY) {
         lines.push(SKIP_ONBOARDING_LINE.to_owned());
     }
-    (!lines.is_empty()).then(|| with_lines(existing.unwrap_or_default(), &lines))
+    (!lines.is_empty()).then(|| (with_lines(existing.unwrap_or_default(), &lines), lines))
 }
 
 /// 第一行连同行尾的长度。`\r\n` 算一个行尾，单独的 `\r` 与 `\n` 各算一个，与 [`has_line`] 的切法一致。
@@ -388,7 +392,7 @@ pub(crate) async fn fill_missing_options(
 ///
 /// 只要有一份有内容（读不了的也按有内容算），在场的每一份连同空的都补：哪一份先被铺成 options.txt 由模组
 /// 说了算（YOSBR 在加载器初始化时就铺，早于 Default Options），漏掉的恰是先铺的那份时，铺出来的
-/// options.txt 里就没有语言。
+/// options.txt 里就没有语言。补进模组那份文件的行记进记账（见 [`FilledLines`]）。
 async fn fill(
     inputs: &OptionsInputs<'_>,
     layout: &GameLayout,
@@ -397,7 +401,8 @@ async fn fill(
 ) -> Result<()> {
     let path = working_dir.join(OPTIONS_FILE);
     if let Some(existing) = read_optional(&path).await? {
-        return fill_file(&path, Some(&existing), inputs, layout, report).await;
+        fill_file(&path, Some(&existing), inputs, layout, report).await?;
+        return Ok(());
     }
     let mut pending = Vec::new();
     let mut unreadable = false;
@@ -414,32 +419,41 @@ async fn fill(
         }
     }
     if !unreadable && !pending.iter().any(|(_, _, existing)| has_content(existing)) {
-        return fill_file(&path, None, inputs, layout, report).await;
+        fill_file(&path, None, inputs, layout, report).await?;
+        return Ok(());
     }
+    let mut filled = Vec::new();
     for (relative, defaults, existing) in &pending {
         // 哪一份先被铺过去说不准，一份写不进去不耽误别的；说明只在这一份没出错时才记，排在它自己的几条前面。
         let at = report.notes.len();
         match fill_file(defaults, Some(existing), inputs, layout, report).await {
-            Ok(()) => report.notes.insert(
-                at,
-                format!(
-                    "options.txt 还没有，{relative} 会在第一次启动时铺过去，缺的行补进这份文件"
-                ),
-            ),
+            Ok(added) => {
+                report.notes.insert(
+                    at,
+                    format!(
+                        "options.txt 还没有，{relative} 会在第一次启动时铺过去，缺的行补进这份文件"
+                    ),
+                );
+                if !added.is_empty() {
+                    filled.push((*relative, added));
+                }
+            }
             Err(err) => report.failures.push(err),
         }
     }
-    Ok(())
+    // 记账写不进去也不撤回补上的行：它们照样随模组铺进 options.txt，只是导出整合包时会跟着带走。
+    record_filled_lines(working_dir, &filled).await
 }
 
-/// 补全一份文件：`existing` 是它现有的内容，文件不存在时为 `None`。
+/// 补全一份文件，返回补上的那几行（不含行尾；只改了语言写法时为空）：`existing` 是它现有的内容，文件不存在时
+/// 为 `None`。
 async fn fill_file(
     path: &Path,
     existing: Option<&[u8]>,
     inputs: &OptionsInputs<'_>,
     layout: &GameLayout,
     report: &mut OptionsReport,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let language = if lacks(existing, LANG_KEY) {
         choose_language(inputs, layout, report).await
     } else {
@@ -455,8 +469,10 @@ async fn fill_file(
         language.as_deref(),
         inputs.skip_onboarding,
     );
-    let Some(content) = filled.or(respelled) else {
-        return Ok(());
+    let (content, added) = match (filled, respelled) {
+        (Some(filled), _) => filled,
+        (None, Some(respelled)) => (respelled, Vec::new()),
+        (None, None) => return Ok(Vec::new()),
     };
     petalfall_base::fs::atomic_write(path, &content).await?;
     if let (Some(code), Some(system)) = (&language, inputs.system) {
@@ -472,7 +488,7 @@ async fn fill_file(
     if inputs.skip_onboarding && lacks(existing, ONBOARDING_KEY) {
         report.notes.push("已跳过游戏的首次无障碍引导".to_owned());
     }
-    Ok(())
+    Ok(added)
 }
 
 /// 现有语言按这个版本的写法改过后的内容（见 [`respell_language`]）。索引读不出来只算这一项没做成，记进
@@ -539,6 +555,114 @@ async fn choose_language(
             None
         }
     }
+}
+
+/// 记账文件（见 [`FilledLines`]），放在工作目录的元数据目录下。
+const FILLED_LINES_FILE: &str = "filled-options.json";
+
+/// 记账的读改写排队：不隔离的实例共用一个工作目录，同时启动时不排队，后写的会盖掉先写的。
+static FILLED_LINES_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 记账：启动器补进模组默认设置的行，按文件记。这几行按本机的系统语言与启动器设置补，却落在整合包自己的文件里，
+/// 导出整合包时要去掉（见 [`without_lines`]），否则收到包的人会把它们当成作者选的。options.txt 不记：导出它
+/// 本来就是把玩家自己的设置带走。
+///
+/// 放在工作目录的元数据目录下，与那几份文件同在一个工作目录：不隔离的实例工作目录是游戏目录，共用的是同一批
+/// 模组默认设置，也就共用这一份记账。
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct FilledLines {
+    /// [`MOD_DEFAULT_OPTIONS`] 里的相对路径到补上的整行（不含行尾），按补上的先后，同一行只记一次。
+    files: BTreeMap<String, Vec<String>>,
+}
+
+impl FilledLines {
+    /// 记在这份文件名下的行；`relative` 是工作目录下的正斜杠相对路径，不分大小写（Windows 上只差大小写的是同一个
+    /// 文件）。不是模组的默认设置、或没记过时为 `None`。
+    pub(crate) fn lines_for(&self, relative: &str) -> Option<&[String]> {
+        let known = MOD_DEFAULT_OPTIONS
+            .into_iter()
+            .find(|path| path.eq_ignore_ascii_case(relative))?;
+        self.files.get(known).map(Vec::as_slice)
+    }
+}
+
+pub(crate) fn filled_lines_path(working_dir: &Path) -> PathBuf {
+    working_dir.join(PETALFALL_META_DIR).join(FILLED_LINES_FILE)
+}
+
+/// 工作目录里的记账，没有记账文件时为空。读不懂照实报错，不当成没记过：当成没记过，补的行就随包带走了。
+pub(crate) async fn read_filled_lines(working_dir: &Path) -> Result<FilledLines> {
+    let path = filled_lines_path(working_dir);
+    match read_optional(&path).await? {
+        Some(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|source| CoreError::JsonFileInvalid { path, source }),
+        None => Ok(FilledLines::default()),
+    }
+}
+
+/// 把这次补进各份模组默认设置的行（`filled`：相对路径与补上的行）并进记账，已记的不重复记；没有新记的不写。
+/// 读不懂的旧记账不覆盖：里面记着的行导出时还要靠它去掉。
+async fn record_filled_lines(working_dir: &Path, filled: &[(&str, Vec<String>)]) -> Result<()> {
+    if filled.is_empty() {
+        return Ok(());
+    }
+    let _turn = FILLED_LINES_LOCK.lock().await;
+    let mut record = read_filled_lines(working_dir).await?;
+    let mut changed = false;
+    for (relative, lines) in filled {
+        let recorded = record.files.entry((*relative).to_owned()).or_default();
+        for line in lines {
+            if !recorded.contains(line) {
+                recorded.push(line.clone());
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec_pretty(&record).map_err(CoreError::JsonSerialize)?;
+    petalfall_base::fs::atomic_write(filled_lines_path(working_dir), &bytes).await?;
+    Ok(())
+}
+
+/// 去掉 `lines` 里此刻仍原样是完整一行的那几行（连同行尾）后的内容，其余逐字节保留；一行都没去掉时返回 `None`。
+///
+/// 每条最多去掉一行：记账之后文件可能被人改过，记着的行不在了就不去，也不拿别的行顶替。补的行都追加在末尾，
+/// 同样的一行有几处时去掉最后一处。行的切法与 [`first_line_len`] 一致。
+pub(crate) fn without_lines(content: &[u8], lines: &[String]) -> Option<Vec<u8>> {
+    let mut spans = Vec::new();
+    let mut start = 0;
+    while start < content.len() {
+        let end = start + first_line_len(&content[start..]);
+        spans.push(start..end);
+        start = end;
+    }
+    let mut dropped = vec![false; spans.len()];
+    for line in lines {
+        let last = (0..spans.len())
+            .rev()
+            .find(|&at| !dropped[at] && line_text(&content[spans[at].clone()]) == line.as_bytes());
+        if let Some(at) = last {
+            dropped[at] = true;
+        }
+    }
+    if !dropped.contains(&true) {
+        return None;
+    }
+    let mut kept = Vec::with_capacity(content.len());
+    for (span, dropped) in spans.into_iter().zip(dropped) {
+        if !dropped {
+            kept.extend_from_slice(&content[span]);
+        }
+    }
+    Some(kept)
+}
+
+/// 一行去掉行尾后的内容。
+fn line_text(line: &[u8]) -> &[u8] {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    line.strip_suffix(b"\r").unwrap_or(line)
 }
 
 #[cfg(test)]
@@ -741,7 +865,7 @@ mod tests {
             GameLanguage::Code(code) => Some(code),
             GameLanguage::GameDefault | GameLanguage::Unavailable => None,
         };
-        fill_options(existing, language.as_deref(), skip_onboarding)
+        fill_options(existing, language.as_deref(), skip_onboarding).map(|(content, _)| content)
     }
 
     fn text(content: &str) -> Option<&[u8]> {
@@ -2115,5 +2239,336 @@ mod tests {
         assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
         assert!(report.notes.is_empty(), "{:?}", report.notes);
         assert_eq!(scene.options(), None);
+    }
+
+    // ---- 记账 ----
+
+    fn record_path() -> String {
+        format!("{PETALFALL_META_DIR}/{FILLED_LINES_FILE}")
+    }
+
+    impl Scene {
+        /// 记账文件的原始字节，没有时为 `None`。
+        fn record_bytes(&self) -> Option<Vec<u8>> {
+            self.read(&record_path())
+        }
+
+        /// 记账文件按 JSON 读出的内容。
+        fn record(&self) -> serde_json::Value {
+            serde_json::from_slice(&self.record_bytes().expect("应有记账文件")).unwrap()
+        }
+    }
+
+    /// 两份模组默认设置各补各的，各记各的：记的是逐字的整行，不带行尾，CRLF 文件也一样；读回来与写的一致。
+    #[tokio::test]
+    async fn lines_filled_into_mod_defaults_are_recorded_per_file() {
+        let scene = scene(V1_21_1);
+        scene.write("config/yosbr/options.txt", b"fov:0.8\r\n\xff\xfe:1\r\n");
+        scene.write(
+            "config/defaultoptions/options.txt",
+            b"lang:ja_jp\nfov:0.6\n",
+        );
+
+        scene.fill(Some("zh-CN")).await;
+
+        assert_eq!(
+            scene.read("config/yosbr/options.txt").unwrap(),
+            b"fov:0.8\r\n\xff\xfe:1\r\nlang:zh_cn\r\nonboardAccessibility:false\r\n"
+        );
+        assert_eq!(
+            scene.record(),
+            serde_json::json!({"files": {
+                "config/defaultoptions/options.txt": ["onboardAccessibility:false"],
+                "config/yosbr/options.txt": ["lang:zh_cn", "onboardAccessibility:false"],
+            }})
+        );
+        let read = read_filled_lines(&scene.working_dir).await.unwrap();
+        assert_eq!(
+            read.lines_for("config/yosbr/options.txt").unwrap(),
+            ["lang:zh_cn", "onboardAccessibility:false"]
+        );
+        assert_eq!(
+            read.lines_for("config/defaultoptions/options.txt").unwrap(),
+            ["onboardAccessibility:false"]
+        );
+        assert_eq!(
+            read.lines_for("config/defaultoptions/extra/options.txt"),
+            None
+        );
+    }
+
+    /// 关掉跳过引导时空文件里补的 `version:3319` 也是启动器补的，一起记；有内容的那份没补它，也就不记。
+    #[tokio::test]
+    async fn the_data_version_line_is_recorded_with_the_language() {
+        let scene = scene(V1_21_1);
+        scene.write("config/yosbr/options.txt", b"\r\n");
+        scene.write("config/defaultoptions/extra/options.txt", b"fov:0.6\n");
+
+        let report = scene
+            .fill_with(Some("zh-CN"), Some("lang-test"), false)
+            .await;
+
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(
+            scene.read("config/yosbr/options.txt").unwrap(),
+            b"\r\nversion:3319\r\nlang:zh_cn\r\n"
+        );
+        assert_eq!(
+            scene.record(),
+            serde_json::json!({"files": {
+                "config/defaultoptions/extra/options.txt": ["lang:zh_cn"],
+                "config/yosbr/options.txt": ["version:3319", "lang:zh_cn"],
+            }})
+        );
+    }
+
+    /// 同一份文件以后又补了别的行就并进去，按补上的先后排；已记过的行再补一次（有人把它删了）不重复记。
+    #[tokio::test]
+    async fn a_later_fill_of_the_same_file_merges_into_the_record() {
+        let scene = scene(V1_21_1);
+        let pending = "config/defaultoptions/options.txt";
+        scene.write(pending, b"fov:0.6\n");
+        scene.write("config/yosbr/options.txt", b"fov:0.8\n");
+
+        let report = scene.fill_without_following(true).await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        let onboarding_only = serde_json::json!({"files": {
+            "config/defaultoptions/options.txt": ["onboardAccessibility:false"],
+            "config/yosbr/options.txt": ["onboardAccessibility:false"],
+        }});
+        assert_eq!(scene.record(), onboarding_only);
+
+        // 只有一份又补了行：另一份的记录原样。
+        scene.write(
+            "config/yosbr/options.txt",
+            b"lang:de_de\nfov:0.8\nonboardAccessibility:false\n",
+        );
+        scene.fill(Some("zh-CN")).await;
+        assert_eq!(
+            scene.read(pending).unwrap(),
+            b"fov:0.6\nonboardAccessibility:false\nlang:zh_cn\n"
+        );
+        let merged = serde_json::json!({"files": {
+            "config/defaultoptions/options.txt": ["onboardAccessibility:false", "lang:zh_cn"],
+            "config/yosbr/options.txt": ["onboardAccessibility:false"],
+        }});
+        assert_eq!(scene.record(), merged);
+
+        scene.write(pending, b"fov:0.6\nonboardAccessibility:false\n");
+        scene.fill(Some("zh-CN")).await;
+        assert_eq!(
+            scene.read(pending).unwrap(),
+            b"fov:0.6\nonboardAccessibility:false\nlang:zh_cn\n"
+        );
+        assert_eq!(scene.record(), merged);
+    }
+
+    /// 什么都没补的一局不产生记账文件，已有的也一个字节都不改写：补的是 options.txt、模组那份已经什么都有、
+    /// 只改了语言的写法、两个开关都关掉。
+    #[tokio::test]
+    async fn a_fill_that_adds_nothing_to_mod_defaults_leaves_the_record_alone() {
+        let into_options = scene(V1_21_1);
+        into_options.write(OPTIONS_FILE, b"fov:0.5\n");
+        into_options.write("config/yosbr/options.txt", b"fov:0.8\n");
+        into_options.fill(Some("zh-CN")).await;
+        assert_eq!(
+            into_options.options().unwrap(),
+            b"fov:0.5\nlang:zh_cn\nonboardAccessibility:false\n"
+        );
+        assert_eq!(into_options.record_bytes(), None);
+
+        let fresh = scene(V1_21_1);
+        fresh.fill(Some("zh-CN")).await;
+        assert!(fresh.options().is_some());
+        assert_eq!(fresh.record_bytes(), None);
+
+        let earlier = br#"{"files":{"config/yosbr/options.txt":["lang:zh_cn"]}}"#;
+        let cases: [(&[u8], bool, bool); 3] = [
+            (b"lang:ja_jp\nonboardAccessibility:true\n", true, true),
+            (b"lang:zh_CN\nonboardAccessibility:false\n", true, true),
+            (b"fov:0.8\n", false, false),
+        ];
+        for (original, follow, skip) in cases {
+            for existing_record in [None, Some(&earlier[..])] {
+                let scene = scene(V1_21_1);
+                scene.write("config/defaultoptions/options.txt", original);
+                if let Some(bytes) = existing_record {
+                    scene.write(&record_path(), bytes);
+                }
+                let report = if follow {
+                    scene
+                        .fill_with(Some("zh-CN"), Some("lang-test"), skip)
+                        .await
+                } else {
+                    scene.fill_without_following(skip).await
+                };
+                assert!(report.failures.is_empty(), "{:?}", report.failures);
+                assert_eq!(
+                    scene.record_bytes().as_deref(),
+                    existing_record,
+                    "{:?}",
+                    String::from_utf8_lossy(original)
+                );
+            }
+        }
+    }
+
+    /// 记账读不懂时照实报错，不覆盖它（里面记着的行导出时还要靠它去掉）；补行本身照做，不撤回。
+    #[tokio::test]
+    async fn an_unreadable_record_is_reported_and_kept_while_the_lines_stay_filled() {
+        let scene = scene(V1_21_1);
+        let pending = "config/yosbr/options.txt";
+        scene.write(pending, b"fov:0.8\n");
+        scene.write(&record_path(), b"{not json");
+
+        let report = scene
+            .fill_with(Some("zh-CN"), Some("lang-test"), true)
+            .await;
+
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert!(
+            matches!(&report.failures[0], CoreError::JsonFileInvalid { path, .. } if path.ends_with(FILLED_LINES_FILE)),
+            "{:?}",
+            report.failures
+        );
+        assert_eq!(
+            scene.read(pending).unwrap(),
+            b"fov:0.8\nlang:zh_cn\nonboardAccessibility:false\n"
+        );
+        assert_eq!(scene.record_bytes().unwrap(), b"{not json");
+        assert_eq!(
+            report.notes,
+            [
+                pending_note(pending).as_str(),
+                "游戏语言设为 zh_cn，跟随系统语言 zh-CN",
+                SKIPPED
+            ]
+        );
+    }
+
+    fn lines(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| (*line).to_owned()).collect()
+    }
+
+    #[test]
+    fn recorded_lines_are_dropped_with_their_line_ends_and_every_other_byte_stays() {
+        let ours = lines(&["lang:zh_cn", "onboardAccessibility:false"]);
+        let cases: [(&[u8], &[u8]); 7] = [
+            (
+                b"version:3955\r\nfov:0.8\r\n\xff\xfe:1\r\nlang:zh_cn\r\nonboardAccessibility:false\r\n",
+                b"version:3955\r\nfov:0.8\r\n\xff\xfe:1\r\n",
+            ),
+            (
+                b"fov:0.8\nlang:zh_cn\nonboardAccessibility:false\n",
+                b"fov:0.8\n",
+            ),
+            // 末行没有行尾，单独的 \r 也是行尾
+            (b"fov:0.8\nonboardAccessibility:false\nlang:zh_cn", b"fov:0.8\n"),
+            (b"fov:0.8\rlang:zh_cn\ronboardAccessibility:false\r", b"fov:0.8\r"),
+            // 只剩一条还在的，就只去掉这一条
+            (b"fov:0.8\nonboardAccessibility:false\n", b"fov:0.8\n"),
+            // 同样的行有两处，只去掉最后一处
+            (
+                b"lang:zh_cn\nfov:0.8\nlang:zh_cn\nonboardAccessibility:false\n",
+                b"lang:zh_cn\nfov:0.8\n",
+            ),
+            // 原本是空文件，补的行去掉后又是空的
+            (b"lang:zh_cn\nonboardAccessibility:false\n", b""),
+        ];
+        for (content, expected) in cases {
+            assert_eq!(
+                without_lines(content, &ours).as_deref(),
+                Some(expected),
+                "{:?}",
+                String::from_utf8_lossy(content)
+            );
+        }
+        assert_eq!(
+            without_lines(
+                b"\nversion:3319\nlang:zh_cn\n",
+                &lines(&["version:3319", "lang:zh_cn"])
+            )
+            .as_deref(),
+            Some(&b"\n"[..])
+        );
+    }
+
+    /// 记着的行被人改掉或删掉了：不去掉任何别的行，只差大小写、多了前后缀的不算同一行。
+    #[test]
+    fn recorded_lines_that_are_gone_take_nothing_else_with_them() {
+        let ours = lines(&["lang:zh_cn", "onboardAccessibility:false"]);
+        let cases: [&[u8]; 8] = [
+            b"",
+            b"fov:0.8\n",
+            b"fov:0.8\nlang:ja_jp\nonboardAccessibility:true\n",
+            b"lang:zh_CN\n",
+            b"lang:zh_cn_x\n",
+            b" lang:zh_cn\n",
+            b"xlang:zh_cn\r\n",
+            b"lang:zh_cnonboardAccessibility:false\n",
+        ];
+        for content in cases {
+            assert_eq!(
+                without_lines(content, &ours),
+                None,
+                "{:?}",
+                String::from_utf8_lossy(content)
+            );
+        }
+        // 一条已经不在了：只去掉还在的那条，别的照留。
+        assert_eq!(
+            without_lines(b"lang:ja_jp\nfov:0.8\nonboardAccessibility:false\n", &ours).as_deref(),
+            Some(&b"lang:ja_jp\nfov:0.8\n"[..])
+        );
+    }
+
+    /// 随机内容：补行之后再按同样的行去掉，剩下的就是原内容（加上补行时为隔开而补的那个换行），一个字节不差。
+    #[test]
+    fn dropping_the_filled_lines_restores_the_original_bytes() {
+        let added = lines(&["version:3319", "lang:zh_cn", SKIP_ONBOARDING_LINE]);
+        for _ in 0..200 {
+            let original: Vec<u8> = std::iter::repeat_with(|| fastrand::u8(..))
+                .take(fastrand::usize(0..2048))
+                .collect();
+            let count = fastrand::usize(1..=added.len());
+            let filled = with_lines(&original, &added[..count]);
+
+            let kept = without_lines(&filled, &added[..count]).unwrap();
+
+            assert_eq!(kept, with_lines(&original, &[]));
+            assert!(kept.starts_with(&original));
+        }
+    }
+
+    /// 只认那三份模组默认设置，不分大小写；记账里混进别的路径（被人改过）也不认。
+    #[test]
+    fn only_the_mod_default_options_are_looked_up_in_the_record() {
+        let record = FilledLines {
+            files: BTreeMap::from([
+                (
+                    "config/yosbr/options.txt".to_owned(),
+                    lines(&["lang:zh_cn"]),
+                ),
+                (
+                    "config/fancymenu/options.txt".to_owned(),
+                    lines(&["lang:zh_cn"]),
+                ),
+            ]),
+        };
+        for relative in ["config/yosbr/options.txt", "Config/YOSBR/Options.txt"] {
+            assert_eq!(
+                record.lines_for(relative).unwrap(),
+                ["lang:zh_cn"],
+                "{relative}"
+            );
+        }
+        for relative in [
+            "config/fancymenu/options.txt",
+            "config/defaultoptions/options.txt",
+            "options.txt",
+            "config/yosbr/options.txt.old",
+        ] {
+            assert_eq!(record.lines_for(relative), None, "{relative}");
+        }
     }
 }

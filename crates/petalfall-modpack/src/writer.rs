@@ -66,8 +66,11 @@ pub struct IndexFile {
 pub struct OverrideFile {
     /// 相对实例目录的路径；包里落在 `overrides/<path>`。
     pub path: SafeRelativePath,
-    /// 本地源文件。
+    /// 本地源文件；`content` 有值时不读它。
     pub source: PathBuf,
+    /// 包里要写的内容与盘上的不一样时（调用方去掉了其中几行之类）由调用方给出，写包时照它写、不读 `source`，
+    /// 盘上的文件不动。`None` 时流式读 `source`。
+    pub content: Option<Vec<u8>>,
 }
 
 /// 一次导出要写的全部内容。
@@ -127,11 +130,16 @@ pub fn write_pack(
     let index = validate(pack)?;
     let mut sizes = Vec::with_capacity(pack.overrides.len());
     for file in &pack.overrides {
-        let meta = std::fs::metadata(&file.source).map_err(|source| Error::Io {
-            path: file.source.clone(),
-            source,
-        })?;
-        sizes.push(meta.len());
+        let size = match &file.content {
+            Some(content) => content.len() as u64,
+            None => std::fs::metadata(&file.source)
+                .map_err(|source| Error::Io {
+                    path: file.source.clone(),
+                    source,
+                })?
+                .len(),
+        };
+        sizes.push(size);
     }
     let bytes_total: u64 = sizes.iter().sum();
 
@@ -290,10 +298,13 @@ fn write_archive(
         writer
             .start_file(format!("{OVERRIDES_PREFIX}{}", file.path), options)
             .map_err(zip_error)?;
-        let mut source = File::open(&file.source).map_err(|source| Error::Io {
-            path: file.source.clone(),
-            source,
-        })?;
+        let mut source: Box<dyn Read + '_> = match &file.content {
+            Some(content) => Box::new(content.as_slice()),
+            None => Box::new(File::open(&file.source).map_err(|source| Error::Io {
+                path: file.source.clone(),
+                source,
+            })?),
+        };
         let mut copied = 0u64;
         loop {
             if is_cancelled() {
@@ -703,6 +714,7 @@ mod tests {
             with_override.overrides = vec![OverrideFile {
                 path: path("config/big.bin"),
                 source: source.clone(),
+                content: None,
             }];
             let dest = tmp.path().join(format!("cancel-{nth}.mrpack"));
             let calls = Cell::new(0u32);
@@ -728,6 +740,7 @@ mod tests {
         across.overrides = vec![OverrideFile {
             path: path("Mods/Sodium.jar"),
             source: source.clone(),
+            content: None,
         }];
         let err = write(&across, &dest).unwrap_err();
         assert!(
@@ -741,10 +754,12 @@ mod tests {
             OverrideFile {
                 path: path("config/a.toml"),
                 source: source.clone(),
+                content: None,
             },
             OverrideFile {
                 path: path("CONFIG/A.TOML"),
                 source,
+                content: None,
             },
         ];
         assert!(matches!(
@@ -862,6 +877,7 @@ mod tests {
             overrides.push(OverrideFile {
                 path: path(at),
                 source,
+                content: None,
             });
         }
         let mut with_overrides = pack(None);
@@ -940,6 +956,7 @@ mod tests {
         broken.overrides = vec![OverrideFile {
             path: path("config/gone.txt"),
             source: gone.clone(),
+            content: None,
         }];
         let dest = tmp.path().join("x.mrpack");
         let err = write(&broken, &dest).unwrap_err();
@@ -948,6 +965,59 @@ mod tests {
             "{err:?}"
         );
         assert!(!dest.exists());
+    }
+
+    /// 调用方给了内容的覆盖文件照内容写，不读盘：进度、回读校验与写成的条目都按给的内容算，盘上的文件不动；
+    /// 源文件不在也写得成。没给内容的照旧读盘。
+    #[test]
+    fn given_content_is_written_instead_of_the_file_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let on_disk = tmp.path().join("options.txt");
+        std::fs::write(&on_disk, b"fov:0.8\nlang:zh_cn\n").unwrap();
+        let plain = tmp.path().join("plain.toml");
+        std::fs::write(&plain, b"a = 1").unwrap();
+        let mut given = pack(None);
+        given.overrides = vec![
+            OverrideFile {
+                path: path("config/yosbr/options.txt"),
+                source: on_disk.clone(),
+                content: Some(b"fov:0.8\n".to_vec()),
+            },
+            OverrideFile {
+                path: path("config/gone.txt"),
+                source: tmp.path().join("gone.txt"),
+                content: Some(Vec::new()),
+            },
+            OverrideFile {
+                path: path("config/plain.toml"),
+                source: plain,
+                content: None,
+            },
+        ];
+        let dest = tmp.path().join("given.mrpack");
+        let mut seen = Vec::new();
+
+        let written = write_pack(&given, &dest, &never, &mut |p| seen.push(p)).unwrap();
+
+        assert_eq!(written.override_files, 3);
+        let last = *seen.last().unwrap();
+        assert_eq!((last.bytes_done, last.bytes_total), (13, 13));
+        assert_eq!(seen[0].bytes_total, 13, "开写前量的也按给的内容算");
+        let mut archive = zip::ZipArchive::new(File::open(&dest).unwrap()).unwrap();
+        for (name, expected) in [
+            ("overrides/config/yosbr/options.txt", &b"fov:0.8\n"[..]),
+            ("overrides/config/gone.txt", b""),
+            ("overrides/config/plain.toml", b"a = 1"),
+        ] {
+            let mut bytes = Vec::new();
+            archive
+                .by_name(name)
+                .unwrap()
+                .read_to_end(&mut bytes)
+                .unwrap();
+            assert_eq!(bytes, expected, "{name}");
+        }
+        assert_eq!(std::fs::read(&on_disk).unwrap(), b"fov:0.8\nlang:zh_cn\n");
     }
 
     fn time_seed() -> u64 {

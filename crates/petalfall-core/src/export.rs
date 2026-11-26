@@ -11,6 +11,7 @@
 //!    只写索引，导入的人从 Modrinth 下载；其余的原样打包进文件。
 //! 3. 额外项（配置、资源包、光影、存档……）只从白名单目录收集，跳过启动器元数据目录、`.old` 备份、
 //!    存档的 `session.lock`、符号链接与目录联接；日志、崩溃报告、natives、版本 jar 与 JSON 不在白名单里，结构上就进不了包。
+//!    配置里模组的默认设置去掉启动器补进去的行再写（见 [`crate::game_lang::FilledLines`]），盘上的文件不动。
 //!
 //! 写包在阻塞线程里进行，先写到目标旁边的临时文件，回读校验通过后才换到目标位置。
 //!
@@ -36,6 +37,7 @@ use tokio::sync::watch;
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, DownloadProgress, EventSink, InstallPhase, emit};
 use crate::facade::{PROGRESS_EVENT_INTERVAL, Petalfall};
+use crate::game_lang::{FilledLines, read_filled_lines, without_lines};
 use crate::instance_install::PhaseAnnouncer;
 use crate::modfs::{BACKUP_SUFFIX, MODS_DIR, bounded_map, local_concurrency, try_exists};
 use crate::modpack::read_instance_modpack;
@@ -358,7 +360,10 @@ impl ExportBlock {
 struct PlannedFile {
     path: SafeRelativePath,
     source: PathBuf,
+    /// 预览报的字节数；`content` 有值时是它的长度。
     size: u64,
+    /// 包里写的内容与盘上的不同时为规划时定下的内容（见 [`leave_out_filled_lines`]），写包时不再读盘。
+    content: Option<Vec<u8>>,
 }
 
 impl PlannedFile {
@@ -366,6 +371,7 @@ impl PlannedFile {
         OverrideFile {
             path: self.path,
             source: self.source,
+            content: self.content,
         }
     }
 }
@@ -714,10 +720,22 @@ impl Petalfall {
             .unwrap_or_default();
         let working_dir = dirs.working_dir.clone();
         let wanted: BTreeSet<ExportExtra> = extras.iter().copied().collect();
+        // 记账与启动前补全看的是同一个工作目录。模组的默认设置都在配置里，没要配置就不读：记账读不懂时，
+        // 不该连累不带配置的导出。
+        let filled = if wanted.contains(&ExportExtra::Config) {
+            read_filled_lines(&working_dir).await?
+        } else {
+            FilledLines::default()
+        };
         let extras = tokio::task::spawn_blocking(move || {
             wanted
                 .into_iter()
-                .map(|extra| Ok((extra, collect_extra(&working_dir, extra, &excluded)?)))
+                .map(|extra| {
+                    Ok((
+                        extra,
+                        collect_extra(&working_dir, extra, &excluded, &filled)?,
+                    ))
+                })
                 .collect::<std::result::Result<BTreeMap<_, _>, petalfall_base::Error>>()
         })
         .await??;
@@ -950,6 +968,7 @@ async fn list_mods(mods_dir: &Path) -> Result<ModListing> {
                 path: safe,
                 source: path,
                 size,
+                content: None,
             },
         };
         if enabled {
@@ -1032,11 +1051,12 @@ fn path_key(path: &Path) -> String {
         .join("/")
 }
 
-/// 收集一个额外项的文件。阻塞 IO。
+/// 收集一个额外项的文件。`filled` 是工作目录里的记账，导出配置时用。阻塞 IO。
 fn collect_extra(
     working_dir: &Path,
     extra: ExportExtra,
     excluded: &HashSet<String>,
+    filled: &FilledLines,
 ) -> std::result::Result<CollectedExtra, petalfall_base::Error> {
     let mut collected = CollectedExtra::default();
     let root = working_dir.join(extra.relative());
@@ -1052,6 +1072,7 @@ fn collect_extra(
                     .expect("options.txt 是合法的实例相对路径"),
                 source: root,
                 size: meta.len(),
+                content: None,
             });
         }
         return Ok(collected);
@@ -1064,9 +1085,32 @@ fn collect_extra(
         Err(source) => return Err(petalfall_base::Error::Io { path: root, source }),
     }
     walk(&root, extra.relative(), excluded, &mut collected)?;
+    for file in &mut collected.files {
+        leave_out_filled_lines(file, filled)?;
+    }
     collected.files.sort_by(|a, b| a.path.cmp(&b.path));
     collected.skipped.sort();
     Ok(collected)
+}
+
+/// 启动器补进模组默认设置的行不随包带走（见 [`FilledLines`]）：包里写去掉它们之后的内容，盘上的文件不动。大小
+/// 跟着换成去掉之后的，预览报的才与写进包里的一致。记账里没有这份文件的不读它。阻塞 IO。
+fn leave_out_filled_lines(
+    file: &mut PlannedFile,
+    filled: &FilledLines,
+) -> std::result::Result<(), petalfall_base::Error> {
+    let Some(lines) = filled.lines_for(file.path.as_str()) else {
+        return Ok(());
+    };
+    let bytes = std::fs::read(&file.source).map_err(|source| petalfall_base::Error::Io {
+        path: file.source.clone(),
+        source,
+    })?;
+    if let Some(kept) = without_lines(&bytes, lines) {
+        file.size = kept.len() as u64;
+        file.content = Some(kept);
+    }
+    Ok(())
 }
 
 /// 递归收集目录里的普通文件。符号链接与目录联接（Windows 上 `is_symlink` 对两者都为真）一律不跟随：
@@ -1119,6 +1163,7 @@ fn walk(
             path: safe,
             source: path,
             size,
+            content: None,
         });
     }
     Ok(())
@@ -2967,5 +3012,285 @@ mod tests {
             .filter(|r| r.url.path().starts_with("/cdn/"))
             .count();
         assert_eq!(cdn_hits, 3, "走索引的三个 Mod 各下载一次");
+    }
+
+    // ---- 启动器补进模组默认设置的行 ----
+
+    const YOSBR: &str = "config/yosbr/options.txt";
+    const DEFAULT_OPTIONS: &str = "config/defaultoptions/options.txt";
+    const EXTRA_OPTIONS: &str = "config/defaultoptions/extra/options.txt";
+
+    /// 照启动前那样补全 options.txt：工作目录取启动用的同一个解析（`resolve_working_dir`），系统语言是简体中文，
+    /// 跳过引导。返回工作目录。
+    async fn fill_like_a_launch(petalfall: &Petalfall, id: &str, scratch: &Path) -> PathBuf {
+        let layout = petalfall_install::GameLayout::new(scratch.join("assets-root"));
+        let index = layout.asset_index_json("lang-test").unwrap();
+        std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+        let objects = BTreeMap::from([(
+            "minecraft/lang/zh_cn.json".to_owned(),
+            petalfall_version::AssetObject {
+                hash: "ab".repeat(20),
+                size: 1,
+            },
+        )]);
+        let index_json = petalfall_version::AssetObjectsIndex {
+            objects,
+            ..petalfall_version::AssetObjectsIndex::default()
+        };
+        std::fs::write(&index, serde_json::to_vec(&index_json).unwrap()).unwrap();
+        let working_dir = petalfall.resolve_working_dir(id).await.unwrap().working_dir;
+        let inputs = crate::game_lang::OptionsInputs {
+            system: Some("zh-CN"),
+            asset_index_id: Some("lang-test"),
+            skip_onboarding: true,
+            follow_system: true,
+        };
+        let report = crate::game_lang::fill_missing_options(&inputs, &layout, &working_dir).await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        working_dir
+    }
+
+    /// 包里 `overrides/<prefix>` 下的条目与各自的字节数。
+    fn entry_sizes(pack: &Path, prefix: &str) -> BTreeMap<String, u64> {
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(pack).unwrap()).unwrap();
+        (0..archive.len())
+            .map(|at| {
+                let entry = archive.by_index(at).unwrap();
+                (entry.name().to_owned(), entry.size())
+            })
+            .filter(|(name, _)| name.starts_with(&format!("overrides/{prefix}")))
+            .collect()
+    }
+
+    fn read_all(dir: &Path, files: &[&str]) -> Vec<Vec<u8>> {
+        files
+            .iter()
+            .map(|file| std::fs::read(dir.join(file)).unwrap())
+            .collect()
+    }
+
+    /// 启动前补进模组默认设置的语言与引导行是按本机补的，不随包带走：包里那几份是作者原来的字节，作者自己写的
+    /// `lang:zh_cn` 照留；玩家自己的 options.txt 照原样带上。盘上的文件不动，记账文件不进包，预览报的配置大小
+    /// 与写进包里的一致。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lines_the_launcher_filled_into_mod_defaults_stay_out_of_the_pack() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        std::fs::remove_file(fixture.dir.join(OPTIONS_FILE)).unwrap();
+        let authored: [(&str, &[u8]); 3] = [
+            (YOSBR, b"version:3955\r\nfov:0.8\r\n\xff\xfe:1\r\n"),
+            (DEFAULT_OPTIONS, b"lang:zh_cn\nfov:0.6\n"),
+            (EXTRA_OPTIONS, b"fov:0.7\n"),
+        ];
+        for (file, bytes) in authored {
+            fixture.write(file, bytes);
+        }
+
+        let working_dir = fill_like_a_launch(&fixture.petalfall, ID, &fixture.root).await;
+
+        assert_eq!(working_dir, fixture.dir);
+        assert_eq!(
+            read_all(&fixture.dir, &[YOSBR, DEFAULT_OPTIONS, EXTRA_OPTIONS]),
+            [
+                &b"version:3955\r\nfov:0.8\r\n\xff\xfe:1\r\nlang:zh_cn\r\nonboardAccessibility:false\r\n"[..],
+                b"lang:zh_cn\nfov:0.6\nonboardAccessibility:false\n",
+                b"fov:0.7\nlang:zh_cn\nonboardAccessibility:false\n",
+            ]
+        );
+        let record = crate::game_lang::filled_lines_path(&fixture.dir);
+        assert!(record.is_file(), "补行之后应有记账");
+        fixture.write(OPTIONS_FILE, b"lang:zh_cn\nonboardAccessibility:false\n");
+        let on_disk = read_all(
+            &fixture.dir,
+            &[YOSBR, DEFAULT_OPTIONS, EXTRA_OPTIONS, OPTIONS_FILE],
+        );
+        let record_bytes = std::fs::read(&record).unwrap();
+
+        let preview = fixture.petalfall.preview_modpack_export(ID).await.unwrap();
+        let target = ModpackExportTarget::new(fixture.root.join("补行.mrpack"));
+        fixture
+            .petalfall
+            .export_modpack(
+                ID,
+                &options(vec![ExportExtra::Config, ExportExtra::Options], false),
+                &target,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let pack = target.destination();
+        for (file, bytes) in authored {
+            assert_eq!(
+                read_entry(pack, &format!("overrides/{file}")),
+                bytes,
+                "{file}"
+            );
+        }
+        assert_eq!(
+            read_entry(pack, "overrides/options.txt"),
+            b"lang:zh_cn\nonboardAccessibility:false\n",
+            "options.txt 是玩家自己的设置，原样带上"
+        );
+        let record_name = record.file_name().unwrap().to_string_lossy().to_lowercase();
+        for name in entry_names(pack) {
+            let lower = name.to_lowercase();
+            assert!(
+                !lower.contains(PETALFALL_META_DIR) && !lower.ends_with(&record_name),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            read_all(
+                &fixture.dir,
+                &[YOSBR, DEFAULT_OPTIONS, EXTRA_OPTIONS, OPTIONS_FILE]
+            ),
+            on_disk
+        );
+        assert_eq!(std::fs::read(&record).unwrap(), record_bytes);
+
+        let config = preview
+            .extras
+            .iter()
+            .find(|stat| stat.extra == ExportExtra::Config)
+            .unwrap();
+        let written = entry_sizes(pack, "config/");
+        assert_eq!(config.files, written.len() as u64);
+        assert_eq!(config.bytes, written.values().sum::<u64>());
+    }
+
+    /// 记账之后文件被人改过：记着的行不在了就不去，不拿别的行顶替；记账里没有的文件，作者写的同样的行也照留。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lines_that_changed_since_they_were_filled_stay_in_the_pack() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        std::fs::remove_file(fixture.dir.join(OPTIONS_FILE)).unwrap();
+        fixture.write(YOSBR, b"fov:0.8\n");
+        fill_like_a_launch(&fixture.petalfall, ID, &fixture.root).await;
+        assert_eq!(
+            std::fs::read(fixture.dir.join(YOSBR)).unwrap(),
+            b"fov:0.8\nlang:zh_cn\nonboardAccessibility:false\n"
+        );
+
+        fixture.write(
+            YOSBR,
+            b"fov:0.8\nlang:ja_jp\nonboardAccessibility:false\r\n",
+        );
+        fixture.write(EXTRA_OPTIONS, b"lang:zh_cn\nonboardAccessibility:false\n");
+        let target = ModpackExportTarget::new(fixture.root.join("改过.mrpack"));
+        fixture
+            .petalfall
+            .export_modpack(
+                ID,
+                &options(vec![ExportExtra::Config], false),
+                &target,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let pack = target.destination();
+        assert_eq!(
+            read_entry(pack, &format!("overrides/{YOSBR}")),
+            b"fov:0.8\nlang:ja_jp\n"
+        );
+        assert_eq!(
+            read_entry(pack, &format!("overrides/{EXTRA_OPTIONS}")),
+            b"lang:zh_cn\nonboardAccessibility:false\n"
+        );
+    }
+
+    /// 不隔离的实例工作目录是游戏目录：补行与记账都落在游戏目录下，导出从同一处读，两边对得上。实例目录里不出现
+    /// 记账。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shared_working_dir_keeps_its_record_next_to_the_shared_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = bare_petalfall(tmp.path());
+        let dir = bare_instance(
+            tmp.path(),
+            "共用",
+            r#"{"id":"共用","inheritsFrom":"1.21.1","type":"release","mainClass":"M"}"#,
+        );
+        VersionSettingsStore::for_version_dir(&dir)
+            .save(&VersionSettings {
+                isolation: IsolationOverride::Disabled,
+                ..VersionSettings::default()
+            })
+            .await
+            .unwrap();
+        let mc = tmp.path().join("mc");
+        std::fs::create_dir_all(mc.join("config/yosbr")).unwrap();
+        std::fs::write(mc.join(YOSBR), b"fov:0.8\r\n").unwrap();
+
+        let working_dir = fill_like_a_launch(&petalfall, "共用", tmp.path()).await;
+
+        assert_eq!(working_dir, mc);
+        assert!(crate::game_lang::filled_lines_path(&mc).is_file());
+        assert!(!crate::game_lang::filled_lines_path(&dir).exists());
+        let filled = b"fov:0.8\r\nlang:zh_cn\r\nonboardAccessibility:false\r\n";
+        assert_eq!(std::fs::read(mc.join(YOSBR)).unwrap(), filled);
+
+        let target = ModpackExportTarget::new(tmp.path().join("共用.mrpack"));
+        petalfall
+            .export_modpack(
+                "共用",
+                &options(vec![ExportExtra::Config], false),
+                &target,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            entry_names(target.destination()),
+            ["modrinth.index.json", "overrides/config/yosbr/options.txt"]
+        );
+        assert_eq!(
+            read_entry(target.destination(), "overrides/config/yosbr/options.txt"),
+            b"fov:0.8\r\n"
+        );
+        assert_eq!(std::fs::read(mc.join(YOSBR)).unwrap(), filled);
+    }
+
+    /// 记账读不懂时照实报错，不当成没记过（那样补的行就随包带走了）；不带配置的导出不读它，照常导出。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreadable_record_fails_only_exports_that_take_the_config() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        let record = crate::game_lang::filled_lines_path(&fixture.dir);
+        std::fs::write(&record, b"{not json").unwrap();
+
+        let with_config = ModpackExportTarget::new(fixture.root.join("带配置.mrpack"));
+        let err = fixture
+            .petalfall
+            .export_modpack(
+                ID,
+                &options(vec![ExportExtra::Config], false),
+                &with_config,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::JsonFileInvalid { path, .. } if path == &record),
+            "{err:?}"
+        );
+        assert!(!with_config.destination().exists());
+
+        let without = ModpackExportTarget::new(fixture.root.join("不带配置.mrpack"));
+        fixture
+            .petalfall
+            .export_modpack(
+                ID,
+                &options(vec![ExportExtra::Options], false),
+                &without,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            read_entry(without.destination(), "overrides/options.txt"),
+            b"lang:zh_cn"
+        );
     }
 }
