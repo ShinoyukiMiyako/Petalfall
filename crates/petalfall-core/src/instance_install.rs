@@ -27,7 +27,8 @@ use petalfall_install::{
 use petalfall_instance::{
     BrokenReason, BrokenVersion, DiscoveredVersion, IncompleteKind, IncompleteMarker,
     IncompleteOutcome, InstallRecordStore, InstallSpec, MarkerError, MarkerStore, NameViolation,
-    PETALFALL_META_DIR, VersionProbe, discover_versions, probe_version,
+    PETALFALL_META_DIR, VersionProbe, check_instance_name, discover_versions, list_version_dirs,
+    probe_version,
 };
 use petalfall_version::{LoaderInfo, LoaderKind, VersionJson, identify_mc_version, resolve};
 
@@ -648,7 +649,7 @@ pub(crate) async fn decide_repair(
                         )?)),
                         None => Err(InstanceError::NotRepairable {
                             id: id.to_owned(),
-                            reason: no_record_reason(id, &broken).await,
+                            reason: no_record_reason(game_dir, id, &broken).await,
                         }
                         .into()),
                     }
@@ -676,7 +677,8 @@ fn unreadable_refusal(id: &str, detail: String) -> CoreError {
 /// [`unreadable_refusal`]）。
 ///
 /// `previous` 与 `broken` 是列表已经读到的未完成标记与探测结果，不再读一遍；会多读的只有安装记录（读不出来的
-/// 不读），没有记录、缺的又是版本 JSON 时再看一眼实例目录顶层。
+/// 不读），没有记录、缺的又是版本 JSON 时再看一眼实例目录顶层，在那里找到一份名字对不上的版本 JSON 时再列一次
+/// `versions/` 查重。
 pub(crate) async fn unrepairable_reason(
     game_dir: &Path,
     id: &str,
@@ -697,8 +699,9 @@ pub(crate) async fn unrepairable_reason(
 }
 
 /// 版本 JSON 用不了、也没有安装记录时补全报的原因。缺的是版本 JSON 时顺带看一眼实例目录：别人打包时把实例目录
-/// 改了名，里面的版本 JSON 还叫原来的名字，只说「缺少版本 JSON」的话，玩家想不到文件其实就在目录里。
-async fn no_record_reason(id: &str, broken: &BrokenVersion) -> String {
+/// 改了名，里面的版本 JSON 还叫原来的名字，只说「缺少版本 JSON」的话，玩家想不到文件其实就在目录里。实例改不成那个
+/// 名字时不提（见 [`renamable_to`]）。
+async fn no_record_reason(game_dir: &Path, id: &str, broken: &BrokenVersion) -> String {
     let reason = format!(
         "{}，也没有记下当初装的是什么",
         broken_reason_text(&broken.reason)
@@ -706,17 +709,38 @@ async fn no_record_reason(id: &str, broken: &BrokenVersion) -> String {
     if broken.reason != BrokenReason::MissingJson {
         return reason;
     }
-    match misnamed_version_json(&broken.dir).await {
-        Ok(Some(name)) => format!(
-            "{reason}；目录里有一份叫 {name}.json 的版本文件，把实例改名成 {name} 就能认出来"
-        ),
-        Ok(None) => reason,
-        // 只是附带的提示：目录没读全就说不准是不是恰好一份，宁可不提，修不好的原因照样报。
+    // 只是附带的提示：目录没读全就说不准是不是恰好一份、改不改得成，宁可不提，修不好的原因照样报。
+    let name = match misnamed_version_json(&broken.dir).await {
+        Ok(Some(name)) => name,
+        Ok(None) => return reason,
         Err(err) => {
             tracing::warn!(id, dir = %broken.dir.display(), error = %err, "查找名字对不上的版本 JSON 失败");
-            reason
+            return reason;
         }
+    };
+    // 查重的名单与改名时的同一份（`Petalfall::instance_names`）：`versions/` 下全部目录名，含版本 JSON 用不了的。
+    let existing = match list_version_dirs(game_dir).await {
+        Ok(names) => names.unwrap_or_default(),
+        Err(err) => {
+            tracing::warn!(id, error = %error_with_causes(&err), "列不出实例名，不提改名");
+            return reason;
+        }
+    };
+    match renamable_to(id, name, &existing) {
+        Some(name) => format!(
+            "{reason}；目录里有一份叫 {name}.json 的版本文件，把实例改名成 {name} 就能认出来"
+        ),
+        None => reason,
     }
+}
+
+/// `name` 过得了实例 `id` 改名时的校验才交回它：与 [`Petalfall::rename_instance_files`] 同一个
+/// [`check_instance_name`]，命名规则加上与 `existing` 不分大小写重名（自己除外）。过不了的名字提给玩家，照做只会被
+/// 改名拒绝。
+fn renamable_to(id: &str, name: String, existing: &[String]) -> Option<String> {
+    check_instance_name(&name, existing.iter().map(String::as_str), Some(id))
+        .is_ok()
+        .then_some(name)
 }
 
 /// 实例目录顶层名字对不上的那份版本 JSON 的名字（不带 `.json`）：内容能解析成版本 JSON，`id` 又正好是自己的
@@ -2155,6 +2179,87 @@ mod tests {
                 repair_verdict(&petalfall, id).await,
                 Err(reason),
                 "{id} 去补全"
+            );
+        }
+    }
+
+    /// 名字对不上的那份版本 JSON，只有实例改得成它的名字时才点出来：改名的校验（命名规则加不分大小写查重）过不了的，
+    /// 照做只会被改名拒绝，原因里不提改名，与零份、多份时一样。
+    #[tokio::test]
+    async fn a_misnamed_version_json_is_named_only_when_the_instance_can_take_that_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let versions = petalfall.game_dir().join("versions");
+        let put = |id: &str, name: &str| {
+            let dir = versions.join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("{name}.json")), vanilla_json(name)).unwrap();
+        };
+        put("改得成", "All the Mods 10");
+        put("太长", &"樱".repeat(33));
+        put("段尾空格", "生存 ");
+        put("段尾点", "生存.");
+        put("点开头", ".atm");
+        put("撞名", "atm10");
+        // 已有的实例，与撞名那份只差大小写：Windows 上是同一个文件夹。
+        std::fs::create_dir_all(versions.join("ATM10")).unwrap();
+
+        let missing = "缺少版本 JSON，也没有记下当初装的是什么";
+        let hinted = format!(
+            "{missing}；目录里有一份叫 All the Mods 10.json 的版本文件，把实例改名成 All the Mods 10 就能认出来"
+        );
+        let expected = [
+            ("改得成", hinted.as_str()),
+            ("太长", missing),
+            ("段尾空格", missing),
+            ("段尾点", missing),
+            ("点开头", missing),
+            ("撞名", missing),
+            ("ATM10", missing),
+        ];
+        let list = petalfall.list_instances().await.unwrap();
+        assert_eq!(list.len(), expected.len());
+        for (id, reason) in expected {
+            let listed = list.iter().find(|i| i.id == id).unwrap();
+            assert_eq!(
+                listed.unrepairable_reason.as_deref(),
+                Some(reason),
+                "{id} 在列表上"
+            );
+            assert_eq!(
+                repair_verdict(&petalfall, id).await,
+                Err(reason.to_owned()),
+                "{id} 去补全"
+            );
+        }
+    }
+
+    /// Windows 的文件名里放不下的名字（保留字符、控制字符、设备名）在盘上造不出那样的版本 JSON，直接拿名字核对：过不了
+    /// 改名校验的不交回，过得了的原样交回。
+    #[test]
+    fn only_a_name_the_instance_can_be_renamed_to_is_suggested() {
+        let existing = ["atm10".to_owned(), "RLCraft".to_owned()];
+        assert_eq!(
+            renamable_to("atm10", "All the Mods 10".to_owned(), &existing).as_deref(),
+            Some("All the Mods 10")
+        );
+        let too_long = "樱".repeat(33);
+        for name in [
+            "a:b",
+            "a?b",
+            "a\u{7}b",
+            "CON",
+            "nul.tar",
+            too_long.as_str(),
+            "生存 ",
+            "生存.",
+            ".atm",
+            "rlcraft",
+        ] {
+            assert_eq!(
+                renamable_to("atm10", name.to_owned(), &existing),
+                None,
+                "{name:?}"
             );
         }
     }
