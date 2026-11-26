@@ -260,7 +260,12 @@ export const AVATAR_LINE = {
   crashed: "已崩溃，点开查看诊断",
   queued: (position: number) => `等待安装 · 第 ${position} 位`,
   installing: (pct: string) => `安装中 · ${pct}`,
+  /** 只给修得好的损坏实例。 */
   broken: "需要修复",
+  /** 整合包没导入完：补全补不回整合包里的 Mod 与配置，菜单第一项是重新导入。 */
+  brokenReimport: "整合包没导入完，需要重新导入",
+  /** 后端说补全修不好：不说需要修复，后端给的原因在启动入口与实例页的提示里，这一行放不下。 */
+  brokenUnrepairable: "文件不完整，补全修不好",
   playUnknown: "上次游玩读不到",
 } as const;
 

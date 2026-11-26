@@ -2094,6 +2094,68 @@ describe("实例详情：补全修不好的损坏实例", () => {
   });
 });
 
+describe("实例详情：损坏实例上进入存档、导出与移动的原因", () => {
+  const LOST = "缺少版本 JSON，也没有记下当初装的是什么";
+  const REIMPORT = "整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。";
+
+  /** 悬停后关联的提示气泡里的文字；没有关联气泡时报错。 */
+  const tipOf = async (el: HTMLElement): Promise<string | null | undefined> => {
+    act(() => {
+      el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = el.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error(`「${nameOf(el)}」悬停后没有关联提示气泡`);
+    return document.getElementById(tipId)?.textContent;
+  };
+  const menuItem = (label: string): HTMLElement => {
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === label);
+    if (item === undefined) throw new Error(`菜单里没有「${label}」`);
+    return item;
+  };
+
+  it.each<[string, Partial<InstanceDto>, { enter: string; export: string; move: string }]>([
+    [
+      "补全修得好：照旧说修复后才能做",
+      { status: "broken", broken_reason: "缺少客户端 jar" },
+      { enter: "实例需要先修复", export: "实例文件不完整，修复后才能导出", move: "实例文件不完整，修复后才能移动" },
+    ],
+    [
+      "补全修不好：不承诺修复，写明后端给的原因",
+      { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: LOST, mc_version: null },
+      { enter: `实例文件不完整，补全修不好：${LOST}`, export: `实例文件不完整，补全修不好：${LOST}`, move: `实例文件不完整，补全修不好：${LOST}` },
+    ],
+    [
+      "整合包没导入完：指向重新导入",
+      { incomplete: { kind: "modpack", outcome: "pending", started_at: NOW - DAY, spec: null, error: null } },
+      { enter: REIMPORT, export: REIMPORT, move: REIMPORT },
+    ],
+  ])("%s", async (_name, patch, expected) => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, ...patch } : i));
+    await open("overview");
+    const play = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.getAttribute("aria-label") === "进入「新世界」");
+    if (play === undefined) throw new Error("找不到「进入「新世界」」");
+    expect(play.getAttribute("aria-disabled")).toBe("true");
+    // 图标按钮的提示气泡先写按钮名，再写禁用原因
+    expect(await tipOf(play)).toBe(`进入「新世界」${expected.enter}`);
+    click(play);
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toEqual([]);
+
+    click(button("更多操作"));
+    for (const [label, reason] of [
+      ["导出整合包", expected.export],
+      ["移到其他游戏目录…", expected.move],
+    ]) {
+      const item = menuItem(label);
+      expect(item.getAttribute("aria-disabled")).toBe("true");
+      expect(await tipOf(item)).toBe(reason);
+    }
+  });
+});
+
 describe("实例详情：概览", () => {
   const LOST = "加载器自带的库 fabric-loader-0.16.10.jar 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器";
 

@@ -53,13 +53,23 @@ export interface InstanceOps {
 }
 
 /**
+ * 损坏实例上导出、移动与进入存档被挡住的原因。修得好的照旧说修复后才能做（repairable）；整合包没导入完的补全补不回来，
+ * 指向重新导入；后端说补全修不好的不承诺修复，写明后端给的原因。整合包半成品先判：头图菜单、概览与设置页给它的入口都是重新导入。
+ */
+export function brokenBlockReason(inst: Pick<InstanceSummary, "status" | "incomplete" | "unrepairableReason">, repairable: string): string {
+  if (needsReimport(inst)) return MODPACK_REIMPORT_COPY.note;
+  if (inst.unrepairableReason !== null) return LOCK_REASON.unrepairable(inst.unrepairableReason);
+  return repairable;
+}
+
+/**
  * 导出读的是此刻的文件，与「改动中」同属一类：游戏运行、存档备份、装 Mod 都不挡；安装、补全、改名、删除会挪走或重写目录，挡住。
  * 占位项的目录还没落盘，损坏的实例写不出可用的整合包。
  */
 export function exportReason(inst: InstanceSummary, work: WorkLock | null): string | undefined {
   if (inst.placeholder) return LOCK_REASON.export.placeholder;
   if (work !== null) return LOCK_REASON.export[work];
-  if (inst.status === "broken") return LOCK_REASON.export.broken;
+  if (inst.status === "broken") return brokenBlockReason(inst, LOCK_REASON.export.broken);
   return undefined;
 }
 
@@ -80,7 +90,7 @@ export function moveReason(inst: InstanceSummary, locks: InstanceLocks): string 
   if (inst.placeholder) return LOCK_REASON.move.placeholder;
   const locked = lockReason(locks.move, "move");
   if (locked !== undefined) return locked;
-  return inst.status === "broken" ? LOCK_REASON.move.broken : undefined;
+  return inst.status === "broken" ? brokenBlockReason(inst, LOCK_REASON.move.broken) : undefined;
 }
 
 /**

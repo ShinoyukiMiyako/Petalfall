@@ -97,7 +97,9 @@ export function pinLine(view: LaunchView, inst: InstanceSummary, now: number): s
       return AVATAR_LINE.installing(percent(task.progress));
     }
     case "broken":
-      return AVATAR_LINE.broken;
+      // 整合包没导入完按启动视图的 reimport 判，与菜单第一项给重新导入一致；修不好的补全会被后端拒，不说需要修复
+      if (view.reimport) return AVATAR_LINE.brokenReimport;
+      return inst.unrepairableReason === null ? AVATAR_LINE.broken : AVATAR_LINE.brokenUnrepairable;
   }
 }
 

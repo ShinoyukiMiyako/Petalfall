@@ -97,6 +97,11 @@ export const LOCK_REASON = {
     placeholder: "新建的实例还没装好，装完后才能移动",
     broken: "实例文件不完整，修复后才能移动",
   },
+  /**
+   * 后端说补全修不好的损坏实例：导出、移动与进入存档的 broken 那句都承诺修复后就能做，对它兑现不了，改为写明后端给的原因。
+   * 原因原样接在末尾，它可能已带句末标点或跟着一句提示，不改写也不补句号。
+   */
+  unrepairable: (reason: string) => `实例文件不完整，补全修不好：${reason}`,
 } as const;
 
 // ---------------------------------------------------------------- 移到其他游戏目录
@@ -242,7 +247,10 @@ export const OVERVIEW_COPY = {
   openSaves: "打开存档文件夹",
   openWorld: (name: string) => `打开「${name}」所在文件夹`,
   enterWorld: (name: string) => `进入「${name}」`,
-  /** 「进入」不能点的原因，键与 enterWorldBlock 的结论一一对应；被当作基底的结论带着使用者，走 INSTANCE_IN_USE_COPY.launch。 */
+  /**
+   * 「进入」不能点的原因，键与 enterWorldBlock 的结论一一对应；被当作基底的结论带着使用者，走 INSTANCE_IN_USE_COPY.launch。
+   * broken 只给修得好的实例：整合包没导入完、补全修不好的经 ops 的 brokenBlockReason 换成各自的说法。
+   */
   enterWorldBlocked: {
     installing: "实例还在安装",
     broken: "实例需要先修复",

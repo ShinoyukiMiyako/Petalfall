@@ -79,7 +79,7 @@ import {
   WORLDS_PREVIEW,
   type ModRow,
 } from "./model";
-import type { InstanceOps } from "./ops";
+import { brokenBlockReason, type InstanceOps } from "./ops";
 import { FolderButton, loadableView, ModuleError, SlowHint, useModuleView } from "./parts";
 import { useWorldOps, WorldBackupsModal, worldRef, type WorldRef } from "./WorldBackupsModal";
 import { UpdatePreviewModal } from "./UpdatePreviewModal";
@@ -473,7 +473,14 @@ function WorldsCard({ inst, view, content, ops }: { inst: InstanceSummary; view:
   const [expanded, setExpanded] = useState(false);
   const worldOps = useWorldOps(inst, ops);
   const block = enterWorldBlock(inst, view.kind, worldOps.busyWorlds.length > 0);
-  const enterReason = block === null ? undefined : typeof block === "object" ? INSTANCE_IN_USE_COPY.launch(block.usedBy) : OVERVIEW_COPY.enterWorldBlocked[block];
+  const enterReason =
+    block === null
+      ? undefined
+      : typeof block === "object"
+        ? INSTANCE_IN_USE_COPY.launch(block.usedBy)
+        : block === "broken"
+          ? brokenBlockReason(inst, OVERVIEW_COPY.enterWorldBlocked.broken)
+          : OVERVIEW_COPY.enterWorldBlocked[block];
   // 弹窗关上后仍记着最近看的那个存档：退场动画期间标题与列表不变成空的
   const [backupsOf, setBackupsOf] = useState<WorldRef | null>(null);
   const [backupsOpen, setBackupsOpen] = useState(false);

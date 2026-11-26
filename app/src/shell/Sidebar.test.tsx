@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { AVATAR_LINE, LAUNCH_COPY, PAGE_LABEL, STOPPED_LABEL } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
+import type { InstanceDto } from "../ipc/instances";
 import type { LaunchView } from "../launch/launchView";
 import { fade, springs, TOOLTIP_TIMING } from "../lib/motion";
 import { startSession } from "../state/session";
@@ -40,7 +41,7 @@ vi.mock("framer-motion", async (importOriginal) => {
 });
 
 const T0 = 1_700_000_000_000;
-const inst = { id: "生存", name: "生存", lastPlayedAt: null, playError: null } as InstanceSummary;
+const inst = { id: "生存", name: "生存", lastPlayedAt: null, playError: null, unrepairableReason: null } as InstanceSummary;
 const session = startSession("生存", "launch-1", { uuid: "u", name: "Steve", kind: "microsoft" }, T0, null);
 
 describe("侧栏选中项", () => {
@@ -71,10 +72,18 @@ describe("固定实例名称提示的第二行", () => {
     ["排队安装写名次", { kind: "installing", task: queuedTask, queuePosition: 2 }, AVATAR_LINE.queued(2)],
     ["安装中写百分比", { kind: "installing", task: { ...queuedTask, status: "running", progress: 0.5 }, queuePosition: null }, AVATAR_LINE.installing("50%")],
     ["后端在装、前端没有任务", { kind: "installing", task: null, queuePosition: null }, SIDEBAR_COPY.waitingInstall],
-    ["损坏", { kind: "broken", reason: "x", reimport: false }, AVATAR_LINE.broken],
+    ["损坏、补全修得好", { kind: "broken", reason: "x", reimport: false }, "需要修复"],
   ];
   it.each(cases)("%s", (_name, view, expected) => {
     expect(pinLine(view, inst, T0)).toBe(expected);
+  });
+
+  it("损坏但修复没用的不说需要修复：整合包没导入完的指向重新导入，补全修不好的照实说", () => {
+    const lost = { ...inst, unrepairableReason: "缺少版本 JSON，也没有记下当初装的是什么" };
+    expect(pinLine({ kind: "broken", reason: "整合包没有导入完", reimport: true }, inst, T0)).toBe("整合包没导入完，需要重新导入");
+    expect(pinLine({ kind: "broken", reason: "缺少版本 JSON", reimport: false }, lost, T0)).toBe("文件不完整，补全修不好");
+    // 整合包没导入完、后端也报了修不好：菜单第一项是重新导入，这一行跟着它
+    expect(pinLine({ kind: "broken", reason: "整合包没有导入完", reimport: true }, lost, T0)).toBe("整合包没导入完，需要重新导入");
   });
 
   it("游玩记录读不出：就绪时写读不到，不说从未游玩；别的状态照常", () => {
@@ -1240,6 +1249,24 @@ describe("侧栏", () => {
     if (tip === null) throw new Error("悬停后没有出现名称提示");
     const line = tip.querySelector("[class*='pinLine']");
     expect(line?.textContent).toBe(AVATAR_LINE.ready(null, Date.now()));
+  });
+
+  it.each<[string, Partial<InstanceDto>, string]>([
+    ["补全修得好", { status: "broken", broken_reason: "缺少客户端 jar" }, "需要修复"],
+    ["补全修不好", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null }, "文件不完整，补全修不好"],
+    ["整合包没导入完", { incomplete: { kind: "modpack", outcome: "pending", started_at: 1_699_000_000_000, spec: null, error: null } }, "整合包没导入完，需要重新导入"],
+  ])("损坏的固定实例（%s）：名称提示第二行按修不修得好换说法", async (_name, over, expected) => {
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", over), instanceDto("创造"), instanceDto("空岛")]);
+    await mount();
+    act(() => {
+      item("pin:生存").dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    });
+    act(() => {
+      vi.advanceTimersByTime(TOOLTIP_TIMING.sidebarDelay);
+    });
+    const tip = document.querySelector("[role='tooltip']");
+    if (tip === null) throw new Error("悬停后没有出现名称提示");
+    expect(tip.querySelector("[class*='pinLine']")?.textContent).toBe(expected);
   });
 
   it("主导航条目的名称写页面名，快捷键写在 aria-keyshortcuts 上", async () => {
