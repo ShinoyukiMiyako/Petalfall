@@ -528,12 +528,13 @@ impl Petalfall {
                 let merged = resolve(&target.json, &provider)?;
                 // 传统布局的加载器版本，客户端 jar 与 natives 在继承链根（原版）的目录里。
                 let root = inheritance_root(&scan, id);
-                self.prepare_sources().await?;
                 let layout = self.layout();
                 // 安装器在本机生成的文件补全下不回来：缺了就照「加载器文件缺失」停下，不假装补全成功。命令层
-                // 把这个失败码记进未完成标记，下一次补全就改走重新安装加载器（见 decide_repair）。
+                // 把这个失败码记进未完成标记，下一次补全就改走重新安装加载器（见 decide_repair）。排在测速之前：
+                // 核对只看本地文件，注定失败的补全不该先发一轮测速探针、网络不佳时还要等它超时。
                 petalfall_install::complete::reject_missing_processor_outputs(&merged, &layout)
                     .await?;
+                self.prepare_sources().await?;
                 let pool = self.download_pool_reporting(events);
                 let policy = self.retry_policy();
                 let http = self.http();
@@ -2525,11 +2526,30 @@ mod tests {
     }
 
     /// 安装器在本机生成的文件（这里是 NeoForge 补丁后的客户端 jar）补全下不回来：缺了它补全就照加载器文件缺失
-    /// 停下，不报成功，也不进任何下载步骤；文件放回去后同一个方案照常补全。
-    #[tokio::test]
+    /// 停下，不报成功，也不进任何下载步骤，连测速探针都不发；文件放回去后同一个方案照常补全，这时才测速。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn repair_stops_when_a_processor_output_of_the_loader_is_missing() {
+        async fn probes(server: &MockServer) -> usize {
+            server
+                .received_requests()
+                .await
+                .expect("mock 应记录请求")
+                .iter()
+                .filter(|request| request.url.path() == "/mc/game/version_manifest_v2.json")
+                .count()
+        }
+        // 测速的两个源钉到两台本地 mock 上，探针发没发出去看得见。
+        let official = MockServer::start().await;
+        let mirror = MockServer::start().await;
         let tmp = tempfile::tempdir().unwrap();
-        let petalfall = petalfall_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path()).with_source_routes(
+            std::sync::Arc::new(crate::sources::tests::Routes {
+                official: official.uri(),
+                mirror: mirror.uri(),
+            }),
+            std::time::Duration::from_secs(600),
+            std::time::Duration::from_secs(30),
+        );
         write_version(
             petalfall.game_dir(),
             "整合包",
@@ -2563,6 +2583,13 @@ mod tests {
             "{err:?}"
         );
         assert!(phases_of(&drain(rx)).is_empty(), "不该进到下载步骤");
+        for server in [&official, &mirror] {
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                0,
+                "核对没过时一个请求都不发"
+            );
+        }
 
         std::fs::create_dir_all(patched.parent().unwrap()).unwrap();
         std::fs::write(&patched, b"patched").unwrap();
@@ -2571,6 +2598,8 @@ mod tests {
             .await
             .unwrap();
         assert!(!outcome.reinstalled);
+        // 核对过了才测速：两个源各收到一个探针，上面的 0 不是因为测速根本没接到这两台 mock 上。
+        assert_eq!((probes(&official).await, probes(&mirror).await), (1, 1));
     }
 
     #[tokio::test]
