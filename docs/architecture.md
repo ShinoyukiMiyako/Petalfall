@@ -146,7 +146,7 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 
 ### 实例补全
 
-`repair_instance(task_id, id, reinstall_loader?)` 是长任务，可取消，占 `repairing` 连同继承链上的基底（见「实例互斥」）；结局写进未完成标记，成功即清除。`reinstall_loader`（前端的 `reinstallLoader`）可缺省：旧任务表里重放的补全任务没有这个键，按 false。方案由 `Petalfall::begin_repair` 与 `begin_loader_reinstall`（同一个 `plan_repair`）看未完成标记定：
+`repair_instance(task_id, id, reinstall_loader?)` 是长任务，可取消，占 `repairing` 连同继承链上的基底（见「实例互斥」；链由 `repair_chain` 读：实例自己的版本 JSON 读盘出错时链无从读起，只占实例本身，交给下面的定方案一步报出「读不出来」的原因，基底的版本 JSON 读盘出错照实报错）；结局写进未完成标记，成功即清除。`reinstall_loader`（前端的 `reinstallLoader`）可缺省：旧任务表里重放的补全任务没有这个键，按 false。方案由 `Petalfall::begin_repair` 与 `begin_loader_reinstall`（同一个 `plan_repair`）看未完成标记定：
 
 - 标记是 `install`：照标记记下的内容重装；是 `modpack`：报不可补全并提示重新导入（`instance_failed`）。
 - 标记是 `repair` 或没有标记（标记文件损坏当作没有）：读版本 JSON。读得出时，显式带了 `reinstall_loader`，或上次败在 `loader_library_missing` 且加载器能装回，就重装；否则按版本 JSON 补齐缺失的文件。上次败在加载器自带的库、补全补不回来，所以再点一次补全（修复实例、修复并启动、任务重试）也走重装，不会原样再败一遍；装不回的照旧补全，玩家可能已经把文件放回去了，这是清掉标记的唯一办法，没放回去时照样报缺失。缺失或损坏时，有 `.petalfall/install-record.json` 就照它重装，没有记录才报不可补全。读不出来（被占用、没有权限、那个位置是个目录）时不看记录，直接报不可补全，原因是「版本 JSON 读不出来：」后接读盘错误连同系统给的原因：照记录重装最后也要把版本 JSON 写回这个位置，读不出的位置多半也写不进去，白下一遍文件；补全现探版本 JSON 时 `probe_version` 报出的读盘错误照全量扫描的口径（`error_with_causes`）换成这句。没有记录、缺的又是版本 JSON 时，实例目录顶层恰好有一份能解析成版本 JSON、`id` 又等于自己文件名的文件（别人打包时改了目录名，版本 JSON 还叫原来的名字），原因后面点出它的名字，说把实例改名成它就能认出来；没有或不止一份时不提，实例改不成这个名字时也不提：改名时的校验（`check_instance_name`，命名规则加上与 `versions/` 下别的目录不分大小写重名）过不了的，比如太长、段尾带点或空格、是 Windows 保留名、以点开头，玩家照做只会被改名拒绝。只读不改。

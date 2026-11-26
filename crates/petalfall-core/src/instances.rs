@@ -1014,6 +1014,18 @@ impl Petalfall {
     /// 失败原因换成笼统的错误。读文件本身出错（权限、磁盘）照实报错。`inheritsFrom` 来自盘上的文件，
     /// 指向不能安全拼进路径的 id 时不再往下读。
     pub async fn inheritance_chain(&self, id: &str) -> Result<Vec<String>> {
+        self.chain_of(id, false).await
+    }
+
+    /// 补全开局要占住的基底版本：同 [`inheritance_chain`](Self::inheritance_chain)，只是实例自己的版本 JSON
+    /// 读盘出错时给空链。这时链无从读起，补全也注定做不成：只占实例本身，由 `begin_repair` 报出与列表一致的
+    /// 「读不出来」的原因，而不是在占锁这一步就以读盘错误结束。链上别的环读盘出错照实报错：基底占不全时
+    /// 不能开始补全。
+    pub async fn repair_chain(&self, id: &str) -> Result<Vec<String>> {
+        self.chain_of(id, true).await
+    }
+
+    async fn chain_of(&self, id: &str, unreadable_self_has_no_chain: bool) -> Result<Vec<String>> {
         if !is_safe_instance_id(id) {
             return Err(InstanceError::InvalidId { id: id.to_owned() }.into());
         }
@@ -1029,6 +1041,15 @@ impl Petalfall {
             let json = match read_version_json(&versions_dir, &current).await {
                 Ok(Some(json)) => json,
                 Ok(None) | Err(CoreError::Version(_)) => break,
+                // 判环保证链上不会再出现实例自己的 id：与它相同的只有第一环。
+                Err(err) if unreadable_self_has_no_chain && current == id => {
+                    tracing::warn!(
+                        id,
+                        error = %petalfall_base::error_with_causes(&err),
+                        "实例自己的版本 JSON 读不出来，补全只占实例本身"
+                    );
+                    break;
+                }
                 Err(err) => return Err(err),
             };
             let Some(parent) = json
@@ -2627,6 +2648,57 @@ pub(crate) mod tests {
             err,
             CoreError::Instance(InstanceError::InvalidId { .. })
         ));
+        assert!(matches!(
+            petalfall.repair_chain("../x").await.unwrap_err(),
+            CoreError::Instance(InstanceError::InvalidId { .. })
+        ));
+
+        // 补全占基底用的链与上面相同。
+        assert_eq!(
+            petalfall.repair_chain("叠层").await.unwrap(),
+            vec!["fabric-1.20.1".to_owned(), "1.20.1".to_owned()]
+        );
+        assert_eq!(
+            petalfall.repair_chain("坏子").await.unwrap(),
+            vec!["坏父".to_owned()]
+        );
+    }
+
+    /// 版本 JSON 读盘出错（这里是那个位置上放了个目录）：启动、移动要的链照实报错；补全要的链在读不出来的是
+    /// 实例自己时给空链，让补全去报「读不出来」的原因，读不出来的是基底时照样报错。
+    #[tokio::test]
+    async fn repair_chain_is_empty_when_the_instance_own_json_cannot_be_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        let versions = game.join("versions");
+        let own_json = versions.join("读不出").join("读不出.json");
+        std::fs::create_dir_all(&own_json).unwrap();
+
+        let err = petalfall.inheritance_chain("读不出").await.unwrap_err();
+        assert!(
+            matches!(&err, CoreError::Base(petalfall_base::Error::Io { path, .. }) if *path == own_json),
+            "{err:?}"
+        );
+        assert!(petalfall.repair_chain("读不出").await.unwrap().is_empty());
+
+        let base_json = versions.join("坏基底").join("坏基底.json");
+        std::fs::create_dir_all(&base_json).unwrap();
+        write_version(
+            &game,
+            "叠在坏基底上",
+            &fabric_json("叠在坏基底上", "坏基底"),
+        );
+        for chain in [
+            petalfall.inheritance_chain("叠在坏基底上").await,
+            petalfall.repair_chain("叠在坏基底上").await,
+        ] {
+            let err = chain.unwrap_err();
+            assert!(
+                matches!(&err, CoreError::Base(petalfall_base::Error::Io { path, .. }) if *path == base_json),
+                "{err:?}"
+            );
+        }
     }
 
     /// 列表的 `bases` 从扫描结果走、不逐个读版本 JSON，补全占基底走的是 `inheritance_chain`：两边要断在同一环，
