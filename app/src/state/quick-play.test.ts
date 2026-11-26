@@ -127,6 +127,16 @@ describe("直达走与启动相同的拦截链", () => {
     expect(s.getState().tasks.map((t) => t.spec.command)).toEqual(["repair_instance"]);
   });
 
+  it("补全修不好的损坏实例：普通启动不转成修复并启动，按入口漏判抛错，不排补全也不启动", async () => {
+    instances = [instanceDto("旧档", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null, quick_play: null })];
+    const s = await boot();
+    await expect(s.actions.launch("旧档")).rejects.toThrow("「旧档」补全修不好，入口不应提供修复并启动");
+    await settle();
+    expect(s.getState().tasks).toEqual([]);
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(callsOf(ipc, "launch_game")).toEqual([]);
+  });
+
   it("安装中的实例：直达与启动一样抛错", async () => {
     instances = [instanceDto("生存", { activity: "installing" })];
     const s = await boot();

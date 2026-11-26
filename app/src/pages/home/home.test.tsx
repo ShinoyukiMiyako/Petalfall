@@ -3,6 +3,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { LAUNCH_COPY } from "../../copy/flows";
 import type { InstanceDto } from "../../ipc/instances";
 import { IpcError } from "../../ipc/errors";
 import { GAME_EXIT_EVENT } from "../../ipc/launch";
@@ -623,6 +624,30 @@ describe("主页：最近游玩", () => {
     expect(live[0].querySelector('[role="progressbar"]')).not.toBeNull();
     expect(leaving).toHaveLength(1);
     expect(leaving[0].querySelector("button")).not.toBeNull();
+  });
+
+  it("最近卡上的实例补全修不好：角上的修复按钮带原因禁用，提示第二行是后端给的原因，点了不发补全", async () => {
+    const reason = "缺少版本 JSON，也没有记下当初装的是什么";
+    instances = instances.map((i) => (i.id === "创造" ? { ...i, status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, mc_version: null, world_count: null, mod_count: null } : i));
+    await mount();
+    const card = buttonByLabel("打开「创造」").closest<HTMLElement>("[data-clip]");
+    if (card === null) throw new Error("找不到「创造」的最近卡");
+    const fix = card.querySelector<HTMLButtonElement>(`button[aria-label="${LAUNCH_COPY.repairAndLaunch}"]`);
+    if (fix === null) throw new Error("最近卡角上没有修复按钮");
+    expect(fix.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      fix.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = fix.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.lastElementChild?.textContent).toBe(reason);
+    click(fix);
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
   });
 });
 

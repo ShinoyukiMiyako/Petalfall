@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ACTION_ERROR, CONFIRM_COPY, INSTANCE_IN_USE_COPY, LAUNCH_COPY, lockReason, type FailureCopy, type FailureFixKind } from "../copy/flows";
 import { javaPinned, type InstanceSummary } from "../domain/adapt";
 import { locksOf } from "../domain/instance-locks";
+import { canRepair } from "../domain/rules";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useInstanceSettings } from "../state/queries/instance";
 import { reimportRoute } from "../state/route";
@@ -28,8 +29,9 @@ export interface LaunchEntry {
    */
   blocked: string | null;
   /**
-   * 损坏实例此刻不能修复的原因：后端占着它或别的实例正以它为基底，补全排上也会被 instance_busy 拒绝。入口据此带原因禁用
-   * 「修复并启动」；重新导入建的是新实例，不受影响。能修复或不是损坏视图为 null。
+   * 损坏实例此刻不能修复的原因：补全修不好时是后端给的原因（补全会以同一句话拒绝）；否则是后端占着它或别的实例正以它为基底，
+   * 补全排上也会被 instance_busy 拒绝。入口据此带原因禁用「修复并启动」；重新导入建的是新实例，不受影响。
+   * 能修复或不是损坏视图为 null。
    */
   repairBlocked: string | null;
   /** 启动（就绪、已结束、失败、崩溃后再启动）；损坏时由状态容器转成「修复并启动」，整合包没导入完的去重新导入。 */
@@ -117,6 +119,8 @@ export function useLaunch(instanceId: string): LaunchEntry {
   const locks = locksOf(inst, false);
   const blocked = busySaves ? LAUNCH_COPY.savesBusy : locks.launch === null ? null : locks.launch === "moving" ? LAUNCH_COPY.moving : INSTANCE_IN_USE_COPY.launch(locks.launch.usedBy);
   const repairReason = isBroken && !reimport ? lockReason(locks.repair, "repair") : undefined;
-  const repairBlocked = repairReason === undefined ? null : repairReason;
+  // 修不好的说后端给的原因，排在锁之前：锁放开了照样修不好，「完成后才能补全」是兑现不了的话
+  const unrepairable = isBroken && !reimport && !canRepair(inst) ? inst.unrepairableReason : null;
+  const repairBlocked = unrepairable !== null ? unrepairable : repairReason === undefined ? null : repairReason;
   return { instance: inst, view, stopping, failure, blocked, repairBlocked, launch, cancel, stop, dismiss, openCrash, openLogs, fix };
 }

@@ -1346,6 +1346,25 @@ describe("侧栏", () => {
       expect(menuOf("生存")?.closest("[data-exiting]")).toBeNull();
     });
 
+    it("补全修不好的固定实例：第一项「修复并启动」带原因禁用，原因是后端给的原文，按下不排补全", async () => {
+      const reason = "缺少版本 JSON，也没有记下当初装的是什么";
+      ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, mc_version: null }), instanceDto("创造"), instanceDto("空岛")]);
+      await mount();
+      await openMenu("生存");
+      const first = menuOf("生存")?.querySelector<HTMLElement>("[role='menuitem']");
+      if (first === null || first === undefined) throw new Error("菜单里没有条目");
+      expect(first.textContent).toBe(LAUNCH_COPY.repairAndLaunch);
+      expect(first.getAttribute("aria-disabled")).toBe("true");
+      const tipId = first.getAttribute("aria-describedby");
+      if (tipId === null) throw new Error("键盘高亮着的禁用项没有关联原因");
+      expect(document.getElementById(tipId)?.textContent).toBe(reason);
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement)) throw new Error("菜单打开后焦点不在元素上");
+      keydown(active, "Enter");
+      await flush();
+      expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    });
+
     it("焦点交给侧栏里原来的下一项", async () => {
       await mount();
       await openMenu("创造");

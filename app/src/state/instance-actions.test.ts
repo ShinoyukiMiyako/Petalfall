@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TASK_TEXT, TASK_TOAST } from "../copy/flows";
+import { ACTION_ERROR, MODPACK_REIMPORT_COPY, TASK_TEXT, TASK_TOAST } from "../copy/flows";
 import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import type { TaskRecordDto } from "../ipc/tasks";
 import { launchView } from "../launch/launchView";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, cancelledError, configDto, deferred, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
+import { describeError } from "./errors";
 import { resources } from "./resource";
 import { isActiveTask } from "./tasks";
 import type { LauncherStore } from "./store";
@@ -309,6 +310,40 @@ describe("修复完成后的启动失败卡", () => {
     });
     await repair("生存");
     expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed" });
+  });
+
+  const unrepairable: [string, Partial<InstanceDto>, string][] = [
+    [
+      "后端说补全修不好：报出的是后端给的原因",
+      { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null },
+      "缺少版本 JSON，也没有记下当初装的是什么",
+    ],
+    ["整合包没导入完：报出的是重新导入那一句", { incomplete: { kind: "modpack", outcome: "pending", started_at: 1_719_999_000_000, spec: null, error: null } }, MODPACK_REIMPORT_COPY.note],
+  ];
+  it.each(unrepairable)("版本文件不完整的失败卡、重扫后实例已修不好（%s）：「修复实例」不排补全，按补全的标题报出原因", async (_name, over, reason) => {
+    await failLaunchWith("version_broken");
+    instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", over) : i));
+    await store.actions.reload("instances");
+    await settle();
+    const toast = store.getState().toasts.find((t) => t.tone === "error");
+    const fromToast = toast === undefined ? undefined : toast.action;
+    if (fromToast === undefined) throw new Error("启动失败通知应带修复动作");
+    // 失败通知的动作与启动入口的「修复实例」是同一份映射，两条路都不排补全
+    for (const fix of [store.actions.failureFix("repair"), fromToast]) {
+      if (!("run" in fix)) throw new Error("修复实例应是命令类修复动作");
+      expect(fix.errorTitle).toBe(ACTION_ERROR.repair);
+      const error = await Promise.resolve()
+        .then(() => fix.run())
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      expect(describeError(error)).toBe(reason);
+    }
+    await settle();
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(store.getState().tasks).toEqual([]);
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed", failure: { code: "version_broken" } });
   });
 
   it("修好后接着启动却停在登录弹窗上：会话没被换掉，失败卡同样撤下", async () => {

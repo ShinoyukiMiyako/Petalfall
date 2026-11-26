@@ -6,8 +6,9 @@ import { frameData } from "framer-motion";
 import { act, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
-import { CONFIRM_COPY, INSTANCE_IN_USE_COPY, LAUNCH_COPY, SESSION_COPY } from "../copy/flows";
+import { ACTION_ERROR, CONFIRM_COPY, INSTANCE_IN_USE_COPY, LAUNCH_COPY, SESSION_COPY } from "../copy/flows";
 import { STOPPED_LINGER_MS } from "../domain/limits";
+import { IpcError } from "../ipc/errors";
 import { GAME_EXIT_EVENT, LAUNCH_PHASE_EVENT } from "../ipc/launch";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
@@ -291,7 +292,7 @@ describe("被别的实例当作基底时的启动", () => {
 });
 
 describe("损坏面的带原因禁用", () => {
-  const refreshWith = async (over: { activity?: "backing_up" | "modifying" | "inherited" | null; used_by?: string | null; modpack_incomplete?: boolean }) => {
+  const refreshWith = async (over: { activity?: "backing_up" | "modifying" | "inherited" | null; used_by?: string | null; modpack_incomplete?: boolean; unrepairable_reason?: string | null }) => {
     ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "版本 JSON 不可用", activity: null, ...over })]);
     await act(async () => {
       await launcher.actions.refreshInstances();
@@ -322,6 +323,56 @@ describe("损坏面的带原因禁用", () => {
     pressEnter(go);
     await flush();
     expect(launcher.state.tasks.map((t) => t.spec.command)).toEqual(["repair_instance"]);
+  });
+
+  it.each([
+    ["没被占着", null],
+    ["同时正在备份（修不好排在被占着之前说）", "backing_up" as const],
+  ])("补全修不好、%s：「修复并启动」保持可聚焦、读出不可用，提示是后端给的原因，点了不发补全", async (_name, activity) => {
+    const reason = "缺少版本 JSON，也没有记下当初装的是什么";
+    await refreshWith({ activity, unrepairable_reason: reason });
+    const go = repair();
+    act(() => go.focus());
+    expect(document.activeElement).toBe(go);
+    expect(go.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      go.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = go.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe(reason);
+    pressEnter(go);
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
+  });
+});
+
+describe("失败面的「修复实例」", () => {
+  it("版本文件不完整、失败后重扫出实例补全修不好：点了不发补全，按补全的标题报出后端给的原因", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reason = "缺少版本 JSON，也没有记下当初装的是什么";
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("version_broken", "版本 JSON 读不出来");
+    });
+    await act(async () => {
+      await launcher.actions.launch("生存");
+      await settle();
+    });
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, mc_version: null })]);
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+      await settle();
+    });
+    expect(launcher.state.session).toMatchObject({ phase: "failed", failure: { code: "version_broken" } });
+    act(() => buttonByText("修复实例").click());
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
+    expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toContainEqual(["error", ACTION_ERROR.repair, reason]);
   });
 });
 

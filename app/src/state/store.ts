@@ -15,6 +15,7 @@ import {
   DEVICE_CODE_TIMEOUT_CODE,
   GAME_DIR_SWITCH_COPY,
   isCrashCategory,
+  MODPACK_REIMPORT_COPY,
   MSA_CLIENT_ID_MISSING,
   NEXT_LAUNCH_SUFFIX,
   TASK_INTERRUPTED_CODE,
@@ -64,7 +65,7 @@ import {
   TASK_JOURNAL_DEBOUNCE_MS,
 } from "../domain/limits";
 import { sameGameDir } from "../domain/paths";
-import { instanceNameError, validateOfflineName } from "../domain/rules";
+import { canRepair, instanceNameError, validateOfflineName } from "../domain/rules";
 import type { FailureCode, LoaderKind, Platform, Task, TaskError, TaskKind } from "../domain/types";
 import * as accountsIpc from "../ipc/accounts";
 import { invoke, type UnlistenFn } from "../ipc/bridge";
@@ -2854,7 +2855,7 @@ export class LauncherStore {
 
   /**
    * 普通启动与直达共用的拦截链：同一实例已在加载或运行时直接返回；别的实例占着游戏进程时弹替换确认；
-   * 安装中抛错；损坏的普通启动转成「修复并启动」，直达抛错；没有账户先登录，登录后带着同一个 quickPlay 继续。
+   * 安装中抛错；损坏的普通启动转成「修复并启动」，直达与补全修不好的抛错；没有账户先登录，登录后带着同一个 quickPlay 继续。
    */
   private async requestLaunch(id: string, quickPlay: launchIpc.QuickPlayArg | null): Promise<void> {
     const inst = this.instance(id);
@@ -2869,6 +2870,8 @@ export class LauncherStore {
     if (inst.status === "broken") {
       // 修复完成后的自动启动是普通启动，带不上直达目标：入口按损坏禁用直达
       if (quickPlay !== null) throw new Error(`「${id}」需要先修复，入口不应提供直达`);
+      // 补全修不好的，入口都按原因禁用了修复并启动；走到这里排上补全也只会被后端拒
+      if (!canRepair(inst)) throw new Error(`「${id}」补全修不好，入口不应提供修复并启动`);
       await this.actions.repairInstance(id, { launchAfter: true });
       return;
     }
@@ -2967,7 +2970,16 @@ export class LauncherStore {
         return { run: () => this.requestLaunch(instanceId, quickPlay), errorTitle: ACTION_ERROR.launch(instanceId) };
       }
       case "repair":
-        return { run: () => this.actions.repairInstance(instanceId), errorTitle: ACTION_ERROR.repair };
+        return {
+          run: async () => {
+            // 启动失败后会重扫，实例此刻可能已是补全修不好的：排上也会被后端拒，不排任务，把原因报出来。
+            // 后端只对版本 JSON 不可用的报原因，整合包没导入完的说重新导入那一句
+            const inst = this.instance(instanceId);
+            if (!canRepair(inst)) throw new Error(inst.unrepairableReason === null ? MODPACK_REIMPORT_COPY.note : inst.unrepairableReason);
+            await this.actions.repairInstance(instanceId);
+          },
+          errorTitle: ACTION_ERROR.repair,
+        };
       case "reinstall_loader":
         return { run: () => this.actions.repairInstance(instanceId, { reinstallLoader: true }), errorTitle: ACTION_ERROR.reinstallLoader };
       case "download_java": {

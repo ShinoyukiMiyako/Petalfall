@@ -3,6 +3,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
+import { LAUNCH_COPY } from "../copy/flows";
 import { fade } from "../lib/motion";
 import { REFLOW_PAUSED_ATTR } from "../lib/reflow";
 import type { Appearance } from "../domain/types";
@@ -191,6 +192,18 @@ describe("命令面板", () => {
     media["(prefers-color-scheme: dark)"].set(false);
     media["(prefers-color-scheme: dark)"].set(true);
     expect(document.documentElement.getAttribute("data-sk-mode")).toBe("day");
+  });
+
+  it.each([
+    ["补全修得好：给出「修复并启动」", null, true],
+    ["补全修不好：不出现「修复并启动」", "缺少版本 JSON，也没有记下当初装的是什么", false],
+  ])("当前实例损坏，%s", async (_name, unrepairable, offered) => {
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: unrepairable, mc_version: null }), instanceDto("创造")]);
+    ipc.overrides.set("get_config", () => configDto({ selected_version: "生存" }));
+    await mount();
+    act(() => shell.openPalette("生存"));
+    await flush();
+    expect(options().some((o) => o.textContent?.startsWith(LAUNCH_COPY.repairAndLaunch))).toBe(offered);
   });
 
   it("Tab 不把焦点带出输入框；Esc 关闭并把焦点还给打开前的元素", async () => {
