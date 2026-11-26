@@ -37,7 +37,7 @@ use tokio::sync::watch;
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, DownloadProgress, EventSink, InstallPhase, emit};
 use crate::facade::{PROGRESS_EVENT_INTERVAL, Petalfall};
-use crate::game_lang::{FilledLines, read_filled_lines, without_lines};
+use crate::game_lang::{FilledLines, filled_lines_path, read_filled_lines, without_lines};
 use crate::instance_install::PhaseAnnouncer;
 use crate::modfs::{BACKUP_SUFFIX, MODS_DIR, bounded_map, local_concurrency, try_exists};
 use crate::modpack::read_instance_modpack;
@@ -450,7 +450,7 @@ impl Petalfall {
     /// 只读，要联网问 Modrinth。
     pub async fn preview_modpack_export(&self, id: &str) -> Result<ModpackExportPreview> {
         Ok(self
-            .plan_export(id, &ExportExtra::ALL, None, None, None)
+            .plan_export(id, &ExportExtra::ALL, None, None, None, true)
             .await?
             .preview())
     }
@@ -473,7 +473,14 @@ impl Petalfall {
         let phases = Arc::new(PhaseAnnouncer::new(events, EXPORT_PHASES.to_vec()));
         phases.enter(InstallPhase::ExportHash);
         let plan = self
-            .plan_export(id, &options.extras, Some(target), events, Some(&*phases))
+            .plan_export(
+                id,
+                &options.extras,
+                Some(target),
+                events,
+                Some(&*phases),
+                false,
+            )
             .await?;
 
         let mut skipped = plan.mod_skipped.clone();
@@ -642,7 +649,8 @@ impl Petalfall {
     }
 
     /// `extras` 是要遍历的额外项，别的额外项不碰盘。`phases` 是导出任务的步骤播报器，第一步（算哈希）由导出在
-    /// 开工时报，这里报认 Mod 与凑包两步；预览不属于任何任务，传 `None`。
+    /// 开工时报，这里报认 Mod 与凑包两步；预览不属于任何任务，传 `None`。`previewing` 为真时是给预览规划，
+    /// 记账读不出来不让它失败（见下）。
     async fn plan_export(
         &self,
         id: &str,
@@ -650,6 +658,7 @@ impl Petalfall {
         target: Option<&ModpackExportTarget>,
         events: Option<&EventSink>,
         phases: Option<&PhaseAnnouncer>,
+        previewing: bool,
     ) -> Result<ExportPlan> {
         let version = self.resolve_instance(id).await?;
         let (minecraft, loader) = exportable(&version).await?;
@@ -720,12 +729,26 @@ impl Petalfall {
             .unwrap_or_default();
         let working_dir = dirs.working_dir.clone();
         let wanted: BTreeSet<ExportExtra> = extras.iter().copied().collect();
-        // 记账与启动前补全看的是同一个工作目录。模组的默认设置都在配置里，没要配置就不读：记账读不懂时，
-        // 不该连累不带配置的导出。
-        let filled = if wanted.contains(&ExportExtra::Config) {
-            read_filled_lines(&working_dir).await?
-        } else {
+        // 记账与启动前补全看的是同一个工作目录。模组的默认设置都在配置里，没要配置就不读。记账读不出来时只有
+        // 带配置的导出照实报错，不能悄悄把补的行带出去；预览只报统计，按没有记账算并记一条警告：导出弹窗要等
+        // 预览成功才出表单，预览一失败，连不带配置的导出也发不出去。
+        let filled = if !wanted.contains(&ExportExtra::Config) {
             FilledLines::default()
+        } else if previewing {
+            match read_filled_lines(&working_dir).await {
+                Ok(filled) => filled,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %filled_lines_path(&working_dir).display(),
+                        error = %err,
+                        cause = ?std::error::Error::source(&err),
+                        "补行记账读不出来，预览按没有记账统计配置"
+                    );
+                    FilledLines::default()
+                }
+            }
+        } else {
+            read_filled_lines(&working_dir).await?
         };
         let extras = tokio::task::spawn_blocking(move || {
             wanted
@@ -2302,7 +2325,7 @@ mod tests {
 
         let none = fixture
             .petalfall
-            .plan_export(ID, &[], None, None, None)
+            .plan_export(ID, &[], None, None, None, false)
             .await;
         assert_eq!(walked(&none.unwrap()), Vec::<ExportExtra>::new());
 
@@ -2318,6 +2341,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -2327,7 +2351,7 @@ mod tests {
 
         let all = fixture
             .petalfall
-            .plan_export(ID, &ExportExtra::ALL, None, None, None);
+            .plan_export(ID, &ExportExtra::ALL, None, None, None, true);
         assert_eq!(walked(&all.await.unwrap()), ExportExtra::ALL);
     }
 
@@ -2743,7 +2767,7 @@ mod tests {
 
         let plan = fixture
             .petalfall
-            .plan_export(ID, &ExportExtra::ALL, None, Some(&tx), None)
+            .plan_export(ID, &ExportExtra::ALL, None, Some(&tx), None, true)
             .await
             .unwrap();
         drop(tx);
@@ -3252,13 +3276,24 @@ mod tests {
         assert_eq!(std::fs::read(mc.join(YOSBR)).unwrap(), filled);
     }
 
-    /// 记账读不懂时照实报错，不当成没记过（那样补的行就随包带走了）；不带配置的导出不读它，照常导出。
+    /// 记账读不懂时带配置的导出照实报错，不当成没记过（那样补的行就随包带走了）；不带配置的导出不读它，照常
+    /// 导出。预览只报统计，不为它失败（导出弹窗要等预览成功才出表单）：配置按盘上的原样算，补过行的那份也是。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unreadable_record_fails_only_exports_that_take_the_config() {
         let fixture = fixture().await;
         mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        fixture.write(YOSBR, b"fov:0.8\nlang:zh_cn\nonboardAccessibility:false\n");
         let record = crate::game_lang::filled_lines_path(&fixture.dir);
         std::fs::write(&record, b"{not json").unwrap();
+
+        let preview = fixture.petalfall.preview_modpack_export(ID).await.unwrap();
+        let config = preview
+            .extras
+            .iter()
+            .find(|stat| stat.extra == ExportExtra::Config)
+            .unwrap();
+        // sodium-options.json 13 字节、sub/deep.toml 11 字节；YOSBR 那份按盘上整份的 46 字节算，不扣补的两行。
+        assert_eq!((config.files, config.bytes), (3, 13 + 11 + 46));
 
         let with_config = ModpackExportTarget::new(fixture.root.join("带配置.mrpack"));
         let err = fixture
