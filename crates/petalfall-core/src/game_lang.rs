@@ -523,7 +523,8 @@ async fn fill_file(
     if inputs.skip_onboarding && lacks(existing, ONBOARDING_KEY) {
         report.notes.push("已跳过游戏的首次无障碍引导".to_owned());
     }
-    // 只为引导写了数据版本时单独说一句：没写语言也没写引导那一行，不说就看不出文件为什么被动过。
+    // 只为引导写了数据版本时单独说一句：没写语言也没写引导那一行，不说就看不出文件为什么被动过。文件本来不在
+    // 时并没有一份空的设置文件，那是在场的模组默认设置全是空的（见 [`declares_data_version`]），要说清为什么建。
     if language.is_none()
         && declares_data_version(
             existing,
@@ -532,9 +533,12 @@ async fn fill_file(
             blank_defaults_pending,
         )
     {
-        report
-            .notes
-            .push("设置文件是空的，已写上数据版本，免得游戏把首次无障碍引导标成走过".to_owned());
+        let note = if existing.is_some() {
+            "设置文件是空的，已写上数据版本，免得游戏把首次无障碍引导标成走过"
+        } else {
+            "模组的默认设置是空的，不新建 options.txt 的话模组会把空文件铺过去：已新建一份只写着数据版本的，免得游戏把首次无障碍引导标成走过"
+        };
+        report.notes.push(note.to_owned());
     }
     Ok(added)
 }
@@ -2132,11 +2136,13 @@ mod tests {
 
     /// 关着「跳过引导」又没有语言可写时，凡是会让游戏读到一份空设置文件的情形都写上数据版本：空的
     /// options.txt；在场的模组默认设置全是空的（不建 options.txt 的话模组会把空文件铺过去）；与有内容的那份
-    /// 并存的空的模组默认设置。没有设置文件、也没有东西会被铺过来时不建文件。
+    /// 并存的空的模组默认设置。没有设置文件、也没有东西会被铺过来时不建文件。启动日志按写进的是已有的空文件
+    /// 还是新建的 options.txt 各说各的原因。
     #[tokio::test]
     async fn switch_off_declares_the_data_version_wherever_a_blank_file_would_be_read() {
         const VERSION_ONLY: &str =
             "设置文件是空的，已写上数据版本，免得游戏把首次无障碍引导标成走过";
+        const VERSION_ONLY_BEFORE_BLANK_DEFAULTS: &str = "模组的默认设置是空的，不新建 options.txt 的话模组会把空文件铺过去：已新建一份只写着数据版本的，免得游戏把首次无障碍引导标成走过";
 
         let blank_options = scene(V1_21_1);
         blank_options.write(OPTIONS_FILE, b"");
@@ -2158,7 +2164,7 @@ mod tests {
             blank_defaults.read("config/yosbr/options.txt").unwrap(),
             b""
         );
-        assert_eq!(report.notes, [VERSION_ONLY]);
+        assert_eq!(report.notes, [VERSION_ONLY_BEFORE_BLANK_DEFAULTS]);
 
         let mixed = scene(V1_21_1);
         mixed.write("config/yosbr/options.txt", b"");
@@ -2176,6 +2182,15 @@ mod tests {
             b"fov:0.6\n"
         );
         assert_eq!(mixed.options(), None);
+        // 这里写进的是一份已有的空文件。
+        assert_eq!(
+            report.notes,
+            [
+                pending_note("config/yosbr/options.txt").as_str(),
+                VERSION_ONLY,
+                pending_note("config/defaultoptions/options.txt").as_str(),
+            ]
+        );
 
         // 开关开着时照旧写引导那一行，不声明版本。
         let skipping = scene(V1_21_1);
