@@ -2363,6 +2363,65 @@ mod tests {
         );
     }
 
+    /// 整合包自带的 options.txt 里只有一行游戏默认语言：去掉后这份文件整个删掉，不留一个空文件冒充包里自带的
+    /// 设置，模板的 options.txt 照常补进实例；没有模板时实例里就没有 options.txt，留给启动前的补全去建。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_options_file_holding_only_the_default_language_does_not_hold_the_template_back() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("测试包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/options.txt", b"lang:en_us\n")],
+        );
+        let petalfall = petalfall(tmp.path(), &server);
+
+        let bare = petalfall
+            .install_modpack(
+                &ModpackSource::File { path: pack.clone() },
+                Some("没有模板"),
+                &ImportSelection::default(),
+                "task-i",
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!bare.version_dir.join("options.txt").exists());
+
+        let template = petalfall.template_dir();
+        std::fs::create_dir_all(&template).unwrap();
+        std::fs::write(template.join("options.txt"), b"fov:90").unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = petalfall
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("有模板"),
+                &ImportSelection::default(),
+                "task-j",
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        drop(tx);
+
+        assert_eq!(
+            std::fs::read(outcome.version_dir.join("options.txt")).unwrap(),
+            b"fov:90"
+        );
+        let mut stages = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let CoreEvent::Stage(stage) = event {
+                stages.push(stage);
+            }
+        }
+        assert!(
+            stages.iter().any(|s| s == "沿用默认设置：补上 options.txt"),
+            "{stages:?}"
+        );
+    }
+
     /// 整合包的模组默认设置里只有一行游戏默认语言：那一行在套模板之前就去掉了，剩下的空文件不挡模板。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mod_defaults_emptied_of_the_default_language_do_not_hold_the_template_back() {

@@ -303,20 +303,49 @@ async fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
 /// 整合包里的 `lang:en_us` 多半是作者把自己的 options.txt 整份带进来的，不是特意让玩家用英文；去掉它之后
 /// 启动前的补全才会按系统语言来。写着别的语言的是作者有意选的，原样留着。只在导入的那一刻做：这时文件一定
 /// 来自整合包，之后再出现的 `lang:en_us` 可能是玩家自己在游戏里选的。
+///
+/// options.txt 去掉这一行后什么都不剩时删掉它：空文件留着，游戏当它是老设置、直接把无障碍引导标成走过，
+/// 模组见它已经在就不铺默认设置，套默认设置也当它是包里自带的。模组那几份留成空文件：它们本来就可能是空的，
+/// 补全与套默认设置都认得（见 [`has_content`]）。位置上不是普通文件的没有行可去，不为它让导入失败。
 pub(crate) async fn drop_pack_default_language(working_dir: &Path) -> Result<Vec<&'static str>> {
     let mut changed = Vec::new();
     for relative in std::iter::once(OPTIONS_FILE).chain(MOD_DEFAULT_OPTIONS) {
         let path = working_dir.join(relative);
+        if !is_regular_file(&path).await? {
+            continue;
+        }
         let Some(options) = read_optional(&path).await? else {
             continue;
         };
         let Some(content) = without_default_language(&options) else {
             continue;
         };
-        petalfall_base::fs::atomic_write(&path, &content).await?;
+        if relative == OPTIONS_FILE && !has_content(&content) {
+            tokio::fs::remove_file(&path)
+                .await
+                .map_err(|source| petalfall_base::Error::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+        } else {
+            petalfall_base::fs::atomic_write(&path, &content).await?;
+        }
         changed.push(relative);
     }
     Ok(changed)
+}
+
+/// 路径上是不是普通文件（不跟随符号链接）；不存在时为 `false`。
+async fn is_regular_file(path: &Path) -> Result<bool> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(meta) => Ok(meta.is_file()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(petalfall_base::Error::Io {
+            path: path.to_owned(),
+            source,
+        }
+        .into()),
+    }
 }
 
 /// 决定要补哪些行所需的启动时状态。
@@ -388,10 +417,17 @@ async fn fill(
         return fill_file(&path, None, inputs, layout, report).await;
     }
     for (relative, defaults, existing) in &pending {
-        report.notes.push(format!(
-            "options.txt 还没有，{relative} 会在第一次启动时铺过去，缺的行补进这份文件"
-        ));
-        fill_file(defaults, Some(existing), inputs, layout, report).await?;
+        // 哪一份先被铺过去说不准，一份写不进去不耽误别的；说明只在这一份没出错时才记，排在它自己的几条前面。
+        let at = report.notes.len();
+        match fill_file(defaults, Some(existing), inputs, layout, report).await {
+            Ok(()) => report.notes.insert(
+                at,
+                format!(
+                    "options.txt 还没有，{relative} 会在第一次启动时铺过去，缺的行补进这份文件"
+                ),
+            ),
+            Err(err) => report.failures.push(err),
+        }
     }
     Ok(())
 }
@@ -1851,6 +1887,87 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    /// options.txt 里只有默认语言那一行时，去掉后整份删掉，不留空文件：空文件会让游戏把引导标成走过，还挡住
+    /// 模组的默认设置与套默认设置。模组那几份照旧留成空文件。
+    #[tokio::test]
+    async fn an_options_file_emptied_of_the_default_language_is_removed() {
+        for original in [&b"lang:en_us\n"[..], &b"\r\nlang:en_US\r\n \r\n"[..]] {
+            let scene = scene(V1_21_1);
+            scene.write(OPTIONS_FILE, original);
+            scene.write("config/yosbr/options.txt", b"lang:en_us\n");
+
+            let changed = drop_pack_default_language(&scene.working_dir)
+                .await
+                .unwrap();
+
+            assert_eq!(changed, [OPTIONS_FILE, "config/yosbr/options.txt"]);
+            assert_eq!(scene.options(), None);
+            assert_eq!(scene.read("config/yosbr/options.txt").unwrap(), b"");
+        }
+    }
+
+    /// 整合包在模组默认设置的位置上放了个目录时没有行可去：其余几份照常处理，不为它让导入失败。
+    #[tokio::test]
+    async fn a_directory_where_an_options_file_belongs_is_skipped_when_dropping() {
+        let scene = scene(V1_21_1);
+        let directory = scene.working_dir.join("config/yosbr/options.txt");
+        std::fs::create_dir_all(&directory).unwrap();
+        scene.write(
+            "config/defaultoptions/options.txt",
+            b"lang:en_us\nfov:0.6\n",
+        );
+
+        let changed = drop_pack_default_language(&scene.working_dir)
+            .await
+            .unwrap();
+
+        assert_eq!(changed, ["config/defaultoptions/options.txt"]);
+        assert_eq!(
+            scene.read("config/defaultoptions/options.txt").unwrap(),
+            b"fov:0.6\n"
+        );
+        assert!(directory.is_dir());
+    }
+
+    /// 一份模组默认设置写不进去（被别的进程占着）时只记这一份的失败，别的照补；写不进去的那份不记说明。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_mod_defaults_file_that_cannot_be_written_does_not_hold_the_others_back() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let scene = scene(V1_21_1);
+        let locked = "config/yosbr/options.txt";
+        let free = "config/defaultoptions/options.txt";
+        scene.write(locked, b"fov:0.8\n");
+        scene.write(free, b"fov:0.6\n");
+        // 只放行读（FILE_SHARE_READ）：读得到，换不掉。
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(scene.working_dir.join(locked))
+            .unwrap();
+
+        let report = scene
+            .fill_with(Some("zh-CN"), Some("lang-test"), true)
+            .await;
+        drop(held);
+
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert_eq!(scene.read(locked).unwrap(), b"fov:0.8\n");
+        assert_eq!(
+            scene.read(free).unwrap(),
+            b"fov:0.6\nlang:zh_cn\nonboardAccessibility:false\n"
+        );
+        assert_eq!(scene.options(), None);
+        assert_eq!(
+            report.notes,
+            [
+                pending_note(free).as_str(),
+                "游戏语言设为 zh_cn，跟随系统语言 zh-CN",
+                SKIPPED
+            ]
         );
     }
 
