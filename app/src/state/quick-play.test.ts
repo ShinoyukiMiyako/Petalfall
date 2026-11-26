@@ -185,10 +185,11 @@ describe("直达走与启动相同的拦截链", () => {
     expect(callsOf(ipc, "launch_game")).toEqual([]);
   });
 
-  it("安装中的实例：直达与启动一样抛错", async () => {
+  it("安装中的实例：直达与启动一样报实例还在安装，不是给开发者看的话", async () => {
     instances = [instanceDto("生存", { activity: "installing" })];
     const s = await boot();
-    await expect(s.actions.quickPlay("生存", WORLD)).rejects.toThrow("「生存」还在安装，入口不应提供启动");
+    await expect(s.actions.quickPlay("生存", WORLD)).rejects.toMatchObject({ message: "实例还在安装" });
+    await expect(s.actions.launch("生存")).rejects.toMatchObject({ message: "实例还在安装" });
     expect(callsOf(ipc, "launch_game")).toEqual([]);
   });
 

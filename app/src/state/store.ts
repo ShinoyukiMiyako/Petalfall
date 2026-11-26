@@ -2869,7 +2869,7 @@ export class LauncherStore {
       this.set({ launchPrompt: { instanceId: id, occupantId: s.instanceId, occupantPhase: s.phase === "running" ? "running" : "loading", quickPlay } });
       return;
     }
-    if (inst.status === "installing") throw new Error(`「${id}」还在安装，入口不应提供启动`);
+    if (inst.status === "installing") throw new Error(LAUNCH_COPY.stillInstalling);
     if (inst.status === "broken") {
       // 入口都按原因禁用了修复并启动，还走到这里的是边角路径：失败通知上的重试点下去时实例已重扫成修不好、补全完成后
       // 接着启动时仍修不好。排上补全也只会被后端拒，不排任务，与「修复实例」一样把原因交给调用方的错误处理。
@@ -3031,7 +3031,7 @@ export class LauncherStore {
               throw new Error(`「${active.instanceId}」的游戏正在运行，先结束游戏`);
             }
             const inst = this.instance(instanceId);
-            if (inst.status === "installing") throw new Error(`「${instanceId}」还在安装，入口不应提供启动`);
+            if (inst.status === "installing") throw new Error(LAUNCH_COPY.stillInstalling);
             if (inst.status === "broken") {
               // 失败通知留着时实例可能已被重扫成损坏：以离线方式进单人带不上补全，修不好的说为什么修不好，修得好的叫玩家先修复
               const refusal = repairRefusal(inst);

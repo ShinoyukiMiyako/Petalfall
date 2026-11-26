@@ -254,7 +254,7 @@ export const OVERVIEW_COPY = {
    * broken 只给修得好的实例：整合包没导入完、补全修不好的经 ops 的 brokenBlockReason 换成各自的说法。
    */
   enterWorldBlocked: {
-    installing: "实例还在安装",
+    installing: LAUNCH_COPY.stillInstalling,
     broken: LAUNCH_COPY.needsRepair,
     unknownVersion: "这个实例的版本信息不完整",
     legacy: "1.20 之前的版本不能直接进入存档",
