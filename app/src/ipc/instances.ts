@@ -312,7 +312,7 @@ export type TemplateSkipReason = "disabled" | "empty" | "shared_working_dir";
 
 /**
  * 套模板的结果：copied 是补进实例的文件，kept 是实例里本来就有、原样保留的文件，left_to_mods 是实例里还没有、
- * 但整合包在 YOSBR 或 Default Options 的默认设置里带了同名文件、留给模组第一次启动时去铺的。
+ * 但整合包在 YOSBR 或 Default Options 的默认设置里带了同名且不是空的文件、留给模组第一次启动时去铺的。
  */
 export type TemplateOutcomeDto =
   | { status: "applied"; copied: string[]; kept: string[]; left_to_mods: string[] }

@@ -9,9 +9,9 @@
 //! 写法就是这个版本认的写法；哪个版本有哪些语言（`zh_hk` 只有新版才有）也一并由索引说了算。
 //!
 //! 整合包带着模组的默认设置（见 [`MOD_DEFAULT_OPTIONS`]）时，options.txt 要等模组第一次启动时铺出来，缺的行
-//! 补进模组那份文件。整合包里写着游戏默认语言的 `lang:` 行不算作者的选择，导入时去掉（见
-//! [`drop_pack_default_language`]），之后与没写一样由这里补。补语言与去掉默认语言行都听配置里的
-//! `follow_system_game_language`。
+//! 补进模组那份文件；那几份全是空的不算，照常新建。整合包里写着游戏默认语言的 `lang:` 行不算作者的选择，
+//! 导入时去掉（见 [`drop_pack_default_language`]），之后与没写一样由这里补。补语言与去掉默认语言行都听
+//! 配置里的 `follow_system_game_language`。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -69,7 +69,7 @@ const DEFAULT_LANGUAGES: [(&str, &str); 26] = [
 
 /// 模组放默认设置的位置（YOSBR、Default Options）。这两个模组只在 options.txt 不存在时才把它铺过去，
 /// 启动器抢先写一份，整合包作者调好的设置就全作废了。所以 options.txt 还没有时不新建，缺的行补进这份
-/// 文件，由模组连同作者的设置一起铺过去。
+/// 文件，由模组连同作者的设置一起铺过去。在场的几份全是空的除外（见 [`has_content`]）。
 ///
 /// Default Options 有两处：自己的 options.txt，和 1.18 起的 `extra/`（里面的文件按相对路径整份铺到游戏
 /// 目录）。两处谁先铺随模组版本而变，先铺的那份成为 options.txt，所以两份都要补。
@@ -174,6 +174,13 @@ fn has_line(options: &[u8], key: &[u8]) -> bool {
     options
         .split(|byte| matches!(byte, b'\n' | b'\r'))
         .any(|line| line.starts_with(key))
+}
+
+/// 文件里有没有内容，只有空白的不算。YOSBR 每次启动都会建一份空的默认设置，整合包常把它原样带进来：里面
+/// 没有作者调过的东西，模组铺过去的也是一份空文件，不该为它让路。同一个文件另有一份有内容或读不了的时
+/// 不适用，那时是在为那一份让路。
+pub(crate) fn has_content(bytes: &[u8]) -> bool {
+    bytes.iter().any(|byte| !byte.is_ascii_whitespace())
 }
 
 /// 文件不存在，或存在但没有这个键。
@@ -347,7 +354,11 @@ pub(crate) async fn fill_missing_options(
 }
 
 /// options.txt 在就补它；不在而模组的默认设置在，就补那份文件、不新建 options.txt（见
-/// [`MOD_DEFAULT_OPTIONS`]）；都不在才新建。
+/// [`MOD_DEFAULT_OPTIONS`]）；都不在才新建。模组的默认设置全是空的也算不在（见 [`has_content`]）。
+///
+/// 只要有一份有内容（读不了的也按有内容算），在场的每一份连同空的都补：哪一份先被铺成 options.txt 由模组
+/// 说了算（YOSBR 在加载器初始化时就铺，早于 Default Options），漏掉的恰是先铺的那份时，铺出来的
+/// options.txt 里就没有语言。
 async fn fill(
     inputs: &OptionsInputs<'_>,
     layout: &GameLayout,
@@ -358,22 +369,30 @@ async fn fill(
     if let Some(existing) = read_optional(&path).await? {
         return fill_file(&path, Some(&existing), inputs, layout, report).await;
     }
-    let mut pending = false;
+    let mut pending = Vec::new();
+    let mut unreadable = false;
     for relative in MOD_DEFAULT_OPTIONS {
         let defaults = working_dir.join(relative);
-        let Some(existing) = read_optional(&defaults).await? else {
-            continue;
-        };
-        pending = true;
+        match read_optional(&defaults).await {
+            Ok(Some(existing)) => pending.push((relative, defaults, existing)),
+            Ok(None) => {}
+            // 读不了的说不清有没有内容，按有算：不新建 options.txt，读得了的几份照补。
+            Err(err) => {
+                unreadable = true;
+                report.failures.push(err);
+            }
+        }
+    }
+    if !unreadable && !pending.iter().any(|(_, _, existing)| has_content(existing)) {
+        return fill_file(&path, None, inputs, layout, report).await;
+    }
+    for (relative, defaults, existing) in &pending {
         report.notes.push(format!(
             "options.txt 还没有，{relative} 会在第一次启动时铺过去，缺的行补进这份文件"
         ));
-        fill_file(&defaults, Some(&existing), inputs, layout, report).await?;
+        fill_file(defaults, Some(existing), inputs, layout, report).await?;
     }
-    if pending {
-        return Ok(());
-    }
-    fill_file(&path, None, inputs, layout, report).await
+    Ok(())
 }
 
 /// 补全一份文件：`existing` 是它现有的内容，文件不存在时为 `None`。
@@ -1480,29 +1499,132 @@ mod tests {
         assert_eq!(scene.options(), None);
     }
 
-    /// YOSBR 每次启动都会建一份空的默认设置，整合包常把它原样带进来。它是已有的文件，补法与空的 options.txt
-    /// 相同：缺的行照补，不声明数据版本。
+    /// YOSBR 每次启动都会建一份空的默认设置，整合包常把它原样带进来。里面没有作者的设置，不为它让路：照常
+    /// 新建 options.txt（模组见它已经在就不铺），那份空文件一个字节都不动。只有空白的同样算空。
     #[tokio::test]
-    async fn empty_mod_defaults_are_filled_like_an_empty_options_file() {
+    async fn blank_mod_defaults_are_ignored_and_the_options_file_is_created() {
         let pending = "config/yosbr/options.txt";
+        for blank in [&b""[..], &b"\r\n \t\n"[..]] {
+            let skipping = scene(V1_21_1);
+            skipping.write(pending, blank);
+            let notes = skipping.fill(Some("zh-CN")).await;
+            assert_eq!(
+                skipping.options().unwrap(),
+                b"lang:zh_cn\nonboardAccessibility:false\n"
+            );
+            assert_eq!(skipping.read(pending).unwrap(), blank);
+            assert_eq!(notes, ["游戏语言设为 zh_cn，跟随系统语言 zh-CN", SKIPPED]);
 
-        let skipping = scene(V1_21_1);
-        skipping.write(pending, b"");
-        skipping.fill(Some("zh-CN")).await;
+            let showing = scene(V1_21_1);
+            showing.write(pending, blank);
+            let report = showing
+                .fill_with(Some("zh-CN"), Some("lang-test"), false)
+                .await;
+            assert!(report.failures.is_empty(), "{:?}", report.failures);
+            assert_eq!(showing.options().unwrap(), b"version:3319\nlang:zh_cn\n");
+            assert_eq!(showing.read(pending).unwrap(), blank);
+        }
+    }
+
+    /// 空的那份与有内容的那份同在时两份都补：先被模组铺成 options.txt 的可能恰是空的那份（YOSBR 早于
+    /// Default Options；Default Options 自己的那份与 `extra/` 里的谁先铺随模组版本而变），漏了它语言就
+    /// 落空。只有空白的那份原内容照样逐字节保留，换行跟着它走。
+    #[tokio::test]
+    async fn a_blank_mod_defaults_file_next_to_a_real_one_is_filled_too() {
+        const YOSBR: &str = "config/yosbr/options.txt";
+        const OWN: &str = "config/defaultoptions/options.txt";
+        const EXTRA: &str = "config/defaultoptions/extra/options.txt";
+        const FILLED: &[u8] = b"lang:zh_cn\nonboardAccessibility:false\n";
+        const FILLED_CRLF: &[u8] = b"\r\n \t\r\nlang:zh_cn\r\nonboardAccessibility:false\r\n";
+        let cases: [(&str, &[u8], &[u8], &str); 4] = [
+            (YOSBR, b"", FILLED, OWN),
+            (OWN, b"", FILLED, EXTRA),
+            (EXTRA, b"", FILLED, YOSBR),
+            (YOSBR, b"\r\n \t\r\n", FILLED_CRLF, EXTRA),
+        ];
+        for (blank, blank_bytes, filled, real) in cases {
+            let scene = scene(V1_21_1);
+            scene.write(blank, blank_bytes);
+            scene.write(real, b"fov:0.6\n");
+
+            let notes = scene.fill(Some("zh-CN")).await;
+
+            assert_eq!(scene.read(blank).unwrap(), filled, "{blank}");
+            assert_eq!(
+                scene.read(real).unwrap(),
+                b"fov:0.6\nlang:zh_cn\nonboardAccessibility:false\n",
+                "{real}"
+            );
+            assert_eq!(scene.options(), None, "{blank}");
+            let expected: Vec<String> = MOD_DEFAULT_OPTIONS
+                .into_iter()
+                .filter(|pending| [blank, real].contains(pending))
+                .flat_map(|pending| {
+                    [
+                        pending_note(pending),
+                        "游戏语言设为 zh_cn，跟随系统语言 zh-CN".to_owned(),
+                        SKIPPED.to_owned(),
+                    ]
+                })
+                .collect();
+            assert_eq!(notes, expected, "{blank}");
+        }
+    }
+
+    /// 在场的几份全是空的才算没有：照常新建 options.txt，几份空文件都不动。
+    #[tokio::test]
+    async fn several_blank_mod_defaults_files_still_count_as_none() {
+        let scene = scene(V1_21_1);
+        for pending in MOD_DEFAULT_OPTIONS {
+            scene.write(pending, b"\n");
+        }
+
+        let notes = scene.fill(Some("zh-CN")).await;
+
         assert_eq!(
-            skipping.read(pending).unwrap(),
+            scene.options().unwrap(),
             b"lang:zh_cn\nonboardAccessibility:false\n"
         );
-        assert_eq!(skipping.options(), None);
+        for pending in MOD_DEFAULT_OPTIONS {
+            assert_eq!(scene.read(pending).unwrap(), b"\n", "{pending}");
+        }
+        assert_eq!(notes, ["游戏语言设为 zh_cn，跟随系统语言 zh-CN", SKIPPED]);
+    }
 
-        let showing = scene(V1_21_1);
-        showing.write(pending, b"");
-        let report = showing
-            .fill_with(Some("zh-CN"), Some("lang-test"), false)
-            .await;
-        assert!(report.failures.is_empty(), "{:?}", report.failures);
-        assert_eq!(showing.read(pending).unwrap(), b"lang:zh_cn\n");
-        assert_eq!(showing.options(), None);
+    /// 整合包的模组默认设置里只有一行默认语言：导入时去掉后成了空文件，启动前就按没有它来，新建 options.txt。
+    #[tokio::test]
+    async fn mod_defaults_holding_only_the_default_language_end_up_ignored() {
+        let scene = scene(V1_21_1);
+        let pending = "config/yosbr/options.txt";
+        scene.write(pending, b"lang:en_us\n");
+
+        drop_pack_default_language(&scene.working_dir)
+            .await
+            .unwrap();
+        scene.fill(Some("zh-CN")).await;
+
+        assert_eq!(scene.read(pending).unwrap(), b"");
+        assert_eq!(
+            scene.options().unwrap(),
+            b"lang:zh_cn\nonboardAccessibility:false\n"
+        );
+    }
+
+    #[test]
+    fn only_non_whitespace_bytes_count_as_content() {
+        let cases: [(&[u8], bool); 7] = [
+            (b"", false),
+            (b"\n", false),
+            (b" \t\r\n\x0c", false),
+            (b"fov:0.8", true),
+            (b"\n\nlang:zh_cn\n", true),
+            // 服务器列表是二进制的，带零字节的最小内容也算有。
+            (b"\x0a\x00\x00\x00", true),
+            (b"\xff", true),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(has_content(bytes), expected, "{bytes:?}");
+        }
     }
 
     /// 关掉「游戏语言跟随系统语言」：不补语言，引导那一行照补，原因记进启动日志。
@@ -1711,19 +1833,76 @@ mod tests {
         assert_eq!(scene.options(), None);
     }
 
-    /// options.txt 已经在了，模组不会再铺默认设置，缺的行照常补。
+    /// 一份读不了不耽误读得了的：说不清它有没有内容，按有算，不新建 options.txt，读得了的每一份（空的也
+    /// 在内，排在它前面后面都一样）照补。
+    #[tokio::test]
+    async fn readable_mod_defaults_are_still_filled_when_another_one_is_unreadable() {
+        const UNREADABLE: &str = "config/defaultoptions/options.txt";
+        let cases: [(&str, &[u8], &[u8]); 3] = [
+            (
+                "config/yosbr/options.txt",
+                b"fov:0.8\n",
+                b"fov:0.8\nlang:zh_cn\nonboardAccessibility:false\n",
+            ),
+            (
+                "config/yosbr/options.txt",
+                b"",
+                b"lang:zh_cn\nonboardAccessibility:false\n",
+            ),
+            (
+                "config/defaultoptions/extra/options.txt",
+                b"fov:0.8\n",
+                b"fov:0.8\nlang:zh_cn\nonboardAccessibility:false\n",
+            ),
+        ];
+        for (readable, original, filled) in cases {
+            let scene = scene(V1_21_1);
+            scene.write(readable, original);
+            std::fs::create_dir_all(scene.working_dir.join(UNREADABLE)).unwrap();
+
+            let report = scene
+                .fill_with(Some("zh-CN"), Some("lang-test"), true)
+                .await;
+
+            assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+            assert!(
+                matches!(&report.failures[0], CoreError::Base(petalfall_base::Error::Io { path, .. }) if path.ends_with(UNREADABLE)),
+                "{:?}",
+                report.failures
+            );
+            assert_eq!(scene.read(readable).unwrap(), filled, "{readable}");
+            assert_eq!(scene.options(), None, "{readable}");
+            assert_eq!(
+                report.notes,
+                [
+                    pending_note(readable).as_str(),
+                    "游戏语言设为 zh_cn，跟随系统语言 zh-CN",
+                    SKIPPED
+                ],
+                "{readable}"
+            );
+        }
+    }
+
+    /// options.txt 已经在了，模组不会再铺默认设置，缺的行照常补进 options.txt，模组那份一个字节都不动。
     #[tokio::test]
     async fn mod_defaults_do_not_matter_once_the_options_file_exists() {
         let scene = scene(V1_21_1);
-        scene.write("config/yosbr/options.txt", b"fov:0.8\n");
+        for pending in MOD_DEFAULT_OPTIONS {
+            scene.write(pending, b"fov:0.8\n");
+        }
         scene.write(OPTIONS_FILE, b"fov:0.5\n");
 
-        scene.fill(Some("zh-CN")).await;
+        let notes = scene.fill(Some("zh-CN")).await;
 
         assert_eq!(
             scene.options().unwrap(),
             b"fov:0.5\nlang:zh_cn\nonboardAccessibility:false\n"
         );
+        for pending in MOD_DEFAULT_OPTIONS {
+            assert_eq!(scene.read(pending).unwrap(), b"fov:0.8\n", "{pending}");
+        }
+        assert_eq!(notes, ["游戏语言设为 zh_cn，跟随系统语言 zh-CN", SKIPPED]);
     }
 
     /// 索引读不出来只算语言这一项没做成：报给调用方，引导那一行不受牵连。

@@ -6,7 +6,8 @@
 //! - 只补缺：实例里已经有的文件（整合包自带的 options.txt）原样不动，键位也不逐行合并——合出来的
 //!   一份既不是作者调的也不是玩家调的，出了问题谁都对不上。
 //! - 整合包经模组（YOSBR、Default Options）带来的同名默认文件也算包里有：它们要等模组第一次启动时才铺进
-//!   实例，而这两个模组只在目标不存在时才铺，先把模板的补进去，作者的那份就整份作废了。
+//!   实例，而这两个模组只在目标不存在时才铺，先把模板的补进去，作者的那份就整份作废了。同名文件全是空的
+//!   不算：里面没有作者的设置。
 //! - 不隔离的实例与别的实例共用游戏目录根下的设置，往里补文件等于改了别的实例，所以跳过。
 //! - 只认白名单里的文件：模板目录里手放的别的东西不会被带进实例。
 
@@ -93,7 +94,7 @@ impl TemplateSkip {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateOutcome {
     /// 套了：`copied` 是补进去的文件，`kept` 是实例里本来就有、原样留着的文件，`left_to_mods` 是实例里还没有、
-    /// 但整合包在模组的默认设置里带了同名文件、留给模组去铺的，都按白名单顺序。
+    /// 但整合包在模组的默认设置里带了同名且不是空的文件、留给模组去铺的，都按白名单顺序。
     Applied {
         copied: Vec<&'static str>,
         kept: Vec<&'static str>,
@@ -286,10 +287,18 @@ async fn template_files(dir: &Path) -> Result<Vec<TemplateFile>> {
 }
 
 /// 整合包有没有在模组的默认设置里带这个文件（见 [`crate::game_lang::MOD_DEFAULTS_DIRS`]）。只看同名文件在
-/// 不在：哪个版本的模组认哪些文件各不相同，作者放了就按作者的来。
+/// 不在、有没有内容：哪个版本的模组认哪些文件各不相同，作者放了就按作者的来。空的不算（见
+/// [`crate::game_lang::has_content`]）：为一份空文件让路，模板的那份白白落空，模组铺过去的也只是空文件。
 async fn mod_default_pending(working_dir: &Path, name: &str) -> Result<bool> {
     for dir in crate::game_lang::MOD_DEFAULTS_DIRS {
-        if entry_exists(&working_dir.join(dir).join(name)).await? {
+        let path = working_dir.join(dir).join(name);
+        let meta = match tokio::fs::symlink_metadata(&path).await {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(petalfall_base::Error::Io { path, source }.into()),
+        };
+        // 不是普通文件的读不出内容，照旧算有，不往它要去的位置上补。
+        if !meta.is_file() || crate::game_lang::has_content(&read_file(&path).await?) {
             return Ok(true);
         }
     }
@@ -681,6 +690,111 @@ mod tests {
             std::fs::read(dir.join("config/defaultoptions/extra/optionsshaders.txt")).unwrap(),
             pack_shaders
         );
+    }
+
+    /// YOSBR 每次启动都会建一份空的 options.txt，整合包常把它原样带进来。空的（只有空白的）不是作者的设置，
+    /// 不挡模板：模板的那份照补，空文件一个字节都不动。同目录下有内容的文件照旧留给模组。
+    #[tokio::test]
+    async fn blank_mod_default_files_do_not_hold_the_template_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = isolated(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "整合包", &vanilla_json("1.21.1"));
+        std::fs::create_dir_all(dir.join("config/yosbr")).unwrap();
+        std::fs::write(dir.join("config/yosbr/options.txt"), b"").unwrap();
+        std::fs::write(dir.join("config/yosbr/servers.dat"), b"pack").unwrap();
+        std::fs::create_dir_all(dir.join("config/defaultoptions")).unwrap();
+        std::fs::write(dir.join("config/defaultoptions/optionsof.txt"), b"\r\n \n").unwrap();
+        put_template(
+            &petalfall,
+            &[
+                ("options.txt", b"fov:90"),
+                ("servers.dat", b"mine"),
+                ("optionsof.txt", b"ofFastRender:true"),
+            ],
+        );
+
+        let outcome = petalfall.apply_template("整合包").await.unwrap();
+
+        assert_eq!(
+            outcome,
+            TemplateOutcome::Applied {
+                copied: vec!["options.txt", "optionsof.txt"],
+                kept: vec![],
+                left_to_mods: vec!["servers.dat"],
+            }
+        );
+        assert_eq!(std::fs::read(dir.join("options.txt")).unwrap(), b"fov:90");
+        assert_eq!(
+            std::fs::read(dir.join("optionsof.txt")).unwrap(),
+            b"ofFastRender:true"
+        );
+        assert!(!dir.join("servers.dat").exists());
+        assert_eq!(
+            std::fs::read(dir.join("config/yosbr/options.txt")).unwrap(),
+            b""
+        );
+        assert_eq!(
+            std::fs::read(dir.join("config/defaultoptions/optionsof.txt")).unwrap(),
+            b"\r\n \n"
+        );
+    }
+
+    /// 同名文件一份空、一份有内容，分在两处模组默认设置的目录里（两个模组之间，或 Default Options 自己的
+    /// 两处）：有内容的那份是作者的设置，模板的照旧留给模组，空的那份排在前面还是后面都一样。
+    #[tokio::test]
+    async fn a_blank_mod_default_next_to_a_real_one_is_still_left_to_the_mods() {
+        const DIRS: [&str; 3] = [
+            "config/yosbr",
+            "config/defaultoptions",
+            "config/defaultoptions/extra",
+        ];
+        let pack_options = b"fov:0.8\n";
+        for (blank, real) in [(0, 2), (2, 0), (1, 2), (2, 1)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = isolated(tmp.path());
+            let dir = write_version(petalfall.game_dir(), "整合包", &vanilla_json("1.21.1"));
+            let blank = dir.join(DIRS[blank]).join("options.txt");
+            let real = dir.join(DIRS[real]).join("options.txt");
+            std::fs::create_dir_all(blank.parent().unwrap()).unwrap();
+            std::fs::write(&blank, b"").unwrap();
+            std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+            std::fs::write(&real, pack_options).unwrap();
+            put_template(&petalfall, &[("options.txt", b"fov:90")]);
+
+            assert_eq!(
+                petalfall.apply_template("整合包").await.unwrap(),
+                TemplateOutcome::Applied {
+                    copied: vec![],
+                    kept: vec![],
+                    left_to_mods: vec!["options.txt"],
+                },
+                "{}",
+                blank.display()
+            );
+            assert!(!dir.join("options.txt").exists(), "{}", blank.display());
+            assert_eq!(std::fs::read(&blank).unwrap(), b"");
+            assert_eq!(std::fs::read(&real).unwrap(), pack_options);
+        }
+    }
+
+    /// 模组默认设置的位置上是个目录时读不出内容，照旧算有：模板的那份不往实例里补。
+    #[tokio::test]
+    async fn a_directory_where_a_mod_default_file_belongs_still_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = isolated(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "整合包", &vanilla_json("1.21.1"));
+        std::fs::create_dir_all(dir.join("config/yosbr/options.txt")).unwrap();
+        put_template(&petalfall, &[("options.txt", b"fov:90")]);
+
+        assert_eq!(
+            petalfall.apply_template("整合包").await.unwrap(),
+            TemplateOutcome::Applied {
+                copied: vec![],
+                kept: vec![],
+                left_to_mods: vec!["options.txt"],
+            }
+        );
+        assert!(!dir.join("options.txt").exists());
     }
 
     /// 实例里已经有的文件照旧算「已有」：这时模组不会再铺它的那份，不归到留给模组的一栏。
