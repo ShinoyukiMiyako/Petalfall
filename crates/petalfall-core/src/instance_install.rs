@@ -15,6 +15,7 @@
 //! 安装链路。
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,9 +24,9 @@ use petalfall_install::{
     forge_installer_url, merge_for_instance, neoforge_installer_url, write_instance_json,
 };
 use petalfall_instance::{
-    DiscoveredVersion, IncompleteKind, IncompleteMarker, IncompleteOutcome, InstallRecordStore,
-    InstallSpec, MarkerError, MarkerStore, NameViolation, PETALFALL_META_DIR, VersionProbe,
-    discover_versions, probe_version,
+    BrokenReason, BrokenVersion, DiscoveredVersion, IncompleteKind, IncompleteMarker,
+    IncompleteOutcome, InstallRecordStore, InstallSpec, MarkerError, MarkerStore, NameViolation,
+    PETALFALL_META_DIR, VersionProbe, discover_versions, probe_version,
 };
 use petalfall_version::{LoaderInfo, LoaderKind, VersionJson, identify_mc_version, resolve};
 
@@ -470,56 +471,14 @@ impl Petalfall {
                 None
             }
         };
-        // 上次补全已经查实加载器自带的库只能重装补回：再照版本 JSON 补一遍只会原样失败，实例库、启动胶囊
-        // 与任务重试的入口都带不上「重装」这个意思，所以由看标记定方案的这一步替它们换掉。装不回的照旧补全：
-        // 玩家可能已经把文件放回去了，这是清掉标记的唯一办法；没放回去时照样报缺失。
-        let stuck = previous.as_ref().is_some_and(lost_loader_library);
-        let plan = match previous.map(|marker| marker.kind) {
-            Some(IncompleteKind::Install { spec }) => {
-                RepairPlan::Reinstall(InstanceRequest::from_spec(id, &spec)?)
-            }
-            // 导入写版本 JSON 在前、下载 Mod 与解出覆盖文件在后，中断时版本 JSON 往往已经可用；
-            // 照它补全只会补齐库文件，再把标记清掉，缺的 Mod 与配置却补不回来，实例就被当成了完好的。
-            Some(IncompleteKind::Modpack { .. }) => {
-                return Err(InstanceError::NotRepairable {
-                    id: id.to_owned(),
-                    reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入"
-                        .to_owned(),
-                }
-                .into());
-            }
-            Some(IncompleteKind::Repair) | None => {
-                match probe_version(self.game_dir(), id).await? {
-                    VersionProbe::Found(version)
-                        if reinstall_loader
-                            || (stuck && reinstallable_loader(&version.loaders).is_ok()) =>
-                    {
-                        RepairPlan::Reinstall(self.loader_reinstall_request(&version).await?)
-                    }
-                    VersionProbe::Found(_) => RepairPlan::Complete,
-                    VersionProbe::Broken(broken) => {
-                        let record = match InstallRecordStore::for_version_dir(&dir).load().await {
-                            Ok(record) => record,
-                            Err(err) => {
-                                tracing::warn!(id, error = %err, "安装记录损坏，当作没有记录");
-                                None
-                            }
-                        };
-                        let Some(spec) = record else {
-                            return Err(InstanceError::NotRepairable {
-                                id: id.to_owned(),
-                                reason: format!(
-                                    "{}，也没有记下当初装的是什么",
-                                    broken_reason_text(&broken.reason)
-                                ),
-                            }
-                            .into());
-                        };
-                        RepairPlan::Reinstall(InstanceRequest::from_spec(id, &spec)?)
-                    }
-                }
-            }
-        };
+        let plan = decide_repair(
+            self.game_dir(),
+            id,
+            previous.as_ref(),
+            None,
+            reinstall_loader,
+        )
+        .await?;
         let kind = match &plan {
             RepairPlan::Reinstall(request) => IncompleteKind::Install {
                 spec: request.spec(),
@@ -530,45 +489,6 @@ impl Petalfall {
         store.save(&marker).await?;
         tracing::info!(id, plan = ?plan, "开始补全实例");
         Ok((plan, marker))
-    }
-
-    /// 从现有版本 JSON 还原「把加载器原样装回」要的内容。在写标记之前调：定不出来的实例不留下一份照猜测写的
-    /// 安装标记，版本号不安全的也在这里拒掉。
-    async fn loader_reinstall_request(
-        &self,
-        version: &DiscoveredVersion,
-    ) -> Result<InstanceRequest> {
-        let id = version.id.as_str();
-        let refuse = |reason: String| -> CoreError {
-            InstanceError::NotRepairable {
-                id: id.to_owned(),
-                reason,
-            }
-            .into()
-        };
-        let (loader, loader_version) = reinstallable_loader(&version.loaders).map_err(refuse)?;
-        // 看继承链根而不是 inheritsFrom：加载器版本可能叠在另一个加载器版本上，改过名的原版基底 id 是玩家起的
-        // 名字，版本号只在 clientVersion 里。基底已经不在时只剩 inheritsFrom 写的那个 id 可用。
-        let scan = discover_versions(self.game_dir()).await?;
-        let root = inheritance_root(&scan, id);
-        let base = scan
-            .versions
-            .iter()
-            .find(|v| v.id == root)
-            .map_or(&version.json, |v| &v.json);
-        let mc = identify_mc_version(base);
-        let mc_version = mc
-            .value
-            .filter(|_| mc.reliable)
-            .ok_or_else(|| refuse("读不出游戏版本号，无法原样装回".to_owned()))?;
-        let request = InstanceRequest {
-            mc_version,
-            loader: Some(loader),
-            loader_version: Some(loader_version),
-            use_template: false,
-        };
-        request.validate()?;
-        Ok(request)
     }
 
     /// 按方案补全实例。
@@ -648,6 +568,187 @@ impl Petalfall {
             }
         }
     }
+}
+
+/// 照未完成标记、版本 JSON 与安装记录定补全方案，不写盘。补全与实例列表共用这一处：列表上说的修不好的原因
+/// 就是真去补全时报的那句，两边不各写一套判断，不会一边说修得好、一边又拒绝。
+///
+/// `previous` 是读到的未完成标记，读不出的当作没有。`probe` 是调用方已经探测过的版本 JSON（实例列表扫描时就有），
+/// 为 `None` 时用到才现探：标记里记着安装内容或整合包时用不到它，补全不为此多读一次。
+pub(crate) async fn decide_repair(
+    game_dir: &Path,
+    id: &str,
+    previous: Option<&IncompleteMarker>,
+    probe: Option<VersionProbe>,
+    reinstall_loader: bool,
+) -> Result<RepairPlan> {
+    // 上次补全已经查实加载器自带的库只能重装补回：再照版本 JSON 补一遍只会原样失败，实例库、启动胶囊
+    // 与任务重试的入口都带不上「重装」这个意思，所以由看标记定方案的这一步替它们换掉。装不回的照旧补全：
+    // 玩家可能已经把文件放回去了，这是清掉标记的唯一办法；没放回去时照样报缺失。
+    let stuck = previous.is_some_and(lost_loader_library);
+    match previous.map(|marker| &marker.kind) {
+        Some(IncompleteKind::Install { spec }) => {
+            Ok(RepairPlan::Reinstall(InstanceRequest::from_spec(id, spec)?))
+        }
+        // 导入写版本 JSON 在前、下载 Mod 与解出覆盖文件在后，中断时版本 JSON 往往已经可用；
+        // 照它补全只会补齐库文件，再把标记清掉，缺的 Mod 与配置却补不回来，实例就被当成了完好的。
+        Some(IncompleteKind::Modpack { .. }) => Err(InstanceError::NotRepairable {
+            id: id.to_owned(),
+            reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入".to_owned(),
+        }
+        .into()),
+        Some(IncompleteKind::Repair) | None => {
+            let probe = match probe {
+                Some(probe) => probe,
+                None => probe_version(game_dir, id).await?,
+            };
+            match probe {
+                VersionProbe::Found(version)
+                    if reinstall_loader
+                        || (stuck && reinstallable_loader(&version.loaders).is_ok()) =>
+                {
+                    Ok(RepairPlan::Reinstall(
+                        loader_reinstall_request(game_dir, &version).await?,
+                    ))
+                }
+                VersionProbe::Found(_) => Ok(RepairPlan::Complete),
+                VersionProbe::Broken(broken) => {
+                    let record = match InstallRecordStore::for_version_dir(&broken.dir)
+                        .load()
+                        .await
+                    {
+                        Ok(record) => record,
+                        Err(err) => {
+                            tracing::warn!(id, error = %err, "安装记录损坏，当作没有记录");
+                            None
+                        }
+                    };
+                    match record {
+                        Some(spec) => Ok(RepairPlan::Reinstall(InstanceRequest::from_spec(
+                            id, &spec,
+                        )?)),
+                        None => Err(InstanceError::NotRepairable {
+                            id: id.to_owned(),
+                            reason: no_record_reason(id, &broken).await,
+                        }
+                        .into()),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 实例列表上一个版本 JSON 用不了的实例补全修不好的原因，与对它发起补全时报的逐字相同；修得好时为 `None`。
+///
+/// `previous` 与 `broken` 是列表已经读到的未完成标记与探测结果，不再读一遍；会多读的只有安装记录，没有记录、
+/// 缺的又是版本 JSON 时再看一眼实例目录顶层。
+pub(crate) async fn unrepairable_reason(
+    game_dir: &Path,
+    id: &str,
+    previous: Option<&IncompleteMarker>,
+    broken: BrokenVersion,
+) -> Option<String> {
+    let probe = Some(VersionProbe::Broken(broken));
+    match decide_repair(game_dir, id, previous, probe, false).await {
+        Ok(_) => None,
+        Err(CoreError::Instance(InstanceError::NotRepairable { reason, .. })) => Some(reason),
+        // 探测结果交进去以后，定方案时还会读的安装记录与实例目录读不出都不报错，眼下走不到这里。真走到了，补全会以
+        // 这个错误失败，列表照样说它修不好，不当成修得好。
+        Err(err) => {
+            tracing::warn!(id, error = %err, "定不出补全方案");
+            Some(err.to_string())
+        }
+    }
+}
+
+/// 版本 JSON 用不了、也没有安装记录时补全报的原因。缺的是版本 JSON 时顺带看一眼实例目录：别人打包时把实例目录
+/// 改了名，里面的版本 JSON 还叫原来的名字，只说「缺少版本 JSON」的话，玩家想不到文件其实就在目录里。
+async fn no_record_reason(id: &str, broken: &BrokenVersion) -> String {
+    let reason = format!(
+        "{}，也没有记下当初装的是什么",
+        broken_reason_text(&broken.reason)
+    );
+    if broken.reason != BrokenReason::MissingJson {
+        return reason;
+    }
+    match misnamed_version_json(&broken.dir).await {
+        Ok(Some(name)) => format!(
+            "{reason}；目录里有一份叫 {name}.json 的版本文件，把实例改名成 {name} 就能认出来"
+        ),
+        Ok(None) => reason,
+        // 只是附带的提示：目录没读全就说不准是不是恰好一份，宁可不提，修不好的原因照样报。
+        Err(err) => {
+            tracing::warn!(id, dir = %broken.dir.display(), error = %err, "查找名字对不上的版本 JSON 失败");
+            reason
+        }
+    }
+}
+
+/// 实例目录顶层名字对不上的那份版本 JSON 的名字（不带 `.json`）：内容能解析成版本 JSON，`id` 又正好是自己的
+/// 文件名，实例改成这个名字就能按 `<id>/<id>.json` 认出来。不止一份时说不准该改成哪个，与没有一样给 `None`。
+async fn misnamed_version_json(dir: &Path) -> std::io::Result<Option<String>> {
+    let mut names = Vec::new();
+    let mut entries = tokio::fs::read_dir(dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        if !entry.file_type().await?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let bytes = tokio::fs::read(&path).await?;
+        let json = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|text| VersionJson::from_json_str(text).ok());
+        if json.is_some_and(|json| json.id == stem) {
+            names.push(stem.to_owned());
+        }
+    }
+    Ok(if names.len() == 1 { names.pop() } else { None })
+}
+
+/// 从现有版本 JSON 还原「把加载器原样装回」要的内容。在写标记之前调：定不出来的实例不留下一份照猜测写的
+/// 安装标记，版本号不安全的也在这里拒掉。
+async fn loader_reinstall_request(
+    game_dir: &Path,
+    version: &DiscoveredVersion,
+) -> Result<InstanceRequest> {
+    let id = version.id.as_str();
+    let refuse = |reason: String| -> CoreError {
+        InstanceError::NotRepairable {
+            id: id.to_owned(),
+            reason,
+        }
+        .into()
+    };
+    let (loader, loader_version) = reinstallable_loader(&version.loaders).map_err(refuse)?;
+    // 看继承链根而不是 inheritsFrom：加载器版本可能叠在另一个加载器版本上，改过名的原版基底 id 是玩家起的
+    // 名字，版本号只在 clientVersion 里。基底已经不在时只剩 inheritsFrom 写的那个 id 可用。
+    let scan = discover_versions(game_dir).await?;
+    let root = inheritance_root(&scan, id);
+    let base = scan
+        .versions
+        .iter()
+        .find(|v| v.id == root)
+        .map_or(&version.json, |v| &v.json);
+    let mc = identify_mc_version(base);
+    let mc_version = mc
+        .value
+        .filter(|_| mc.reliable)
+        .ok_or_else(|| refuse("读不出游戏版本号，无法原样装回".to_owned()))?;
+    let request = InstanceRequest {
+        mc_version,
+        loader: Some(loader),
+        loader_version: Some(loader_version),
+        use_template: false,
+    };
+    request.validate()?;
+    Ok(request)
 }
 
 /// 这份标记记着上次败在加载器自带的库上（码与命令报给前端的启动失败码同一个）。
@@ -1827,6 +1928,148 @@ mod tests {
             ),
             "实际：{err:?}"
         );
+    }
+
+    /// 对一个实例发起补全的结论：修得好时是定下的方案，修不好时是报的原因。
+    async fn repair_verdict(
+        petalfall: &Petalfall,
+        id: &str,
+    ) -> std::result::Result<RepairPlan, String> {
+        match petalfall.begin_repair(id).await {
+            Ok((plan, _)) => Ok(plan),
+            Err(CoreError::Instance(InstanceError::NotRepairable { reason, .. })) => Err(reason),
+            Err(other) => panic!("{id} 应定出方案或报不可补全：{other:?}"),
+        }
+    }
+
+    /// 实例列表说的修不好的原因就是补全报的那句：修不好的逐字相同，修得好的列表上为空、补全也不拒。
+    #[tokio::test]
+    async fn listed_unrepairable_reason_matches_what_repair_reports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        let versions = game.join("versions");
+        let fabric = request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"));
+        // 装好之后版本 JSON 被删：只剩安装记录。
+        InstallRecordStore::for_version_dir(&versions.join("有记录"))
+            .save(&fabric.spec())
+            .await
+            .unwrap();
+        // 新建在写出版本 JSON 之前失败：带安装标记。
+        MarkerStore::for_version_dir(&versions.join("装到一半"))
+            .save(&IncompleteMarker::pending(
+                IncompleteKind::Install {
+                    spec: fabric.spec(),
+                },
+                1_700_000_000_000,
+            ))
+            .await
+            .unwrap();
+        // 整合包导入在写出版本 JSON 之前中断：带整合包标记。
+        MarkerStore::for_version_dir(&versions.join("导到一半"))
+            .save(&IncompleteMarker::pending(
+                IncompleteKind::Modpack {
+                    task_id: "mp#1".into(),
+                },
+                1_700_000_000_000,
+            ))
+            .await
+            .unwrap();
+        write_version(&game, "完好", &vanilla_json("完好"));
+        std::fs::create_dir_all(versions.join("空的")).unwrap();
+        write_version(&game, "写坏了", "{ not json");
+
+        let list = petalfall.list_instances().await.unwrap();
+
+        let expected = [
+            ("有记录", Ok(RepairPlan::Reinstall(fabric.clone()))),
+            ("装到一半", Ok(RepairPlan::Reinstall(fabric.clone()))),
+            (
+                "导到一半",
+                Err("整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入"),
+            ),
+            ("完好", Ok(RepairPlan::Complete)),
+            ("空的", Err("缺少版本 JSON，也没有记下当初装的是什么")),
+            (
+                "写坏了",
+                Err(
+                    "版本 JSON 损坏：key must be a string at line 1 column 3，也没有记下当初装的是什么",
+                ),
+            ),
+        ];
+        assert_eq!(list.len(), expected.len());
+        for (id, verdict) in expected {
+            let verdict = verdict.map_err(str::to_owned);
+            let listed = list.iter().find(|i| i.id == id).unwrap();
+            assert_eq!(
+                listed.unrepairable_reason,
+                verdict.clone().err(),
+                "{id} 在列表上"
+            );
+            assert_eq!(repair_verdict(&petalfall, id).await, verdict, "{id} 去补全");
+        }
+    }
+
+    /// 别人打包时把实例目录改了名、里面的版本 JSON 还叫原来的名字：恰好一份时列表与补全都点出它的名字，没有或不止
+    /// 一份时不提。只看缺版本 JSON 的实例目录顶层：id 对不上自己文件名的、不是版本 JSON 的、子目录里的都不算。
+    #[tokio::test]
+    async fn a_misnamed_version_json_is_named_only_when_there_is_exactly_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        let versions = game.join("versions");
+        let put = |dir: &std::path::Path, name: &str, contents: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(name), contents).unwrap();
+        };
+        let one = versions.join("atm10");
+        put(
+            &one,
+            "All the Mods 10.json",
+            &vanilla_json("All the Mods 10"),
+        );
+        put(&one, "改过 id.json", &vanilla_json("别的名字"));
+        put(&one, "usercache.json", "[]");
+        put(&one.join("config"), "config.json", &vanilla_json("config"));
+        put(&versions.join("一份也没有"), "usercache.json", "[]");
+        let two = versions.join("两份");
+        put(&two, "甲.json", &vanilla_json("甲"));
+        put(&two, "乙.json", &vanilla_json("乙"));
+        // 版本 JSON 在、只是写坏了，不是名字对不上：旁边那份不提。
+        let corrupt = write_version(&game, "写坏了", "{ not json");
+        put(&corrupt, "丙.json", &vanilla_json("丙"));
+
+        let missing = "缺少版本 JSON，也没有记下当初装的是什么";
+        let expected = [
+            (
+                "atm10",
+                format!(
+                    "{missing}；目录里有一份叫 All the Mods 10.json 的版本文件，把实例改名成 All the Mods 10 就能认出来"
+                ),
+            ),
+            ("一份也没有", missing.to_owned()),
+            ("两份", missing.to_owned()),
+            (
+                "写坏了",
+                "版本 JSON 损坏：key must be a string at line 1 column 3，也没有记下当初装的是什么"
+                    .to_owned(),
+            ),
+        ];
+        let list = petalfall.list_instances().await.unwrap();
+        assert_eq!(list.len(), expected.len());
+        for (id, reason) in expected {
+            let listed = list.iter().find(|i| i.id == id).unwrap();
+            assert_eq!(
+                listed.unrepairable_reason.as_deref(),
+                Some(reason.as_str()),
+                "{id} 在列表上"
+            );
+            assert_eq!(
+                repair_verdict(&petalfall, id).await,
+                Err(reason),
+                "{id} 去补全"
+            );
+        }
     }
 
     /// 实例目录里的 Fabric 版本 JSON：`clientVersion` 记着原版版本号，改过名也认得出。

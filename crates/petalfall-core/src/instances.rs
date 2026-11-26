@@ -87,6 +87,10 @@ pub struct InstanceSummary {
     pub modpack: Readable<Option<InstanceModpack>>,
     /// 最近一次崩溃的时刻（Unix 毫秒）；`Read(None)` 表示没崩溃过。
     pub last_crash_at: Readable<Option<u64>>,
+    /// 补全修不好的原因：只有版本 JSON 用不了（`version` 为 [`InstanceVersion::Broken`]）且补全会被拒绝时才有，
+    /// 与补全报的 [`InstanceError::NotRepairable`] 里的 `reason` 逐字相同；修得好的损坏实例为 `None`。版本 JSON
+    /// 可用的实例不看，一律为 `None`（整合包没导入完这类拒绝从 `incomplete` 就看得出）。
+    pub unrepairable_reason: Option<String>,
 }
 
 /// 实例的版本状态。
@@ -761,8 +765,20 @@ async fn summarize(
         }
     };
 
+    let mut unrepairable_reason = None;
     let version = match entry {
-        Entry::Broken(broken) => InstanceVersion::Broken(broken.reason),
+        Entry::Broken(broken) => {
+            // 这一项只对版本 JSON 用不了的实例给出，所以只在这里多读安装记录：列表是热路径，完好的实例一个文件也
+            // 不多读。读不出的标记当作没有，与补全同一口径。
+            let previous = match &incomplete {
+                Some(Readable::Read(marker)) => Some(marker),
+                Some(Readable::Unreadable(_)) | None => None,
+            };
+            let reason = broken.reason.clone();
+            unrepairable_reason =
+                crate::instance_install::unrepairable_reason(game_dir, &id, previous, broken).await;
+            InstanceVersion::Broken(reason)
+        }
         Entry::Found(version, java_major, quick_play, bases) => {
             let workdir = match &settings {
                 Readable::Read(settings) => {
@@ -803,6 +819,7 @@ async fn summarize(
         dir_error,
         modpack,
         last_crash_at,
+        unrepairable_reason,
     }
 }
 

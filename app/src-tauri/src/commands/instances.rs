@@ -599,6 +599,9 @@ pub struct InstanceDto {
     /// 判断能不能用要同时看 incomplete 为空。
     pub status: &'static str,
     pub broken_reason: Option<String>,
+    /// 补全修不好的原因，与对它发起补全时报的 `detail.reason` 逐字相同；只有 broken 且补全会被拒绝时非空，
+    /// 修得好的 broken 实例与 ready 实例为 null。
+    pub unrepairable_reason: Option<String>,
     /// 原版版本号；识别不出或 broken 时为 null。
     pub mc_version: Option<String>,
     pub loaders: Vec<LoaderDto>,
@@ -1124,6 +1127,7 @@ fn instance_dto(
         id: summary.id,
         status: "ready",
         broken_reason: None,
+        unrepairable_reason: summary.unrepairable_reason,
         mc_version: None,
         loaders: Vec::new(),
         release_type: None,
@@ -5641,6 +5645,7 @@ mod tests {
             dir_error: None,
             modpack,
             last_crash_at,
+            unrepairable_reason: None,
         };
         let pack = petalfall_core::InstanceModpack {
             schema: 1,
@@ -5690,6 +5695,7 @@ mod tests {
             value["quick_play"],
             json!({ "singleplayer": true, "multiplayer": true })
         );
+        assert_eq!(value["unrepairable_reason"], json!(null));
 
         let broken = instance_dto(
             summary(
@@ -5725,11 +5731,74 @@ mod tests {
             Readable::Read(VersionSettings::default()),
         );
         missing_json.version = InstanceVersion::Broken(petalfall_core::BrokenReason::MissingJson);
+        missing_json.unrepairable_reason = Some("缺少版本 JSON，也没有记下当初装的是什么".into());
         let value =
             serde_json::to_value(instance_dto(missing_json, None, Readable::Read(None))).unwrap();
         assert_eq!(value["status"], json!("broken"));
         assert_eq!(value["quick_play"], json!(null));
         assert_eq!(value["resource_pack_count"], json!(null));
+        assert_eq!(
+            value["unrepairable_reason"],
+            json!("缺少版本 JSON，也没有记下当初装的是什么")
+        );
+    }
+
+    /// 列表上说的修不好的原因就是补全命令报的 `detail.reason`：前端照着它提前说清楚，不用等点了补全才知道。
+    /// 修得好的损坏实例与完好的实例都是 null。
+    #[tokio::test]
+    async fn listed_unrepairable_reason_is_what_the_repair_command_reports() {
+        let env = Env::new();
+        env.vanilla("1.21.1");
+        std::fs::create_dir_all(env.game_dir().join("versions").join("空的")).unwrap();
+        let installing = env.game_dir().join("versions").join("装到一半");
+        petalfall_core::MarkerStore::for_version_dir(&installing)
+            .save(&IncompleteMarker::pending(
+                IncompleteKind::Install {
+                    spec: petalfall_core::InstallSpec {
+                        mc_version: "1.21.1".into(),
+                        loader: None,
+                        loader_version: None,
+                        use_template: false,
+                    },
+                },
+                1_761_800_000_000,
+            ))
+            .await
+            .unwrap();
+        let locks = InstanceLocks::default();
+
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
+        let entry = |id: &str| list.iter().find(|i| i.id == id).unwrap();
+        assert_eq!(entry("1.21.1").status, "ready");
+        assert_eq!(entry("1.21.1").unrepairable_reason, None);
+        assert_eq!(entry("装到一半").status, "broken");
+        assert_eq!(entry("装到一半").unrepairable_reason, None);
+        let empty = serde_json::to_value(entry("空的")).unwrap();
+        assert_eq!(empty["status"], json!("broken"));
+        assert_eq!(
+            empty["unrepairable_reason"],
+            json!("缺少版本 JSON，也没有记下当初装的是什么")
+        );
+
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+        let err = repair_instance_with(
+            &env.facade,
+            &TaskRegistry::default(),
+            &locks,
+            "r",
+            &current_game_dir(&env.facade).await,
+            "空的",
+            &sink,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, common::INSTANCE_FAILED);
+        assert_eq!(
+            err.detail.as_ref().unwrap()["reason"],
+            empty["unrepairable_reason"]
+        );
     }
 
     /// 导入中断留下的整合包标记在列表里报为 modpack，而不是「标记读不出来」。
