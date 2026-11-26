@@ -202,6 +202,15 @@ function CrashBanner({ at, report, onTab }: { at: number | null; report: CrashRe
 }
 
 function BrokenBanner({ inst, reason, ops }: { inst: InstanceSummary; reason: string; ops: InstanceOps }) {
+  // 补全修不好：正文写后端给的原因，不给修复按钮。重装加载器走的也是补全，同样会被拒，所以排在它前面判
+  const unrepairable = inst.unrepairableReason;
+  if (unrepairable !== null) {
+    return (
+      <Banner tone="warn" icon="alert" title={OVERVIEW_COPY.brokenTitle}>
+        {unrepairable}
+      </Banner>
+    );
+  }
   // 原因写着要重新安装加载器时按钮照着说：普通的「修复实例」看上去又是刚失败过的那件事
   const reinstall = lostLoaderLibrary(inst) && canReinstallLoader(inst);
   return (
@@ -215,7 +224,7 @@ function BrokenBanner({ inst, reason, ops }: { inst: InstanceSummary; reason: st
             {REINSTALL_LOADER_LABEL}
           </Button>
         ) : (
-          <Button icon="wrench" disabledReason={lockReason(ops.locks.repair, "repair")} onClick={ops.repair}>
+          <Button icon="wrench" disabledReason={ops.repairReason} onClick={ops.repair}>
             {OVERVIEW_COPY.repair}
           </Button>
         )

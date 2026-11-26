@@ -1,10 +1,10 @@
 // 头图菜单、设置页「实例管理」与崩溃页共用的一组实例操作：重命名、固定、打开文件夹、导出整合包、移到别的游戏目录、补全与删除。
 // 几处入口的锁定判断与反馈都从这里出，保证完全一致（删除确认与实例库共用 delete.tsx）。动作一律经外层统一错误处理执行。
 
-import { ACTION_ERROR, lockReason } from "../../copy/flows";
+import { ACTION_ERROR, lockReason, MODPACK_REIMPORT_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { locksOf, type InstanceLocks } from "../../domain/instance-locks";
-import { instanceNameError } from "../../domain/rules";
+import { canRepair, instanceNameError, needsReimport } from "../../domain/rules";
 import { useRunner } from "../../shell/useRunner";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { busyInstanceId } from "../../state/selectors";
@@ -41,6 +41,8 @@ export interface InstanceOps {
   exportSavesReason: string | undefined;
   /** 此刻不能移到别的游戏目录的原因；能移为 undefined。菜单项与移动弹窗的主按钮共用它。 */
   moveReason: string | undefined;
+  /** 此刻不能补全的原因；能补全为 undefined。头图菜单、概览横幅、设置页与崩溃页的补全入口共用它。 */
+  repairReason: string | undefined;
   /** 更新检查设置此刻改不了的原因：只写卷宗不碰 jar，游戏运行不挡；但要占住实例，安装、补全、改名、删除挡着。能改为 undefined。 */
   updateHoldReason: string | undefined;
   /** 此刻不能改动 Mod 的原因（启停、更新、移除、回滚）：既要换 jar（游戏运行、补全挡着），也要占住实例（改名、删除挡着）。能改动为 undefined。 */
@@ -79,6 +81,18 @@ export function moveReason(inst: InstanceSummary, locks: InstanceLocks): string 
   const locked = lockReason(locks.move, "move");
   if (locked !== undefined) return locked;
   return inst.status === "broken" ? LOCK_REASON.move.broken : undefined;
+}
+
+/**
+ * 补全：修不好的实例后端一律拒绝，不管此刻排不排得上，原因照后端给的原文写（它可能已带句末标点或一句提示，不再改写）；
+ * 修得好的才看实例与基底的锁。整合包半成品在头图、概览与设置页先给重新导入，只有崩溃页的补全按钮不分这一支；
+ * 后端在它版本 JSON 还在时不报原因，用重新导入的说明垫上。
+ */
+export function repairReason(inst: InstanceSummary, locks: InstanceLocks): string | undefined {
+  if (canRepair(inst)) return lockReason(locks.repair, "repair");
+  if (inst.unrepairableReason !== null) return inst.unrepairableReason;
+  if (needsReimport(inst)) return MODPACK_REIMPORT_COPY.note;
+  throw new Error(`实例 ${inst.id} 补全修不好，却既没有原因也不是没导入完的整合包`);
 }
 
 export function useInstanceOps(inst: InstanceSummary): InstanceOps {
@@ -151,6 +165,7 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     exportReason: exportReason(inst, work),
     exportSavesReason: exportSavesReason(inst, busy),
     moveReason: moveReason(inst, locks),
+    repairReason: repairReason(inst, locks),
     updateHoldReason,
     modsReason: modsLock !== undefined ? modsLock : updateHoldReason,
     repair,

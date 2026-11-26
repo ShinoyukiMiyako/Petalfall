@@ -719,6 +719,40 @@ describe("崩溃诊断：参与扫描的文件", () => {
   });
 });
 
+describe("崩溃诊断：补全修不好的实例", () => {
+  // 假后端的种子实例：从旧电脑拷来时丢了版本 JSON，也没记下当初装的是什么，补全会被拒
+  const LOST = "旧电脑拷来的";
+
+  it("本地库缺失的一键尝试：「补全游戏文件」带假后端列出的原因禁用，点了不发补全", async () => {
+    await crashWith(-1073741819);
+    const base = mockCrashReport(ID);
+    if (base === null) throw new Error("应已有崩溃报告");
+    ipc.overrides.set("last_crash", (args) => {
+      if (args.versionId !== LOST) throw new Error(`只该读「${LOST}」的崩溃报告，读的是 ${String(args.versionId)}`);
+      const report: CrashReportDto = {
+        ...base,
+        diagnoses: [{ category: "native_library_missing", summary: "", advice: "", detail: null, matched: "UnsatisfiedLinkError", line: 3, context: [], source: "session_log" }],
+      };
+      return report;
+    });
+    await open("crash", LOST);
+    const repair = button("补全游戏文件");
+    expect(repair.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      repair.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = repair.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("「补全游戏文件」悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe("缺少版本 JSON，也没有记下当初装的是什么");
+    click(repair);
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+  });
+});
+
 describe("崩溃诊断：这次启动时的提醒", () => {
   it("游戏目录在 OneDrive 里：标题、正文与「更换游戏目录」，点了去设置的游戏分区", async () => {
     setMockLaunchWarnings(["onedrive_folder"]);

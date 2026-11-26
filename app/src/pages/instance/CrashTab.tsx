@@ -670,7 +670,6 @@ function FixRow({
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const modLock = ops.modsReason;
-  const repairLock = lockReason(ops.locks.repair, "repair");
   const settingsLock = ops.settingsReason;
 
   /** 改实例设置的一键尝试：可撤销，成功后通知「某某已改为」。 */
@@ -815,7 +814,7 @@ function FixRow({
       break;
     case "repair":
       note = inst.status === "installing" ? CRASH_PAGE_COPY.repairDone : CRASH_PAGE_COPY.repairNote;
-      if (inst.status !== "installing") action = button(SETTINGS_COPY.repairTitle, ops.repair, repairLock);
+      if (inst.status !== "installing") action = button(SETTINGS_COPY.repairTitle, ops.repair, ops.repairReason);
       extra = (
         <>
           {fix.changeGameDir && (

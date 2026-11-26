@@ -59,7 +59,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   const backdrop = useCoverBackdrop(inst);
   const pinBlocked = useLauncherSelector((s) => !inst.pinned && !canPinMore(s));
   const renameReason = lockReason(ops.locks.rename, "rename");
-  const repairReason = lockReason(ops.locks.repair, "repair");
+  const repairReason = ops.repairReason;
   const deleteReason = lockReason(ops.locks.delete, "delete");
   const folderReason = ops.folderReason("instance");
   const exportReason = ops.exportReason;

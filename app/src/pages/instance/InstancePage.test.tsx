@@ -2002,6 +2002,96 @@ describe("实例详情：整合包没导入完", () => {
     click(button("重新导入"));
     expect(nav.route).toEqual({ page: "discover", kind: "modpack", open: { platform: "curseforge", projectId: "285109" } });
   });
+
+  it("崩溃页本地库缺失的一键尝试：「补全游戏文件」带重新导入的说明禁用，点了不发补全", async () => {
+    crash = report([{ category: "native_library_missing" }], NOW - 60_000);
+    await open("crash");
+    const repair = button("补全游戏文件");
+    expect(repair.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      repair.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = repair.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("「补全游戏文件」悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe("整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。");
+    click(repair);
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+  });
+});
+
+describe("实例详情：补全修不好的损坏实例", () => {
+  // 后端原文已带句号，后面还跟一句指向目录里别的版本文件的提示：各处原样照抄，不补句号、不改写
+  const UNREPAIRABLE = "缺少版本 JSON，也没有记下当初装的是什么。目录里有一份叫 1.20.1.json 的版本文件，可能是改名时没跟上";
+  const live = (el: Element) => el.closest("[inert]") === null;
+
+  /** 悬停后关联的提示气泡里的文字；没有关联气泡时报错。 */
+  const tipOf = async (el: HTMLElement): Promise<string | null | undefined> => {
+    act(() => {
+      el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = el.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error(`「${textOf(el)}」悬停后没有关联提示气泡`);
+    return document.getElementById(tipId)?.textContent;
+  };
+
+  beforeEach(() => {
+    instances = instances.map((i) => (i.id === ID ? instanceDto(ID, { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: UNREPAIRABLE, mc_version: null }) : i));
+  });
+
+  it("概览横幅：标题照旧，正文是后端给的原因原文而不是损坏原因，不给「修复实例」", async () => {
+    await open("overview");
+    const title = [...document.querySelectorAll("div")].find((el) => el.childElementCount === 0 && el.textContent === "实例文件不完整，暂时无法启动" && live(el));
+    if (title === undefined) throw new Error("没有损坏横幅");
+    expect(title.nextElementSibling?.textContent).toBe(UNREPAIRABLE);
+    const banner = title.closest<HTMLElement>('[class*="_banner_"]');
+    if (banner === null) throw new Error("损坏横幅的标题不在横幅里");
+    expect(banner.querySelectorAll("button")).toHaveLength(0);
+    expect(() => button("修复实例")).toThrow("找不到按钮");
+  });
+
+  it("头图菜单的「补全游戏文件」带原因禁用，悬停写后端给的原因；点了不发补全、不留任务", async () => {
+    await open("overview");
+    click(button("更多操作"));
+    const repair = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "补全游戏文件");
+    if (repair === undefined) throw new Error("菜单里没有「补全游戏文件」");
+    expect(repair.getAttribute("aria-disabled")).toBe("true");
+    expect(await tipOf(repair)).toBe(UNREPAIRABLE);
+    click(repair);
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
+  });
+
+  it("崩溃页本地库缺失的一键尝试：「补全游戏文件」带后端给的原因禁用，点了不发补全", async () => {
+    crash = report([{ category: "native_library_missing" }], NOW - 60_000);
+    await open("crash");
+    const repair = button("补全游戏文件");
+    expect(repair.getAttribute("aria-disabled")).toBe("true");
+    expect(await tipOf(repair)).toBe(UNREPAIRABLE);
+    click(repair);
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
+  });
+
+  it("修得好的损坏实例照旧：崩溃页的「补全游戏文件」能点，发出补全", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, unrepairable_reason: null } : i));
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    crash = report([{ category: "native_library_missing" }], NOW - 60_000);
+    await open("crash");
+    const repair = button("补全游戏文件");
+    expect(repair.getAttribute("aria-disabled")).toBeNull();
+    click(repair);
+    await flush();
+    expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual([ID]);
+  });
 });
 
 describe("实例详情：概览", () => {

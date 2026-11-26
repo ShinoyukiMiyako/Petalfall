@@ -841,9 +841,13 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
   const changed = name.trim() !== inst.name;
   const error = changed ? ops.nameError(name) : null;
   const renameReason = lockReason(ops.locks.rename, "rename");
-  const repairReason = lockReason(ops.locks.repair, "repair");
+  const repairReason = ops.repairReason;
   const deleteReason = lockReason(ops.locks.delete, "delete");
   const folder = gameDir === null ? null : instanceFolderPath(gameDir, inst.id);
+  // 补全修不好时说明直接写后端给的原因，不再说补全会做什么；它也进候选一起占位
+  const unrepairable = inst.unrepairableReason;
+  const repairNote = unrepairable !== null ? unrepairable : ops.locks.repair === "running" ? SETTINGS_COPY.repairRunning : SETTINGS_COPY.repairNote;
+  const repairNotes = unrepairable === null ? [SETTINGS_COPY.repairNote, SETTINGS_COPY.repairRunning] : [SETTINGS_COPY.repairNote, SETTINGS_COPY.repairRunning, unrepairable];
 
   const saveName = () => {
     if (!changed || error !== null || renaming) return;
@@ -903,7 +907,7 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
             {/* 游戏启动、退出时说明在两条之间换：说明槽按长的那条占位，这一行与下面的行不跟着变高变矮 */}
             <SettingRow
               title={SETTINGS_COPY.repairTitle}
-              description={<NoteSlot current={ops.locks.repair === "running" ? SETTINGS_COPY.repairRunning : SETTINGS_COPY.repairNote} options={[SETTINGS_COPY.repairNote, SETTINGS_COPY.repairRunning]} />}
+              description={<NoteSlot current={repairNote} options={repairNotes} />}
             >
               <Button size="sm" icon="wrench" disabled={ops.locks.repair === "installing"} focusableWhenDisabled disabledReason={ops.locks.repair === "installing" ? undefined : repairReason} onClick={ops.repair}>
                 <SwapLabel busy={ops.locks.repair === "installing"} idle={SETTINGS_COPY.repair} />

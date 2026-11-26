@@ -554,6 +554,51 @@ describe("实例设置：会换的说明与按钮文案", () => {
   });
 });
 
+describe("实例设置：补全修不好的损坏实例", () => {
+  // 后端原文已带句号，后面还跟一句提示：说明位与悬停提示都原样照抄，不补句号、不改写
+  const REASON = "缺少版本 JSON，也没有记下当初装的是什么。目录里有一份叫 1.20.1.json 的版本文件，可能是改名时没跟上";
+
+  it("补全一行的说明换成后端给的原因，原来两条留作占位；「补全」带同一句原因禁用，点了不发补全", async () => {
+    instances = [instanceDto(ID, { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: REASON, mc_version: null })];
+    await openSettings();
+    const repairRow = row(SETTINGS_COPY.repairTitle);
+    const slot = description(repairRow).firstElementChild as HTMLElement;
+    expect(textOf(slot)).toBe(REASON);
+    expect([slot.dataset.reserveA, slot.dataset.reserveB]).toEqual([SETTINGS_COPY.repairNote, SETTINGS_COPY.repairRunning]);
+    const repair = button(SETTINGS_COPY.repair, repairRow);
+    expect(repair.disabled).toBe(false);
+    expect(repair.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      repair.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = repair.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("「补全」悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe(REASON);
+    act(() => repair.click());
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
+  });
+
+  it("修得好的损坏实例照旧：说明写补全会做什么，「补全」能点并发出补全", async () => {
+    instances = [instanceDto(ID, { status: "broken", broken_reason: "缺少版本 JSON", mc_version: null })];
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await openSettings();
+    const repairRow = row(SETTINGS_COPY.repairTitle);
+    const slot = description(repairRow).firstElementChild as HTMLElement;
+    expect(textOf(slot)).toBe(SETTINGS_COPY.repairNote);
+    expect([slot.dataset.reserveA, slot.dataset.reserveB]).toEqual([SETTINGS_COPY.repairRunning, undefined]);
+    const repair = button(SETTINGS_COPY.repair, repairRow);
+    expect(repair.getAttribute("aria-disabled")).toBeNull();
+    act(() => repair.click());
+    await flush();
+    expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual([ID]);
+  });
+});
+
 describe("实例设置：默认设置一行", () => {
   const templateRow = () => row(SETTINGS_COPY.templateTitle);
 
