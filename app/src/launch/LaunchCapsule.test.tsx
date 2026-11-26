@@ -344,10 +344,13 @@ describe("损坏面的带原因禁用", () => {
     const tipId = go.getAttribute("aria-describedby");
     if (tipId === null) throw new Error("悬停后没有关联提示气泡");
     expect(document.getElementById(tipId)?.textContent).toBe(reason);
+    const errorsBefore = launcher.state.toasts.filter((t) => t.tone === "error");
     pressEnter(go);
     await flush();
     expect(callsOf(ipc, "repair_instance")).toEqual([]);
     expect(launcher.state.tasks).toEqual([]);
+    // 点击漏到状态容器的话，启动拦截同样不排补全，却会报一条错：没有新的错误通知才说明点击在入口就被拦下了
+    expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual(errorsBefore);
   });
 });
 

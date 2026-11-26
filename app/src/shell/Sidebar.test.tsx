@@ -1392,11 +1392,14 @@ describe("侧栏", () => {
       const tipId = first.getAttribute("aria-describedby");
       if (tipId === null) throw new Error("键盘高亮着的禁用项没有关联原因");
       expect(document.getElementById(tipId)?.textContent).toBe(reason);
+      const errorsBefore = errorToasts();
       const active = document.activeElement;
       if (!(active instanceof HTMLElement)) throw new Error("菜单打开后焦点不在元素上");
       keydown(active, "Enter");
       await flush();
       expect(callsOf(ipc, "repair_instance")).toEqual([]);
+      // 按键漏到状态容器的话，启动拦截同样不排补全，却会报一条错：没有新的错误通知才说明按键在菜单项上就被拦下了
+      expect(errorToasts()).toEqual(errorsBefore);
     });
 
     it.each<[string, () => unknown, string]>([
