@@ -2855,7 +2855,8 @@ export class LauncherStore {
 
   /**
    * 普通启动与直达共用的拦截链：同一实例已在加载或运行时直接返回；别的实例占着游戏进程时弹替换确认；
-   * 安装中抛错；损坏的普通启动转成「修复并启动」，直达与补全修不好的抛错；没有账户先登录，登录后带着同一个 quickPlay 继续。
+   * 安装中抛错；损坏的：补全修不好的报出原因，修得好的普通启动转成「修复并启动」、直达抛错；没有账户先登录，
+   * 登录后带着同一个 quickPlay 继续。
    */
   private async requestLaunch(id: string, quickPlay: launchIpc.QuickPlayArg | null): Promise<void> {
     const inst = this.instance(id);
@@ -2868,10 +2869,12 @@ export class LauncherStore {
     }
     if (inst.status === "installing") throw new Error(`「${id}」还在安装，入口不应提供启动`);
     if (inst.status === "broken") {
+      // 入口都按原因禁用了修复并启动，还走到这里的是边角路径：失败通知上的重试点下去时实例已重扫成修不好、补全完成后
+      // 接着启动时仍修不好。排上补全也只会被后端拒，不排任务，与「修复实例」一样把原因交给调用方的错误处理：后端只对
+      // 版本 JSON 不可用的报原因，整合包没导入完的说重新导入那一句。排在直达之前，直达的重试也走到这里
+      if (!canRepair(inst)) throw new Error(inst.unrepairableReason === null ? MODPACK_REIMPORT_COPY.note : inst.unrepairableReason);
       // 修复完成后的自动启动是普通启动，带不上直达目标：入口按损坏禁用直达
       if (quickPlay !== null) throw new Error(`「${id}」需要先修复，入口不应提供直达`);
-      // 补全修不好的，入口都按原因禁用了修复并启动；走到这里排上补全也只会被后端拒
-      if (!canRepair(inst)) throw new Error(`「${id}」补全修不好，入口不应提供修复并启动`);
       await this.actions.repairInstance(id, { launchAfter: true });
       return;
     }

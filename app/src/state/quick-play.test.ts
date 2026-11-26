@@ -127,10 +127,23 @@ describe("直达走与启动相同的拦截链", () => {
     expect(s.getState().tasks.map((t) => t.spec.command)).toEqual(["repair_instance"]);
   });
 
-  it("补全修不好的损坏实例：普通启动不转成修复并启动，按入口漏判抛错，不排补全也不启动", async () => {
-    instances = [instanceDto("旧档", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null, quick_play: null })];
+  it.each<[string, Partial<InstanceDto>, string]>([
+    [
+      "后端说补全修不好：报出后端给的原因原文",
+      { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null, quick_play: null },
+      "缺少版本 JSON，也没有记下当初装的是什么",
+    ],
+    [
+      "整合包没导入完：报出重新导入那一句",
+      { incomplete: { kind: "modpack", outcome: "pending", started_at: 1_719_999_000_000, spec: null, error: null } },
+      "整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。",
+    ],
+  ])("补全修不好的损坏实例（%s）：普通启动不转成修复并启动，直达也不说先修复，不排补全也不启动", async (_name, over, reason) => {
+    instances = [instanceDto("旧档", over)];
     const s = await boot();
-    await expect(s.actions.launch("旧档")).rejects.toThrow("「旧档」补全修不好，入口不应提供修复并启动");
+    await expect(s.actions.launch("旧档")).rejects.toMatchObject({ message: reason });
+    // 直达的重试也会走到这里：同样报原因，不是给开发者看的「入口不应提供直达」
+    await expect(s.actions.quickPlay("旧档", WORLD)).rejects.toMatchObject({ message: reason });
     await settle();
     expect(s.getState().tasks).toEqual([]);
     expect(callsOf(ipc, "repair_instance")).toEqual([]);

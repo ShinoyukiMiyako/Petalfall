@@ -357,6 +357,82 @@ describe("修复完成后的启动失败卡", () => {
   });
 });
 
+describe("启动拦截遇上补全修不好的实例：边角路径把原因交给错误处理", () => {
+  const LOST = "缺少版本 JSON，也没有记下当初装的是什么";
+  const unrepairable: [string, Partial<InstanceDto>, string][] = [
+    ["后端说补全修不好：报出后端给的原因原文", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: LOST, mc_version: null }, LOST],
+    [
+      "整合包没导入完：报出重新导入那一句",
+      { incomplete: { kind: "modpack", outcome: "pending", started_at: 1_719_999_000_000, spec: null, error: null } },
+      "整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。",
+    ],
+  ];
+
+  /** 跑一遍修复动作：拒绝时返回拒绝的错误，成功时为 null。 */
+  const outcomeOf = (run: () => void | Promise<void>) =>
+    Promise.resolve()
+      .then(run)
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+  /** 启动以缺文件失败（失败卡给的是重试），随后重扫出的「生存」换成 over：失败通知与启动入口上的重试动作。 */
+  const failThenRescan = async (over: Partial<InstanceDto>) => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("files_offline", "还缺文件", { count: 3 });
+    });
+    await store.actions.launch("生存");
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed", failure: { code: "files_offline" } });
+    instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", over) : i));
+    await store.actions.reload("instances");
+    await settle();
+    const toast = store.getState().toasts.find((t) => t.tone === "error");
+    const fromToast = toast === undefined ? undefined : toast.action;
+    if (fromToast === undefined) throw new Error("启动失败通知应带重试");
+    return [store.actions.failureFix("retry"), fromToast];
+  };
+
+  it.each(unrepairable)("失败通知上的「重试」点下去时实例已重扫成修不好（%s）：不排补全也不启动，按启动的标题报出原因", async (_name, over, reason) => {
+    for (const fix of await failThenRescan(over)) {
+      if (!("run" in fix)) throw new Error("重试应是命令类修复动作");
+      expect(fix.errorTitle).toBe("「生存」启动失败");
+      expect(describeError(await outcomeOf(fix.run))).toBe(reason);
+    }
+    await settle();
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(callsOf(ipc, "launch_game")).toHaveLength(1);
+    expect(store.getState().tasks).toEqual([]);
+  });
+
+  it("重试时实例已重扫成修得好的损坏：照旧转成修复并启动，排上补全", async () => {
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    const [retry] = await failThenRescan({ status: "broken", broken_reason: "缺少客户端 jar" });
+    if (!("run" in retry)) throw new Error("重试应是命令类修复动作");
+    expect(await outcomeOf(retry.run)).toBeNull();
+    expect(store.getState().tasks.map((t) => [t.spec.command, t.title])).toEqual([["repair_instance", "补全「生存」的游戏文件"]]);
+    expect(callsOf(ipc, "launch_game")).toHaveLength(1);
+  });
+
+  it.each(unrepairable)("补全完成后接着启动、重扫回来实例仍修不好（%s）：不再排补全也不启动，按落地的标题报出原因", async (_name, over, reason) => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", { status: "broken", broken_reason: "缺少客户端 jar" }) : i));
+    await store.actions.reload("instances");
+    await settle();
+    ipc.overrides.set("repair_instance", () => {
+      instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", over) : i));
+      return { reinstalled: false, libraries: 0, assets: 0, natives: 0 };
+    });
+    // 修得好的损坏实例点启动：排上补全，完成后接着启动
+    await store.actions.launch("生存");
+    await settle();
+    expect(store.getState().tasks.map((t) => [t.status, t.title])).toEqual([["done", "补全「生存」的游戏文件"]]);
+    expect(store.getState().toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["error", "补全「生存」的游戏文件已完成，后续设置没有写入", reason]]);
+    expect(callsOf(ipc, "repair_instance")).toHaveLength(1);
+    expect(callsOf(ipc, "launch_game")).toEqual([]);
+  });
+});
+
 describe("改名迁移启动会话", () => {
   it("启动失败的会话随改名换成新 id：重试按新名字启动，查看日志也落到新名字", async () => {
     ipc.overrides.set("launch_game", () => {
