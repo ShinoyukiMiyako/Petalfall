@@ -2491,6 +2491,47 @@ mod tests {
         );
     }
 
+    /// 编辑器存成 UTF-8 时会在开头带上 BOM：整合包自带的 options.txt 只有它（或它加空白）时同样是空的，导入时
+    /// 删掉；BOM 后面有内容的原样留着。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_options_file_holding_only_a_bom_is_removed_on_import() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall(tmp.path(), &server);
+        let cases: [(&str, &[u8], bool); 3] = [
+            ("BOM", b"\xef\xbb\xbf", false),
+            ("BOM-blank", b"\xef\xbb\xbf\r\n \r\n", false),
+            ("BOM-fov", b"\xef\xbb\xbffov:0.8\n", true),
+        ];
+        for (name, pack_options, kept) in cases {
+            let pack = tmp.path().join(format!("{name}.mrpack"));
+            write_pack(
+                &pack,
+                &index(serde_json::json!({"minecraft": "test"})),
+                &[("overrides/options.txt", pack_options)],
+            );
+
+            let outcome = petalfall
+                .install_modpack(
+                    &ModpackSource::File { path: pack },
+                    Some(name),
+                    &ImportSelection::default(),
+                    &format!("task-{name}"),
+                    None,
+                )
+                .await
+                .unwrap();
+
+            let written = match std::fs::read(outcome.version_dir.join("options.txt")) {
+                Ok(bytes) => Some(bytes),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                Err(err) => panic!("读 {name} 的 options.txt 失败：{err}"),
+            };
+            assert_eq!(written.as_deref(), kept.then_some(pack_options), "{name}");
+        }
+    }
+
     /// 整合包的模组默认设置里只有一行游戏默认语言：那一行在套模板之前就去掉了，剩下的空文件不挡模板。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mod_defaults_emptied_of_the_default_language_do_not_hold_the_template_back() {

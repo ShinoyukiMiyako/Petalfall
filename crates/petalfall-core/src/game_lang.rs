@@ -26,6 +26,7 @@ use crate::error::{CoreError, Result};
 use crate::launch::read_asset_index;
 
 const OPTIONS_FILE: &str = "options.txt";
+const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 const LANG_KEY: &[u8] = b"lang:";
 const ONBOARDING_KEY: &[u8] = b"onboardAccessibility:";
 
@@ -182,7 +183,11 @@ fn has_line(options: &[u8], key: &[u8]) -> bool {
 /// 文件里有没有内容，只有空白的不算。空文件里没有谁调过的东西，也没有要迁移的内容，补语言时与新文件一样
 /// 处理（见 [`fill_options`]）。YOSBR 每次启动都会建一份空的默认设置，整合包常把它原样带进来，模组铺过去的
 /// 也是一份空文件：在场的几份全是这样时不为它们让路，另有一份有内容或读不了的时才连它一起补（见 [`fill`]）。
+///
+/// 开头的一个 UTF-8 BOM 也不算：Windows 上的编辑器存成 UTF-8 时常带上它，只有它（或它加空白）的文件里同样
+/// 一行设置都没有。
 pub(crate) fn has_content(bytes: &[u8]) -> bool {
+    let bytes = bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes);
     bytes.iter().any(|byte| !byte.is_ascii_whitespace())
 }
 
@@ -240,7 +245,7 @@ fn with_lines(options: &[u8], lines: &[String]) -> Vec<u8> {
 
 /// 要不要声明数据版本。玩家要看引导（开关关着）时，游戏读到一份没有 `version:` 行的设置文件就把引导标成
 /// 走过（见 [`ONBOARDING_FIX_DATA_VERSION`]）。会让它读到这种文件的有三种：往新文件或空文件里只写了语言；
-/// 文件已经在、是空的（只有空白）；空的模组默认设置等着被模组铺成 options.txt（`blank_defaults_pending`，
+/// 文件已经在、是空的（见 [`has_content`]）；空的模组默认设置等着被模组铺成 options.txt（`blank_defaults_pending`，
 /// 这时新建一份声明了版本的 options.txt 挡在前面）。比这个版本老的游戏遇到更高的声明版本什么也不做，空文件
 /// 里也没有要迁移的内容。有内容的已有文件不加：声明版本会让它跳过自己需要的迁移，引导弹不弹本来就由它自己
 /// 的版本决定。文件不存在、也没有东西会被铺过来时不为这一行新建文件：游戏没有设置文件时自己会弹引导。
@@ -349,7 +354,7 @@ pub(crate) async fn drop_pack_default_language(working_dir: &Path) -> Result<Vec
     Ok(changed)
 }
 
-/// 整合包带来的 options.txt 是空的（只有空白）时删掉它，返回删没删。本来就空的、去掉默认语言行后变空的都算，
+/// 整合包带来的 options.txt 是空的（见 [`has_content`]）时删掉它，返回删没删。本来就空的、去掉默认语言行后变空的都算，
 /// 所以不看语言开关。空文件不是谁的设置，留着却处处碍事：游戏当它是老设置、直接把无障碍引导标成走过，模组见
 /// 它已经在就不铺作者的默认设置，套默认设置也当它是包里自带的而不补模板。只在导入的那一刻做，这时文件一定
 /// 来自整合包。模组那几份空的默认设置不删：补全与套默认设置都认得（见 [`has_content`]）。
@@ -1068,6 +1073,43 @@ mod tests {
                 true,
                 text("\nonboardAccessibility:false\n"),
             ),
+            // 只有 BOM（或 BOM 加空白）的也是空文件：BOM 原样留在开头自成一行，补的行接在后面。
+            (
+                "zh-CN",
+                V1_21_1,
+                text("\u{feff}"),
+                false,
+                text("\u{feff}\nversion:3319\nlang:zh_cn\n"),
+            ),
+            (
+                "zh-CN",
+                V1_21_1,
+                text("\u{feff}\r\n"),
+                false,
+                text("\u{feff}\r\nversion:3319\r\nlang:zh_cn\r\n"),
+            ),
+            (
+                "en-US",
+                V1_21_1,
+                text("\u{feff}"),
+                false,
+                text("\u{feff}\nversion:3319\n"),
+            ),
+            (
+                "zh-CN",
+                V1_21_1,
+                text("\u{feff}"),
+                true,
+                text("\u{feff}\nlang:zh_cn\nonboardAccessibility:false\n"),
+            ),
+            // BOM 后面有内容的照旧是有内容的文件，不声明数据版本。
+            (
+                "zh-CN",
+                V1_21_1,
+                text("\u{feff}fov:0.5\n"),
+                false,
+                text("\u{feff}fov:0.5\nlang:zh_cn\n"),
+            ),
             // 已有 lang 不动，哪怕和系统语言不一样。
             (
                 "zh-CN",
@@ -1784,11 +1826,17 @@ mod tests {
     }
 
     /// YOSBR 每次启动都会建一份空的默认设置，整合包常把它原样带进来。里面没有作者的设置，不为它让路：照常
-    /// 新建 options.txt（模组见它已经在就不铺），那份空文件一个字节都不动。只有空白的同样算空。
+    /// 新建 options.txt（模组见它已经在就不铺），那份空文件一个字节都不动。只有空白的、只有 BOM 或 BOM 加
+    /// 空白的同样算空。
     #[tokio::test]
     async fn blank_mod_defaults_are_ignored_and_the_options_file_is_created() {
         let pending = "config/yosbr/options.txt";
-        for blank in [&b""[..], &b"\r\n \t\n"[..]] {
+        for blank in [
+            &b""[..],
+            &b"\r\n \t\n"[..],
+            &b"\xef\xbb\xbf"[..],
+            &b"\xef\xbb\xbf\r\n"[..],
+        ] {
             let skipping = scene(V1_21_1);
             skipping.write(pending, blank);
             let notes = skipping.fill(Some("zh-CN")).await;
@@ -1812,7 +1860,7 @@ mod tests {
 
     /// 空的那份与有内容的那份同在时两份都补：先被模组铺成 options.txt 的可能恰是空的那份（YOSBR 早于
     /// Default Options；Default Options 自己的那份与 `extra/` 里的谁先铺随模组版本而变），漏了它语言就
-    /// 落空。只有空白的那份原内容照样逐字节保留，换行跟着它走。
+    /// 落空。只有空白的、只有 BOM 的那份原内容照样逐字节保留在开头，换行跟着它走。
     #[tokio::test]
     async fn a_blank_mod_defaults_file_next_to_a_real_one_is_filled_too() {
         const YOSBR: &str = "config/yosbr/options.txt";
@@ -1820,11 +1868,13 @@ mod tests {
         const EXTRA: &str = "config/defaultoptions/extra/options.txt";
         const FILLED: &[u8] = b"lang:zh_cn\nonboardAccessibility:false\n";
         const FILLED_CRLF: &[u8] = b"\r\n \t\r\nlang:zh_cn\r\nonboardAccessibility:false\r\n";
-        let cases: [(&str, &[u8], &[u8], &str); 4] = [
+        const FILLED_BOM: &[u8] = b"\xef\xbb\xbf\nlang:zh_cn\nonboardAccessibility:false\n";
+        let cases: [(&str, &[u8], &[u8], &str); 5] = [
             (YOSBR, b"", FILLED, OWN),
             (OWN, b"", FILLED, EXTRA),
             (EXTRA, b"", FILLED, YOSBR),
             (YOSBR, b"\r\n \t\r\n", FILLED_CRLF, EXTRA),
+            (OWN, b"\xef\xbb\xbf", FILLED_BOM, YOSBR),
         ];
         for (blank, blank_bytes, filled, real) in cases {
             let scene = scene(V1_21_1);
@@ -1896,7 +1946,7 @@ mod tests {
 
     #[test]
     fn only_non_whitespace_bytes_count_as_content() {
-        let cases: [(&[u8], bool); 7] = [
+        let cases: [(&[u8], bool); 13] = [
             (b"", false),
             (b"\n", false),
             (b" \t\r\n\x0c", false),
@@ -1905,6 +1955,13 @@ mod tests {
             // 服务器列表是二进制的，带零字节的最小内容也算有。
             (b"\x0a\x00\x00\x00", true),
             (b"\xff", true),
+            // 开头的一个 BOM 不算内容；不在开头的、第二个、不完整的都算。
+            (b"\xef\xbb\xbf", false),
+            (b"\xef\xbb\xbf\r\n \t\n", false),
+            (b"\xef\xbb\xbffov:0.8", true),
+            (b"\n\xef\xbb\xbf", true),
+            (b"\xef\xbb\xbf\xef\xbb\xbf", true),
+            (b"\xef\xbb", true),
         ];
         for (bytes, expected) in cases {
             assert_eq!(has_content(bytes), expected, "{bytes:?}");
@@ -2112,10 +2169,20 @@ mod tests {
             assert_eq!(blank.read(pending).unwrap(), b"", "{pending}");
         }
 
-        let kept = scene(V1_21_1);
-        kept.write(OPTIONS_FILE, b"lang:en_us\n");
-        assert!(!remove_blank_options_file(&kept.working_dir).await.unwrap());
-        assert_eq!(kept.options().unwrap(), b"lang:en_us\n");
+        // 编辑器存成 UTF-8 时带上的 BOM 不算内容。
+        for bom_only in [&b"\xef\xbb\xbf"[..], &b"\xef\xbb\xbf \r\n"[..]] {
+            let bom = scene(V1_21_1);
+            bom.write(OPTIONS_FILE, bom_only);
+            assert!(remove_blank_options_file(&bom.working_dir).await.unwrap());
+            assert_eq!(bom.options(), None, "{bom_only:?}");
+        }
+
+        for original in [&b"lang:en_us\n"[..], &b"\xef\xbb\xbffov:0.5\n"[..]] {
+            let kept = scene(V1_21_1);
+            kept.write(OPTIONS_FILE, original);
+            assert!(!remove_blank_options_file(&kept.working_dir).await.unwrap());
+            assert_eq!(kept.options().unwrap(), original);
+        }
 
         let absent = scene(V1_21_1);
         assert!(
@@ -2203,7 +2270,7 @@ mod tests {
     fn data_version_is_declared_only_when_the_game_would_read_a_blank_file() {
         // (现有内容, 要写语言, 开关, 空的模组默认设置在等, 期望)
         type Case<'a> = (Option<&'a [u8]>, bool, bool, bool, bool);
-        let cases: [Case; 10] = [
+        let cases: [Case; 13] = [
             (None, true, false, false, true),
             (None, false, false, false, false),
             (None, false, false, true, true),
@@ -2213,7 +2280,11 @@ mod tests {
             (Some(b""), false, true, false, false),
             (Some(b"fov:0.5\n"), true, false, false, false),
             (Some(b"fov:0.5\n"), false, false, true, false),
-            (Some(b"\xef\xbb\xbf"), true, false, false, false),
+            // 只有 BOM（或 BOM 加空白）的已有文件也是空的。
+            (Some(b"\xef\xbb\xbf"), true, false, false, true),
+            (Some(b"\xef\xbb\xbf\r\n"), false, false, false, true),
+            (Some(b"\xef\xbb\xbf"), false, true, false, false),
+            (Some(b"\xef\xbb\xbffov:0.5\n"), true, false, false, false),
         ];
         for (existing, writes_language, skip_onboarding, pending, expected) in cases {
             assert_eq!(

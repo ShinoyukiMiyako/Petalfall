@@ -739,6 +739,51 @@ mod tests {
         );
     }
 
+    /// 编辑器存成 UTF-8 时会在开头带上 BOM：只有它（或它加空白）的模组默认设置同样是空的，不挡模板，那份文件
+    /// 一个字节都不动；BOM 后面有内容的照旧是作者的设置，留给模组。
+    #[tokio::test]
+    async fn a_mod_default_holding_only_a_bom_does_not_hold_the_template_back() {
+        let cases: [(&[u8], Option<&[u8]>); 3] = [
+            (b"\xef\xbb\xbf", Some(b"fov:90")),
+            (b"\xef\xbb\xbf\r\n \n", Some(b"fov:90")),
+            (b"\xef\xbb\xbffov:0.8\n", None),
+        ];
+        for (pack_options, instance_options) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = isolated(tmp.path());
+            let dir = write_version(petalfall.game_dir(), "整合包", &vanilla_json("1.21.1"));
+            std::fs::create_dir_all(dir.join("config/yosbr")).unwrap();
+            std::fs::write(dir.join("config/yosbr/options.txt"), pack_options).unwrap();
+            put_template(&petalfall, &[("options.txt", b"fov:90")]);
+
+            let outcome = petalfall.apply_template("整合包").await.unwrap();
+
+            let (copied, left_to_mods) = match instance_options {
+                Some(_) => (vec!["options.txt"], vec![]),
+                None => (vec![], vec!["options.txt"]),
+            };
+            assert_eq!(
+                outcome,
+                TemplateOutcome::Applied {
+                    copied,
+                    kept: vec![],
+                    left_to_mods,
+                },
+                "{pack_options:?}"
+            );
+            let written = match std::fs::read(dir.join("options.txt")) {
+                Ok(bytes) => Some(bytes),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                Err(err) => panic!("读实例的 options.txt 失败：{err}"),
+            };
+            assert_eq!(written.as_deref(), instance_options, "{pack_options:?}");
+            assert_eq!(
+                std::fs::read(dir.join("config/yosbr/options.txt")).unwrap(),
+                pack_options
+            );
+        }
+    }
+
     /// 同名文件一份空、一份有内容，分在两处模组默认设置的目录里（两个模组之间，或 Default Options 自己的
     /// 两处）：有内容的那份是作者的设置，模板的照旧留给模组，空的那份排在前面还是后面都一样。
     #[tokio::test]
