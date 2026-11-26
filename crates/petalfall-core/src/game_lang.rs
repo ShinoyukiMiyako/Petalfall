@@ -70,14 +70,22 @@ const DEFAULT_LANGUAGES: [(&str, &str); 26] = [
 /// 模组放默认设置的位置（YOSBR、Default Options）。这两个模组只在 options.txt 不存在时才把它铺过去，
 /// 启动器抢先写一份，整合包作者调好的设置就全作废了。所以 options.txt 还没有时不新建，缺的行补进这份
 /// 文件，由模组连同作者的设置一起铺过去。
-const MOD_DEFAULT_OPTIONS: [&str; 2] = [
+///
+/// Default Options 有两处：自己的 options.txt，和 1.18 起的 `extra/`（里面的文件按相对路径整份铺到游戏
+/// 目录）。两处谁先铺随模组版本而变，先铺的那份成为 options.txt，所以两份都要补。
+const MOD_DEFAULT_OPTIONS: [&str; 3] = [
     "config/yosbr/options.txt",
     "config/defaultoptions/options.txt",
+    "config/defaultoptions/extra/options.txt",
 ];
 
 /// 这两个模组放默认设置的目录，与 [`MOD_DEFAULT_OPTIONS`] 逐项对应。目录里的文件由模组在第一次启动时铺到
 /// 游戏目录的同名位置，目标已经存在就不铺：options.txt 之外的文件（服务器列表、OptiFine 的设置）也是这样。
-pub(crate) const MOD_DEFAULTS_DIRS: [&str; 2] = ["config/yosbr", "config/defaultoptions"];
+pub(crate) const MOD_DEFAULTS_DIRS: [&str; 3] = [
+    "config/yosbr",
+    "config/defaultoptions",
+    "config/defaultoptions/extra",
+];
 
 /// 系统语言能落到的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1422,6 +1430,56 @@ mod tests {
         assert_eq!(scene.options(), None);
     }
 
+    /// Default Options 的 `extra/` 里只有 options.txt 时也算模组的默认设置：模组会把它整份铺成 options.txt，
+    /// 抢先新建一份就把它顶掉了。
+    #[tokio::test]
+    async fn options_in_the_default_options_extra_folder_are_filled_in_place() {
+        let scene = scene(V1_21_1);
+        let pending = "config/defaultoptions/extra/options.txt";
+        scene.write(
+            pending,
+            b"version:3955\nfov:0.8\nkey_key.jump:key.keyboard.space\n",
+        );
+
+        let notes = scene.fill(Some("zh-CN")).await;
+
+        assert_eq!(scene.options(), None);
+        assert_eq!(
+            scene.read(pending).unwrap(),
+            b"version:3955\nfov:0.8\nkey_key.jump:key.keyboard.space\nlang:zh_cn\nonboardAccessibility:false\n"
+        );
+        assert_eq!(
+            notes,
+            [
+                pending_note(pending).as_str(),
+                "游戏语言设为 zh_cn，跟随系统语言 zh-CN",
+                SKIPPED
+            ]
+        );
+    }
+
+    /// Default Options 自己的 options.txt 与 `extra/` 里的那份谁先铺随模组版本而变，两份都补才不会漏。
+    #[tokio::test]
+    async fn both_default_options_files_are_filled_when_the_pack_ships_both() {
+        let scene = scene(V1_21_1);
+        scene.write("config/defaultoptions/options.txt", b"fov:0.6\n");
+        scene.write("config/defaultoptions/extra/options.txt", b"fov:0.8\n");
+
+        scene.fill(Some("zh-CN")).await;
+
+        assert_eq!(
+            scene.read("config/defaultoptions/options.txt").unwrap(),
+            b"fov:0.6\nlang:zh_cn\nonboardAccessibility:false\n"
+        );
+        assert_eq!(
+            scene
+                .read("config/defaultoptions/extra/options.txt")
+                .unwrap(),
+            b"fov:0.8\nlang:zh_cn\nonboardAccessibility:false\n"
+        );
+        assert_eq!(scene.options(), None);
+    }
+
     /// YOSBR 每次启动都会建一份空的默认设置，整合包常把它原样带进来。它是已有的文件，补法与空的 options.txt
     /// 相同：缺的行照补，不声明数据版本。
     #[tokio::test]
@@ -1552,7 +1610,7 @@ mod tests {
         }
     }
 
-    /// 导入时三处一起看：写着默认语言的去掉那一行，写着别的语言的、没有的都不动，返回的是改过的文件。
+    /// 导入时四处一起看：写着默认语言的去掉那一行，写着别的语言的、没有的都不动，返回的是改过的文件。
     #[tokio::test]
     async fn pack_default_language_is_dropped_from_every_options_file() {
         let scene = scene(V1_21_1);
@@ -1562,14 +1620,31 @@ mod tests {
             "config/defaultoptions/options.txt",
             b"version:3955\r\nfov:0.6\r\nlang:en_us\r\nonboardAccessibility:false\r\n",
         );
+        scene.write(
+            "config/defaultoptions/extra/options.txt",
+            b"lang:en_us\nfov:0.7\n",
+        );
         scene.write("config/fancymenu/options.txt", b"lang:en_us\n");
 
         let changed = drop_pack_default_language(&scene.working_dir)
             .await
             .unwrap();
 
-        assert_eq!(changed, [OPTIONS_FILE, "config/defaultoptions/options.txt"]);
+        assert_eq!(
+            changed,
+            [
+                OPTIONS_FILE,
+                "config/defaultoptions/options.txt",
+                "config/defaultoptions/extra/options.txt",
+            ]
+        );
         assert_eq!(scene.options().unwrap(), b"version:3955\nfov:0.5\n");
+        assert_eq!(
+            scene
+                .read("config/defaultoptions/extra/options.txt")
+                .unwrap(),
+            b"fov:0.7\n"
+        );
         assert_eq!(
             scene.read("config/yosbr/options.txt").unwrap(),
             b"lang:ja_jp\nfov:0.8\n"

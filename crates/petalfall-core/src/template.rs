@@ -637,6 +637,52 @@ mod tests {
         );
     }
 
+    /// Default Options 的 `extra/` 按相对路径把文件铺进游戏目录，同样是目标不存在才铺：整合包放在那里的同名
+    /// 文件也留给模组。
+    #[tokio::test]
+    async fn files_in_the_default_options_extra_folder_are_left_to_the_mod() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = isolated(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "整合包", &vanilla_json("1.21.1"));
+        let pack_shaders = b"shaderPack=pack.zip\n";
+        std::fs::create_dir_all(dir.join("config/defaultoptions/extra/config")).unwrap();
+        std::fs::write(
+            dir.join("config/defaultoptions/extra/optionsshaders.txt"),
+            pack_shaders,
+        )
+        .unwrap();
+        // extra 里更深一层的同名文件铺到的是 config/ 下，不是游戏目录根，不影响白名单文件。
+        std::fs::write(
+            dir.join("config/defaultoptions/extra/config/servers.dat"),
+            b"elsewhere",
+        )
+        .unwrap();
+        put_template(
+            &petalfall,
+            &[
+                ("servers.dat", b"mine"),
+                ("optionsshaders.txt", b"shaderPack=mine.zip"),
+            ],
+        );
+
+        let outcome = petalfall.apply_template("整合包").await.unwrap();
+
+        assert_eq!(
+            outcome,
+            TemplateOutcome::Applied {
+                copied: vec!["servers.dat"],
+                kept: vec![],
+                left_to_mods: vec!["optionsshaders.txt"],
+            }
+        );
+        assert!(!dir.join("optionsshaders.txt").exists());
+        assert_eq!(std::fs::read(dir.join("servers.dat")).unwrap(), b"mine");
+        assert_eq!(
+            std::fs::read(dir.join("config/defaultoptions/extra/optionsshaders.txt")).unwrap(),
+            pack_shaders
+        );
+    }
+
     /// 实例里已经有的文件照旧算「已有」：这时模组不会再铺它的那份，不归到留给模组的一栏。
     #[tokio::test]
     async fn a_file_already_in_the_instance_is_kept_whatever_the_mods_hold() {
