@@ -8,7 +8,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ACTION_ERROR, CONFIRM_COPY, INSTANCE_IN_USE_COPY, LAUNCH_COPY, lockReason, type FailureCopy, type FailureFixKind } from "../copy/flows";
 import { javaPinned, type InstanceSummary } from "../domain/adapt";
 import { locksOf } from "../domain/instance-locks";
-import { canRepair } from "../domain/rules";
+import { repairRefusal } from "../domain/rules";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useInstanceSettings } from "../state/queries/instance";
 import { reimportRoute } from "../state/route";
@@ -24,8 +24,9 @@ export interface LaunchEntry {
   /** failed 视图的文案与修复动作；其余视图为 null。 */
   failure: FailureCopy | null;
   /**
-   * 此刻不能启动的原因：存档正在备份、恢复或导出，或者别的实例正以它为基底，后端会以 instance_busy 拒绝。入口据此
-   * 带原因禁用启动与重新启动，取消、结束、查看诊断不受影响；能启动为 null。
+   * 此刻不能启动的原因：存档正在备份、恢复或导出，或者别的实例正以它为基底，后端会以 instance_busy 拒绝；失败、已结束的会话
+   * 视图下实例已被重扫成补全修不好时，是 rules 的 repairRefusal 那一句。入口据此带原因禁用启动与重新启动，取消、结束、
+   * 查看诊断不受影响；能启动为 null。
    */
   blocked: string | null;
   /**
@@ -117,10 +118,14 @@ export function useLaunch(instanceId: string): LaunchEntry {
 
   // 启动入口只在这个实例没有活动会话时才问这两项，损坏视图同样，会话这一项恒为 false
   const locks = locksOf(inst, false);
-  const blocked = busySaves ? LAUNCH_COPY.savesBusy : locks.launch === null ? null : locks.launch === "moving" ? LAUNCH_COPY.moving : INSTANCE_IN_USE_COPY.launch(locks.launch.usedBy);
+  const lockBlocked = busySaves ? LAUNCH_COPY.savesBusy : locks.launch === null ? null : locks.launch === "moving" ? LAUNCH_COPY.moving : INSTANCE_IN_USE_COPY.launch(locks.launch.usedBy);
+  // 失败、已结束的会话视图排在实例自身的损坏之前（见 launchView），入口照样给「启动」「重新启动」；实例此刻已被重扫成补全修不好时，
+  // 点下去只会被启动拦截以同一句原因拒绝，所以带着它禁用。排在锁之前：锁放开了照样起不来
+  const sessionRefusal = (view.kind === "failed" || view.kind === "stopped") && inst.status === "broken" ? repairRefusal(inst) : null;
+  const blocked = sessionRefusal !== null ? sessionRefusal : lockBlocked;
   const repairReason = isBroken && !reimport ? lockReason(locks.repair, "repair") : undefined;
   // 修不好的说后端给的原因，排在锁之前：锁放开了照样修不好，「完成后才能补全」是兑现不了的话
-  const unrepairable = isBroken && !reimport && !canRepair(inst) ? inst.unrepairableReason : null;
+  const unrepairable = isBroken && !reimport ? repairRefusal(inst) : null;
   const repairBlocked = unrepairable !== null ? unrepairable : repairReason === undefined ? null : repairReason;
   return { instance: inst, view, stopping, failure, blocked, repairBlocked, launch, cancel, stop, dismiss, openCrash, openLogs, fix };
 }

@@ -7,6 +7,8 @@ import { LAUNCH_COPY } from "../copy/flows";
 import { fade } from "../lib/motion";
 import { REFLOW_PAUSED_ATTR } from "../lib/reflow";
 import type { Appearance } from "../domain/types";
+import { IpcError } from "../ipc/errors";
+import type { InstanceDto } from "../ipc/instances";
 import { DEFAULT_APPEARANCE, AppearanceProvider } from "../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { activeAccount } from "../state/selectors";
@@ -204,6 +206,32 @@ describe("命令面板", () => {
     act(() => shell.openPalette("生存"));
     await flush();
     expect(options().some((o) => o.textContent?.startsWith(LAUNCH_COPY.repairAndLaunch))).toBe(offered);
+  });
+
+  it.each<[string, Partial<InstanceDto> | null, boolean]>([
+    ["实例照旧完好：照常给出启动", null, true],
+    ["实例被重扫成补全修不好：不给启动", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null }, false],
+    ["实例被重扫成整合包没导入完：不给启动", { incomplete: { kind: "modpack", outcome: "pending", started_at: 1_699_000_000_000, spec: null, error: null } }, false],
+  ])("当前实例启动失败后，%s", async (_name, rescanned, offered) => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("files_offline", "还缺文件", { count: 3 });
+    });
+    await mount();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+      await settle();
+    });
+    expect(launcher.state.session).toMatchObject({ instanceId: "生存", phase: "failed" });
+    if (rescanned !== null) {
+      ipc.overrides.set("list_instances", () => [instanceDto("生存", { last_played_at: 100, ...rescanned }), instanceDto("创造", { last_played_at: 900 }), instanceDto("空岛")]);
+      await act(async () => {
+        await launcher.actions.refreshInstances();
+        await settle();
+      });
+    }
+    act(() => shell.openPalette());
+    await flush();
+    expect(options().some((o) => o.textContent?.startsWith(LAUNCH_COPY.group("生存")))).toBe(offered);
   });
 
   it("Tab 不把焦点带出输入框；Esc 关闭并把焦点还给打开前的元素", async () => {

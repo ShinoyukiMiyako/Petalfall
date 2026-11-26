@@ -14,10 +14,12 @@ import type { LaunchView } from "../launch/launchView";
 import { fade, springs, TOOLTIP_TIMING } from "../lib/motion";
 import { startSession } from "../state/session";
 import type { Task } from "../domain/types";
-import { LauncherProvider, useLauncherActions } from "../state/launcher";
+import { LauncherProvider, useLauncherActions, useLauncherSelector } from "../state/launcher";
+import type { LauncherState } from "../state/store";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { IpcError } from "../ipc/errors";
+import { bootOverrides, callsOf, cancelledError, configDto, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { ChromeProvider, type ChromeApi } from "./chrome";
 import { SIDEBAR_COPY } from "../copy/shell";
 import { OverlayRoot } from "./overlay";
@@ -195,14 +197,19 @@ let view: Rendered | undefined;
 let nav: NavApi;
 let shell: ShellApi;
 let launcher: ReturnType<typeof useLauncherActions>;
+let toasts: LauncherState["toasts"] = [];
 const chrome: ChromeApi = { scrollContentToTop: vi.fn(), focusContent: vi.fn() };
 
 function Probe() {
   nav = useNav();
   shell = useShell();
   launcher = useLauncherActions();
+  toasts = useLauncherSelector((s) => s.toasts);
   return null;
 }
+
+/** 此刻的错误通知：标题与正文。入口的点击漏进状态容器时，启动拦截报的错会多出一条。 */
+const errorToasts = () => toasts.filter((t) => t.tone === "error").map((t) => [t.title, t.body]);
 
 const flush = () =>
   act(async () => {
@@ -1390,6 +1397,64 @@ describe("侧栏", () => {
       keydown(active, "Enter");
       await flush();
       expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    });
+
+    it.each<[string, () => unknown, string]>([
+      ["启动失败", () => new IpcError("files_offline", "还缺文件", { count: 3 }), LAUNCH_COPY.relaunch],
+      ["启动被取消", () => cancelledError(), LAUNCH_COPY.launch],
+    ])("%s后实例被重扫成补全修不好：第一项带那一句原因禁用，按下不启动、不多报错", async (_name, failure, label) => {
+      const reason = "缺少版本 JSON，也没有记下当初装的是什么";
+      ipc.overrides.set("launch_game", () => {
+        throw failure();
+      });
+      await mount();
+      await act(async () => {
+        await launcher.launch("生存");
+      });
+      await flush();
+      ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, mc_version: null }), instanceDto("创造"), instanceDto("空岛")]);
+      await act(async () => {
+        await launcher.refreshInstances();
+      });
+      await flush();
+      await openMenu("生存");
+      const first = menuOf("生存")?.querySelector<HTMLElement>("[role='menuitem']");
+      if (first === null || first === undefined) throw new Error("菜单里没有条目");
+      // 会话视图排在损坏之前：第一项仍是启动类的说法，只是带原因禁用
+      expect(first.textContent).toBe(label);
+      expect(first.getAttribute("aria-disabled")).toBe("true");
+      const tipId = first.getAttribute("aria-describedby");
+      if (tipId === null) throw new Error("键盘高亮着的禁用项没有关联原因");
+      expect(document.getElementById(tipId)?.textContent).toBe(reason);
+      const errorsBefore = errorToasts();
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement)) throw new Error("菜单打开后焦点不在元素上");
+      keydown(active, "Enter");
+      await flush();
+      expect(callsOf(ipc, "launch_game")).toHaveLength(1);
+      expect(callsOf(ipc, "repair_instance")).toEqual([]);
+      expect(errorToasts()).toEqual(errorsBefore);
+    });
+
+    it("启动失败后实例照旧完好：第一项「重新启动」能按，按下再启动一次", async () => {
+      ipc.overrides.set("launch_game", () => {
+        throw new IpcError("files_offline", "还缺文件", { count: 3 });
+      });
+      await mount();
+      await act(async () => {
+        await launcher.launch("生存");
+      });
+      await flush();
+      await openMenu("生存");
+      const first = menuOf("生存")?.querySelector<HTMLElement>("[role='menuitem']");
+      if (first === null || first === undefined) throw new Error("菜单里没有条目");
+      expect(first.textContent).toBe(LAUNCH_COPY.relaunch);
+      expect(first.getAttribute("aria-disabled")).toBeNull();
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement)) throw new Error("菜单打开后焦点不在元素上");
+      keydown(active, "Enter");
+      await flush();
+      expect(callsOf(ipc, "launch_game")).toHaveLength(2);
     });
 
     it("焦点交给侧栏里原来的下一项", async () => {
