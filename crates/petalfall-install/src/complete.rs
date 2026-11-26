@@ -931,17 +931,29 @@ mod tests {
     }
 
     /// Forge 1.20.1 与 1.20.1 的 NeoForge：补丁 jar 落在 `--fml.forgeGroup` 给的组下，反混淆目录按
-    /// `--fml.mcpVersion` 推出。
+    /// `--fml.mcpVersion` 推出。1.20.1 的 NeoForge 不写组，带的是它自己的 FML，补丁 jar 在 net.neoforged 下：
+    /// 按 Forge 的默认组去找会把刚装好的实例拦下来。
     #[tokio::test]
     async fn missing_processor_outputs_of_forge_are_reported() {
-        for (group, group_path, forge) in [
-            ("net.minecraftforge", "net/minecraftforge", "47.4.10"),
-            ("net.neoforged", "net/neoforged", "47.1.106"),
+        let forge_args = "--launchTarget forgeclient --fml.forgeVersion 47.4.10 \
+             --fml.mcVersion 1.20.1 --fml.forgeGroup net.minecraftforge --fml.mcpVersion 20230612.114412";
+        let mut fork = with_game_args(
+            "--launchTarget forgeclient --fml.forgeVersion 47.1.106 --fml.fmlVersion 47.2.2 \
+             --fml.mcVersion 1.20.1 --fml.mcpVersion 20230612.114412",
+        );
+        fork.libraries = serde_json::from_value(serde_json::json!([
+            {"name": "net.neoforged.fancymodloader:loader:47.2.2"}
+        ]))
+        .unwrap();
+        for (group, group_path, forge, version) in [
+            (
+                "net.minecraftforge",
+                "net/minecraftforge",
+                "47.4.10",
+                with_game_args(forge_args),
+            ),
+            ("net.neoforged", "net/neoforged", "47.1.106", fork),
         ] {
-            let version = with_game_args(&format!(
-                "--launchTarget forgeclient --fml.forgeVersion {forge} --fml.mcVersion 1.20.1 \
-                 --fml.forgeGroup {group} --fml.mcpVersion 20230612.114412"
-            ));
             let dir = tempfile::tempdir().unwrap();
             let layout = GameLayout::new(dir.path());
             let patched = layout.library_path(&format!(

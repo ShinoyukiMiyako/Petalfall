@@ -226,7 +226,8 @@ fn native_jars(
 }
 
 /// 加载器处理器产物所在的库目录：[`processor_outputs`] 按合并后版本 JSON 的 `--fml.*` 启动参数推出的补丁 jar
-/// 所在的目录，以及反混淆目录，都整目录带上。不是 Forge 系的版本没有这些参数，得到空表。
+/// 所在的目录，以及反混淆目录，都整目录带上。反混淆目录里有一个只在 1.13 到 1.15 的 Forge 上才有，别的版本
+/// 源里没有它，由 [`collect_files`] 跳过。不是 Forge 系的版本没有这些参数，得到空表。
 fn processor_output_dirs(merged: &VersionJson, layout: &GameLayout) -> Result<Vec<PathBuf>> {
     let outputs = processor_outputs(merged)?;
     let patched_dirs = outputs.patched_jars.iter().map(|jar| {
@@ -625,7 +626,7 @@ mod tests {
         assert_eq!(plan.total_bytes(), 0);
     }
 
-    /// 1.20.4 之前的 Forge：补丁 jar 与反混淆产物不在库清单里，按 `--fml.*` 参数推出的两个目录整个带上（递归），
+    /// 1.20.4 之前的 Forge：补丁 jar 与反混淆产物不在库清单里，按 `--fml.*` 参数推出的目录整个带上（递归），
     /// 库清单里也有的 universal jar 只列一次，目标已有的跳过。没写 `--fml.forgeGroup` 时按 net.minecraftforge。
     #[tokio::test]
     async fn forge_1_20_1_brings_the_processor_output_dirs() {
@@ -687,22 +688,78 @@ mod tests {
         assert_eq!(plan.missing_in_source, 0);
         assert_eq!(plan.total_bytes(), 5 + 3 + 3 + 4 + 7 + 9 + 5);
 
-        // 1.20.1 的 NeoForge 沿用 Forge 的参数、组名换成 net.neoforged；推出来的目录源里没有就跳过，不算缺失。
+        // 1.20.1 的 NeoForge 沿用 Forge 的参数但不写组，带的是它自己的 FML，补丁 jar 在 net.neoforged 下；
+        // 推出来的目录源里没有就跳过，不算缺失。
+        let fork_fml = "libraries/net/neoforged/fancymodloader/loader/47.2.2/loader-47.2.2.jar";
         let fork = json!({
             "id": "新森林",
             "arguments": forge_args(&[
-                "--fml.forgeVersion", "47.1.106", "--fml.mcVersion", "1.20.1",
-                "--fml.forgeGroup", "net.neoforged", "--fml.mcpVersion", "20230612.999999"
-            ])
+                "--fml.forgeVersion", "47.1.106", "--fml.fmlVersion", "47.2.2",
+                "--fml.mcVersion", "1.20.1", "--fml.mcpVersion", "20230612.999999"
+            ]),
+            "libraries": [artifact(
+                "net.neoforged.fancymodloader:loader:47.2.2",
+                "net/neoforged/fancymodloader/loader/47.2.2/loader-47.2.2.jar"
+            )]
         });
         put_version(&source, "新森林", &fork.to_string());
         let fork_jar =
             "libraries/net/neoforged/forge/1.20.1-47.1.106/forge-1.20.1-47.1.106-client.jar";
         put(&at(&source, fork_jar), b"fork");
+        put(&at(&source, fork_fml), b"fml");
+        // 同版本号的 Forge 目录不是它的，不带。
+        put(
+            &at(
+                &source,
+                "libraries/net/minecraftforge/forge/1.20.1-47.1.106/forge-1.20.1-47.1.106-client.jar",
+            ),
+            b"not mine",
+        );
         let plan = plan_between(&source, &target, "新森林").await;
         assert_eq!(
             relative(&plan.files, &source, &target),
-            vec![(fork_jar.to_owned(), 4)]
+            vec![(fork_fml.to_owned(), 3), (fork_jar.to_owned(), 4)]
+        );
+        assert_eq!(plan.missing_in_source, 0);
+    }
+
+    /// 1.13 到 1.15 的 Forge：extra、slim 生成在不带 mcp 版本号的 client 目录里，带 mcp 版本号的目录里只有 srg，
+    /// 两个目录都带。别的游戏版本的 client 目录不带。
+    #[tokio::test]
+    async fn old_forge_brings_the_unversioned_client_dir() {
+        let (_tmp, source, target) = game_dirs();
+        let instance = json!({
+            "id": "老存档",
+            "mainClass": "cpw.mods.modlauncher.Launcher",
+            "arguments": forge_args(&[
+                "--fml.forgeVersion", "31.2.62", "--fml.mcVersion", "1.15.2",
+                "--fml.forgeGroup", "net.minecraftforge", "--fml.mcpVersion", "20200515.085601"
+            ])
+        });
+        put_version(&source, "老存档", &instance.to_string());
+        let client = "libraries/net/minecraft/client";
+        let patched =
+            "libraries/net/minecraftforge/forge/1.15.2-31.2.62/forge-1.15.2-31.2.62-client.jar";
+        let srg = format!("{client}/1.15.2-20200515.085601/client-1.15.2-20200515.085601-srg.jar");
+        let extra = format!("{client}/1.15.2/client-1.15.2-extra.jar");
+        let slim = format!("{client}/1.15.2/client-1.15.2-slim.jar");
+        put(&at(&source, patched), b"patched");
+        put(&at(&source, &srg), b"srg");
+        put(&at(&source, &extra), b"extra");
+        put(&at(&source, &slim), b"slim");
+        put(
+            &at(
+                &source,
+                &format!("{client}/1.14.4/client-1.14.4-extra-stable.jar"),
+            ),
+            b"other version",
+        );
+
+        let plan = plan_between(&source, &target, "老存档").await;
+
+        assert_eq!(
+            relative(&plan.files, &source, &target),
+            vec![(srg, 3), (extra, 5), (slim, 4), (patched.to_owned(), 7)]
         );
         assert_eq!(plan.missing_in_source, 0);
     }

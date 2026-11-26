@@ -159,8 +159,15 @@ fn join_maven(base: &str, relative: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), relative)
 }
 
-/// 启动参数没写 `--fml.forgeGroup` 时 FML 按这个组找自己的库，处理器产物也落在这个组下。
+/// 启动参数没写 `--fml.forgeGroup` 时 Forge 的 FML 按这个组找自己的库，处理器产物也落在这个组下。
 const DEFAULT_FORGE_GROUP: &str = "net.minecraftforge";
+
+/// 1.20.1 的 NeoForge（47.1.x）沿用 `--fml.forgeVersion` 这套参数，但它的 FML 没有 `--fml.forgeGroup` 这个参数，
+/// 版本 JSON 里也不写：组在它的 FML 里是定死的，补丁 jar 落在 `net/neoforged/forge/` 下。
+const NEOFORGED_FORGE_GROUP: &str = "net.neoforged";
+
+/// NeoForge 自己的 FML 在版本 JSON 库清单里的 maven 组，凭它认出版本带的是哪一家的 FML。
+const NEOFORGED_FML_GROUP: &str = "net.neoforged.fancymodloader";
 
 /// 游戏版本号 `主.次.修订`。
 type McVersion = (u32, u32, u32);
@@ -182,16 +189,19 @@ pub struct ProcessorOutputs {
 
 /// 按合并后版本 JSON 的 `--fml.*` 启动参数推出处理器产物的位置。FML 启动时按同样的参数到库目录里找它们：
 /// 处理器的产物按 `[坐标]` 落到坐标对应的库路径（见 forge.rs 的 `resolve_outputs`），Forge 的补丁 jar 是
-/// `<组>:forge:<mc>-<forge>:client`，NeoForge 的是 `net.neoforged:neoforge:<版本>:client`，反混淆产物在
-/// `net.minecraft:client:<mc>-<mcp 或 neoform>` 的目录下。不是 Forge 系的版本（原版、Fabric、Quilt、1.12 及
-/// 更早的旧式 Forge）没有这些参数，得到空表。参数取值带 `..`、分隔符或盘符时报 [`Error::UnsafePath`]。
+/// `<组>:forge:<mc>-<forge>:client`（组见 [`default_forge_group`]），NeoForge 的是
+/// `net.neoforged:neoforge:<版本>:client`，反混淆产物在 `net.minecraft:client:<mc>-<mcp 或 neoform>` 的目录下。
+/// Forge 这套参数另给出不带 mcp 版本号的 `net.minecraft:client:<mc>` 目录：1.13 到 1.15 的 Forge 把 extra、slim
+/// 生成在那里，1.16.5 上已经并进带 mcp 版本号的目录。不是 Forge 系的版本（原版、Fabric、Quilt、1.12 及更早的
+/// 旧式 Forge）没有这些参数，得到空表。参数取值带 `..`、分隔符或盘符时报 [`Error::UnsafePath`]。
 pub fn processor_outputs(version: &VersionJson) -> Result<ProcessorOutputs> {
     derive_processor_outputs(version, false)
 }
 
 /// [`processor_outputs`] 里对过文件名的那部分，启动前的缺失检查只查这些：游戏版本在
 /// [`FORGE_CHECKED_MC`]、[`NEOFORGE_CHECKED_MC`] 之外的，加载器可能换了产物的名字或不再生成它们，照旧推出的
-/// 位置去查会把好好的实例拦下来，重装也装不出那个文件。
+/// 位置去查会把好好的实例拦下来，重装也装不出那个文件。不带 mcp 版本号的那个目录也不在其中：它只在一部分游戏
+/// 版本上才有，没有的版本查了同样会拦下好好的实例。
 pub(crate) fn checked_processor_outputs(version: &VersionJson) -> Result<ProcessorOutputs> {
     derive_processor_outputs(version, true)
 }
@@ -206,20 +216,27 @@ fn derive_processor_outputs(version: &VersionJson, checked_only: bool) -> Result
     let (forge_wanted, neoforge_wanted) = (wanted(FORGE_CHECKED_MC), wanted(NEOFORGE_CHECKED_MC));
     let mut outputs = ProcessorOutputs::default();
     if let (Some(mc), Some(forge)) = (&mc, fml_arg(&tokens, "--fml.forgeVersion")?) {
-        let group =
-            fml_arg(&tokens, "--fml.forgeGroup")?.unwrap_or_else(|| DEFAULT_FORGE_GROUP.to_owned());
+        let group = match fml_arg(&tokens, "--fml.forgeGroup")? {
+            Some(group) => group,
+            None => default_forge_group(version).to_owned(),
+        };
         if forge_wanted {
             outputs.patched_jars.push(coordinate_path(&format!(
                 "{group}:forge:{mc}-{forge}:client"
             ))?);
         }
     }
-    if let (Some(mc), Some(mcp)) = (&mc, fml_arg(&tokens, "--fml.mcpVersion")?)
-        && forge_wanted
-    {
-        outputs
-            .deobf_dirs
-            .push(coordinate_dir(&format!("net.minecraft:client:{mc}-{mcp}"))?);
+    if let (Some(mc), Some(mcp)) = (&mc, fml_arg(&tokens, "--fml.mcpVersion")?) {
+        if forge_wanted {
+            outputs
+                .deobf_dirs
+                .push(coordinate_dir(&format!("net.minecraft:client:{mc}-{mcp}"))?);
+        }
+        if !checked_only {
+            outputs
+                .deobf_dirs
+                .push(coordinate_dir(&format!("net.minecraft:client:{mc}"))?);
+        }
     }
     if let Some(neoforge) = fml_arg(&tokens, "--fml.neoForgeVersion")?
         && neoforge_wanted
@@ -236,6 +253,20 @@ fn derive_processor_outputs(version: &VersionJson, checked_only: bool) -> Result
         ))?);
     }
     Ok(outputs)
+}
+
+/// 没写 `--fml.forgeGroup` 时补丁 jar 落在哪个组下，由版本带的是哪一家的 FML 决定：库清单里有 NeoForge 自己的
+/// FML（1.20.1 的 NeoForge）就是 [`NEOFORGED_FORGE_GROUP`]，否则是 Forge 的 [`DEFAULT_FORGE_GROUP`]。
+fn default_forge_group(version: &VersionJson) -> &'static str {
+    let neoforged_fml = version
+        .libraries
+        .iter()
+        .any(|lib| lib.name.split(':').next() == Some(NEOFORGED_FML_GROUP));
+    if neoforged_fml {
+        NEOFORGED_FORGE_GROUP
+    } else {
+        DEFAULT_FORGE_GROUP
+    }
 }
 
 /// 一个 `--fml.*` 参数的取值。它要拼进库目录的路径：拼成 `<mc>-<版本>` 之后 `..` 就不再是一个点段，查不出来，
@@ -764,26 +795,54 @@ mod tests {
         }
     }
 
+    /// 同 [`with_game_args`]，另带库清单（只写坐标）。
+    fn with_game_args_and_libraries(args: &str, libraries: &[&str]) -> VersionJson {
+        let args: Vec<&str> = args.split_whitespace().collect();
+        let libraries: Vec<_> = libraries
+            .iter()
+            .map(|name| serde_json::json!({ "name": name }))
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "id": "加载器",
+            "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "arguments": {"game": args, "jvm": []},
+            "libraries": libraries
+        }))
+        .unwrap()
+    }
+
     /// 三组真实的启动参数（Forge 1.20.1、1.20.1 的 NeoForge、NeoForge 21.1）各自推出的产物，文件名与本机装出来的
-    /// 一致：补丁 jar 是确切的文件，反混淆产物给到目录。这三组都在核对过的版本里，启动前全数要查。
+    /// 一致：补丁 jar 是确切的文件，反混淆产物给到目录。这三组都在核对过的版本里，启动前全数要查；Forge 这套
+    /// 参数另推出的不带 mcp 版本号的目录只给移动实例用，启动前不查。
     #[test]
     fn fml_arguments_point_at_the_processor_outputs() {
         let forge = with_game_args(
             "--launchTarget forgeclient --fml.forgeVersion 47.4.10 --fml.mcVersion 1.20.1 \
              --fml.forgeGroup net.minecraftforge --fml.mcpVersion 20230612.114412",
         );
-        let forge_outputs = outputs(
-            &["net/minecraftforge/forge/1.20.1-47.4.10/forge-1.20.1-47.4.10-client.jar"],
-            &["net/minecraft/client/1.20.1-20230612.114412"],
+        let forge_jar = "net/minecraftforge/forge/1.20.1-47.4.10/forge-1.20.1-47.4.10-client.jar";
+        // 1.20.1 的 NeoForge 不写 --fml.forgeGroup，库清单里是它自己的 FML。
+        let neoforge_fork = with_game_args_and_libraries(
+            "--launchTarget forgeclient --fml.forgeVersion 47.1.106 --fml.fmlVersion 47.2.2 \
+             --fml.mcVersion 1.20.1 --fml.mcpVersion 20230612.114412",
+            &[
+                "net.neoforged.fancymodloader:loader:47.2.2",
+                "net.minecraftforge:accesstransformers:8.0.4",
+            ],
         );
-        let neoforge_fork = with_game_args(
-            "--launchTarget forgeclient --fml.forgeVersion 47.1.106 --fml.mcVersion 1.20.1 \
-             --fml.forgeGroup net.neoforged --fml.mcpVersion 20230612.114412",
-        );
-        let fork_outputs = outputs(
-            &["net/neoforged/forge/1.20.1-47.1.106/forge-1.20.1-47.1.106-client.jar"],
-            &["net/minecraft/client/1.20.1-20230612.114412"],
-        );
+        let fork_jar = "net/neoforged/forge/1.20.1-47.1.106/forge-1.20.1-47.1.106-client.jar";
+        let versioned = "net/minecraft/client/1.20.1-20230612.114412";
+        for (version, jar) in [(forge, forge_jar), (neoforge_fork, fork_jar)] {
+            assert_eq!(
+                processor_outputs(&version).unwrap(),
+                outputs(&[jar], &[versioned, "net/minecraft/client/1.20.1"])
+            );
+            assert_eq!(
+                checked_processor_outputs(&version).unwrap(),
+                outputs(&[jar], &[versioned])
+            );
+        }
+
         let neoforge = with_game_args(
             "--fml.neoForgeVersion 21.1.250 --fml.fmlVersion 4.0.44 --fml.mcVersion 1.21.1 \
              --fml.neoFormVersion 20240808.144430 --launchTarget forgeclient",
@@ -792,25 +851,82 @@ mod tests {
             &["net/neoforged/neoforge/21.1.250/neoforge-21.1.250-client.jar"],
             &["net/minecraft/client/1.21.1-20240808.144430"],
         );
-        for (version, expected) in [
-            (forge, forge_outputs),
-            (neoforge_fork, fork_outputs),
-            (neoforge, neoforge_outputs),
-        ] {
-            assert_eq!(processor_outputs(&version).unwrap(), expected);
-            assert_eq!(checked_processor_outputs(&version).unwrap(), expected);
-        }
-
-        // 没写 --fml.forgeGroup 时按 FML 的默认组 net.minecraftforge。
-        let ungrouped = with_game_args(
-            "--fml.forgeVersion 36.2.39 --fml.mcVersion 1.16.5 --fml.mcpVersion 20210115.111550",
-        );
+        assert_eq!(processor_outputs(&neoforge).unwrap(), neoforge_outputs);
         assert_eq!(
-            checked_processor_outputs(&ungrouped).unwrap(),
+            checked_processor_outputs(&neoforge).unwrap(),
+            neoforge_outputs
+        );
+    }
+
+    /// 没写 `--fml.forgeGroup` 时组看版本带的是哪一家的 FML：Forge 的 FML（或认不出）按 net.minecraftforge，
+    /// NeoForge 自己的 FML 按 net.neoforged；写了就照写的来，库清单里别的 net.neoforged 库不算数。
+    #[test]
+    fn the_forge_group_defaults_by_whose_fml_the_version_carries() {
+        let args =
+            "--fml.forgeVersion 36.2.39 --fml.mcVersion 1.16.5 --fml.mcpVersion 20210115.111550";
+        let jar_under = |group: &str| {
             outputs(
-                &["net/minecraftforge/forge/1.16.5-36.2.39/forge-1.16.5-36.2.39-client.jar"],
+                &[&format!(
+                    "{group}/forge/1.16.5-36.2.39/forge-1.16.5-36.2.39-client.jar"
+                )],
                 &["net/minecraft/client/1.16.5-20210115.111550"],
             )
+        };
+        for (libraries, group) in [
+            (&[][..], "net/minecraftforge"),
+            (
+                &["net.minecraftforge:fmlloader:1.16.5-36.2.39"][..],
+                "net/minecraftforge",
+            ),
+            (
+                &["net.neoforged:mergetool:2.0.0:api"][..],
+                "net/minecraftforge",
+            ),
+            (
+                &["net.neoforged.fancymodloader:loader:47.2.2"][..],
+                "net/neoforged",
+            ),
+        ] {
+            let version = with_game_args_and_libraries(args, libraries);
+            assert_eq!(
+                checked_processor_outputs(&version).unwrap(),
+                jar_under(group),
+                "{libraries:?}"
+            );
+        }
+
+        let explicit = with_game_args_and_libraries(
+            &format!("{args} --fml.forgeGroup org.example"),
+            &["net.neoforged.fancymodloader:loader:47.2.2"],
+        );
+        assert_eq!(
+            checked_processor_outputs(&explicit).unwrap(),
+            jar_under("org/example")
+        );
+    }
+
+    /// 1.13 到 1.15 的 Forge 把 extra、slim 生成在不带 mcp 版本号的目录里，带 mcp 版本号的目录里只有 srg：两个
+    /// 目录移动实例都要带。启动前只查带 mcp 版本号的那个。
+    #[test]
+    fn old_forge_keeps_extra_and_slim_in_the_unversioned_client_dir() {
+        let version = with_game_args(
+            "--launchTarget fmlclient --fml.forgeVersion 31.2.62 --fml.mcVersion 1.15.2 \
+             --fml.forgeGroup net.minecraftforge --fml.mcpVersion 20200515.085601",
+        );
+        let jar = "net/minecraftforge/forge/1.15.2-31.2.62/forge-1.15.2-31.2.62-client.jar";
+        assert_eq!(
+            processor_outputs(&version).unwrap(),
+            outputs(
+                &[jar],
+                &[
+                    "net/minecraft/client/1.15.2-20200515.085601",
+                    "net/minecraft/client/1.15.2"
+                ]
+            )
+        );
+        assert_eq!(
+            checked_processor_outputs(&version).unwrap(),
+            outputs(&[jar], &["net/minecraft/client/1.15.2-20200515.085601"])
         );
     }
 
@@ -870,17 +986,18 @@ mod tests {
                  --fml.neoFormVersion 20241203.161809"
             ))
         };
-        for (version, checked) in [
-            (forge_on("1.13"), true),
-            (forge_on("1.20.1"), true),
-            (forge_on("1.12.2"), false),
-            (forge_on("1.20.2"), false),
-            (forge_on("1.20.1-pre1"), false),
-            (neoforge_on("1.20.2"), true),
-            (neoforge_on("1.21.1"), true),
-            (neoforge_on("1.20.1"), false),
-            (neoforge_on("1.21.2"), false),
-            (neoforge_on("26.1"), false),
+        // 第二项：Forge 参数另推出的不带 mcp 版本号的目录，NeoForge 参数没有。
+        for (version, unversioned, checked) in [
+            (forge_on("1.13"), Some("1.13"), true),
+            (forge_on("1.20.1"), Some("1.20.1"), true),
+            (forge_on("1.12.2"), Some("1.12.2"), false),
+            (forge_on("1.20.2"), Some("1.20.2"), false),
+            (forge_on("1.20.1-pre1"), Some("1.20.1-pre1"), false),
+            (neoforge_on("1.20.2"), None, true),
+            (neoforge_on("1.21.1"), None, true),
+            (neoforge_on("1.20.1"), None, false),
+            (neoforge_on("1.21.2"), None, false),
+            (neoforge_on("26.1"), None, false),
         ] {
             let all = processor_outputs(&version).unwrap();
             assert_eq!(all.patched_jars.len(), 1);
@@ -889,9 +1006,25 @@ mod tests {
                 "{:?}",
                 all.patched_jars
             );
-            assert_eq!(all.deobf_dirs.len(), 1);
+            let unversioned = unversioned.map(|mc| format!("net/minecraft/client/{mc}"));
+            let versioned: Vec<String> = all
+                .deobf_dirs
+                .iter()
+                .filter(|dir| Some(*dir) != unversioned.as_ref())
+                .cloned()
+                .collect();
+            assert_eq!(versioned.len(), 1, "{:?}", all.deobf_dirs);
+            assert_eq!(
+                all.deobf_dirs.len(),
+                1 + usize::from(unversioned.is_some()),
+                "{:?}",
+                all.deobf_dirs
+            );
             let expected = if checked {
-                all
+                ProcessorOutputs {
+                    patched_jars: all.patched_jars,
+                    deobf_dirs: versioned,
+                }
             } else {
                 ProcessorOutputs::default()
             };
