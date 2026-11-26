@@ -881,8 +881,13 @@ impl Petalfall {
             announcer.enter(InstallPhase::Template);
         }
         let template = self.apply_template(name).await?;
-        if let crate::template::TemplateOutcome::Applied { copied, .. } = &template
-            && !copied.is_empty()
+        // 留给模组的也要说：模板的文件一个都没补进来时，不说玩家就看不出默认设置为什么没生效。
+        if let crate::template::TemplateOutcome::Applied {
+            copied,
+            left_to_mods,
+            ..
+        } = &template
+            && (!copied.is_empty() || !left_to_mods.is_empty())
         {
             emit(events, CoreEvent::stage(template_stage(&template)));
         }
@@ -2213,6 +2218,184 @@ mod tests {
                 .any(|s| s
                     == "沿用默认设置：补上 servers.dat（options.txt 留给整合包里模组的默认设置）"),
             "{stages:?}"
+        );
+    }
+
+    /// 模板里只有 options.txt、又整份留给了模组时，一个文件都没补进来。这时进度里照样要说，不然玩家看不出
+    /// 默认设置为什么没生效。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn template_left_entirely_to_the_mods_is_still_announced() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("测试包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/config/yosbr/options.txt", b"fov:0.8\n")],
+        );
+        let petalfall = petalfall(tmp.path(), &server);
+        let template = petalfall.template_dir();
+        std::fs::create_dir_all(&template).unwrap();
+        std::fs::write(template.join("options.txt"), b"fov:90").unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = petalfall
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("只留给模组"),
+                &ImportSelection::default(),
+                "task-e",
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        drop(tx);
+
+        assert!(!outcome.version_dir.join("options.txt").exists());
+        let mut stages = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let CoreEvent::Stage(stage) = event {
+                stages.push(stage);
+            }
+        }
+        assert!(
+            stages
+                .iter()
+                .any(|s| s == "沿用默认设置：options.txt 留给整合包里模组的默认设置"),
+            "{stages:?}"
+        );
+    }
+
+    /// 整合包带着 YOSBR 自动建的那份空 options.txt 时，它不是作者的设置：模板的 options.txt 照常补进实例，
+    /// 空文件原样留着。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blank_mod_defaults_in_the_pack_do_not_hold_the_template_back() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("测试包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/config/yosbr/options.txt", b"")],
+        );
+        let petalfall = petalfall(tmp.path(), &server);
+        let template = petalfall.template_dir();
+        std::fs::create_dir_all(&template).unwrap();
+        std::fs::write(template.join("options.txt"), b"fov:90").unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = petalfall
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("带空占位"),
+                &ImportSelection::default(),
+                "task-f",
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        drop(tx);
+
+        let dir = outcome.version_dir;
+        assert_eq!(std::fs::read(dir.join("options.txt")).unwrap(), b"fov:90");
+        assert_eq!(
+            std::fs::read(dir.join("config/yosbr/options.txt")).unwrap(),
+            b""
+        );
+        let mut stages = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let CoreEvent::Stage(stage) = event {
+                stages.push(stage);
+            }
+        }
+        assert!(
+            stages.iter().any(|s| s == "沿用默认设置：补上 options.txt"),
+            "{stages:?}"
+        );
+    }
+
+    /// 模板的文件实例里都已经有、一个没补也没有留给模组的时不发这条进度：包里自带的设置原样留着本来就是
+    /// 常态，不用每次导入都说一遍。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn template_with_nothing_to_add_is_not_announced() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("测试包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/options.txt", b"fov:0.8\n")],
+        );
+        let petalfall = petalfall(tmp.path(), &server);
+        let template = petalfall.template_dir();
+        std::fs::create_dir_all(&template).unwrap();
+        std::fs::write(template.join("options.txt"), b"fov:90").unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = petalfall
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("自带设置"),
+                &ImportSelection::default(),
+                "task-h",
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        drop(tx);
+
+        assert_eq!(
+            std::fs::read(outcome.version_dir.join("options.txt")).unwrap(),
+            b"fov:0.8\n"
+        );
+        let mut stages = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let CoreEvent::Stage(stage) = event {
+                stages.push(stage);
+            }
+        }
+        assert!(
+            !stages.iter().any(|s| s.contains("沿用默认设置")),
+            "{stages:?}"
+        );
+    }
+
+    /// 整合包的模组默认设置里只有一行游戏默认语言：那一行在套模板之前就去掉了，剩下的空文件不挡模板。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mod_defaults_emptied_of_the_default_language_do_not_hold_the_template_back() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("测试包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/config/yosbr/options.txt", b"lang:en_us\n")],
+        );
+        let petalfall = petalfall(tmp.path(), &server);
+        let template = petalfall.template_dir();
+        std::fs::create_dir_all(&template).unwrap();
+        std::fs::write(template.join("options.txt"), b"fov:90").unwrap();
+
+        let outcome = petalfall
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("只有默认语言"),
+                &ImportSelection::default(),
+                "task-g",
+                None,
+            )
+            .await
+            .unwrap();
+
+        let dir = outcome.version_dir;
+        assert_eq!(std::fs::read(dir.join("options.txt")).unwrap(), b"fov:90");
+        assert_eq!(
+            std::fs::read(dir.join("config/yosbr/options.txt")).unwrap(),
+            b""
         );
     }
 
