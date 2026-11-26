@@ -5,6 +5,11 @@ import { formatPlaytime } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import type { SortKey } from "./model";
 
+/** 后端给的原因有的已带句末标点，有的后面还跟着一句提示：没有句末标点时才补句号，不出现两个句号。 */
+function sentence(text: string): string {
+  return /[。！？.!?]$/.test(text) ? text : `${text}。`;
+}
+
 export const LIBRARY_COPY = {
   title: PAGE_LABEL.library,
   subtitle: (count: number, pinned: number, minutes: number | null) =>
@@ -23,7 +28,12 @@ export const LIBRARY_COPY = {
   dirVersionsUnknown: "版本数读不到",
 
   repairTitle: (count: number) => `${count} 个实例需要修复`,
-  repairBody: (names: readonly string[]) => `${names.map((n) => `「${n}」`).join("")}缺少游戏文件，补全后就能启动。`,
+  /** 横幅正文：补全修得好的合成一句；修不好的另起一句，逐个写明后端给的原因，不承诺补全后就能启动。只有一拨时只出那一句。 */
+  repairBody: (repairable: readonly string[], unrepairable: readonly { name: string; reason: string }[]) => {
+    if (repairable.length === 0 && unrepairable.length === 0) throw new Error("修复横幅没有要列的实例");
+    const fixable = repairable.length === 0 ? "" : `${repairable.map((n) => `「${n}」`).join("")}缺少游戏文件，补全后就能启动。`;
+    return fixable + unrepairable.map(({ name, reason }) => sentence(`「${name}」补全修不好：${reason}`)).join("");
+  },
   repairOne: "立即修复",
   repairAll: "全部修复",
 

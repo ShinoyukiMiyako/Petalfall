@@ -129,7 +129,8 @@ describe("统计与签名", () => {
   it("累计时长求和、损坏实例按原顺序列出", () => {
     const list = [inst("a", { playtimeMin: 90 }), inst("b", { status: "broken", brokenReason: "缺少版本 JSON" }), inst("c", { playtimeMin: 30 })];
     expect(totalPlaytime(list)).toBe(120);
-    expect(ids(brokenInstances(list))).toEqual(["b"]);
+    expect(ids(brokenInstances(list).repairable)).toEqual(["b"]);
+    expect(brokenInstances(list).unrepairable).toEqual([]);
     expect(LIBRARY_COPY.subtitle(3, 2, totalPlaytime(list))).toBe("共 3 个实例 · 2 个固定在侧栏 · 累计 2 小时");
   });
 
@@ -149,9 +150,34 @@ describe("统计与签名", () => {
       // 正在重新补全的不算损坏
       inst("busy", { status: "installing", incomplete: marker("modpack") }),
     ];
-    expect(ids(brokenInstances(list))).toEqual(["install", "repair"]);
+    expect(ids(brokenInstances(list).repairable)).toEqual(["install", "repair"]);
+    expect(brokenInstances(list).unrepairable).toEqual([]);
   });
 
+  it("修复横幅把补全修不好的另列一拨，带上后端给的原因；修得好的、整合包没导入完的、没坏的都不进这一拨", () => {
+    const reason = "缺少版本 JSON，也没有记下当初装的是什么";
+    const marker = { kind: "modpack" as const, outcome: "failed" as const, startedAt: null, spec: null, error: null };
+    const list = [
+      inst("旧电脑拷来的", { status: "broken", brokenReason: "缺少版本 JSON", unrepairableReason: reason, mcVersion: null }),
+      inst("坏掉的", { status: "broken", brokenReason: "缺少客户端 jar" }),
+      inst("pack", { status: "broken", brokenReason: "整合包没有导入完", incomplete: marker }),
+      inst("好的"),
+    ];
+    const broken = brokenInstances(list);
+    expect(ids(broken.repairable)).toEqual(["坏掉的"]);
+    expect(broken.unrepairable.map((u) => [u.inst.id, u.reason])).toEqual([["旧电脑拷来的", reason]]);
+  });
+
+  it("两拨各自保持列表里的顺序，不论修得好的与修不好的怎么交错", () => {
+    const n = 3 + Math.floor(Math.random() * 6);
+    const list = Array.from({ length: n }, (_, i) =>
+      Math.random() < 0.5 ? inst(`修不好${i}`, { status: "broken", brokenReason: "缺少版本 JSON", unrepairableReason: `原因${i}`, mcVersion: null }) : inst(`修得好${i}`, { status: "broken", brokenReason: "缺少客户端 jar" }),
+    );
+    const broken = brokenInstances(list);
+    expect(ids(broken.repairable)).toEqual(ids(list.filter((i) => i.unrepairableReason === null)));
+    expect(broken.unrepairable.map((u) => [u.inst.id, u.reason])).toEqual(list.filter((i) => i.unrepairableReason !== null).map((i) => [i.id, i.unrepairableReason]));
+    expect(broken.repairable.length + broken.unrepairable.length).toBe(n);
+  });
 });
 
 describe("crowdedChange", () => {
@@ -283,6 +309,26 @@ describe("文案", () => {
   });
 
   it("修复横幅逐个列出实例名", () => {
-    expect(LIBRARY_COPY.repairBody(["GT: New Horizons", "RLCraft"])).toBe("「GT: New Horizons」「RLCraft」缺少游戏文件，补全后就能启动。");
+    expect(LIBRARY_COPY.repairBody(["GT: New Horizons", "RLCraft"], [])).toBe("「GT: New Horizons」「RLCraft」缺少游戏文件，补全后就能启动。");
+  });
+
+  it("修复横幅：修不好的另起一句、各带自己的原因，不说补全后就能启动；只有修不好的时只出这一句", () => {
+    const reason = "缺少版本 JSON，也没有记下当初装的是什么";
+    expect(LIBRARY_COPY.repairBody(["坏掉的"], [{ name: "旧电脑拷来的", reason }])).toBe("「坏掉的」缺少游戏文件，补全后就能启动。「旧电脑拷来的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。");
+    const both = [
+      { name: "甲", reason },
+      { name: "乙", reason: "版本 JSON 损坏，也没有记下当初装的是什么" },
+    ];
+    expect(LIBRARY_COPY.repairBody([], both)).toBe("「甲」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。「乙」补全修不好：版本 JSON 损坏，也没有记下当初装的是什么。");
+  });
+
+  it("修复横幅：原因已带句末标点或后跟一句提示时照原文接上，不再补句号", () => {
+    const withHint = "缺少版本 JSON，也没有记下当初装的是什么。目录里还有一份别的版本文件，可能是改名时留下的。";
+    expect(LIBRARY_COPY.repairBody([], [{ name: "甲", reason: withHint }])).toBe(`「甲」补全修不好：${withHint}`);
+    expect(LIBRARY_COPY.repairBody([], [{ name: "乙", reason: "Version JSON is missing." }])).toBe("「乙」补全修不好：Version JSON is missing.");
+  });
+
+  it("修复横幅两拨都空时是调用错了：横幅不该出现", () => {
+    expect(() => LIBRARY_COPY.repairBody([], [])).toThrow("修复横幅没有要列的实例");
   });
 });

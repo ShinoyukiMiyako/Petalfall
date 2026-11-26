@@ -9,7 +9,7 @@ import { Icon } from "../../art/Icon";
 import { LAUNCH_COPY, lockReason, MODPACK_REIMPORT_COPY, SESSION_COPY, TASK_STATUS_LABEL } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { locksOf } from "../../domain/instance-locks";
-import { needsReimport } from "../../domain/rules";
+import { canRepair, needsReimport } from "../../domain/rules";
 import { sessionPhaseLabel, stageLabel, type LaunchView } from "../../launch/launchView";
 import { useLaunch, type LaunchEntry } from "../../launch/useLaunch";
 import { useMounted } from "../../lib/useMounted";
@@ -145,12 +145,22 @@ function FaceContent({ view, entry, inst, reimport }: { view: LaunchView; entry:
     case "broken":
       if (reimport) return <ReimportStatus inst={inst} />;
       return (
-        // 视图是 broken 说明本实例没有活动的会话；补全被基底占用、备份、改动挡住时不让点了才报 instance_busy
-        <Button size="sm" icon="wrench" disabledReason={lockReason(locksOf(inst, false).repair, "repair")} onClick={entry.launch}>
+        <Button size="sm" icon="wrench" disabledReason={repairBlockedReason(inst)} onClick={entry.launch}>
           {LAUNCH_COPY.repairAndLaunch}
         </Button>
       );
   }
+}
+
+/**
+ * 底栏「修复并启动」点不了的原因。补全修不好的写明后端给的原因，排在锁之前：锁放开了也修不好。
+ * 视图是 broken 说明本实例没有活动的会话；补全被基底占用、备份、改动挡住时不让点了才报 instance_busy。
+ */
+function repairBlockedReason(inst: InstanceSummary): string | undefined {
+  if (canRepair(inst)) return lockReason(locksOf(inst, false).repair, "repair");
+  // 整合包没导入完的已换成重新导入的面，canRepair 为 false 的只剩后端报了修不好的
+  if (inst.unrepairableReason === null) throw new Error(`实例 ${inst.id} 补全修不好，却没有原因`);
+  return inst.unrepairableReason;
 }
 
 /** 整合包没导入完：补全补不回来，底栏不给「修复并启动」，改给重新导入与删除。 */

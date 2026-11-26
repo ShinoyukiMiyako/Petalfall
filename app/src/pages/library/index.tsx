@@ -128,13 +128,15 @@ export default function LibraryPage() {
   const counts = useMemo(() => loaderCounts(all), [all]);
   const shown = useMemo(() => visibleInstances(all, view), [all, view]);
   const broken = useMemo(() => brokenInstances(all), [all]);
+  // 补全修不好的也进横幅：它们同样启动不了，横幅写明修不好的原因
+  const brokenCount = broken.repairable.length + broken.unrepairable.length;
   const filtered = isFiltered(view);
 
   // 横幅在不在：读完以后看有没有损坏实例；还在读时按上次读完时记下的。占位与真实横幅同一个 key、同一个外框，
   // 数据到了只把里面的骨架换成文字与按钮；记下有、这次却没有时整条淡出，下面由页面的让位滑上来
-  const repairShown = gate.view === "content" ? broken.length > 0 : shape.repairBanner;
+  const repairShown = gate.view === "content" ? brokenCount > 0 : shape.repairBanner;
   // 读完、读成功才记：读取失败时的空列表不是「没有损坏实例」
-  const repairSettled = gate.view === "content" && ready ? broken.length > 0 : null;
+  const repairSettled = gate.view === "content" && ready ? brokenCount > 0 : null;
   useEffect(() => {
     if (repairSettled !== null) report({ repairBanner: repairSettled });
   }, [repairSettled, report]);
@@ -146,11 +148,11 @@ export default function LibraryPage() {
   ];
   const sortOptions = SORT_KEYS.map((key) => ({ value: key, label: LIBRARY_COPY.sort[key] }));
 
-  // 被基底占用、备份或改动占着的这轮不排：补全排上也只会被 instance_busy 拒绝，留下一个失败的任务
+  // 只为补全修得好的排；被基底占用、备份或改动占着的这轮也不排：补全排上也只会被 instance_busy 拒绝，留下一个失败的任务
   const repairReason = (inst: InstanceSummary) => lockReason(locksOf(inst, inst.id === sessionInstance).repair, "repair");
-  const repairable = broken.filter((inst) => repairReason(inst) === undefined);
+  const queueable = broken.repairable.filter((inst) => repairReason(inst) === undefined);
   const repairAll = () => {
-    for (const inst of repairable) void run(() => actions.repairInstance(inst.id), ACTION_ERROR.repair);
+    for (const inst of queueable) void run(() => actions.repairInstance(inst.id), ACTION_ERROR.repair);
   };
 
   const clearFilter = () => setView({ loader: "all", query: "" });
@@ -228,21 +230,24 @@ export default function LibraryPage() {
             icon="wrench"
             title={
               <Loadable view={gate.view} skeleton={<Skeleton shape="text" width={REPAIR_SKELETON.title} />}>
-                {() => LIBRARY_COPY.repairTitle(broken.length)}
+                {() => LIBRARY_COPY.repairTitle(brokenCount)}
               </Loadable>
             }
             actions={
-              <Loadable view={gate.view} skeleton={<Skeleton shape="block" width={REPAIR_SKELETON.actionWidth} height={REPAIR_SKELETON.actionHeight} radius="sm" />}>
-                {() => (
-                  <Button size="sm" disabledReason={repairable.length === 0 ? repairReason(broken[0]) : undefined} onClick={repairAll}>
-                    {broken.length > 1 ? LIBRARY_COPY.repairAll : LIBRARY_COPY.repairOne}
-                  </Button>
-                )}
-              </Loadable>
+              // 全都修不好时不给按钮：补全一律被拒。还在读时不知道，按记下的形状先占着按钮位
+              gate.view === "content" && broken.repairable.length === 0 ? undefined : (
+                <Loadable view={gate.view} skeleton={<Skeleton shape="block" width={REPAIR_SKELETON.actionWidth} height={REPAIR_SKELETON.actionHeight} radius="sm" />}>
+                  {() => (
+                    <Button size="sm" disabledReason={queueable.length === 0 ? repairReason(broken.repairable[0]) : undefined} onClick={repairAll}>
+                      {broken.repairable.length > 1 ? LIBRARY_COPY.repairAll : LIBRARY_COPY.repairOne}
+                    </Button>
+                  )}
+                </Loadable>
+              )
             }
           >
             <Loadable view={gate.view} skeleton={<Skeleton shape="text" width={REPAIR_SKELETON.body} />}>
-              {() => LIBRARY_COPY.repairBody(broken.map((inst) => inst.name))}
+              {() => LIBRARY_COPY.repairBody(broken.repairable.map((inst) => inst.name), broken.unrepairable.map(({ inst, reason }) => ({ name: inst.name, reason })))}
             </Loadable>
           </Banner>
         )}

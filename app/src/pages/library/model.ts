@@ -3,7 +3,7 @@
 import { gameDirSwitchReason } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
-import { needsReimport } from "../../domain/rules";
+import { canRepair, needsReimport } from "../../domain/rules";
 import { REFLOW_MAX_ITEMS } from "../../lib/reflow";
 import type { GameDirectoryDto } from "../../state/queries/catalog";
 import type { SelectOption } from "../../ui/Select";
@@ -101,9 +101,33 @@ export function totalPlaytime(list: readonly InstanceSummary[]): number | null {
   return total;
 }
 
-/** 修复横幅列出的实例：补全能修好的损坏实例。整合包没导入完的补全补不回来，各自在卡片上给重新导入。 */
-export function brokenInstances(list: readonly InstanceSummary[]): InstanceSummary[] {
-  return list.filter((inst) => inst.status === "broken" && !needsReimport(inst));
+/** 修复横幅里补全修不好的一个实例，连同后端给的原因（原文照写）。 */
+export interface UnrepairableInstance {
+  inst: InstanceSummary;
+  reason: string;
+}
+
+/** 修复横幅列出的实例，按补全修不修得好分两拨，各自保持列表顺序；横幅在不在看两拨之和。 */
+export interface BrokenInstances {
+  /** 补全能修好的：横幅的按钮只为它们排补全。 */
+  repairable: InstanceSummary[];
+  /** 补全修不好的：补全一律被拒，横幅只写明原因。 */
+  unrepairable: UnrepairableInstance[];
+}
+
+/** 修复横幅列出的实例。整合包没导入完的补全补不回来，两拨都不进，各自在卡片上给重新导入。 */
+export function brokenInstances(list: readonly InstanceSummary[]): BrokenInstances {
+  const repairable: InstanceSummary[] = [];
+  const unrepairable: UnrepairableInstance[] = [];
+  for (const inst of list) {
+    if (inst.status !== "broken" || needsReimport(inst)) continue;
+    const reason = inst.unrepairableReason;
+    if (canRepair(inst)) repairable.push(inst);
+    else if (reason !== null) unrepairable.push({ inst, reason });
+    // 整合包没导入完的上面已排掉，canRepair 为 false 的只剩后端报了修不好的；没有原因就是两边对修不修得好的判定错开了
+    else throw new Error(`实例 ${inst.id} 补全修不好，却没有原因`);
+  }
+  return { repairable, unrepairable };
 }
 
 /**

@@ -61,6 +61,12 @@ function sample(): InstanceDto[] {
   ];
 }
 
+/** 后端对补全修不好的实例给的原因：列表里与补全拒绝时是同一句。 */
+const UNREPAIRABLE = "缺少版本 JSON，也没有记下当初装的是什么";
+/** 补全修不好的损坏实例：版本 JSON 缺失，也没有安装记录。 */
+const unrepairable = (id: string, overrides: Partial<InstanceDto> = {}) =>
+  instanceDto(id, { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: UNREPAIRABLE, mc_version: null, ...overrides });
+
 let instances: InstanceDto[];
 /** 启动时读到的界面形状：默认没记过。 */
 let shape: UiShape;
@@ -309,6 +315,26 @@ describe("实例库：修复横幅按记下的形状占位", () => {
     expect(liveBanners()).toEqual([held]);
     expect(held.textContent).toBe("1 个实例需要修复「坏掉的」缺少游戏文件，补全后就能启动。立即修复");
     expect(repairButtons()).toHaveLength(1);
+    await advance(5 * UI_SHAPE_WRITE_DELAY_MS);
+    expect(callsOf(ipc, "set_ui_shape")).toEqual([]);
+  });
+
+  it("列表到了、损坏实例全都补全修不好：同一个外框里换上标题与说明，按钮位撤下，记下的没变，不写", async () => {
+    shape = { recentCards: 0, repairBanner: true };
+    instances = instances.map((i) => (i.id === "坏掉的" ? unrepairable("坏掉的") : i));
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    const [held] = liveBanners();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+      list.resolve(instances);
+      await settle();
+    });
+    expect(liveBanners()).toEqual([held]);
+    expect(held.textContent).toBe("1 个实例需要修复「坏掉的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。");
+    expect(held.querySelector("button")).toBeNull();
+    expect(held.querySelector(`.${bannerStyles.actions}`)).toBeNull();
     await advance(5 * UI_SHAPE_WRITE_DELAY_MS);
     expect(callsOf(ipc, "set_ui_shape")).toEqual([]);
   });
@@ -1219,6 +1245,68 @@ describe("实例库：动作", () => {
     const repairs = launcher.state.tasks.filter((t) => t.spec.command === "repair_instance");
     expect(repairs.map((t) => t.spec.args)).toEqual([{ id: "坏掉的" }]);
     expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的"]);
+  });
+
+  it("修复横幅：补全修不好的另起一句写明后端给的原因，「立即修复」只为修得好的那个排补全", async () => {
+    instances = [...instances, unrepairable("旧电脑拷来的")];
+    await mount();
+    const button = byText<HTMLButtonElement>("button", LIBRARY_COPY.repairOne);
+    const banner = button.closest(`.${bannerStyles.banner}`);
+    expect(banner?.textContent).toBe("2 个实例需要修复「坏掉的」缺少游戏文件，补全后就能启动。「旧电脑拷来的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。立即修复");
+    expect(button.getAttribute("aria-disabled")).toBeNull();
+    click(button);
+    await flush();
+    expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的"]);
+    expect(launcher.state.tasks.filter((t) => t.spec.command === "repair_instance").map((t) => t.spec.args)).toEqual([{ id: "坏掉的" }]);
+  });
+
+  it("修复横幅：两个修得好、一个修不好时按修得好的个数给「全部修复」，只为那两个排补全", async () => {
+    instances = [...instances, unrepairable("旧电脑拷来的"), instanceDto("也坏了", { status: "broken", broken_reason: "缺少客户端 jar" })];
+    await mount();
+    expect(document.body.textContent).toContain("3 个实例需要修复「坏掉的」「也坏了」缺少游戏文件，补全后就能启动。「旧电脑拷来的」补全修不好：");
+    click(byText("button", LIBRARY_COPY.repairAll));
+    await flush();
+    expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的", "也坏了"]);
+  });
+
+  it("修复横幅：修得好的都被别的实例当作基底、另有修不好的时，按钮带锁的原因禁用，点了什么都不排", async () => {
+    instances = [...instances.map((i): InstanceDto => (i.id === "坏掉的" ? { ...i, activity: "inherited", used_by: "Fabric 整合" } : i)), unrepairable("旧电脑拷来的")];
+    await mount();
+    const button = byText<HTMLButtonElement>("button", LIBRARY_COPY.repairOne);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(button)).toBe("实例「Fabric 整合」正在使用它，结束后才能补全");
+    click(button);
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+  });
+
+  it("损坏实例全都补全修不好：横幅照样出现并写明原因、不给修复按钮，记下这次有横幅", async () => {
+    instances = instances.map((i) => (i.id === "坏掉的" ? unrepairable("坏掉的") : i));
+    await mount();
+    const banners = [...document.querySelectorAll<HTMLElement>(`.${bannerStyles.banner}`)];
+    expect(banners.map((b) => b.textContent)).toEqual(["1 个实例需要修复「坏掉的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。"]);
+    expect(banners[0].querySelector("button")).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UI_SHAPE_WRITE_DELAY_MS);
+    });
+    expect(callsOf(ipc, "set_ui_shape")).toEqual([{ patch: { repair_banner: true } }]);
+  });
+
+  it("补全修不好的卡片：底栏「修复并启动」以后端给的原因禁用，点了不排补全；被当作基底时也先说修不好", async () => {
+    instances = [...instances.filter((i) => i.id !== "坏掉的"), unrepairable("旧电脑拷来的"), unrepairable("坏掉的", { activity: "inherited", used_by: "Fabric 整合" })];
+    await mount();
+    for (const id of ["旧电脑拷来的", "坏掉的"]) {
+      const card = byText<HTMLButtonElement>("article button", id).closest("article");
+      if (card === null) throw new Error("找不到卡片");
+      const repair = byText<HTMLButtonElement>("button", "修复并启动", card);
+      expect(repair.getAttribute("aria-disabled")).toBe("true");
+      expect(await reasonOf(repair)).toBe(UNREPAIRABLE);
+      click(repair);
+      await flush();
+    }
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(callsOf(ipc, "launch_game")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
   });
 
   it("开始修复：横幅淡出并让出位置，卡身的损坏原因淡出、统计行在原处淡入，底栏换成安装面", async () => {
