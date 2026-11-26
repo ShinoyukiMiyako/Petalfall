@@ -1008,6 +1008,7 @@ versions/<实例名>/
     ├── ledger.json        Mod 卷宗：mods 目录里每个 jar 的平台来源与版本
     ├── history.json       Mod 变更历史，只追加，作为回滚的凭据
     ├── modpack.json       从整合包导入的实例记录的整合包信息
+    ├── filled-options.json 启动前补进模组默认设置的行，导出整合包时据此去掉（不隔离的实例这份在游戏目录下的 .petalfall/filled-options.json）
     ├── last-crash.json    最近一次崩溃报告
     └── staging/           装 Mod 时的暂存区（不隔离的实例改用游戏目录下的 .petalfall/staging）
 ```
