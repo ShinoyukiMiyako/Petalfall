@@ -4,7 +4,7 @@
 import { ACTION_ERROR, lockReason, MODPACK_REIMPORT_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { locksOf, type InstanceLocks } from "../../domain/instance-locks";
-import { canRepair, instanceNameError, needsReimport } from "../../domain/rules";
+import { instanceNameError, needsReimport, repairRefusal } from "../../domain/rules";
 import { useRunner } from "../../shell/useRunner";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { busyInstanceId } from "../../state/selectors";
@@ -94,15 +94,12 @@ export function moveReason(inst: InstanceSummary, locks: InstanceLocks): string 
 }
 
 /**
- * 补全：修不好的实例后端一律拒绝，不管此刻排不排得上，原因照后端给的原文写（它可能已带句末标点或一句提示，不再改写）；
- * 修得好的才看实例与基底的锁。整合包半成品在头图、概览与设置页先给重新导入，只有崩溃页的补全按钮不分这一支；
- * 后端在它版本 JSON 还在时不报原因，用重新导入的说明垫上。
+ * 补全：修不好的实例后端一律拒绝，不管此刻排不排得上，说法取 rules 的 repairRefusal（整合包半成品说重新导入，其余照后端原文）；
+ * 修得好的才看实例与基底的锁。整合包半成品在头图、概览与设置页先给重新导入，只有崩溃页的补全按钮不分这一支。
  */
 export function repairReason(inst: InstanceSummary, locks: InstanceLocks): string | undefined {
-  if (canRepair(inst)) return lockReason(locks.repair, "repair");
-  if (inst.unrepairableReason !== null) return inst.unrepairableReason;
-  if (needsReimport(inst)) return MODPACK_REIMPORT_COPY.note;
-  throw new Error(`实例 ${inst.id} 补全修不好，却既没有原因也不是没导入完的整合包`);
+  const refusal = repairRefusal(inst);
+  return refusal === null ? lockReason(locks.repair, "repair") : refusal;
 }
 
 export function useInstanceOps(inst: InstanceSummary): InstanceOps {

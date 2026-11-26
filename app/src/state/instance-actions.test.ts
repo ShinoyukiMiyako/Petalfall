@@ -319,6 +319,17 @@ describe("修复完成后的启动失败卡", () => {
       "缺少版本 JSON，也没有记下当初装的是什么",
     ],
     ["整合包没导入完：报出的是重新导入那一句", { incomplete: { kind: "modpack", outcome: "pending", started_at: 1_719_999_000_000, spec: null, error: null } }, MODPACK_REIMPORT_COPY.note],
+    [
+      "整合包没导入完、版本 JSON 也不可用，后端报了它那句原因：照样报重新导入那一句",
+      {
+        status: "broken",
+        broken_reason: "缺少版本 JSON",
+        unrepairable_reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入",
+        incomplete: { kind: "modpack", outcome: "pending", started_at: 1_719_999_000_000, spec: null, error: null },
+        mc_version: null,
+      },
+      MODPACK_REIMPORT_COPY.note,
+    ],
   ];
   it.each(unrepairable)("版本文件不完整的失败卡、重扫后实例已修不好（%s）：「修复实例」不排补全，按补全的标题报出原因", async (_name, over, reason) => {
     await failLaunchWith("version_broken");
@@ -364,6 +375,17 @@ describe("启动拦截遇上补全修不好的实例：边角路径把原因交�
     [
       "整合包没导入完：报出重新导入那一句",
       { incomplete: { kind: "modpack", outcome: "pending", started_at: 1_719_999_000_000, spec: null, error: null } },
+      "整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。",
+    ],
+    [
+      "整合包没导入完、版本 JSON 也不可用，后端报了它那句原因：照样报重新导入那一句",
+      {
+        status: "broken",
+        broken_reason: "缺少版本 JSON",
+        unrepairable_reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入",
+        incomplete: { kind: "modpack", outcome: "pending", started_at: 1_719_999_000_000, spec: null, error: null },
+        mc_version: null,
+      },
       "整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。",
     ],
   ];

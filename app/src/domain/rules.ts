@@ -1,7 +1,7 @@
 // 校验与推算：实例名、离线用户名、崩溃一键尝试的内存目标、Java 主版本、本机 Java 的自动挑选、整合包没导入完、跟随全局时的版本隔离。
 // 纯函数，页面、流程、启动入口与状态层共用同一份。
 
-import { INSTANCE_NAME_ERROR, OFFLINE_NAME_COPY } from "../copy/flows";
+import { INSTANCE_NAME_ERROR, MODPACK_REIMPORT_COPY, OFFLINE_NAME_COPY } from "../copy/flows";
 import { checkInstanceName, ILLEGAL_NAME_CHARS, INSTANCE_NAME_MAX_UNITS } from "../ipc/instances";
 import type { JavaInstallationDto } from "../ipc/java";
 import type { InstanceSummary, Settings } from "./adapt";
@@ -183,6 +183,16 @@ export function needsReimport(inst: Pick<InstanceSummary, "status" | "incomplete
  */
 export function canRepair(inst: Pick<InstanceSummary, "status" | "incomplete" | "unrepairableReason">): boolean {
   return !needsReimport(inst) && inst.unrepairableReason === null;
+}
+
+/**
+ * 补全修不好时给玩家的那一句；修得好为 null，与 canRepair 一一对应。整合包没导入完的一律说前端的重新导入说明：
+ * 后端在它版本 JSON 不可用时也报一句原因，措辞与标点和前端的略有出入，先判它，同一种情况才不会随版本 JSON 在不在说成两样。
+ * 其余是后端给的原因原文，可能已带句末标点或跟着一句提示，不改写。
+ */
+export function repairRefusal(inst: Pick<InstanceSummary, "status" | "incomplete" | "unrepairableReason">): string | null {
+  if (needsReimport(inst)) return MODPACK_REIMPORT_COPY.note;
+  return inst.unrepairableReason;
 }
 
 // ---------------------------------------------------------------- 重新安装加载器

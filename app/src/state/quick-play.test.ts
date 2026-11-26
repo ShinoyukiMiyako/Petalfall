@@ -138,6 +138,18 @@ describe("直达走与启动相同的拦截链", () => {
       { incomplete: { kind: "modpack", outcome: "pending", started_at: 1_719_999_000_000, spec: null, error: null } },
       "整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。",
     ],
+    [
+      "整合包没导入完、版本 JSON 也不可用，后端报了它那句原因：照样报重新导入那一句",
+      {
+        status: "broken",
+        broken_reason: "缺少版本 JSON",
+        unrepairable_reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入",
+        incomplete: { kind: "modpack", outcome: "pending", started_at: 1_719_999_000_000, spec: null, error: null },
+        mc_version: null,
+        quick_play: null,
+      },
+      "整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。",
+    ],
   ])("补全修不好的损坏实例（%s）：普通启动不转成修复并启动，直达也不说先修复，不排补全也不启动", async (_name, over, reason) => {
     instances = [instanceDto("旧档", over)];
     const s = await boot();

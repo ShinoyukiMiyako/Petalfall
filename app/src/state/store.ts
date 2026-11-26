@@ -15,7 +15,6 @@ import {
   DEVICE_CODE_TIMEOUT_CODE,
   GAME_DIR_SWITCH_COPY,
   isCrashCategory,
-  MODPACK_REIMPORT_COPY,
   MSA_CLIENT_ID_MISSING,
   NEXT_LAUNCH_SUFFIX,
   TASK_INTERRUPTED_CODE,
@@ -65,7 +64,7 @@ import {
   TASK_JOURNAL_DEBOUNCE_MS,
 } from "../domain/limits";
 import { sameGameDir } from "../domain/paths";
-import { canRepair, instanceNameError, validateOfflineName } from "../domain/rules";
+import { instanceNameError, repairRefusal, validateOfflineName } from "../domain/rules";
 import type { FailureCode, LoaderKind, Platform, Task, TaskError, TaskKind } from "../domain/types";
 import * as accountsIpc from "../ipc/accounts";
 import { invoke, type UnlistenFn } from "../ipc/bridge";
@@ -2870,9 +2869,10 @@ export class LauncherStore {
     if (inst.status === "installing") throw new Error(`「${id}」还在安装，入口不应提供启动`);
     if (inst.status === "broken") {
       // 入口都按原因禁用了修复并启动，还走到这里的是边角路径：失败通知上的重试点下去时实例已重扫成修不好、补全完成后
-      // 接着启动时仍修不好。排上补全也只会被后端拒，不排任务，与「修复实例」一样把原因交给调用方的错误处理：后端只对
-      // 版本 JSON 不可用的报原因，整合包没导入完的说重新导入那一句。排在直达之前，直达的重试也走到这里
-      if (!canRepair(inst)) throw new Error(inst.unrepairableReason === null ? MODPACK_REIMPORT_COPY.note : inst.unrepairableReason);
+      // 接着启动时仍修不好。排上补全也只会被后端拒，不排任务，与「修复实例」一样把原因交给调用方的错误处理。
+      // 排在直达之前，直达的重试也走到这里
+      const refusal = repairRefusal(inst);
+      if (refusal !== null) throw new Error(refusal);
       // 修复完成后的自动启动是普通启动，带不上直达目标：入口按损坏禁用直达
       if (quickPlay !== null) throw new Error(`「${id}」需要先修复，入口不应提供直达`);
       await this.actions.repairInstance(id, { launchAfter: true });
@@ -2975,10 +2975,9 @@ export class LauncherStore {
       case "repair":
         return {
           run: async () => {
-            // 启动失败后会重扫，实例此刻可能已是补全修不好的：排上也会被后端拒，不排任务，把原因报出来。
-            // 后端只对版本 JSON 不可用的报原因，整合包没导入完的说重新导入那一句
-            const inst = this.instance(instanceId);
-            if (!canRepair(inst)) throw new Error(inst.unrepairableReason === null ? MODPACK_REIMPORT_COPY.note : inst.unrepairableReason);
+            // 启动失败后会重扫，实例此刻可能已是补全修不好的：排上也会被后端拒，不排任务，把原因报出来
+            const refusal = repairRefusal(this.instance(instanceId));
+            if (refusal !== null) throw new Error(refusal);
             await this.actions.repairInstance(instanceId);
           },
           errorTitle: ACTION_ERROR.repair,
