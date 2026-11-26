@@ -1,0 +1,12 @@
+{
+  "files": {
+    "config/defaultoptions/options.txt": [
+      "version:3319",
+      "lang:zh_cn"
+    ],
+    "config/yosbr/options.txt": [
+      "lang:zh_cn",
+      "onboardAccessibility:false"
+    ]
+  }
+}

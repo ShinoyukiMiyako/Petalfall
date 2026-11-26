@@ -620,7 +620,7 @@ static FILLED_LINES_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct FilledLines {
     /// [`MOD_DEFAULT_OPTIONS`] 里的相对路径到补上的整行（不含行尾），按补上的先后，同一行只记一次。
-    files: BTreeMap<String, Vec<String>>,
+    pub(crate) files: BTreeMap<String, Vec<String>>,
 }
 
 impl FilledLines {

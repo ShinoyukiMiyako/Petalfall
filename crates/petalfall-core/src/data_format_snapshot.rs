@@ -1,11 +1,13 @@
 //! 落盘类型的快照守卫：改了写进数据目录或游戏目录的类型，却忘了判断要不要加数据格式号时，这里的测试会挂。
 //!
-//! 覆盖本 crate 写下的十种文件，每种在 `testdata/data-format/current/` 下有一份样本：
+//! 覆盖本 crate 写下的十一种文件，每种在 `testdata/data-format/current/` 下有一份样本：
 //! - 数据目录：全局配置 `config.json`、游玩记录 `playtime.json`、运行中游戏的记录 `running-game.json`、
 //!   模板元数据 `templates/default/template.json`、移动日志 `moves/<token>.json`（文件名随每次移动变，样本叫
 //!   `move-journal.json`）。
 //! - 游戏目录：依赖版本记录 `.petalfall/base-versions.json`；每个实例 `versions/<id>/.petalfall/` 下的最近一次
-//!   崩溃报告 `last-crash.json`、整合包信息 `modpack.json`、来源卷宗 `ledger.json`、变更历史 `history.json`。
+//!   崩溃报告 `last-crash.json`、整合包信息 `modpack.json`、来源卷宗 `ledger.json`、变更历史 `history.json`；
+//!   工作目录 `.petalfall/` 下补进模组默认设置的行的记账 `filled-options.json`（隔离实例在实例目录下，不隔离的
+//!   在游戏目录下）。
 //!
 //! 离线账户文件 `offline_accounts.json` 的文件名由本 crate 定，落盘类型与序列化却在 petalfall-auth，样本登记在
 //! 那边的快照守卫里，这里不重复。
@@ -13,7 +15,8 @@
 //! 样本把每个字段都填上非默认值（`Option` 都是 `Some`，集合不空，config.json 的保留区放一个不认识的键），每个
 //! 持久化枚举的每个取值都出现：守的是落盘形状，不是业务规则。样本一律用结构体字面量写全字段，类型加了字段这里
 //! 先编译不过。能走生产代码的写函数的就写进临时目录再读回比对，写盘方式一变快照也跟着变；整合包信息的写盘在
-//! 导入流程中间够不着，按它的写法（pretty）直接序列化。
+//! 导入流程中间够不着，按它的写法（pretty）直接序列化；补行记账的写函数是 `game_lang` 的私有函数，按它的写法
+//! （pretty 加原子写入）写到它的位置再读回。
 //!
 //! 一份文件只装得下某个枚举的一个取值时（配置里的各个设置项、运行记录的账户类型、移动日志的阶段、整合包信息的
 //! 格式与加载器），样本是若干份完整内容组成的 JSON 数组：每份按生产代码写出后逐行缩进两格、以逗号隔开包进方括号，
@@ -51,6 +54,7 @@ use crate::crashdiag::{
     ScannedFile, save_crash_report,
 };
 use crate::facade::Petalfall;
+use crate::game_lang::{FilledLines, filled_lines_path};
 use crate::history::{HistoryEvent, HistoryStore};
 use crate::instances::record_base_versions_in;
 use crate::launch::LaunchWarning;
@@ -774,6 +778,23 @@ fn ledger_sample() -> Ledger {
     }
 }
 
+/// 两份模组默认设置各记一种补法：开着跳过引导时补的语言与引导行；关着跳过引导、往空文件里补语言时，语言前面
+/// 先声明的数据版本。
+fn filled_lines_sample() -> FilledLines {
+    FilledLines {
+        files: BTreeMap::from([
+            (
+                "config/defaultoptions/options.txt".to_owned(),
+                vec!["version:3319".into(), "lang:zh_cn".into()],
+            ),
+            (
+                "config/yosbr/options.txt".to_owned(),
+                vec!["lang:zh_cn".into(), "onboardAccessibility:false".into()],
+            ),
+        ]),
+    }
+}
+
 // ---- 测试 ----
 
 #[tokio::test]
@@ -1056,6 +1077,22 @@ async fn history_json_matches_snapshot() {
         store.append(event).await.expect("追加历史事件");
     }
     assert_matches_snapshot("history.json", "history.json", &read_written(store.path()));
+}
+
+#[tokio::test]
+async fn filled_options_json_matches_snapshot() {
+    let dir = tempfile::tempdir().expect("建临时目录");
+    let bytes = serde_json::to_vec_pretty(&filled_lines_sample()).expect("样本能序列化");
+    petalfall_base::fs::atomic_write(filled_lines_path(dir.path()), &bytes)
+        .await
+        .expect("写补行记账");
+    // 按元数据目录下的文件名读回：记账挪了位置或改了名，旧版本就找不到它，这里读不回来同样会挂。
+    let written = read_written(
+        &dir.path()
+            .join(PETALFALL_META_DIR)
+            .join("filled-options.json"),
+    );
+    assert_matches_snapshot("filled-options.json", "filled-options.json", &written);
 }
 
 #[test]
