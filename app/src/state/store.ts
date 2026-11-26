@@ -2639,7 +2639,9 @@ export class LauncherStore {
           return;
         }
         if (meta.launchAfter && !isSessionActive(this.raw.session)) {
-          await this.actions.launch(id);
+          // 接着的启动不并进落地：落地失败的标题是「补全已完成，后续设置没有写入」，启动被拒或出错时与事实对不上。
+          // 与登录后接着启动一样转到后台，失败按启动自己的标题报
+          this.background(ACTION_ERROR.launch(id), this.actions.launch(id));
           return;
         }
         const copy = task.spec.args.reinstallLoader === true ? TASK_TOAST.loaderReinstalled(id) : TASK_TOAST.repaired(id);

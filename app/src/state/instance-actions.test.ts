@@ -436,7 +436,7 @@ describe("启动拦截遇上补全修不好的实例：边角路径把原因交�
     expect(callsOf(ipc, "launch_game")).toHaveLength(1);
   });
 
-  it.each(unrepairable)("补全完成后接着启动、重扫回来实例仍修不好（%s）：不再排补全也不启动，按落地的标题报出原因", async (_name, over, reason) => {
+  it.each(unrepairable)("补全完成后接着启动、重扫回来实例仍修不好（%s）：不再排补全也不启动，按启动失败的标题报出原因", async (_name, over, reason) => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", { status: "broken", broken_reason: "缺少客户端 jar" }) : i));
     await store.actions.reload("instances");
@@ -449,9 +449,33 @@ describe("启动拦截遇上补全修不好的实例：边角路径把原因交�
     await store.actions.launch("生存");
     await settle();
     expect(store.getState().tasks.map((t) => [t.status, t.title])).toEqual([["done", "补全「生存」的游戏文件"]]);
-    expect(store.getState().toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["error", "补全「生存」的游戏文件已完成，后续设置没有写入", reason]]);
+    // 补全本身已经完成，被拒的是接着的启动：标题说启动失败，不说补全后续设置没写入
+    expect(store.getState().toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["error", "「生存」启动失败", reason]]);
     expect(callsOf(ipc, "repair_instance")).toHaveLength(1);
     expect(callsOf(ipc, "launch_game")).toEqual([]);
+  });
+
+  it("补全完成后接着启动、后端以不是失败码的错误拒绝启动：按启动失败的标题报，落地照常收尾", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", { status: "broken", broken_reason: "缺少客户端 jar" }) : i));
+    await store.actions.reload("instances");
+    await settle();
+    ipc.overrides.set("repair_instance", () => {
+      instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存") : i));
+      return { reinstalled: false, libraries: 0, assets: 0, natives: 0 };
+    });
+    const refused = new IpcError("instance_busy", "实例 生存 正在备份存档", { id: "生存", activity: "backing_up" });
+    ipc.overrides.set("launch_game", () => {
+      throw refused;
+    });
+    await store.actions.launch("生存");
+    await settle();
+    expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["生存"]);
+    expect(store.getState().toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["error", "「生存」启动失败", describeError(refused)]]);
+    expect(store.getState().session).toBeNull();
+    const repaired = store.getState().instances.find((i) => i.id === "生存");
+    if (repaired === undefined) throw new Error("补全后列表里没有「生存」");
+    expect(launchView(store.getState(), repaired).kind).toBe("ready");
   });
 });
 
