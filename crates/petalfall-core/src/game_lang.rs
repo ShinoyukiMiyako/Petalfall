@@ -176,9 +176,9 @@ fn has_line(options: &[u8], key: &[u8]) -> bool {
         .any(|line| line.starts_with(key))
 }
 
-/// 文件里有没有内容，只有空白的不算。YOSBR 每次启动都会建一份空的默认设置，整合包常把它原样带进来：里面
-/// 没有作者调过的东西，模组铺过去的也是一份空文件，不该为它让路。同一个文件另有一份有内容或读不了的时
-/// 不适用，那时是在为那一份让路。
+/// 文件里有没有内容，只有空白的不算。空文件里没有谁调过的东西，也没有要迁移的内容，补语言时与新文件一样
+/// 处理（见 [`fill_options`]）。YOSBR 每次启动都会建一份空的默认设置，整合包常把它原样带进来，模组铺过去的
+/// 也是一份空文件：在场的几份全是这样时不为它们让路，另有一份有内容或读不了的时才连它一起补（见 [`fill`]）。
 pub(crate) fn has_content(bytes: &[u8]) -> bool {
     bytes.iter().any(|byte| !byte.is_ascii_whitespace())
 }
@@ -244,9 +244,10 @@ fn fill_options(
     let mut lines = Vec::new();
     if let Some(code) = language.filter(|_| lacks(existing, LANG_KEY)) {
         // 玩家要看引导时，只写语言的新文件反而会让游戏把引导标成走过（见 ONBOARDING_FIX_DATA_VERSION）。
-        // 比这个版本老的游戏遇到更高的声明版本什么也不做，新文件里也没有要迁移的内容。已有的文件不加：
-        // 声明版本会让它跳过自己需要的迁移，引导弹不弹本来就由它自己的版本决定。
-        if existing.is_none() && !skip_onboarding {
+        // 比这个版本老的游戏遇到更高的声明版本什么也不做，新文件里也没有要迁移的内容。空的（只有空白的）
+        // 已有文件与新文件一样：里面同样没有要迁移的内容，不声明版本的话关掉开关引导照样不弹。有内容的
+        // 已有文件不加：声明版本会让它跳过自己需要的迁移，引导弹不弹本来就由它自己的版本决定。
+        if !existing.is_some_and(has_content) && !skip_onboarding {
             lines.push(format!("version:{ONBOARDING_FIX_DATA_VERSION}"));
         }
         lines.push(format!("lang:{code}"));
@@ -786,7 +787,7 @@ mod tests {
             ),
             ("en-US", V1_21_1, None, false, None),
             ("sw-KE", V1_21_1, None, false, None),
-            // 已有文件：缺哪行补哪行，换行风格跟随原文件，不额外声明数据版本。
+            // 已有文件（有内容）：缺哪行补哪行，换行风格跟随原文件，不额外声明数据版本。
             (
                 "zh-CN",
                 V1_21_1,
@@ -808,7 +809,6 @@ mod tests {
                 false,
                 text("fov:0.5\nlang:zh_cn\n"),
             ),
-            ("zh-CN", V1_21_1, text(""), false, text("lang:zh_cn\n")),
             (
                 "en-US",
                 V1_21_1,
@@ -817,6 +817,37 @@ mod tests {
                 text("fov:0.5\r\nonboardAccessibility:false\r\n"),
             ),
             ("en-US", V1_21_1, text("fov:0.5\r\n"), false, None),
+            // 已有文件是空的（只有空白）：里面没有要迁移的内容，与新文件一样，开关关掉又要写语言时带上
+            // 数据版本；原有的空白逐字节保留，换行跟着它走。
+            (
+                "zh-CN",
+                V1_21_1,
+                text(""),
+                false,
+                text("version:3319\nlang:zh_cn\n"),
+            ),
+            (
+                "zh-CN",
+                V1_21_1,
+                text("\r\n \t\r\n"),
+                false,
+                text("\r\n \t\r\nversion:3319\r\nlang:zh_cn\r\n"),
+            ),
+            (
+                "zh-CN",
+                V1_21_1,
+                text(""),
+                true,
+                text("lang:zh_cn\nonboardAccessibility:false\n"),
+            ),
+            ("en-US", V1_21_1, text(""), false, None),
+            (
+                "en-US",
+                V1_21_1,
+                text("\n"),
+                true,
+                text("\nonboardAccessibility:false\n"),
+            ),
             // 已有 lang 不动，哪怕和系统语言不一样。
             (
                 "zh-CN",
@@ -1311,6 +1342,39 @@ mod tests {
             .await;
         assert_eq!(report.notes, ["游戏语言设为 zh_cn，跟随系统语言 zh-CN"]);
         assert_eq!(scene.options().unwrap(), b"version:3319\nlang:zh_cn\n");
+    }
+
+    /// 开关关掉时，空的已有文件与新文件一样带上数据版本：空的 options.txt，和与有内容的那份并存、因而也要
+    /// 补的空的模组默认设置。有内容的那份照旧不加，它的迁移由它自己的版本决定。
+    #[tokio::test]
+    async fn switch_off_declares_the_data_version_in_blank_files_only() {
+        let blank_options = scene(V1_21_1);
+        blank_options.write(OPTIONS_FILE, b"");
+        let report = blank_options
+            .fill_with(Some("zh-CN"), Some("lang-test"), false)
+            .await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(
+            blank_options.options().unwrap(),
+            b"version:3319\nlang:zh_cn\n"
+        );
+
+        let mixed = scene(V1_21_1);
+        mixed.write("config/yosbr/options.txt", b"");
+        mixed.write("config/defaultoptions/options.txt", b"fov:0.6\n");
+        let report = mixed
+            .fill_with(Some("zh-CN"), Some("lang-test"), false)
+            .await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(
+            mixed.read("config/yosbr/options.txt").unwrap(),
+            b"version:3319\nlang:zh_cn\n"
+        );
+        assert_eq!(
+            mixed.read("config/defaultoptions/options.txt").unwrap(),
+            b"fov:0.6\nlang:zh_cn\n"
+        );
+        assert_eq!(mixed.options(), None);
     }
 
     #[tokio::test]
