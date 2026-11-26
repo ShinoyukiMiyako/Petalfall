@@ -23,11 +23,22 @@ export const LIBRARY_COPY = {
   dirVersionsUnknown: "版本数读不到",
 
   repairTitle: (count: number) => `${count} 个实例需要修复`,
-  /** 横幅正文：补全修得好的合成一句；修不好的另起一句，逐个写明后端给的原因，不承诺补全后就能启动。只有一拨时只出那一句。 */
+  /** 横幅列出的实例一个都修不好时的标题：补全一律被拒，不说需要修复。 */
+  unrepairableTitle: (count: number) => `${count} 个实例补全修不好`,
+  /**
+   * 横幅正文：补全修得好的合成一句；修不好的另起，写明后端给的原因，不承诺补全后就能启动。原因相同的并成一句
+   * （从旧电脑拷来的一批实例往往是同一个原因），按各原因第一次出现的先后排。只有一拨时只出那一拨。
+   */
   repairBody: (repairable: readonly string[], unrepairable: readonly { name: string; reason: string }[]) => {
     if (repairable.length === 0 && unrepairable.length === 0) throw new Error("修复横幅没有要列的实例");
     const fixable = repairable.length === 0 ? "" : `${repairable.map((n) => `「${n}」`).join("")}缺少游戏文件，补全后就能启动。`;
-    return fixable + unrepairable.map(({ name, reason }) => sentence(`「${name}」补全修不好：${reason}`)).join("");
+    const byReason = new Map<string, string[]>();
+    for (const { name, reason } of unrepairable) {
+      const names = byReason.get(reason);
+      if (names === undefined) byReason.set(reason, [name]);
+      else names.push(name);
+    }
+    return fixable + [...byReason].map(([reason, names]) => sentence(`${names.map((n) => `「${n}」`).join("")}补全修不好：${reason}`)).join("");
   },
   repairOne: "立即修复",
   repairAll: "全部修复",

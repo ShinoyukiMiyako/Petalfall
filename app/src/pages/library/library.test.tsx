@@ -319,9 +319,9 @@ describe("实例库：修复横幅按记下的形状占位", () => {
     expect(callsOf(ipc, "set_ui_shape")).toEqual([]);
   });
 
-  it("列表到了、损坏实例全都补全修不好：同一个外框里换上标题与说明，按钮位撤下，记下的没变，不写", async () => {
+  it("列表到了、损坏实例全都补全修不好且不止一个：同一个外框里换上标题与说明，原因相同的并成一句，按钮位撤下，记下的没变，不写", async () => {
     shape = { recentCards: 0, repairBanner: true };
-    instances = instances.map((i) => (i.id === "坏掉的" ? unrepairable("坏掉的") : i));
+    instances = [...instances.map((i) => (i.id === "坏掉的" ? unrepairable("坏掉的") : i)), unrepairable("旧电脑拷来的")];
     const list = deferred<InstanceDto[]>();
     ipc.overrides.set("list_instances", () => list.promise);
     await mount();
@@ -332,11 +332,31 @@ describe("实例库：修复横幅按记下的形状占位", () => {
       await settle();
     });
     expect(liveBanners()).toEqual([held]);
-    expect(held.textContent).toBe("1 个实例需要修复「坏掉的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。");
+    expect(held.textContent).toBe("2 个实例补全修不好「坏掉的」「旧电脑拷来的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。");
     expect(held.querySelector("button")).toBeNull();
     expect(held.querySelector(`.${bannerStyles.actions}`)).toBeNull();
     await advance(5 * UI_SHAPE_WRITE_DELAY_MS);
     expect(callsOf(ipc, "set_ui_shape")).toEqual([]);
+  });
+
+  it("列表到了、唯一的损坏实例补全修不好：按钮位不撤，换上它的「删除实例」", async () => {
+    shape = { recentCards: 0, repairBanner: true };
+    instances = instances.map((i) => (i.id === "坏掉的" ? unrepairable("坏掉的") : i));
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    const [held] = liveBanners();
+    const slot = held.querySelector(`.${bannerStyles.actions}`);
+    expect(slot).not.toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+      list.resolve(instances);
+      await settle();
+    });
+    expect(liveBanners()).toEqual([held]);
+    expect(held.textContent).toBe("1 个实例补全修不好「坏掉的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。删除实例");
+    expect(held.querySelector(`.${bannerStyles.actions}`)).toBe(slot);
+    expect(repairButtons()).toEqual([]);
   });
 
   it("列表到了、没有损坏实例：占位的横幅淡出让出位置，记下这次没有横幅", async () => {
@@ -1280,16 +1300,56 @@ describe("实例库：动作", () => {
     expect(callsOf(ipc, "repair_instance")).toEqual([]);
   });
 
-  it("损坏实例全都补全修不好：横幅照样出现并写明原因、不给修复按钮，记下这次有横幅", async () => {
+  it("损坏实例全都补全修不好：横幅照样出现，标题不说需要修复，写明原因、不给修复按钮，记下这次有横幅", async () => {
     instances = instances.map((i) => (i.id === "坏掉的" ? unrepairable("坏掉的") : i));
     await mount();
     const banners = [...document.querySelectorAll<HTMLElement>(`.${bannerStyles.banner}`)];
-    expect(banners.map((b) => b.textContent)).toEqual(["1 个实例需要修复「坏掉的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。"]);
-    expect(banners[0].querySelector("button")).toBeNull();
+    expect(banners.map((b) => b.textContent)).toEqual(["1 个实例补全修不好「坏掉的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。删除实例"]);
+    expect([...banners[0].querySelectorAll("button")].map((b) => b.textContent)).toEqual([LIBRARY_COPY.menu.remove]);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(UI_SHAPE_WRITE_DELAY_MS);
     });
     expect(callsOf(ipc, "set_ui_shape")).toEqual([{ patch: { repair_banner: true } }]);
+  });
+
+  it("唯一修不好的实例：横幅上的「删除实例」走删除确认，先问后端删除预览，不排补全", async () => {
+    instances = instances.map((i) => (i.id === "坏掉的" ? unrepairable("坏掉的") : i));
+    ipc.overrides.set("preview_instance_deletion", (args) => ({ id: args.id, worlds: [], size_bytes: 0, file_count: 0, dependents: [], activity: null }));
+    await mount();
+    const remove = byText<HTMLButtonElement>(`.${bannerStyles.banner} button`, LIBRARY_COPY.menu.remove);
+    expect(remove.getAttribute("aria-disabled")).toBeNull();
+    click(remove);
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([{ id: "坏掉的" }]);
+    expect(document.querySelector('[role="dialog"] h2')?.textContent).toBe(DELETE_INSTANCE_COPY.title("坏掉的"));
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+  });
+
+  it("唯一修不好的实例正被别的实例当作基底：横幅上的「删除实例」带锁的原因禁用，点了不开确认", async () => {
+    instances = instances.map((i) => (i.id === "坏掉的" ? unrepairable("坏掉的", { activity: "inherited", used_by: "Fabric 整合" }) : i));
+    await mount();
+    const remove = byText<HTMLButtonElement>(`.${bannerStyles.banner} button`, LIBRARY_COPY.menu.remove);
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(remove)).toBe("实例「Fabric 整合」正在使用它，结束后才能删除");
+    click(remove);
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("修不好的不止一个：横幅不给批量删除，各自卡片菜单里的「删除实例」照常可用", async () => {
+    instances = [...instances.map((i) => (i.id === "坏掉的" ? unrepairable("坏掉的") : i)), unrepairable("旧电脑拷来的")];
+    await mount();
+    const banner = document.querySelector<HTMLElement>(`.${bannerStyles.banner}`);
+    if (banner === null) throw new Error("没有修复横幅");
+    expect(banner.textContent).toBe("2 个实例补全修不好「坏掉的」「旧电脑拷来的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。");
+    expect(banner.querySelector("button")).toBeNull();
+    for (const id of ["坏掉的", "旧电脑拷来的"]) {
+      click(byLabel(LIBRARY_COPY.moreLabel(id)));
+      expect(menuItem(LIBRARY_COPY.menu.remove).getAttribute("aria-disabled")).toBeNull();
+      keydown(document, "Escape");
+      await afterMotion();
+    }
   });
 
   it("补全修不好的卡片：底栏「修复并启动」以后端给的原因禁用，点了不排补全；被当作基底时也先说修不好", async () => {

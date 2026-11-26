@@ -33,6 +33,7 @@ import { SearchInput } from "../../ui/SearchInput";
 import { SegmentedControl, type SegmentOption } from "../../ui/SegmentedControl";
 import { Select } from "../../ui/Select";
 import { Skeleton } from "../../ui/Skeleton";
+import { useDeleteInstance } from "../instance/delete";
 import { switchSuggestion } from "../shared/switch-suggestion";
 import { useSwitchDirectory } from "../shared/useSwitchDirectory";
 import { LIBRARY_COPY } from "./copy";
@@ -154,6 +155,11 @@ export default function LibraryPage() {
   const repairAll = () => {
     for (const inst of queueable) void run(() => actions.repairInstance(inst.id), ACTION_ERROR.repair);
   };
+  // 一个都修不好时标题不说需要修复。只列着一个修不好的实例时，横幅给它删除入口：删掉是它剩下的出路；
+  // 列着多个时删除留在各自卡片的菜单与详情页上，横幅不做批量删除
+  const repairTitle = broken.repairable.length === 0 ? LIBRARY_COPY.unrepairableTitle(brokenCount) : LIBRARY_COPY.repairTitle(brokenCount);
+  const lone = broken.repairable.length === 0 && broken.unrepairable.length === 1 ? broken.unrepairable[0].inst : null;
+  const deleteInstance = useDeleteInstance();
 
   const clearFilter = () => setView({ loader: "all", query: "" });
   const switchDirectory = (dir: GameDirectoryDto) => void switchTo(dir.path, dir.name);
@@ -230,18 +236,24 @@ export default function LibraryPage() {
             icon="wrench"
             title={
               <Loadable view={gate.view} skeleton={<Skeleton shape="text" width={REPAIR_SKELETON.title} />}>
-                {() => LIBRARY_COPY.repairTitle(brokenCount)}
+                {() => repairTitle}
               </Loadable>
             }
             actions={
-              // 全都修不好时不给按钮：补全一律被拒。还在读时不知道，按记下的形状先占着按钮位
-              gate.view === "content" && broken.repairable.length === 0 ? undefined : (
+              // 全都修不好时不给修复按钮：补全一律被拒；只剩一个修不好的换成它的删除，多个时不给按钮。还在读时不知道，按记下的形状先占着按钮位
+              gate.view === "content" && broken.repairable.length === 0 && lone === null ? undefined : (
                 <Loadable view={gate.view} skeleton={<Skeleton shape="block" width={REPAIR_SKELETON.actionWidth} height={REPAIR_SKELETON.actionHeight} radius="sm" />}>
-                  {() => (
-                    <Button size="sm" disabledReason={queueable.length === 0 ? repairReason(broken.repairable[0]) : undefined} onClick={repairAll}>
-                      {broken.repairable.length > 1 ? LIBRARY_COPY.repairAll : LIBRARY_COPY.repairOne}
-                    </Button>
-                  )}
+                  {() =>
+                    lone !== null ? (
+                      <Button size="sm" variant="danger" icon="trash" disabledReason={lockReason(locksOf(lone, lone.id === sessionInstance).delete, "delete")} onClick={() => void deleteInstance(lone)}>
+                        {LIBRARY_COPY.menu.remove}
+                      </Button>
+                    ) : (
+                      <Button size="sm" disabledReason={queueable.length === 0 ? repairReason(broken.repairable[0]) : undefined} onClick={repairAll}>
+                        {broken.repairable.length > 1 ? LIBRARY_COPY.repairAll : LIBRARY_COPY.repairOne}
+                      </Button>
+                    )
+                  }
                 </Loadable>
               )
             }

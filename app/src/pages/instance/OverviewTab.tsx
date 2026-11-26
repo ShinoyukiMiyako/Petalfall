@@ -202,11 +202,21 @@ function CrashBanner({ at, report, onTab }: { at: number | null; report: CrashRe
 }
 
 function BrokenBanner({ inst, reason, ops }: { inst: InstanceSummary; reason: string; ops: InstanceOps }) {
-  // 补全修不好：正文写后端给的原因，不给修复按钮。重装加载器走的也是补全，同样会被拒，所以排在它前面判
+  // 补全修不好：标题不说暂时，正文写后端给的原因，不给修复按钮。重装加载器走的也是补全，同样会被拒，所以排在它前面判。
+  // 删掉是剩下的出路，与整合包没导入完的横幅同一个删除入口
   const unrepairable = inst.unrepairableReason;
   if (unrepairable !== null) {
     return (
-      <Banner tone="warn" icon="alert" title={OVERVIEW_COPY.brokenTitle}>
+      <Banner
+        tone="warn"
+        icon="alert"
+        title={OVERVIEW_COPY.unrepairableTitle}
+        actions={
+          <Button variant="danger" icon="trash" disabledReason={lockReason(ops.locks.delete, "delete")} onClick={ops.remove}>
+            {HERO_COPY.delete}
+          </Button>
+        }
+      >
         {unrepairable}
       </Banner>
     );

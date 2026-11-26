@@ -200,6 +200,8 @@ export const EXPORT_COPY = {
 
 export const OVERVIEW_COPY = {
   brokenTitle: "实例文件不完整，暂时无法启动",
+  /** 后端说补全修不好：修复也起不来，不说暂时。 */
+  unrepairableTitle: "实例文件不完整，补全修不好",
   repair: "修复实例",
   repairStarted: (name: string) => `开始补全「${name}」`,
   repairStartedBody: "进度见下载任务",

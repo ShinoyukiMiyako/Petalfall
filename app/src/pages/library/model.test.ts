@@ -322,6 +322,29 @@ describe("文案", () => {
     expect(LIBRARY_COPY.repairBody([], both)).toBe("「甲」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。「乙」补全修不好：版本 JSON 损坏，也没有记下当初装的是什么。");
   });
 
+  it("修复横幅：原因相同的修不好的实例并成一句，按各原因第一次出现的先后排，不逐个重复", () => {
+    const lost = "缺少版本 JSON，也没有记下当初装的是什么";
+    const broken = "版本 JSON 损坏，也没有记下当初装的是什么";
+    const list = [
+      { name: "甲", reason: lost },
+      { name: "乙", reason: broken },
+      { name: "丙", reason: lost },
+    ];
+    expect(LIBRARY_COPY.repairBody([], list)).toBe(`「甲」「丙」补全修不好：${lost}。「乙」补全修不好：${broken}。`);
+    expect(LIBRARY_COPY.repairBody(["坏掉的"], list.slice(0, 1).concat(list.slice(2)))).toBe(`「坏掉的」缺少游戏文件，补全后就能启动。「甲」「丙」补全修不好：${lost}。`);
+    // 随机多少个同一原因的实例：原因只出现一次，名字按列表顺序一个不少
+    const names = Array.from({ length: 2 + Math.floor(Math.random() * 6) }, (_, i) => `旧档${i}`);
+    const merged = LIBRARY_COPY.repairBody([], names.map((name) => ({ name, reason: lost })));
+    expect(merged).toBe(`${names.map((n) => `「${n}」`).join("")}补全修不好：${lost}。`);
+    expect(merged.split(lost)).toHaveLength(2);
+  });
+
+  it("修复横幅的标题：一个都修不好时说补全修不好，不说需要修复；有修得好的照旧", () => {
+    expect(LIBRARY_COPY.unrepairableTitle(1)).toBe("1 个实例补全修不好");
+    expect(LIBRARY_COPY.unrepairableTitle(3)).toBe("3 个实例补全修不好");
+    expect(LIBRARY_COPY.repairTitle(2)).toBe("2 个实例需要修复");
+  });
+
   it("修复横幅：原因已带句末标点或后跟一句提示时照原文接上，不再补句号", () => {
     const withHint = "缺少版本 JSON，也没有记下当初装的是什么。目录里还有一份别的版本文件，可能是改名时留下的。";
     expect(LIBRARY_COPY.repairBody([], [{ name: "甲", reason: withHint }])).toBe(`「甲」补全修不好：${withHint}`);

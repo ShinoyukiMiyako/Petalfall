@@ -2045,15 +2045,30 @@ describe("实例详情：补全修不好的损坏实例", () => {
     instances = instances.map((i) => (i.id === ID ? instanceDto(ID, { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: UNREPAIRABLE, mc_version: null }) : i));
   });
 
-  it("概览横幅：标题照旧，正文是后端给的原因原文而不是损坏原因，不给「修复实例」", async () => {
+  it("概览横幅：标题不说暂时，正文是后端给的原因原文而不是损坏原因，不给「修复实例」，给「删除实例」", async () => {
     await open("overview");
-    const title = [...document.querySelectorAll("div")].find((el) => el.childElementCount === 0 && el.textContent === "实例文件不完整，暂时无法启动" && live(el));
+    const title = [...document.querySelectorAll("div")].find((el) => el.childElementCount === 0 && el.textContent === "实例文件不完整，补全修不好" && live(el));
     if (title === undefined) throw new Error("没有损坏横幅");
+    expect(text()).not.toContain("暂时无法启动");
     expect(title.nextElementSibling?.textContent).toBe(UNREPAIRABLE);
     const banner = title.closest<HTMLElement>('[class*="_banner_"]');
     if (banner === null) throw new Error("损坏横幅的标题不在横幅里");
-    expect(banner.querySelectorAll("button")).toHaveLength(0);
+    expect([...banner.querySelectorAll("button")].map(textOf)).toEqual(["删除实例"]);
     expect(() => button("修复实例")).toThrow("找不到按钮");
+  });
+
+  it("概览横幅的「删除实例」走删除确认：先问后端删除预览，确认框写着要删的实例，不发补全", async () => {
+    await open("overview");
+    const title = [...document.querySelectorAll("div")].find((el) => el.childElementCount === 0 && el.textContent === "实例文件不完整，补全修不好" && live(el));
+    const banner = title === undefined ? null : title.closest<HTMLElement>('[class*="_banner_"]');
+    if (banner === null) throw new Error("没有损坏横幅");
+    const remove = button("删除实例", banner);
+    expect(remove.getAttribute("aria-disabled")).toBeNull();
+    click(remove);
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([{ id: ID }]);
+    expect(dialog().querySelector("h2")?.textContent).toBe(`删除「${ID}」？`);
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
   });
 
   it("头图菜单的「补全游戏文件」带原因禁用，悬停写后端给的原因；点了不发补全、不留任务", async () => {
