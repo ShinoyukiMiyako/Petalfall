@@ -238,16 +238,35 @@ describe("以离线方式进单人：状态容器", () => {
     expect(launchArgs()).toHaveLength(2);
   });
 
-  it("实例在失败之后变成损坏：不发起启动，直接报错", async () => {
+  it.each<[string, Parameters<typeof instanceDto>[1], string]>([
+    ["补全修得好：叫玩家先修复", { status: "broken", broken_reason: "missing_json" }, "实例需要先修复"],
+    [
+      "后端说补全修不好：报后端给的原因原文",
+      { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null },
+      "缺少版本 JSON，也没有记下当初装的是什么",
+    ],
+    [
+      "整合包没导入完、后端也报了它那句原因：报重新导入那一句",
+      {
+        status: "broken",
+        broken_reason: "缺少版本 JSON",
+        unrepairable_reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入",
+        incomplete: { kind: "modpack", outcome: "pending", started_at: T0 - 60_000, spec: null, error: null },
+        mc_version: null,
+      },
+      "整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。",
+    ],
+  ])("实例在失败之后变成损坏（%s）：不发起启动，按启动失败的标题报给玩家看得懂的话", async (_name, broken, message) => {
     await loginMockPlayer();
     const store = await storeWith(MOCK_PLAYER, "Mock_Player");
     failNextMockLaunch("account_service_down", { account: "Mock_Player", status: 503 });
     await store.actions.launch("生存");
-    ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "missing_json" })]);
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", broken)]);
     await store.actions.refreshInstances();
 
     const target = runnable(store.actions.failureFix("launch_offline_once"));
-    await expect(target.run()).rejects.toThrow("「生存」文件不完整，入口不应提供以离线方式进单人");
+    expect(target.errorTitle).toBe(ACTION_ERROR.launch("生存"));
+    await expect(target.run()).rejects.toMatchObject({ message });
     expect(launchArgs()).toEqual([{ accountUuid: MOCK_PLAYER, offlineFallback: false }]);
   });
 });

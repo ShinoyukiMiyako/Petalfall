@@ -15,6 +15,7 @@ import {
   DEVICE_CODE_TIMEOUT_CODE,
   GAME_DIR_SWITCH_COPY,
   isCrashCategory,
+  LAUNCH_COPY,
   MSA_CLIENT_ID_MISSING,
   NEXT_LAUNCH_SUFFIX,
   TASK_INTERRUPTED_CODE,
@@ -2873,8 +2874,9 @@ export class LauncherStore {
       // 排在直达之前，直达的重试也走到这里
       const refusal = repairRefusal(inst);
       if (refusal !== null) throw new Error(refusal);
-      // 修复完成后的自动启动是普通启动，带不上直达目标：入口按损坏禁用直达
-      if (quickPlay !== null) throw new Error(`「${id}」需要先修复，入口不应提供直达`);
+      // 修复完成后的自动启动是普通启动，带不上直达目标：入口按损坏禁用直达。直达失败后点重试、实例已重扫成修得好的
+      // 损坏时会走到这里，报给玩家的是先修复，标题沿用调用方的启动失败
+      if (quickPlay !== null) throw new Error(LAUNCH_COPY.needsRepair);
       await this.actions.repairInstance(id, { launchAfter: true });
       return;
     }
@@ -3028,7 +3030,11 @@ export class LauncherStore {
             }
             const inst = this.instance(instanceId);
             if (inst.status === "installing") throw new Error(`「${instanceId}」还在安装，入口不应提供启动`);
-            if (inst.status === "broken") throw new Error(`「${instanceId}」文件不完整，入口不应提供以离线方式进单人`);
+            if (inst.status === "broken") {
+              // 失败通知留着时实例可能已被重扫成损坏：以离线方式进单人带不上补全，修不好的说为什么修不好，修得好的叫玩家先修复
+              const refusal = repairRefusal(inst);
+              throw new Error(refusal === null ? LAUNCH_COPY.needsRepair : refusal);
+            }
             const account = this.raw.accounts.find((a) => a.uuid === accountUuid);
             if (account === undefined) throw new Error(`账户 ${accountUuid} 不存在`);
             // 以离线方式进单人只能玩单人：失败的那一局是直达存档时照旧直达那个存档，直达服务器的目标丢掉，进标题画面

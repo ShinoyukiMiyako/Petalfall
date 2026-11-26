@@ -2,7 +2,7 @@
 // 跨页面共用的文案（启动、崩溃类别、确认框、通知）取自 copy/flows，这里只放本页私有的部分。
 // 插值一律经 domain/format 格式化；产品名取自 app-info。
 
-import { cluePointer, CRASH_SOURCE_LABEL, LOADER_NAME, RELEASE_CHANNEL_LABEL, SETTINGS_SECTION_LABEL } from "../../copy/flows";
+import { cluePointer, CRASH_SOURCE_LABEL, LAUNCH_COPY, LOADER_NAME, RELEASE_CHANNEL_LABEL, SETTINGS_SECTION_LABEL } from "../../copy/flows";
 import { formatBytes, formatMemory, formatPlaytime, formatRelative } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
@@ -253,7 +253,7 @@ export const OVERVIEW_COPY = {
    */
   enterWorldBlocked: {
     installing: "实例还在安装",
-    broken: "实例需要先修复",
+    broken: LAUNCH_COPY.needsRepair,
     unknownVersion: "这个实例的版本信息不完整",
     legacy: "1.20 之前的版本不能直接进入存档",
     moving: "实例正在移到其他游戏目录，完成后才能启动",

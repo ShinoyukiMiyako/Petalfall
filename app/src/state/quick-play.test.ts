@@ -117,14 +117,37 @@ describe("直达走与启动相同的拦截链", () => {
     expect(s.getState().session).toMatchObject({ instanceId: "生存", quickPlay: WORLD });
   });
 
-  it("损坏的实例不提供直达：抛错，不启动也不排补全；普通启动照旧转成修复并启动", async () => {
+  it("损坏的实例不提供直达：报给玩家先修复，不启动也不排补全；普通启动照旧转成修复并启动", async () => {
     const s = await boot();
-    await expect(s.actions.quickPlay("坏了", SERVER)).rejects.toThrow("「坏了」需要先修复，入口不应提供直达");
+    await expect(s.actions.quickPlay("坏了", SERVER)).rejects.toMatchObject({ message: "实例需要先修复" });
     expect(callsOf(ipc, "launch_game")).toEqual([]);
     expect(s.getState().tasks).toEqual([]);
     ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
     await s.actions.launch("坏了");
     expect(s.getState().tasks.map((t) => t.spec.command)).toEqual(["repair_instance"]);
+  });
+
+  it("直达失败后点重试、实例已重扫成修得好的损坏：按启动失败的标题报先修复，不启动也不排补全", async () => {
+    const s = await boot();
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("files_offline", "还缺文件", { count: 3 });
+    });
+    await s.actions.quickPlay("生存", WORLD);
+    expect(s.getState().session).toMatchObject({ instanceId: "生存", phase: "failed", quickPlay: WORLD });
+    instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", { status: "broken", broken_reason: "缺少客户端 jar" }) : i));
+    await s.actions.refreshInstances();
+    await settle();
+    const toast = s.getState().toasts.find((t) => t.tone === "error");
+    if (toast === undefined || toast.action === undefined) throw new Error("直达失败的通知应带重试");
+    for (const retry of [s.actions.failureFix("retry"), toast.action]) {
+      if (!("run" in retry)) throw new Error("重试应是命令类修复动作");
+      expect(retry.errorTitle).toBe("「生存」启动失败");
+      await expect(Promise.resolve().then(() => retry.run())).rejects.toMatchObject({ message: "实例需要先修复" });
+    }
+    await settle();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(1);
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(s.getState().tasks).toEqual([]);
   });
 
   it.each<[string, Partial<InstanceDto>, string]>([
