@@ -1,10 +1,7 @@
 // 新建、导入还没装好的实例：实例详情各标签在这段时间里的说法。
 // 盘上还没有装好的实例目录，标签里该有的存档、Mod、设置、日志与诊断都还读不到，所以不画骨架，直接说明在装什么、进度去哪看。
 
-/** 句末补句号；原因原文自己已带句末标点时不重复。 */
-function sentence(text: string): string {
-  return /[。！？.!?]$/.test(text) ? text : `${text}。`;
-}
+import { sentence } from "./flows";
 
 const PROGRESS_WHERE = "进度可以在下载任务里查看。";
 
