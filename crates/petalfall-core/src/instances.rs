@@ -90,6 +90,10 @@ pub struct InstanceSummary {
     /// 补全修不好的原因：只有版本 JSON 用不了（`version` 为 [`InstanceVersion::Broken`]）且补全会被拒绝时才有，
     /// 与补全报的 [`InstanceError::NotRepairable`] 里的 `reason` 逐字相同；修得好的损坏实例为 `None`。版本 JSON
     /// 可用的实例不看，一律为 `None`（整合包没导入完这类拒绝从 `incomplete` 就看得出）。
+    ///
+    /// 版本 JSON 读不出来（[`BrokenReason::Unreadable`]）时有没有安装记录都修不好，原因是「版本 JSON 读不出来：」
+    /// 后接读盘错误连同系统给的原因。这一段是列表扫描那一次读到的，补全时再读一次，系统给的原因可能不同（这一刻被
+    /// 占用、下一刻没有权限），两边只在这里可能差开。
     pub unrepairable_reason: Option<String>,
 }
 

@@ -19,6 +19,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use petalfall_base::error_with_causes;
 use petalfall_install::{
     ForgeInstaller, LoaderFlavor, LoaderInstaller, VanillaInstaller, ensure_complete,
     forge_installer_url, merge_for_instance, neoforge_installer_url, write_instance_json,
@@ -604,7 +605,16 @@ pub(crate) async fn decide_repair(
         Some(IncompleteKind::Repair) | None => {
             let probe = match probe {
                 Some(probe) => probe,
-                None => probe_version(game_dir, id).await?,
+                None => match probe_version(game_dir, id).await {
+                    Ok(probe) => probe,
+                    // 全量扫描把同样的读盘故障记成 `BrokenReason::Unreadable`，原因同样取 `error_with_causes`（见
+                    // `discover_versions`）：照这个口径拼原因，列表上说的与这里报的才是同一句。
+                    Err(err) => {
+                        let detail = error_with_causes(&err);
+                        tracing::warn!(id, error = %detail, "版本 JSON 读不出来");
+                        return Err(unreadable_refusal(id, detail));
+                    }
+                },
             };
             match probe {
                 VersionProbe::Found(version)
@@ -616,6 +626,10 @@ pub(crate) async fn decide_repair(
                     ))
                 }
                 VersionProbe::Found(_) => Ok(RepairPlan::Complete),
+                VersionProbe::Broken(BrokenVersion {
+                    reason: BrokenReason::Unreadable(detail),
+                    ..
+                }) => Err(unreadable_refusal(id, detail)),
                 VersionProbe::Broken(broken) => {
                     let record = match InstallRecordStore::for_version_dir(&broken.dir)
                         .load()
@@ -643,10 +657,25 @@ pub(crate) async fn decide_repair(
     }
 }
 
-/// 实例列表上一个版本 JSON 用不了的实例补全修不好的原因，与对它发起补全时报的逐字相同；修得好时为 `None`。
+/// 版本 JSON 读不出来（被占用、没有权限、那个位置是个目录）时补全的拒绝。不看安装记录：照记录重装最后也要把版本
+/// JSON 写回这个位置，读不出的位置多半也写不进去，白下一遍文件。
 ///
-/// `previous` 与 `broken` 是列表已经读到的未完成标记与探测结果，不再读一遍；会多读的只有安装记录，没有记录、
-/// 缺的又是版本 JSON 时再看一眼实例目录顶层。
+/// 原因只由 `detail`（读盘错误连同系统给的原因）拼出，列表与补全都经这里。两边各读一次盘，系统给的原因在两次读取
+/// 之间可能不同（这一刻被占用、下一刻没有权限），那时两句只差在冒号后面的那段，照实给出，不为凑成一句丢掉它。
+fn unreadable_refusal(id: &str, detail: String) -> CoreError {
+    InstanceError::NotRepairable {
+        id: id.to_owned(),
+        reason: broken_reason_text(&BrokenReason::Unreadable(detail)),
+    }
+    .into()
+}
+
+/// 实例列表上一个版本 JSON 用不了的实例补全修不好的原因，与对它发起补全时报的逐字相同；修得好时为 `None`。
+/// 版本 JSON 读不出来时例外的只有系统给的那段原因：列表用的是扫描那一次读到的，补全时再读一次可能不同（见
+/// [`unreadable_refusal`]）。
+///
+/// `previous` 与 `broken` 是列表已经读到的未完成标记与探测结果，不再读一遍；会多读的只有安装记录（读不出来的
+/// 不读），没有记录、缺的又是版本 JSON 时再看一眼实例目录顶层。
 pub(crate) async fn unrepairable_reason(
     game_dir: &Path,
     id: &str,
@@ -2011,6 +2040,59 @@ mod tests {
                 "{id} 在列表上"
             );
             assert_eq!(repair_verdict(&petalfall, id).await, verdict, "{id} 去补全");
+        }
+    }
+
+    /// 版本 JSON 读不出来（这里让 `<id>.json` 是个目录，读文件必报 IO 错）：有没有安装记录都修不好。列表上的原因与
+    /// 补全报的是同一句「版本 JSON 读不出来：」后接读盘错误与系统给的原因，不说「也没有记下当初装的是什么」；补全在
+    /// 写标记之前就拒绝，不会照安装记录去重装。
+    #[tokio::test]
+    async fn an_unreadable_version_json_is_not_repairable_with_or_without_an_install_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let versions = petalfall.game_dir().join("versions");
+        let fabric = request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"));
+        InstallRecordStore::for_version_dir(&versions.join("有记录"))
+            .save(&fabric.spec())
+            .await
+            .unwrap();
+        let ids = ["有记录", "没记录"];
+        for id in ids {
+            std::fs::create_dir_all(versions.join(id).join(format!("{id}.json"))).unwrap();
+        }
+
+        let list = petalfall.list_instances().await.unwrap();
+        assert_eq!(list.len(), ids.len());
+        for id in ids {
+            let json = versions.join(id).join(format!("{id}.json"));
+            let expected = format!(
+                "版本 JSON 读不出来：文件 IO 失败: {}：{}",
+                json.display(),
+                std::fs::read(&json).unwrap_err()
+            );
+            let listed = list.iter().find(|i| i.id == id).unwrap();
+            assert!(
+                matches!(
+                    &listed.version,
+                    crate::instances::InstanceVersion::Broken(BrokenReason::Unreadable(_))
+                ),
+                "{id}：{:?}",
+                listed.version
+            );
+            assert_eq!(
+                listed.unrepairable_reason.as_deref(),
+                Some(expected.as_str()),
+                "{id} 在列表上"
+            );
+            assert_eq!(
+                repair_verdict(&petalfall, id).await,
+                Err(expected),
+                "{id} 去补全"
+            );
+            assert!(
+                !marker_path(&versions.join(id)).exists(),
+                "{id} 补全在写标记之前就拒绝"
+            );
         }
     }
 

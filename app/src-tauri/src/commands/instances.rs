@@ -600,7 +600,8 @@ pub struct InstanceDto {
     pub status: &'static str,
     pub broken_reason: Option<String>,
     /// 补全修不好的原因，与对它发起补全时报的 `detail.reason` 逐字相同；只有 broken 且补全会被拒绝时非空，
-    /// 修得好的 broken 实例与 ready 实例为 null。
+    /// 修得好的 broken 实例与 ready 实例为 null。版本 JSON 读不出来时有没有安装记录都非空，是「版本 JSON 读不出来：」
+    /// 后接读盘错误与系统给的原因；补全时再读一次，系统给的原因可能与列表那一次不同，两边只在这一段可能差开。
     pub unrepairable_reason: Option<String>,
     /// 原版版本号；识别不出或 broken 时为 null。
     pub mc_version: Option<String>,
