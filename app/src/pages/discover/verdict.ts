@@ -2,6 +2,7 @@
 // （实例正在安装、已损坏或正在移到别的游戏目录，数据包要有存档、光影要有 Iris 或 OptiFine），映射成六种判定与可勾选性。纯函数。
 
 import type { InstanceSummary } from "../../domain/adapt";
+import { needsReimport } from "../../domain/rules";
 import type { InstallableResourceType, InstanceMatch, ModVersionInfo } from "../../state/queries/discover";
 import type { WorldDto } from "../../state/queries/instance";
 import { INSTALL_COPY } from "./copy";
@@ -77,12 +78,19 @@ function fromMatch(id: string, match: InstanceMatch): TargetVerdict {
   }
 }
 
+/** 损坏实例不可用的原因：只有补全修得好的才叫人先修复，其余指向真正能走的路或写明为什么修不好。 */
+function brokenReason(inst: InstanceSummary): string {
+  if (needsReimport(inst)) return INSTALL_COPY.instanceNeedsReimport;
+  if (inst.unrepairableReason !== null) return INSTALL_COPY.instanceUnrepairable(inst.unrepairableReason);
+  return INSTALL_COPY.instanceBroken;
+}
+
 /** 单个实例的判定。 */
 export function targetVerdict(input: TargetInput): TargetVerdict {
   const { instance, match, resourceType } = input;
   const id = instance.id;
   if (instance.status === "installing") return verdict(id, "unavailable", INSTALL_COPY.instanceInstalling, null);
-  if (instance.status === "broken") return verdict(id, "unavailable", INSTALL_COPY.instanceBroken, null);
+  if (instance.status === "broken") return verdict(id, "unavailable", brokenReason(instance), null);
   // 与启动胶囊、存档行「进入」同一口径看 activity（排着的移动任务也算）：任务会排在移动后面，移动成功后实例已不在当前目录，开不了工
   if (instance.activity === "moving") return verdict(id, "unavailable", INSTALL_COPY.instanceMoving, null);
   if (match === null) return verdict(id, "unavailable", INSTALL_COPY.judging, null);

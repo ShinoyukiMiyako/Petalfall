@@ -48,6 +48,41 @@ describe("单个目标的判定", () => {
     expect([judging.kind, judging.selectable, judging.reason]).toEqual(["unavailable", false, "正在判断能否安装…"]);
   });
 
+  describe("损坏实例：只有补全修得好的才叫人先修复", () => {
+    const LOST = "缺少版本 JSON，也没有记下当初装的是什么";
+    const marker = (kind: "install" | "repair" | "modpack" | "unknown") => ({ kind, outcome: "failed" as const, startedAt: null, spec: null, error: null });
+    const broken = (overrides: Parameters<typeof summary>[1]) => summary("旧电脑拷来的", { status: "broken", brokenReason: "缺少版本 JSON", mcVersion: null, ...overrides });
+    const judge = (instance: ReturnType<typeof summary>) => targetVerdict({ instance, match: match("旧电脑拷来的"), resourceType: "mod" });
+
+    it("修得好的（没有标记、上次安装或补全没做完）仍是「实例已损坏，先修复」", () => {
+      for (const incomplete of [null, marker("install"), marker("repair"), marker("unknown")]) {
+        const v = judge(broken({ incomplete }));
+        expect([v.kind, v.selectable, v.reason, v.version]).toEqual(["unavailable", false, "实例已损坏，先修复", null]);
+      }
+    });
+
+    it("补全修不好的不叫人先修复，原样写出后端给的原因，连同后面那句提示", () => {
+      const lost = judge(broken({ unrepairableReason: LOST }));
+      expect([lost.kind, lost.selectable, lost.reason, lost.version]).toEqual(["unavailable", false, `实例已损坏：${LOST}`, null]);
+      expect(lost.reason).not.toContain("修复");
+      const file = `1.${20 + Math.floor(Math.random() * 10)}.1.json`;
+      const hinted = `${LOST}。目录里有一份叫 ${file} 的版本文件`;
+      expect(judge(broken({ incomplete: marker("unknown"), unrepairableReason: hinted })).reason).toBe(`实例已损坏：${hinted}`);
+      // 修不好的哪怕是当前实例也不会被默认勾上
+      const rows = [{ instance: broken({ unrepairableReason: LOST }), verdict: lost }];
+      expect(defaultPick(rows, null, "旧电脑拷来的")).toEqual([]);
+      expect(effectiveSelection(rows, new Set(["旧电脑拷来的"]))).toEqual([]);
+    });
+
+    it("整合包没导入完的指向重新导入，不论后端报没报原因", () => {
+      const packReason = "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入";
+      for (const unrepairableReason of [null, packReason]) {
+        const v = judge(broken({ brokenReason: "整合包没有导入完，删掉这个实例后重新导入", incomplete: marker("modpack"), unrepairableReason }));
+        expect([v.kind, v.selectable, v.reason]).toEqual(["unavailable", false, "整合包没有导入完，删掉后重新导入"]);
+      }
+    });
+  });
+
   it("实例正在移到别的游戏目录：不论矩阵怎么判、装哪一类资源都不可用，不带版本，也不会被默认勾上", () => {
     const moving = summary("生存", { activity: "moving" });
     for (const resourceType of ["mod", "resource_pack"] as const) {

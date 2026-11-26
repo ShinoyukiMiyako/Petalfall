@@ -231,6 +231,10 @@ export const INSTALL_COPY = {
   installedInWorld: (world: string) => `已装在存档「${world}」`,
   instanceInstalling: "实例正在安装",
   instanceBroken: "实例已损坏，先修复",
+  /** 补全修不好的损坏实例：叫人先修复是让人去做做不成的事，改为写出后端给的原因（原文照登，过长时悬停看全文）。 */
+  instanceUnrepairable: (reason: string) => `实例已损坏：${reason}`,
+  /** 整合包没导入完：补全补不回整合包里的 Mod 与配置，只能删掉重新导入。 */
+  instanceNeedsReimport: "整合包没有导入完，删掉后重新导入",
   /** 目标行里放得下，不截断；说的是哪个实例，行上已经写着。 */
   instanceMoving: "正在移到其他游戏目录",
   judging: "正在判断能否安装…",
