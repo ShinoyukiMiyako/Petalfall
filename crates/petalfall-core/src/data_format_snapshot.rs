@@ -15,8 +15,7 @@
 //! 样本把每个字段都填上非默认值（`Option` 都是 `Some`，集合不空，config.json 的保留区放一个不认识的键），每个
 //! 持久化枚举的每个取值都出现：守的是落盘形状，不是业务规则。样本一律用结构体字面量写全字段，类型加了字段这里
 //! 先编译不过。能走生产代码的写函数的就写进临时目录再读回比对，写盘方式一变快照也跟着变；整合包信息的写盘在
-//! 导入流程中间够不着，按它的写法（pretty）直接序列化；补行记账的写函数是 `game_lang` 的私有函数，按它的写法
-//! （pretty 加原子写入）写到它的位置再读回。
+//! 导入流程中间够不着，按它的写法（pretty）直接序列化。
 //!
 //! 一份文件只装得下某个枚举的一个取值时（配置里的各个设置项、运行记录的账户类型、移动日志的阶段、整合包信息的
 //! 格式与加载器），样本是若干份完整内容组成的 JSON 数组：每份按生产代码写出后逐行缩进两格、以逗号隔开包进方括号，
@@ -54,7 +53,7 @@ use crate::crashdiag::{
     ScannedFile, save_crash_report,
 };
 use crate::facade::Petalfall;
-use crate::game_lang::{FilledLines, filled_lines_path};
+use crate::game_lang::{FilledLines, record_filled_lines};
 use crate::history::{HistoryEvent, HistoryStore};
 use crate::instances::record_base_versions_in;
 use crate::launch::LaunchWarning;
@@ -1082,8 +1081,14 @@ async fn history_json_matches_snapshot() {
 #[tokio::test]
 async fn filled_options_json_matches_snapshot() {
     let dir = tempfile::tempdir().expect("建临时目录");
-    let bytes = serde_json::to_vec_pretty(&filled_lines_sample()).expect("样本能序列化");
-    petalfall_base::fs::atomic_write(filled_lines_path(dir.path()), &bytes)
+    // 交给启动前补全写记账的同一个函数，按文件把样本里的行当成这次补上的：写法一变，快照跟着变。
+    let sample = filled_lines_sample();
+    let filled: Vec<(&str, Vec<String>)> = sample
+        .files
+        .iter()
+        .map(|(relative, lines)| (relative.as_str(), lines.clone()))
+        .collect();
+    record_filled_lines(dir.path(), &filled)
         .await
         .expect("写补行记账");
     // 按元数据目录下的文件名读回：记账挪了位置或改了名，旧版本就找不到它，这里读不回来同样会挂。

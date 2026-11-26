@@ -1112,7 +1112,7 @@ versions/<实例名>/
 **防忘守卫：**
 
 - 快照绊线：每种落盘类型都有一份完整的样本（每个字段都填上非默认值，每个持久化枚举的每个取值都出现），按生产代码的写法序列化，与所在包根下 `testdata/data-format/current/` 里的样本逐字节比对。落盘形状一变测试就挂，失败信息里写着上面的判断规则与新内容：不需要加号就把新内容存进样本，需要就按上面的步骤做。很多落盘类型是私有的，所以快照都写在各自包内的测试模块里，共四处：
-  - `crates/petalfall-core/src/data_format_snapshot.rs`：`config.json`、`playtime.json`、`running-game.json`、模板元数据 `template.json`、移动日志、`.petalfall/base-versions.json`，以及实例元数据里的 `last-crash.json`、`modpack.json`、`ledger.json`、`history.json`；
+  - `crates/petalfall-core/src/data_format_snapshot.rs`：`config.json`、`playtime.json`、`running-game.json`、模板元数据 `template.json`、移动日志、`.petalfall/base-versions.json`，实例元数据里的 `last-crash.json`、`modpack.json`、`ledger.json`、`history.json`，以及工作目录 `.petalfall/` 下的补行记账 `filled-options.json`；
   - `crates/petalfall-auth/src/data_format_snapshot.rs`：凭据库（比对的是 DPAPI 加密之前的明文）与 `offline_accounts.json`；
   - `crates/petalfall-instance/src/data_format_snapshot.rs`：实例设置、未完成标记、安装记录与存档备份清单 `index.json`；
   - `app/src-tauri/src/tasks.rs` 测试模块里的 `data_format_snapshot`：`tasks.json`。

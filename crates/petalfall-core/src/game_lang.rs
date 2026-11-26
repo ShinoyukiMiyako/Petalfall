@@ -659,7 +659,10 @@ pub(crate) async fn read_filled_lines(working_dir: &Path) -> Result<FilledLines>
 
 /// 把这次补进各份模组默认设置的行（`filled`：相对路径与补上的行）并进记账，已记的不重复记；没有新记的不写。
 /// 读不懂的旧记账不覆盖：里面记着的行导出时还要靠它去掉。
-async fn record_filled_lines(working_dir: &Path, filled: &[(&str, Vec<String>)]) -> Result<()> {
+pub(crate) async fn record_filled_lines(
+    working_dir: &Path,
+    filled: &[(&str, Vec<String>)],
+) -> Result<()> {
     if filled.is_empty() {
         return Ok(());
     }
