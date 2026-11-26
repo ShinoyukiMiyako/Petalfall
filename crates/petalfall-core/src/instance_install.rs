@@ -21,8 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use petalfall_base::error_with_causes;
 use petalfall_install::{
-    ForgeInstaller, LoaderFlavor, LoaderInstaller, VanillaInstaller, ensure_complete,
-    forge_installer_url, merge_for_instance, neoforge_installer_url, write_instance_json,
+    LoaderFlavor, LoaderInstaller, VanillaInstaller, ensure_complete, forge_installer_url,
+    merge_for_instance, neoforge_installer_url, write_instance_json,
 };
 use petalfall_instance::{
     BrokenReason, BrokenVersion, DiscoveredVersion, IncompleteKind, IncompleteMarker,
@@ -315,8 +315,8 @@ impl Petalfall {
                 );
                 // 处理器不看下载池的令牌，取消看的是上下文上挂的那个（make_context 已挂上）：
                 // 取消时正在跑的处理器要被结束，不能等宽限期满被丢下。
-                let (embedded, summary) = ForgeInstaller::new(cx, java)
-                    .with_sources(self.source_plan(self.config().download_source))
+                let (embedded, summary) = self
+                    .forge_installer(cx, major, java, events)
                     .install_for_instance(&url, id)
                     .await?;
                 emit(

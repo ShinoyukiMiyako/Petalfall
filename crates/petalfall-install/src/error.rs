@@ -157,6 +157,11 @@ pub enum Error {
         output: Option<ProcessorOutput>,
     },
 
+    /// 处理器跑完了，生成的产物却与安装器声明的 sha1 对不上，详情见 [`ProcessorOutputMismatch`]。装箱是因为字段多，
+    /// 不让整个错误枚举跟着变大。
+    #[error(transparent)]
+    ProcessorOutputMismatch(Box<ProcessorOutputMismatch>),
+
     /// 要写进库目录的文件正被别的进程打开着（旧版 Forge 的通用 jar 由安装器直接解出，不经处理器）。
     /// 与 [`Error::ProcessorOutputLocked`] 同样重试没用，要等那个游戏退出。
     #[error(
@@ -206,6 +211,62 @@ fn file_label(path: &std::path::Path) -> String {
     )
 }
 
+/// 处理器跑完了，生成的产物却与安装器声明的 sha1 对不上。官方 installer 同样判失败，校验不能放宽。旧版安装工具在
+/// 老的 Java 8 上生成的 jar 字节与声明的不同，换新一些的 Java 就对得上，所以安装器有备用 Java 时会换它重跑一次
+/// （见 [`crate::forge::FallbackJava`]），这里报的是重跑之后仍对不上、或没能换的情形。
+///
+/// 正文写全处理器、产物的完整路径与两边的 sha1，再交代用过哪个 Java、为什么没换：命令层不另带详情，玩家与
+/// 「复制错误原文」看到的就是这一句。
+#[derive(Debug)]
+pub struct ProcessorOutputMismatch {
+    /// 处理器的 maven 坐标。
+    pub jar: String,
+    /// 对不上的那个产物。
+    pub path: PathBuf,
+    pub expected: String,
+    pub actual: String,
+    /// 先跑这个处理器的 Java。
+    pub java: PathBuf,
+    /// 换过 Java 重跑时是换上的那个；`expected` 与 `actual` 是重跑之后的结果。
+    pub retried_with: Option<PathBuf>,
+    /// 想换 Java 重跑却没能取到备用 Java 的原因，同时挂在原因链上。
+    pub fallback_error: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+impl std::fmt::Display for ProcessorOutputMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "处理器 {} 生成的 {} 与安装器声明的不符（期望 sha1 {}，实际 {}）",
+            self.jar,
+            self.path.display(),
+            self.expected,
+            self.actual
+        )?;
+        match &self.retried_with {
+            Some(second) => write!(
+                f,
+                "，先用 {} 跑、又换 {} 重跑，两次都对不上",
+                self.java.display(),
+                second.display()
+            )?,
+            None => write!(f, "，用的 Java 是 {}", self.java.display())?,
+        }
+        if let Some(reason) = &self.fallback_error {
+            write!(f, "；想换一个 Java 重跑，但没能取到：{reason}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ProcessorOutputMismatch {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.fallback_error
+            .as_deref()
+            .map(|reason| reason as &(dyn std::error::Error + 'static))
+    }
+}
+
 /// crate 级 `Result` 别名。
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -242,6 +303,8 @@ impl RetryableError for Error {
             | Error::ProcessorFailed { .. }
             | Error::ProcessorOutputLocked { .. }
             | Error::LibraryFileLocked { .. } => false,
+            // 同一个处理器、同样的输入，在同一个 Java 上生成的字节每次都一样；能换的 Java 已经换过。
+            Error::ProcessorOutputMismatch(_) => false,
             // 路径越界与加载器自带库缺失都是文件内容本身的问题，重下同一份文件结果不变。
             Error::UnsafePath { .. }
             | Error::LoaderLibraryMissing { .. }
@@ -349,6 +412,67 @@ mod tests {
             actual: "bb".into(),
         });
         assert!(err.is_retryable());
+    }
+
+    /// 产物对不上的正文要指认处理器与文件、写出两边的 sha1，再按有没有换过 Java、为什么没换各说一句；没能换的原因
+    /// 同时挂在原因链上。
+    #[test]
+    fn processor_output_mismatch_names_the_processor_the_file_and_the_javas() {
+        let path = PathBuf::from(
+            r"D:\mc\libraries\net\minecraft\client\1.13.2-20190213.203750\client-1.13.2-20190213.203750-extra.jar",
+        );
+        let java8 = PathBuf::from(r"D:\data\runtime\8\bin\java.exe");
+        let java17 = PathBuf::from(r"D:\data\runtime\17\bin\java.exe");
+        let mismatch =
+            |retried_with: Option<PathBuf>,
+             fallback_error: Option<Box<dyn std::error::Error + Send + Sync>>| {
+                Error::ProcessorOutputMismatch(Box::new(ProcessorOutputMismatch {
+                    jar: "net.minecraftforge:jarsplitter:1.1.0".into(),
+                    path: path.clone(),
+                    expected: "938487f2".into(),
+                    actual: "2f9435b4".into(),
+                    java: java8.clone(),
+                    retried_with,
+                    fallback_error,
+                }))
+            };
+        let head = format!(
+            "处理器 net.minecraftforge:jarsplitter:1.1.0 生成的 {} 与安装器声明的不符（期望 sha1 938487f2，实际 2f9435b4）",
+            path.display()
+        );
+
+        let plain = mismatch(None, None);
+        assert_eq!(
+            plain.to_string(),
+            format!("{head}，用的 Java 是 {}", java8.display())
+        );
+        assert!(std::error::Error::source(&plain).is_none());
+        assert!(!plain.is_retryable());
+
+        let retried = mismatch(Some(java17.clone()), None);
+        assert_eq!(
+            retried.to_string(),
+            format!(
+                "{head}，先用 {} 跑、又换 {} 重跑，两次都对不上",
+                java8.display(),
+                java17.display()
+            )
+        );
+        assert!(!retried.is_retryable());
+
+        let reason = "未找到匹配 Java 17 的运行时，且自动下载已关闭";
+        let unavailable = mismatch(None, Some(Box::new(std::io::Error::other(reason))));
+        assert_eq!(
+            unavailable.to_string(),
+            format!(
+                "{head}，用的 Java 是 {}；想换一个 Java 重跑，但没能取到：{reason}",
+                java8.display()
+            )
+        );
+        assert_eq!(
+            std::error::Error::source(&unavailable).map(ToString::to_string),
+            Some(reason.to_owned())
+        );
     }
 
     #[test]

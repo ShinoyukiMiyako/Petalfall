@@ -5,15 +5,27 @@
 //! Forge / NeoForge 则先读该版本要求的 Java 主版本、备妥运行时，再下载并执行官方 installer
 //! （内含 processors 子进程），故这两者的分支多一步 Java 解析。
 
+use std::path::{Path, PathBuf};
+
+use petalfall_install::forge::{FallbackJava, FallbackJavaError};
 use petalfall_install::{
     ForgeInstaller, InstallContext, LoaderInstaller, LoaderSummary, VanillaInstaller,
     VanillaSummary, forge_installer_url, neoforge_installer_url,
 };
+use petalfall_java::JavaInstallation;
 use petalfall_version::VersionJson;
 
 use crate::error::Result;
 use crate::event::{CoreEvent, EventSink, InstallPhase, emit};
 use crate::facade::{Petalfall, make_context};
+
+/// Forge / NeoForge 处理器产物校验不过时换用的 Java 主版本；游戏要求的 Java 低于它时才换。
+///
+/// 依据是实测：Forge 1.13.2（25.0.223）的 jarsplitter 1.1.0 在 Mojang 运行时自带的 Windows 版 1.8.0_51 上拆出的
+/// slim、extra 两个 jar 与安装器声明的 sha1 都对不上（同样的输入，与时区无关），换 Java 16、17、21 就完全一致；
+/// 整条处理器链（jarsplitter 1.1.0、SpecialSource 1.8.3、binarypatcher 1.1.1）在这几个版本上都跑得完，产物全部
+/// 对得上。取 17 是因为它是 Mojang 运行时里最通用的一档，本机常有，没有时也能下载。
+pub(crate) const PROCESSOR_FALLBACK_JAVA_MAJOR: u32 = 17;
 
 /// 可安装的 Mod 加载器选择。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,8 +268,8 @@ impl Petalfall {
                 choice.display_name()
             )),
         );
-        let summary = ForgeInstaller::new(cx, java_path)
-            .with_sources(self.source_plan(self.config().download_source))
+        let summary = self
+            .forge_installer(cx, required_major, java_path, events)
             .install(installer_url)
             .await?;
         emit(
@@ -275,6 +287,82 @@ impl Petalfall {
             loader_version: loader_version.to_owned(),
             libraries: summary.libraries,
         })
+    }
+
+    /// Forge / NeoForge 安装器：处理器先用 `java`（按游戏要求的主版本 `required_major` 取的那个）跑，installer 的
+    /// `.sha1` 按下载源方案取；游戏要求的 Java 低于 [`PROCESSOR_FALLBACK_JAVA_MAJOR`] 时带上备用 Java。传统布局安装
+    /// 与新建、重装实例共用这一份。
+    pub(crate) fn forge_installer<'a>(
+        &'a self,
+        cx: InstallContext<'a>,
+        required_major: u32,
+        java: PathBuf,
+        events: Option<&'a EventSink>,
+    ) -> ForgeInstaller<'a> {
+        let fallback = self.processor_fallback_java(required_major, &java, events);
+        ForgeInstaller::new(cx, java)
+            .with_sources(self.source_plan(self.config().download_source))
+            .with_fallback_java(fallback)
+    }
+
+    /// 处理器产物校验不过时去取的备用 Java；游戏要求的 Java 已经不低于 [`PROCESSOR_FALLBACK_JAVA_MAJOR`] 时不提供。
+    /// `primary` 是处理器先用的那个 Java。
+    fn processor_fallback_java<'a>(
+        &'a self,
+        required_major: u32,
+        primary: &Path,
+        events: Option<&'a EventSink>,
+    ) -> Option<FallbackJava<'a>> {
+        if required_major >= PROCESSOR_FALLBACK_JAVA_MAJOR {
+            return None;
+        }
+        let primary = primary.to_path_buf();
+        Some(Box::new(move || {
+            Box::pin(self.fetch_processor_fallback_java(primary.clone(), events))
+        }))
+    }
+
+    /// 经 [`Petalfall::resolve_java`] 取 Java [`PROCESSOR_FALLBACK_JAVA_MAJOR`]：本机有就用，没有且开着自动下载就下
+    /// Mojang 的运行时。不报步骤：这时已经在处理器那一步，Java 那一步早报过了，再报会让步骤倒退；下载运行时的进度
+    /// 算进处理器这一步，与校验一步里补下载的做法一样。
+    async fn fetch_processor_fallback_java(
+        &self,
+        primary: PathBuf,
+        events: Option<&EventSink>,
+    ) -> std::result::Result<PathBuf, FallbackJavaError> {
+        let resolved = self
+            .resolve_java(PROCESSOR_FALLBACK_JAVA_MAJOR, events)
+            .await;
+        let fallback = fallback_outcome(resolved)?;
+        // 设置里固定了 Java 时取回的就是先用的那个，安装器认出是同一个、不重跑，这里也不说要换。
+        if fallback != primary {
+            emit(
+                events,
+                CoreEvent::stage(format!(
+                    "安装器生成的文件与它声明的不符，改用 Java {PROCESSOR_FALLBACK_JAVA_MAJOR} 重跑：{}",
+                    fallback.display()
+                )),
+            );
+        }
+        Ok(fallback)
+    }
+}
+
+/// 取备用 Java 的结果交给安装器：取消照常以取消结束；别的失败记一条 warn，原因原样交给安装器写进报错。
+fn fallback_outcome(
+    resolved: Result<(Vec<JavaInstallation>, PathBuf)>,
+) -> std::result::Result<PathBuf, FallbackJavaError> {
+    match resolved {
+        Ok((_, path)) => Ok(path),
+        Err(err) if err.is_cancelled() => Err(FallbackJavaError::Cancelled),
+        Err(err) => {
+            tracing::warn!(
+                major = PROCESSOR_FALLBACK_JAVA_MAJOR,
+                error = %err,
+                "没能取到备用 Java，处理器产物对不上时没法换 Java 重跑"
+            );
+            Err(FallbackJavaError::Unavailable(Box::new(err)))
+        }
     }
 }
 
@@ -1122,5 +1210,153 @@ mod tests {
                 "{stages:?}"
             );
         }
+    }
+
+    /// 只有游戏要求的 Java 低于 17 时才给安装器备用 Java：已经是 17 及以上，换了也是同一档。
+    #[test]
+    fn the_fallback_java_is_offered_only_below_java_17() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let petalfall = Petalfall::for_test(PetalfallConfig::default(), root.clone(), root.clone());
+        let primary = root.join("java.exe");
+        assert_eq!(PROCESSOR_FALLBACK_JAVA_MAJOR, 17);
+        for (major, offered) in [(8, true), (16, true), (17, false), (21, false), (25, false)] {
+            assert_eq!(
+                petalfall
+                    .processor_fallback_java(major, &primary, None)
+                    .is_some(),
+                offered,
+                "游戏要求 Java {major}"
+            );
+        }
+    }
+
+    /// 取备用 Java 失败时原因原样交给安装器，取消仍是取消、不当成取不到。
+    #[test]
+    fn a_failed_fallback_keeps_its_reason_and_a_cancelled_one_stays_cancelled() {
+        match fallback_outcome(Err(crate::error::CoreError::NoJava { major: 17 })) {
+            Err(FallbackJavaError::Unavailable(reason)) => assert_eq!(
+                reason.to_string(),
+                "未找到匹配 Java 17 的运行时，且自动下载已关闭（开启 auto_download_java 或手动安装对应 Java）"
+            ),
+            other => panic!("应为取不到，实际：{other:?}"),
+        }
+        for cancelled in [
+            crate::error::CoreError::Java(petalfall_java::Error::Cancelled),
+            crate::error::CoreError::Install(petalfall_install::Error::Download(
+                petalfall_download::Error::Cancelled,
+            )),
+        ] {
+            assert!(
+                matches!(
+                    fallback_outcome(Err(cancelled)),
+                    Err(FallbackJavaError::Cancelled)
+                ),
+                "取消应照常以取消结束"
+            );
+        }
+        let picked = PathBuf::from(r"D:\data\runtime\17\bin\java.exe");
+        assert_eq!(
+            fallback_outcome(Ok((Vec::new(), picked.clone()))).unwrap(),
+            picked
+        );
+    }
+
+    /// 经 resolve_java 取备用 Java 失败（这里是设置里固定的 Java 不见了）：原因交给安装器，产物对不上的报错正文里
+    /// 就带着它。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_fallback_java_hands_its_reason_to_the_installer_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let missing = root
+            .join("jdk-8")
+            .join("bin")
+            .join(petalfall_java::JAVA_EXE);
+        let config = PetalfallConfig {
+            default_java: Some(missing.clone()),
+            auto_download_java: false,
+            ..PetalfallConfig::default()
+        };
+        let petalfall = Petalfall::for_test(config, root.clone(), root.clone());
+        let fetch = petalfall
+            .processor_fallback_java(8, &missing, None)
+            .expect("游戏要求 Java 8 时应带备用来源");
+
+        let reason = match fetch().await {
+            Err(FallbackJavaError::Unavailable(reason)) => reason,
+            other => panic!("应为取不到，实际：{other:?}"),
+        };
+
+        let shown = format!("执行 java 可执行文件失败：{}", missing.display());
+        assert_eq!(reason.to_string(), shown);
+        let err = petalfall_install::Error::ProcessorOutputMismatch(Box::new(
+            petalfall_install::error::ProcessorOutputMismatch {
+                jar: "net.minecraftforge:jarsplitter:1.1.0".into(),
+                path: root.join("client-1.13.2-20190213.203750-extra.jar"),
+                expected: "938487f2".into(),
+                actual: "2f9435b4".into(),
+                java: missing.clone(),
+                retried_with: None,
+                fallback_error: Some(reason),
+            },
+        ));
+        let message = err.to_string();
+        assert!(
+            message.ends_with(&format!("；想换一个 Java 重跑，但没能取到：{shown}")),
+            "{message}"
+        );
+    }
+
+    /// 取回的备用 Java 与先用的不是同一个时才发「改用 Java 17 重跑」的阶段事件；设置里固定了 Java、取回的还是先用的
+    /// 那个时不说要换。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn switching_java_is_announced_only_for_another_java() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let fixed = root.join("fake-java-17.cmd");
+        std::fs::write(
+            &fixed,
+            "@echo off\r\n>&2 echo openjdk version \"17.0.8\" 2023-07-18\r\nexit /b 0\r\n",
+        )
+        .unwrap();
+        let config = PetalfallConfig {
+            default_java: Some(fixed.clone()),
+            auto_download_java: false,
+            ..PetalfallConfig::default()
+        };
+        let petalfall = Petalfall::for_test(config, root.clone(), root.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let other = root
+            .join("jdk-8")
+            .join("bin")
+            .join(petalfall_java::JAVA_EXE);
+        {
+            let same = petalfall
+                .processor_fallback_java(8, &fixed, Some(&tx))
+                .unwrap();
+            assert_eq!(same().await.unwrap(), fixed);
+            let switched = petalfall
+                .processor_fallback_java(8, &other, Some(&tx))
+                .unwrap();
+            assert_eq!(switched().await.unwrap(), fixed);
+        }
+        drop(tx);
+
+        let mut announced = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let CoreEvent::Stage(text) = event
+                && text.contains("重跑")
+            {
+                announced.push(text);
+            }
+        }
+        assert_eq!(
+            announced,
+            vec![format!(
+                "安装器生成的文件与它声明的不符，改用 Java 17 重跑：{}",
+                fixed.display()
+            )]
+        );
     }
 }
