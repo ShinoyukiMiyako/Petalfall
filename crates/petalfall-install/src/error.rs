@@ -180,13 +180,22 @@ pub enum Error {
         problem: petalfall_version::UnsafePath,
     },
 
-    /// 加载器安装器自带的库（版本 JSON 里声明了下载件、地址留空）缺失或已损坏。它只在安装加载器时从
-    /// installer 里解出或由处理器生成，没有地址可以重新下载。
+    /// 加载器安装器自带的库（版本 JSON 里声明了下载件、地址留空，或按 `--fml.*` 启动参数推出、不在库清单里的
+    /// 补丁 jar）缺失或已损坏。它只在安装加载器时从 installer 里解出或由处理器生成，没有地址可以重新下载。
     #[error(
         "加载器自带的库 {} 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器",
         file_label(path)
     )]
     LoaderLibraryMissing { path: PathBuf },
+
+    /// 加载器安装器的处理器生成的反混淆目录（Minecraft 本体的 srg、extra 等文件所在）缺失或是空的。与
+    /// [`Error::LoaderLibraryMissing`] 一样只能重装加载器补回，命令层与启动失败码都归到同一个码；单列一种是
+    /// 因为它是目录，正文不能把它说成库文件。
+    #[error(
+        "加载器生成的目录 {} 缺失或是空的，它只能由加载器安装器生成，需要重新安装加载器",
+        file_label(path)
+    )]
+    LoaderOutputDirMissing { path: PathBuf },
 }
 
 /// 报错正文里只写文件名：完整路径太长，放进错误详情。
@@ -234,7 +243,9 @@ impl RetryableError for Error {
             | Error::ProcessorOutputLocked { .. }
             | Error::LibraryFileLocked { .. } => false,
             // 路径越界与加载器自带库缺失都是文件内容本身的问题，重下同一份文件结果不变。
-            Error::UnsafePath { .. } | Error::LoaderLibraryMissing { .. } => false,
+            Error::UnsafePath { .. }
+            | Error::LoaderLibraryMissing { .. }
+            | Error::LoaderOutputDirMissing { .. } => false,
         }
     }
 }

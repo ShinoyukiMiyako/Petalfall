@@ -530,7 +530,9 @@ fn install_code(err: &InstallError) -> &'static str {
         InstallError::LoaderVersionNotFound { .. } => code::LOADER_VERSION_NOT_FOUND,
         InstallError::Download(_) => code::DOWNLOAD_FAILED,
         InstallError::UnsafePath { .. } => code::INSTALL_UNSAFE_PATH,
-        InstallError::LoaderLibraryMissing { .. } => code::LOADER_LIBRARY_MISSING,
+        InstallError::LoaderLibraryMissing { .. } | InstallError::LoaderOutputDirMissing { .. } => {
+            code::LOADER_LIBRARY_MISSING
+        }
         _ => code::INSTALL_FAILED,
     }
 }
@@ -866,7 +868,10 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             detail.insert("entry".to_owned(), json!(entry));
             detail.insert("path".to_owned(), json!(path));
         }
-        CoreError::Install(InstallError::LoaderLibraryMissing { path }) => {
+        CoreError::Install(
+            InstallError::LoaderLibraryMissing { path }
+            | InstallError::LoaderOutputDirMissing { path },
+        ) => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
         CoreError::JavaPathInvalid { path, reason, .. } => {
@@ -1720,6 +1725,20 @@ mod tests {
         assert_eq!(
             missing.detail,
             Some(json!({ "path": path.display().to_string() }))
+        );
+
+        // 安装器生成的反混淆目录缺失归同一个码，正文说的是目录。
+        let dir = PathBuf::from("C:/mc/libraries/net/minecraft/client/1.21.1-20240808.144430");
+        let missing: CommandError =
+            InstallError::LoaderOutputDirMissing { path: dir.clone() }.into();
+        assert_eq!(missing.code, code::LOADER_LIBRARY_MISSING);
+        assert_eq!(
+            missing.message,
+            "加载器生成的目录 1.21.1-20240808.144430 缺失或是空的，它只能由加载器安装器生成，需要重新安装加载器"
+        );
+        assert_eq!(
+            missing.detail,
+            Some(json!({ "path": dir.display().to_string() }))
         );
     }
 

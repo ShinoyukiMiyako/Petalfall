@@ -13,9 +13,8 @@ use std::path::{Path, PathBuf};
 
 use petalfall_install::GameLayout;
 use petalfall_install::natives::native_jar_relpath;
-use petalfall_install::plan::{asset_object_tasks, library_tasks, logging_task};
+use petalfall_install::plan::{asset_object_tasks, library_tasks, logging_task, processor_outputs};
 use petalfall_instance::is_safe_instance_id;
-use petalfall_version::loader::{arg_tokens, flag_value};
 use petalfall_version::{
     RuntimeContext, VersionJson, check_path_segment, resolve, select_libraries,
 };
@@ -29,9 +28,6 @@ use crate::workdir::read_version_json;
 
 /// 继承链的长度上限，与 `instances.rs` 里给实例锁取链的上限相同：两边取到的基底要一致。
 const MAX_INHERIT_DEPTH: usize = 16;
-
-/// 启动参数没写 `--fml.forgeGroup` 时 FML 按这个组找自己的库，处理器产物也落在这个组下。
-const DEFAULT_FORGE_GROUP: &str = "net.minecraftforge";
 
 /// 一个要补到目标的文件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,64 +225,22 @@ fn native_jars(
     Ok(jars)
 }
 
-/// 加载器处理器产物所在的库目录，按合并后版本 JSON 的 `--fml.*` 启动参数推出。处理器的产物按 `[坐标]` 落到
-/// 坐标对应的库路径（见 forge.rs 的 `resolve_outputs`），Forge 的补丁 jar 是 `<组>:forge:<mc>-<forge>:client`，
-/// NeoForge 的是 `net.neoforged:neoforge:<版本>:client`，反混淆产物是 `net.minecraft:client:<mc>-<mcp 或 neoform>:*`。
-/// 不是 Forge 系的版本没有这些参数，得到空表。
+/// 加载器处理器产物所在的库目录：[`processor_outputs`] 按合并后版本 JSON 的 `--fml.*` 启动参数推出的补丁 jar
+/// 所在的目录，以及反混淆目录，都整目录带上。不是 Forge 系的版本没有这些参数，得到空表。
 fn processor_output_dirs(merged: &VersionJson, layout: &GameLayout) -> Result<Vec<PathBuf>> {
-    let tokens = arg_tokens(merged);
-    let mc = fml_arg(&tokens, "--fml.mcVersion")?;
-    let mut dirs = Vec::new();
-    if let (Some(mc), Some(forge)) = (&mc, fml_arg(&tokens, "--fml.forgeVersion")?) {
-        let group =
-            fml_arg(&tokens, "--fml.forgeGroup")?.unwrap_or_else(|| DEFAULT_FORGE_GROUP.to_owned());
-        dirs.push(library_dir(
-            layout,
-            &group,
-            "forge",
-            &format!("{mc}-{forge}"),
-        )?);
-    }
-    if let (Some(mc), Some(mcp)) = (&mc, fml_arg(&tokens, "--fml.mcpVersion")?) {
-        dirs.push(library_dir(
-            layout,
-            "net.minecraft",
-            "client",
-            &format!("{mc}-{mcp}"),
-        )?);
-    }
-    if let Some(neoforge) = fml_arg(&tokens, "--fml.neoForgeVersion")? {
-        dirs.push(library_dir(layout, "net.neoforged", "neoforge", &neoforge)?);
-    }
-    if let (Some(mc), Some(neoform)) = (&mc, fml_arg(&tokens, "--fml.neoFormVersion")?) {
-        dirs.push(library_dir(
-            layout,
-            "net.minecraft",
-            "client",
-            &format!("{mc}-{neoform}"),
-        )?);
-    }
-    Ok(dirs)
-}
-
-/// 一个 `--fml.*` 参数的取值。它要拼进库目录的路径：拼成 `<mc>-<版本>` 之后 `..` 就不再是一个点段，查不出来，
-/// 所以拼之前逐个按单个路径段检查。
-fn fml_arg(tokens: &[String], flag: &str) -> Result<Option<String>> {
-    let Some(value) = flag_value(tokens, flag) else {
-        return Ok(None);
-    };
-    check_path_segment(&value).map_err(|problem| petalfall_install::Error::UnsafePath {
-        entry: format!("启动参数 {flag}"),
-        path: value.clone(),
-        problem,
-    })?;
-    Ok(Some(value))
-}
-
-/// maven 坐标 `group:artifact:version` 的目录 `libraries/<group 路径>/<artifact>/<version>`。
-fn library_dir(layout: &GameLayout, group: &str, artifact: &str, version: &str) -> Result<PathBuf> {
-    let relative = format!("{}/{artifact}/{version}", group.replace('.', "/"));
-    Ok(layout.checked_library_path(&format!("{group}:{artifact}:{version}"), &relative)?)
+    let outputs = processor_outputs(merged)?;
+    let patched_dirs = outputs.patched_jars.iter().map(|jar| {
+        layout
+            .library_path(jar)
+            .parent()
+            .expect("补丁 jar 的路径带着坐标目录")
+            .to_path_buf()
+    });
+    let deobf_dirs = outputs
+        .deobf_dirs
+        .iter()
+        .map(|dir| layout.library_path(dir));
+    Ok(patched_dirs.chain(deobf_dirs).collect())
 }
 
 /// 把清单里的文件与处理器产物目录下的文件落到目标，去掉目标已有的。清单里源也缺的计数；产物目录在源里不存在

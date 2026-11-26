@@ -10,7 +10,8 @@
 //! 安装的实例则落到实例自己的目录。
 //!
 //! 加载器安装器自带的库（版本 JSON 里地址留空）没有地方可以重下：盘上那份齐全就不进下载批次，缺了或坏了
-//! 报 [`Error::LoaderLibraryMissing`]，交给玩家重装加载器。
+//! 报 [`Error::LoaderLibraryMissing`]，交给玩家重装加载器。处理器在本机生成、不在库清单里的产物另由
+//! [`reject_missing_processor_outputs`] 按启动参数核对。
 
 use std::path::{Path, PathBuf};
 
@@ -158,6 +159,54 @@ pub fn reject_missing_bundled(missing: &[DownloadTask]) -> Result<()> {
         }),
         None => Ok(()),
     }
+}
+
+/// 加载器处理器在本机生成、不在库清单里的产物（见 [`plan::processor_outputs`]），上面按库清单的检查看不到它们，
+/// 缺了游戏要到 FML 加载时才报安装损坏。按 `version`（合并后的版本 JSON）的 `--fml.*` 启动参数推出位置，在
+/// `layout` 的库目录里核对：补丁 jar 不在报 [`Error::LoaderLibraryMissing`]，反混淆目录不在或是空的报
+/// [`Error::LoaderOutputDirMissing`]。目录只看有没有东西，不细数里面的文件。只查对过文件名的游戏版本；没有
+/// `--fml.*` 参数的版本什么都不查。
+pub async fn reject_missing_processor_outputs(
+    version: &VersionJson,
+    layout: &GameLayout,
+) -> Result<()> {
+    let outputs = plan::checked_processor_outputs(version)?;
+    for jar in &outputs.patched_jars {
+        let path = layout.library_path(jar);
+        let present = match tokio::fs::metadata(&path).await {
+            Ok(meta) => meta.is_file(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(source) => return Err(io_err(&path, source)),
+        };
+        if !present {
+            return Err(Error::LoaderLibraryMissing { path });
+        }
+    }
+    for dir in &outputs.deobf_dirs {
+        let path = layout.library_path(dir);
+        if !has_entries(&path).await? {
+            return Err(Error::LoaderOutputDirMissing { path });
+        }
+    }
+    Ok(())
+}
+
+/// 目录在、且里面至少有一项；不存在或不是目录时为 `false`。
+async fn has_entries(dir: &Path) -> Result<bool> {
+    match tokio::fs::metadata(dir).await {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Ok(false),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(io_err(dir, source)),
+    }
+    let mut entries = tokio::fs::read_dir(dir)
+        .await
+        .map_err(|source| io_err(dir, source))?;
+    let first = entries
+        .next_entry()
+        .await
+        .map_err(|source| io_err(dir, source))?;
+    Ok(first.is_some())
 }
 
 async fn bundled_library_ready(task: &DownloadTask) -> Result<bool> {
@@ -774,5 +823,199 @@ mod tests {
             reject_missing_bundled(&[fetchable, bundled]),
             Err(Error::LoaderLibraryMissing { path }) if path == Path::new("/mc/libraries/forge.jar")
         ));
+    }
+
+    /// 游戏参数按空白分开写成一行的版本 JSON。
+    fn with_game_args(args: &str) -> VersionJson {
+        let args: Vec<&str> = args.split_whitespace().collect();
+        serde_json::from_value(serde_json::json!({
+            "id": "加载器",
+            "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "arguments": {"game": args, "jvm": []}
+        }))
+        .unwrap()
+    }
+
+    fn put(path: &Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// NeoForge 21.1：补丁 jar 与反混淆目录都在才放行。补丁 jar 所在目录里还放着能下载的 universal jar，删掉
+    /// 补丁 jar 后目录不空，照样要报它缺失；补丁 jar 的位置是个目录也算缺失。反混淆目录不在、是空的或是个文件，
+    /// 报目录缺失，正文说的是目录。
+    #[tokio::test]
+    async fn missing_processor_outputs_of_neoforge_are_reported() {
+        use std::collections::hash_map::RandomState;
+        use std::hash::BuildHasher;
+
+        // 构建号随机，免得检查碰巧对上一个写死的路径。
+        let build = RandomState::new().hash_one("neoforge build") % 1000;
+        let neoforge = format!("21.1.{build}");
+        let version = with_game_args(&format!(
+            "--fml.neoForgeVersion {neoforge} --fml.fmlVersion 4.0.44 --fml.mcVersion 1.21.1 \
+             --fml.neoFormVersion 20240808.144430 --launchTarget forgeclient"
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let layout = GameLayout::new(dir.path());
+        let patched = layout.library_path(&format!(
+            "net/neoforged/neoforge/{neoforge}/neoforge-{neoforge}-client.jar"
+        ));
+        let universal = layout.library_path(&format!(
+            "net/neoforged/neoforge/{neoforge}/neoforge-{neoforge}-universal.jar"
+        ));
+        let deobf = layout.library_path("net/minecraft/client/1.21.1-20240808.144430");
+        let srg = deobf.join("client-1.21.1-20240808.144430-srg.jar");
+        put(&patched, b"patched");
+        put(&universal, b"universal");
+        put(&srg, b"srg");
+
+        reject_missing_processor_outputs(&version, &layout)
+            .await
+            .unwrap();
+
+        std::fs::remove_file(&patched).unwrap();
+        let err = reject_missing_processor_outputs(&version, &layout)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::LoaderLibraryMissing { path } if *path == patched),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "加载器自带的库 neoforge-{neoforge}-client.jar 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器"
+            )
+        );
+        std::fs::create_dir_all(&patched).unwrap();
+        assert!(matches!(
+            reject_missing_processor_outputs(&version, &layout).await,
+            Err(Error::LoaderLibraryMissing { path }) if path == patched
+        ));
+        std::fs::remove_dir(&patched).unwrap();
+        put(&patched, b"patched");
+
+        std::fs::remove_file(&srg).unwrap();
+        let err = reject_missing_processor_outputs(&version, &layout)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::LoaderOutputDirMissing { path } if *path == deobf),
+            "空目录：{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "加载器生成的目录 1.21.1-20240808.144430 缺失或是空的，它只能由加载器安装器生成，需要重新安装加载器"
+        );
+        std::fs::remove_dir(&deobf).unwrap();
+        assert!(matches!(
+            reject_missing_processor_outputs(&version, &layout).await,
+            Err(Error::LoaderOutputDirMissing { path }) if path == deobf
+        ));
+        put(&deobf, b"not a directory");
+        assert!(matches!(
+            reject_missing_processor_outputs(&version, &layout).await,
+            Err(Error::LoaderOutputDirMissing { path }) if path == deobf
+        ));
+
+        // 目录里只要有东西就算在，不细数是哪些文件。
+        std::fs::remove_file(&deobf).unwrap();
+        put(
+            &deobf.join("client-1.21.1-20240808.144430-mappings.txt"),
+            b"map",
+        );
+        reject_missing_processor_outputs(&version, &layout)
+            .await
+            .unwrap();
+    }
+
+    /// Forge 1.20.1 与 1.20.1 的 NeoForge：补丁 jar 落在 `--fml.forgeGroup` 给的组下，反混淆目录按
+    /// `--fml.mcpVersion` 推出。
+    #[tokio::test]
+    async fn missing_processor_outputs_of_forge_are_reported() {
+        for (group, group_path, forge) in [
+            ("net.minecraftforge", "net/minecraftforge", "47.4.10"),
+            ("net.neoforged", "net/neoforged", "47.1.106"),
+        ] {
+            let version = with_game_args(&format!(
+                "--launchTarget forgeclient --fml.forgeVersion {forge} --fml.mcVersion 1.20.1 \
+                 --fml.forgeGroup {group} --fml.mcpVersion 20230612.114412"
+            ));
+            let dir = tempfile::tempdir().unwrap();
+            let layout = GameLayout::new(dir.path());
+            let patched = layout.library_path(&format!(
+                "{group_path}/forge/1.20.1-{forge}/forge-1.20.1-{forge}-client.jar"
+            ));
+            let deobf = layout.library_path("net/minecraft/client/1.20.1-20230612.114412");
+            put(
+                &deobf.join("client-1.20.1-20230612.114412-extra.jar"),
+                b"extra",
+            );
+
+            let err = reject_missing_processor_outputs(&version, &layout)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, Error::LoaderLibraryMissing { path } if *path == patched),
+                "{group}: {err:?}"
+            );
+
+            put(&patched, b"patched");
+            reject_missing_processor_outputs(&version, &layout)
+                .await
+                .unwrap();
+            std::fs::remove_dir_all(&deobf).unwrap();
+            assert!(
+                matches!(
+                    reject_missing_processor_outputs(&version, &layout).await,
+                    Err(Error::LoaderOutputDirMissing { path }) if path == deobf
+                ),
+                "{group}"
+            );
+        }
+    }
+
+    /// 没有 `--fml.*` 参数的版本（原版、Fabric、旧式 Forge），和不在对过文件名的游戏版本里的 Forge 与 NeoForge，
+    /// 库目录是空的也不报。
+    #[tokio::test]
+    async fn versions_without_checked_processor_outputs_are_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = GameLayout::new(dir.path());
+        let versions = [
+            VersionJson::from_json_str(
+                r#"{"id":"1.21.1","mainClass":"net.minecraft.client.main.Main",
+                    "arguments":{"game":["--username","${auth_player_name}"],"jvm":[]}}"#,
+            )
+            .unwrap(),
+            VersionJson::from_json_str(
+                r#"{"id":"fabric-loader-0.16.10-1.21.1","mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
+                    "libraries":[{"name":"net.fabricmc:fabric-loader:0.16.10","url":"https://maven.fabricmc.net/"}]}"#,
+            )
+            .unwrap(),
+            VersionJson::from_json_str(
+                r#"{"id":"1.12.2-forge-14.23.5.2860","mainClass":"net.minecraft.launchwrapper.Launch",
+                    "minecraftArguments":"--username ${auth_player_name} --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker"}"#,
+            )
+            .unwrap(),
+            with_game_args(
+                "--launchTarget forgeclient --fml.forgeVersion 49.1.0 --fml.mcVersion 1.20.4 \
+                 --fml.forgeGroup net.minecraftforge --fml.mcpVersion 20231207.154220",
+            ),
+            with_game_args(
+                "--fml.neoForgeVersion 21.4.156 --fml.fmlVersion 5.0.33 --fml.mcVersion 1.21.4 \
+                 --fml.neoFormVersion 20241203.161809 --launchTarget forgeclient",
+            ),
+        ];
+        for version in &versions {
+            assert!(
+                reject_missing_processor_outputs(version, &layout)
+                    .await
+                    .is_ok(),
+                "{}",
+                version.id
+            );
+        }
+        assert!(!layout.libraries_dir().exists());
     }
 }

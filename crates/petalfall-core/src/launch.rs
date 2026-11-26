@@ -638,10 +638,12 @@ async fn read_chain_member(
         })
 }
 
-/// 启动前查出加载器自带的库缺失：玩家能针对性处理（重新安装加载器），收敛成失败码；完整路径放进参数，
-/// 与任务失败时的错误详情同一个键。
+/// 启动前查出加载器自带的库或安装器生成的目录缺失：玩家能针对性处理（重新安装加载器），收敛成失败码；完整
+/// 路径放进参数，与任务失败时的错误详情同一个键。
 fn loader_library_missing(err: petalfall_install::Error) -> LaunchFailed {
-    let petalfall_install::Error::LoaderLibraryMissing { path } = &err else {
+    let (petalfall_install::Error::LoaderLibraryMissing { path }
+    | petalfall_install::Error::LoaderOutputDirMissing { path }) = &err
+    else {
         return LaunchFailed::Core(err.into());
     };
     let path = path.display().to_string();
@@ -1042,6 +1044,9 @@ impl Petalfall {
             asset_index_missing: plan.asset_index_missing,
         };
         petalfall_install::complete::reject_missing_bundled(&plan.files)
+            .map_err(loader_library_missing)?;
+        petalfall_install::complete::reject_missing_processor_outputs(merged, &layout)
+            .await
             .map_err(loader_library_missing)?;
 
         // -- 4 下载缺失文件（游戏文件、托管 Java、authlib-injector）
@@ -5646,6 +5651,92 @@ mod tests {
             failure.message,
             "加载器自带的库 forge-1.20.1-47.2.0-universal.jar 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器"
         );
+    }
+
+    /// NeoForge 21.1 的处理器产物不在库清单里：补丁 jar 缺失时启动停在补全库文件这一步，报加载器文件缺失、带上
+    /// 补丁 jar 的完整路径，不下载、不拉起游戏；反混淆目录不在或是空的同样拦下，路径给目录。都在时照常启动。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn missing_processor_outputs_stop_launch_while_completing_libraries() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        let json = serde_json::json!({
+            "id": VERSION,
+            "type": "release",
+            "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "javaVersion": {"component": "java-runtime-gamma", "majorVersion": 17},
+            "arguments": {"game": [
+                "--fml.neoForgeVersion", "21.1.250", "--fml.fmlVersion", "4.0.44",
+                "--fml.mcVersion", "1.21.1", "--fml.neoFormVersion", "20240808.144430",
+                "--launchTarget", "forgeclient"
+            ], "jvm": []}
+        });
+        install_json(&mc, VERSION, &json.to_string());
+        let java = echo_java(&fx.root);
+        let libraries = mc.join("libraries");
+        let patched =
+            libraries.join("net/neoforged/neoforge/21.1.250/neoforge-21.1.250-client.jar");
+        let deobf = libraries.join("net/minecraft/client/1.21.1-20240808.144430");
+        let stopped_at = |events: &[LaunchEvent], failure: &LaunchFailure, path: &Path| {
+            assert_eq!(failure.code, FailureCode::LoaderLibraryMissing);
+            assert_eq!(failure.params["path"].as_str().map(Path::new), Some(path));
+            assert_eq!(stage_indices(events), vec![0, 1, 2, 3]);
+            assert!(
+                !events.iter().any(|e| matches!(e, LaunchEvent::Download(_))),
+                "不该推出下载进度：{events:?}"
+            );
+            assert!(!fx.root.join(ECHO_JAVA_ARGS).exists(), "不该拉起游戏");
+        };
+
+        let (result, events) = launch(&fx.petalfall, java.clone()).await;
+        let failure = expect_failure(result);
+        stopped_at(&events, &failure, &patched);
+        assert_eq!(
+            failure.message,
+            "加载器自带的库 neoforge-21.1.250-client.jar 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器"
+        );
+
+        std::fs::create_dir_all(patched.parent().unwrap()).unwrap();
+        std::fs::write(&patched, b"patched").unwrap();
+        let (result, events) = launch(&fx.petalfall, java.clone()).await;
+        stopped_at(&events, &expect_failure(result), &deobf);
+
+        std::fs::create_dir_all(&deobf).unwrap();
+        let (result, events) = launch(&fx.petalfall, java.clone()).await;
+        let failure = expect_failure(result);
+        stopped_at(&events, &failure, &deobf);
+        assert_eq!(
+            failure.message,
+            "加载器生成的目录 1.21.1-20240808.144430 缺失或是空的，它只能由加载器安装器生成，需要重新安装加载器"
+        );
+
+        std::fs::write(deobf.join("client-1.21.1-20240808.144430-srg.jar"), b"srg").unwrap();
+        let (result, events) = launch(&fx.petalfall, java).await;
+        let run = expect_run(result);
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(run.finish().await.exit.exit_code, Some(0));
+        assert!(fx.root.join(ECHO_JAVA_ARGS).exists());
+    }
+
+    /// 没有 `--fml.*` 参数的旧式 Forge 不推处理器产物，库目录是空的也照常启动。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn versions_without_fml_arguments_launch_without_processor_outputs() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        let json = serde_json::json!({
+            "id": VERSION,
+            "type": "release",
+            "mainClass": "net.minecraft.launchwrapper.Launch",
+            "javaVersion": {"component": "java-runtime-gamma", "majorVersion": 17},
+            "minecraftArguments": "--username ${auth_player_name} --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker"
+        });
+        install_json(&mc, VERSION, &json.to_string());
+
+        let (result, _) = launch(&fx.petalfall, echo_java(&fx.root)).await;
+
+        let run = expect_run(result);
+        assert_eq!(run.finish().await.exit.exit_code, Some(0));
+        assert!(fx.root.join(ECHO_JAVA_ARGS).exists());
+        assert!(!mc.join("libraries").exists());
     }
 
     #[test]
