@@ -309,8 +309,8 @@ function strParam(params: FailureParams, key: string, code: FailureCode): string
   return String(param(params, key, code));
 }
 
-/** 句末补句号；原因原文自己已带句末标点时不重复。 */
-function sentence(text: string): string {
+/** 句末补句号；原因原文自己已带句末标点时不重复。后端给的原因有的已带句末标点、有的后面还跟着一句提示，各页拼句时共用这一份。 */
+export function sentence(text: string): string {
   return /[。！？.!?]$/.test(text) ? text : `${text}。`;
 }
 

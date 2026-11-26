@@ -7,7 +7,7 @@ import { INSTALL_COPY, SEARCH_COPY } from "../pages/discover/copy";
 import { HERO_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
 import { GPU_COPY } from "../pages/settings/copy";
 import { TASKS_COPY } from "../pages/tasks/copy";
-import { ACTION_ERROR, CONFIRM_COPY, DELETE_INSTANCE_COPY, failureCopy, failureToastLabel, INSTALL_PHASE_LABEL, lockReason, microsoftLoginFailure, moveBlockerReason, TASK_TEXT, TASK_TOAST, taskFailureReason, taskPhaseText, taskStatusLabel, TOAST_COPY, withoutSettingsAction, type FailureContext } from "./flows";
+import { ACTION_ERROR, CONFIRM_COPY, DELETE_INSTANCE_COPY, failureCopy, failureToastLabel, INSTALL_PHASE_LABEL, lockReason, microsoftLoginFailure, moveBlockerReason, sentence, TASK_TEXT, TASK_TOAST, taskFailureReason, taskPhaseText, taskStatusLabel, TOAST_COPY, withoutSettingsAction, type FailureContext } from "./flows";
 import { PEEK_COPY } from "./shell";
 
 /** 文案禁用词：语气词、客套、空泛的结果与按钮、归因措辞、占位说法、错别字与旧称，以及账户相关术语的禁用叫法。 */
@@ -104,6 +104,17 @@ describe("通知正文", () => {
   it("补全开始的通知与其他入队通知同一句式，句末不加句号", () => {
     expect(OVERVIEW_COPY.repairStartedBody).toBe("进度见下载任务");
     expect(TASK_TOAST.exportStarted("x").body).toBe(OVERVIEW_COPY.repairStartedBody);
+  });
+});
+
+describe("拼句时的句末标点", () => {
+  it("没有句末标点才补句号；已带中西文句末标点的原样返回，不出现两个句号", () => {
+    expect(sentence("缺少版本 JSON，也没有记下当初装的是什么")).toBe("缺少版本 JSON，也没有记下当初装的是什么。");
+    for (const ended of ["已补全。", "已补全！", "已补全？", "Version JSON is missing.", "Missing!", "Missing?"]) expect(sentence(ended)).toBe(ended);
+  });
+
+  it("只看末尾：句中带句号、后面跟着一句没收尾的提示时照样补上", () => {
+    expect(sentence("缺少版本 JSON。目录里有一份叫 1.20.1.json 的版本文件")).toBe("缺少版本 JSON。目录里有一份叫 1.20.1.json 的版本文件。");
   });
 });
 

@@ -1,14 +1,9 @@
 // 实例库页面自己的文案。跨页面共用的（加载器名、启动入口、删除确认、通知目录）从 copy/flows 引用，这里不重复。
 
-import { joinMixed, LOADER_NAME, PAGE_LABEL } from "../../copy/flows";
+import { joinMixed, LOADER_NAME, PAGE_LABEL, sentence } from "../../copy/flows";
 import { formatPlaytime } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import type { SortKey } from "./model";
-
-/** 后端给的原因有的已带句末标点，有的后面还跟着一句提示：没有句末标点时才补句号，不出现两个句号。 */
-function sentence(text: string): string {
-  return /[。！？.!?]$/.test(text) ? text : `${text}。`;
-}
 
 export const LIBRARY_COPY = {
   title: PAGE_LABEL.library,
