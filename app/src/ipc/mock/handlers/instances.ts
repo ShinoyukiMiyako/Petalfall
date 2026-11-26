@@ -133,7 +133,8 @@ type DerivedField =
   | "modpack"
   | "modpack_error"
   | "last_crash_at"
-  | "last_crash_error";
+  | "last_crash_error"
+  | "unrepairable_reason";
 
 interface MockInstance {
   dto: Omit<InstanceDto, DerivedField>;
@@ -364,6 +365,30 @@ function seedInstances(): MockInstance[] {
       content: emptyContent(),
       sizeBytes: 12 * MB,
       fileCount: 3,
+      coverFiles: [],
+    },
+    // 从旧电脑拷过来时漏了版本 JSON，启动器也没记下当初装的是什么：补全修不好，与上面那个修得好的损坏实例对照着看
+    {
+      dto: {
+        id: "旧电脑拷来的",
+        status: "broken",
+        broken_reason: "缺少版本 JSON",
+        mc_version: null,
+        loaders: [],
+        release_type: null,
+        is_release: false,
+        java_major: null,
+        quick_play: null,
+        settings_error: null,
+        incomplete: null,
+        created_at: now - 200 * DAY,
+      },
+      settings: defaultSettings(),
+      modpack: null,
+      inheritsFrom: null,
+      content: emptyContent(),
+      sizeBytes: 640 * MB,
+      fileCount: 2100,
       coverFiles: [],
     },
   ];
@@ -770,6 +795,8 @@ function toDto(instance: MockInstance): InstanceDto {
     modpack_error: null,
     last_crash_at: crash === null ? null : crash.at,
     last_crash_error: null,
+    // 与后端一样只对版本 JSON 不可用的实例下结论：版本 JSON 还在的整合包半成品补全也会拒，由前端按未完成标记认出
+    unrepairable_reason: instance.dto.status === "broken" ? mockRepairRefusal(instance) : null,
     activity: activityOf(instance.dto.id),
     used_by: usedByOf(instance.dto.id),
     base_busy: ready ? baseBusyOf(instance.dto.id) : null,
@@ -1270,6 +1297,17 @@ function mockLoaderReinstallSpec(instance: MockInstance): NonNullable<Incomplete
   return { mc_version: mcVersion, loader: loader.kind, loader_version: loader.version };
 }
 
+/**
+ * 补全会以 instance_failed 拒绝时报的原因，与后端看未完成标记定补全方案的那一步同一套判定；修得好为 null。
+ * 列实例给的 unrepairable_reason 与补全的拒绝都取这一句，两处逐字一致。mock 不记安装记录，版本 JSON 不可用时只看标记。
+ */
+function mockRepairRefusal(instance: MockInstance): string | null {
+  if (instance.dto.incomplete?.kind === "modpack") return "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入";
+  const marked = instance.dto.incomplete?.kind === "install" ? instance.dto.incomplete.spec : null;
+  if (instance.dto.status === "broken" && marked === null) return `${instance.dto.broken_reason ?? "版本 JSON 不可用"}，也没有记下当初装的是什么`;
+  return null;
+}
+
 async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
   const taskId = str(args, "taskId");
   const id = str(args, "id");
@@ -1286,15 +1324,9 @@ async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
     throw error;
   }
   try {
-    if (instance.dto.incomplete?.kind === "modpack") {
-      const reason = "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入";
-      throw new IpcError("instance_failed", `实例 ${id} 无法补全：${reason}`, { id, reason });
-    }
+    const refusal = mockRepairRefusal(instance);
+    if (refusal !== null) throw new IpcError("instance_failed", `实例 ${id} 无法补全：${refusal}`, { id, reason: refusal });
     const marked = instance.dto.incomplete?.kind === "install" ? instance.dto.incomplete.spec : null;
-    if (instance.dto.status === "broken" && marked === null) {
-      const reason = `${instance.dto.broken_reason ?? "版本 JSON 不可用"}，也没有记下当初装的是什么`;
-      throw new IpcError("instance_failed", `实例 ${id} 无法补全：${reason}`, { id, reason });
-    }
     // 与后端一样：上次补全败在加载器自带的库上时，不带参数的补全也走重装，否则只会原样失败；装不回的照旧补全
     const stuck = instance.dto.incomplete?.error?.code === "loader_library_missing" && typeof reinstallableMockLoader(instance.dto.loaders) !== "string";
     const spec = marked !== null ? marked : reinstallLoader || stuck ? mockLoaderReinstallSpec(instance) : null;

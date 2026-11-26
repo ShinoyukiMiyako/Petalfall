@@ -175,6 +175,16 @@ export function needsReimport(inst: Pick<InstanceSummary, "status" | "incomplete
   return inst.status === "broken" && inst.incomplete !== null && inst.incomplete.kind === "modpack";
 }
 
+// ---------------------------------------------------------------- 补全修不好
+
+/**
+ * 点修复（补全游戏文件）能不能把实例修好：整合包没导入完的、后端说补全修不好的（版本 JSON 不可用又没记下当初装的是什么），
+ * 补全一律被拒，入口不该承诺「补全后就能启动」。只回答修不修得好，不管此刻排不排得上：实例或基底正忙由 instance-locks 判定。
+ */
+export function canRepair(inst: Pick<InstanceSummary, "status" | "incomplete" | "unrepairableReason">): boolean {
+  return !needsReimport(inst) && inst.unrepairableReason === null;
+}
+
 // ---------------------------------------------------------------- 重新安装加载器
 
 /**

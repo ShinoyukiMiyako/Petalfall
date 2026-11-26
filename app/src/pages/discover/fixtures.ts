@@ -23,6 +23,7 @@ export function summary(id: string, overrides: Partial<InstanceSummary> = {}): I
     pinned: false,
     status: "ready",
     brokenReason: null,
+    unrepairableReason: null,
     createdAt: 1_700_000_000_000,
     lastPlayedAt: null,
     playtimeMin: 0,

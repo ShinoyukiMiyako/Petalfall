@@ -71,6 +71,7 @@ export function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): I
     id,
     status: "ready",
     broken_reason: null,
+    unrepairable_reason: null,
     mc_version: "1.21.1",
     loaders: [],
     release_type: "release",

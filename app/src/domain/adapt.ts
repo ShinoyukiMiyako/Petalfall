@@ -170,6 +170,11 @@ export interface InstanceSummary {
   status: InstanceStatus;
   /** status 为 broken 时的原因；其余为 null。 */
   brokenReason: string | null;
+  /**
+   * 补全修不好时后端给的原因（补全会以同一句话拒绝）：只在 status 为 broken 时可能非空，补全修得好的损坏实例与别的状态都为 null。
+   * 整合包没导入完的另由 needsReimport 判定，后端在它版本 JSON 还在时不报这一项。点修复有没有用看 rules 的 canRepair。
+   */
+  unrepairableReason: string | null;
   createdAt: number | null;
   /** 上次游玩的毫秒时间戳；没玩过或游玩记录读不出时为 null，要说「从未游玩」先看 playError。 */
   lastPlayedAt: number | null;
@@ -254,19 +259,26 @@ export interface InstanceContext {
   busyTaskInstanceIds: ReadonlySet<string>;
 }
 
-function instanceStatus(dto: InstanceDto, incomplete: InstanceIncomplete | null, ctx: InstanceContext): { status: InstanceStatus; brokenReason: string | null } {
+function instanceStatus(
+  dto: InstanceDto,
+  incomplete: InstanceIncomplete | null,
+  ctx: InstanceContext,
+): { status: InstanceStatus; brokenReason: string | null; unrepairableReason: string | null } {
+  // 后端只对版本 JSON 不可用的实例下这个结论；版本 JSON 可用却说修不好，两端对这个字段的理解已经错开
+  if (dto.unrepairable_reason !== null && dto.status !== "broken") throw new Error(`实例 ${dto.id} 没有损坏，却说补全修不好：${dto.unrepairable_reason}`);
   // 正在安装或补全时版本目录里也有未完成标记，必须先判安装中，否则排队中的新实例会被画成损坏
   if (ctx.busyTaskInstanceIds.has(dto.id) || dto.activity === "installing" || dto.activity === "repairing") {
-    return { status: "installing", brokenReason: null };
+    return { status: "installing", brokenReason: null, unrepairableReason: null };
   }
   if (dto.status === "broken") {
-    if (dto.broken_reason !== null) return { status: "broken", brokenReason: dto.broken_reason };
-    if (incomplete !== null) return { status: "broken", brokenReason: incompleteReason(incomplete) };
+    const unrepairableReason = dto.unrepairable_reason;
+    if (dto.broken_reason !== null) return { status: "broken", brokenReason: dto.broken_reason, unrepairableReason };
+    if (incomplete !== null) return { status: "broken", brokenReason: incompleteReason(incomplete), unrepairableReason };
     throw new Error(`实例 ${dto.id} 标为损坏却没有原因`);
   }
   if (dto.status !== "ready") throw new Error(`未知的实例状态：${String(dto.status)}`);
-  if (incomplete !== null) return { status: "broken", brokenReason: incompleteReason(incomplete) };
-  return { status: "ready", brokenReason: null };
+  if (incomplete !== null) return { status: "broken", brokenReason: incompleteReason(incomplete), unrepairableReason: null };
+  return { status: "ready", brokenReason: null, unrepairableReason: null };
 }
 
 export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): InstanceSummary {
@@ -276,7 +288,7 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     .filter((l): l is { kind: ExtraLoaderKind; version: string | null } => l.kind === "optifine" || l.kind === "liteloader")
     .map((l) => ({ kind: l.kind, version: l.version }));
   const incomplete = dto.incomplete === null ? null : incompleteFromDto(dto.incomplete);
-  const { status, brokenReason } = instanceStatus(dto, incomplete, ctx);
+  const { status, brokenReason, unrepairableReason } = instanceStatus(dto, incomplete, ctx);
   // 活动只报最要紧的那一件，被当作基底时它可能是 running 等；反过来报 inherited 却没说谁在用，或说了谁在用却没有任何占用，都是契约破了。
   if (dto.activity === "inherited" && dto.used_by === null) throw new Error(`实例 ${dto.id} 被当作基底占着，却没说是哪个实例在用`);
   if (dto.used_by !== null && dto.activity === null) throw new Error(`实例 ${dto.id} 正被 ${dto.used_by} 使用，却没有报出占用`);
@@ -304,6 +316,7 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     pinned: ctx.pins.includes(dto.id),
     status,
     brokenReason,
+    unrepairableReason,
     createdAt: dto.created_at,
     lastPlayedAt: dto.last_played_at,
     playtimeMin: dto.playtime_min,

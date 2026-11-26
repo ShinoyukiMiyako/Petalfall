@@ -213,8 +213,8 @@ describe("mock：列表、内容与元数据", () => {
 
   it("列表按小写 id 排序，就绪与损坏的实例字段各自成立", async () => {
     const list = await listInstances();
-    // 码位顺序：数字 < 拉丁字母 < 汉字（樱 U+6A31 在 没 U+6CA1 之前），与后端一致，不按语言区域排。
-    expect(list.map((i) => i.id)).toEqual(["1.20.1-Fabric", "1.20.1-Forge", "1.21", "1.21.1", "1.21.1-Fabric", "RLCraft", "樱花生存", "没装完"]);
+    // 码位顺序：数字 < 拉丁字母 < 汉字（旧 U+65E7、樱 U+6A31 在 没 U+6CA1 之前），与后端一致，不按语言区域排。
+    expect(list.map((i) => i.id)).toEqual(["1.20.1-Fabric", "1.20.1-Forge", "1.21", "1.21.1", "1.21.1-Fabric", "RLCraft", "旧电脑拷来的", "樱花生存", "没装完"]);
     // 游玩时长取自启动 mock 的种子：1.20.1-Fabric 玩过 95 + 30 + 55 分钟，1.21 玩过 40 + 120 + 15 分钟。
     expect(list.find((i) => i.id === "1.20.1-Fabric")?.playtime_min).toBe(180);
     expect(list.find((i) => i.id === "1.21")?.playtime_min).toBe(175);
@@ -250,6 +250,11 @@ describe("mock：列表、内容与元数据", () => {
     const broken = list.find((i) => i.id === "没装完");
     expect(broken).toMatchObject({ status: "broken", mod_count: null, world_count: null, resource_pack_count: null, isolated: null, mc_version: null });
     expect(broken?.incomplete).toMatchObject({ kind: "install", outcome: "failed", spec: { loader: "neoforge" } });
+    // 记着当初装的是什么，补全照着重装就能修好；没记下的那个补全修不好，就绪的实例一律不报
+    expect(broken?.unrepairable_reason).toBeNull();
+    expect(list.filter((i) => i.unrepairable_reason !== null).map((i) => [i.id, i.status, i.unrepairable_reason])).toEqual([
+      ["旧电脑拷来的", "broken", "缺少版本 JSON，也没有记下当初装的是什么"],
+    ]);
   });
 
   it("内容：资源包顺序、当前光影与读不出 level.dat 的存档；损坏实例报 instance_failed", async () => {
@@ -450,6 +455,20 @@ describe("mock：新建与补全", () => {
     expect(await repaired).toEqual({ reinstalled: true, libraries: 12, assets: 0, natives: 0 });
     const fixed = (await listInstances()).find((i) => i.id === "没装完");
     expect(fixed).toMatchObject({ status: "ready", incomplete: null, mc_version: "1.20.1", loaders: [{ kind: "neoforge", version: "47.1.106" }] });
+    expect(fixed?.unrepairable_reason).toBeNull();
+  });
+
+  it("补全修不好的实例：补全以 instance_failed 拒绝，报的原因与列表给的逐字相同，实例原样留着、不占着", async () => {
+    const ID = "旧电脑拷来的";
+    const listed = (await listInstances()).find((i) => i.id === ID);
+    expect(listed).toMatchObject({ status: "broken", broken_reason: "缺少版本 JSON", incomplete: null });
+    const error = await rejection(repairInstance("t-lost", mockGameDir(), ID));
+    expect(error.code).toBe("instance_failed");
+    expect(error.message).toBe(`实例 ${ID} 无法补全：缺少版本 JSON，也没有记下当初装的是什么`);
+    expect(detail(error)).toEqual({ id: ID, reason: listed?.unrepairable_reason });
+    expect((await listInstances()).find((i) => i.id === ID)).toMatchObject({ status: "broken", incomplete: null, activity: null, unrepairable_reason: listed?.unrepairable_reason });
+    // 被拒后既不占着实例也不留下任务：同一个 taskId 再来一次还是同一个拒绝，不是 instance_busy 或 task_conflict
+    expect((await rejection(repairInstance("t-lost", mockGameDir(), ID))).code).toBe("instance_failed");
   });
 
   describe("重新安装加载器", () => {

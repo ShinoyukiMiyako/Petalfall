@@ -71,6 +71,11 @@ export interface InstanceDto {
   /** ready：版本 JSON 可用；broken：缺失或损坏，原因见 broken_reason。只说版本 JSON，安装写到一半时也是 ready：判断能不能用要同时看 incomplete 为空。 */
   status: "ready" | "broken";
   broken_reason: string | null;
+  /**
+   * 补全会被拒绝时（以 instance_failed 报不可补全）补全报的那句原因，原样照抄，可能还带一句指向目录里别的版本文件的提示；
+   * 只在 broken 且补全修不好时非空（版本 JSON 缺失或损坏、又没有记下当初装的是什么）。补全修得好的损坏实例与 ready 的实例都为 null。
+   */
+  unrepairable_reason: string | null;
   /** 原版版本号；识别不出或 broken 时为 null。 */
   mc_version: string | null;
   loaders: LoaderDto[];

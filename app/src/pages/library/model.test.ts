@@ -39,6 +39,7 @@ function inst(id: string, overrides: Partial<InstanceSummary> = {}): InstanceSum
     pinned: false,
     status: "ready",
     brokenReason: null,
+    unrepairableReason: null,
     createdAt: 1_000,
     lastPlayedAt: null,
     playtimeMin: 0,

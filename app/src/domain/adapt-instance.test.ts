@@ -7,6 +7,7 @@ function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): Instance
     id,
     status: "ready",
     broken_reason: null,
+    unrepairable_reason: null,
     mc_version: "1.21.1",
     loaders: [],
     release_type: "release",
@@ -101,6 +102,27 @@ describe("实例 DTO 适配：状态", () => {
     const byMarker = instanceFromDto(instanceDto("C", { status: "broken", broken_reason: null, incomplete: incomplete({}) }), idle);
     expect(byMarker.brokenReason).toBe("安装没有完成：连接超时");
     expect(() => instanceFromDto(instanceDto("D", { status: "broken", broken_reason: null }), idle)).toThrow("实例 D 标为损坏却没有原因");
+  });
+
+  it("补全修不好的原因随损坏原样带过（含后面跟着的提示）；修得好的损坏、就绪但带标记的为 null，安装中不带", () => {
+    const reason = "缺少版本 JSON，也没有记下当初装的是什么。目录里有一份叫 1.20.1.json 的版本文件，可能是改名时没跟上";
+    const lost = instanceDto("Lost", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason });
+    expect(instanceFromDto(lost, idle)).toMatchObject({ status: "broken", brokenReason: "缺少版本 JSON", unrepairableReason: reason });
+    expect(instanceFromDto(instanceDto("M", { status: "broken", broken_reason: null, unrepairable_reason: reason, incomplete: incomplete({ kind: "repair" }) }), idle)).toMatchObject({
+      status: "broken",
+      brokenReason: "补全没有完成：连接超时",
+      unrepairableReason: reason,
+    });
+    expect(instanceFromDto(instanceDto("C", { status: "broken", broken_reason: "缺少版本 JSON", incomplete: incomplete({}) }), idle).unrepairableReason).toBeNull();
+    expect(instanceFromDto(instanceDto("E", { incomplete: incomplete({ kind: "repair", outcome: "cancelled", error: null }) }), idle)).toMatchObject({ status: "broken", unrepairableReason: null });
+    expect(instanceFromDto(lost, { pins: [], busyTaskInstanceIds: new Set(["Lost"]) })).toMatchObject({ status: "installing", brokenReason: null, unrepairableReason: null });
+    expect(instanceFromDto({ ...lost, activity: "repairing" }, idle)).toMatchObject({ status: "installing", unrepairableReason: null });
+  });
+
+  it("没有损坏却说补全修不好是契约破了，抛错；排着任务也一样", () => {
+    const reason = "缺少版本 JSON，也没有记下当初装的是什么";
+    expect(() => instanceFromDto(instanceDto("R", { unrepairable_reason: reason }), idle)).toThrow(`实例 R 没有损坏，却说补全修不好：${reason}`);
+    expect(() => instanceFromDto(instanceDto("R", { unrepairable_reason: reason }), { pins: [], busyTaskInstanceIds: new Set(["R"]) })).toThrow("实例 R 没有损坏");
   });
 
   it("就绪但带未完成标记的按损坏处理（上次补全被取消）", () => {
