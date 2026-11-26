@@ -529,6 +529,10 @@ impl Petalfall {
                 let root = inheritance_root(&scan, id);
                 self.prepare_sources().await?;
                 let layout = self.layout();
+                // 安装器在本机生成的文件补全下不回来：缺了就照「加载器文件缺失」停下，不假装补全成功。命令层
+                // 把这个失败码记进未完成标记，下一次补全就改走重新安装加载器（见 decide_repair）。
+                petalfall_install::complete::reject_missing_processor_outputs(&merged, &layout)
+                    .await?;
                 let pool = self.download_pool_reporting(events);
                 let policy = self.retry_policy();
                 let http = self.http();
@@ -2436,6 +2440,55 @@ mod tests {
             .unwrap();
         let (plan, _) = petalfall.begin_repair("光影").await.unwrap();
         assert_eq!(plan, RepairPlan::Complete);
+    }
+
+    /// 安装器在本机生成的文件（这里是 NeoForge 补丁后的客户端 jar）补全下不回来：缺了它补全就照加载器文件缺失
+    /// 停下，不报成功，也不进任何下载步骤；文件放回去后同一个方案照常补全。
+    #[tokio::test]
+    async fn repair_stops_when_a_processor_output_of_the_loader_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        write_version(
+            petalfall.game_dir(),
+            "整合包",
+            r#"{"id":"整合包","type":"release","mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+                "arguments":{"jvm":[],"game":["--fml.neoForgeVersion","21.1.250","--fml.fmlVersion","4.0.44",
+                "--fml.mcVersion","1.21.1","--fml.neoFormVersion","20240808.144430","--launchTarget","forgeclient"]}}"#,
+        );
+        let layout = petalfall.layout();
+        let patched =
+            layout.library_path("net/neoforged/neoforge/21.1.250/neoforge-21.1.250-client.jar");
+        let srg = layout.library_path(
+            "net/minecraft/client/1.21.1-20240808.144430/client-1.21.1-20240808.144430-srg.jar",
+        );
+        std::fs::create_dir_all(srg.parent().unwrap()).unwrap();
+        std::fs::write(&srg, b"srg").unwrap();
+        let (plan, _) = petalfall.begin_repair("整合包").await.unwrap();
+        assert_eq!(plan, RepairPlan::Complete);
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = petalfall
+            .repair_instance("整合包", &plan, Some(&tx))
+            .await
+            .unwrap_err();
+        drop(tx);
+        assert!(
+            matches!(
+                &err,
+                CoreError::Install(petalfall_install::Error::LoaderLibraryMissing { path })
+                    if *path == patched
+            ),
+            "{err:?}"
+        );
+        assert!(phases_of(&drain(rx)).is_empty(), "不该进到下载步骤");
+
+        std::fs::create_dir_all(patched.parent().unwrap()).unwrap();
+        std::fs::write(&patched, b"patched").unwrap();
+        let outcome = petalfall
+            .repair_instance("整合包", &plan, None)
+            .await
+            .unwrap();
+        assert!(!outcome.reinstalled);
     }
 
     #[tokio::test]
