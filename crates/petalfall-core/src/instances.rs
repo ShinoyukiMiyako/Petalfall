@@ -1250,11 +1250,11 @@ pub(crate) async fn is_unclaimed_base_version(game_dir: &Path, id: &str) -> bool
     }
 }
 
-/// 游戏目录里有没有别的版本经 `inheritsFrom` 直接继承 `versions/<id>`。只算版本 JSON 读得懂的：读不出来或
-/// 读不懂的版本说不清继承着谁，不算。版本目录扫不出来时照实报错。
-pub(crate) async fn is_inherited_base_version(game_dir: &Path, id: &str) -> Result<bool> {
+/// 游戏目录里经 `inheritsFrom` 直接继承 `versions/<id>` 的版本，与 [`dependents_in`] 同一口径与顺序。只算版本
+/// JSON 读得懂的：读不出来或读不懂的版本说不清继承着谁，不算。版本目录扫不出来时照实报错。
+pub(crate) async fn base_version_dependents(game_dir: &Path, id: &str) -> Result<Vec<String>> {
     let scan = discover_versions(game_dir).await?;
-    Ok(!dependents_in(&scan, id).is_empty())
+    Ok(dependents_in(&scan, id))
 }
 
 /// 版本目录是不是加载器安装器落下的样子：继承着别的版本，目录名里带着加载器的版本号

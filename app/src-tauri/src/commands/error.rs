@@ -115,7 +115,7 @@ pub mod code {
     /// duplicate）。
     pub const INSTANCE_NAME_INVALID: &str = "instance_name_invalid";
     /// 整合包要用的原版或加载器的版本目录名下已经有一个别的版本，装了会换掉它的版本 JSON（detail.id 为那个
-    /// 版本）。前端没有统一说法，显示后端原文。
+    /// 版本，detail.inherited_by 为直接继承它的版本，没有时为空数组）。前端没有统一说法，显示后端原文。
     pub const MODPACK_BASE_OCCUPIED: &str = "modpack_base_occupied";
     /// 启动器写在实例里的 JSON 文件读不懂（detail.path）。
     pub const JSON_FILE_INVALID: &str = "json_file_invalid";
@@ -771,8 +771,11 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             detail.insert("name".to_owned(), json!(name));
             detail.insert("rule".to_owned(), json!(rule.code()));
         }
-        CoreError::BaseVersionOccupied { id, .. } => {
+        CoreError::BaseVersionOccupied {
+            id, inherited_by, ..
+        } => {
             detail.insert("id".to_owned(), json!(id));
+            detail.insert("inherited_by".to_owned(), json!(inherited_by));
         }
         CoreError::JsonFileInvalid { path, .. } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
@@ -1211,6 +1214,8 @@ mod tests {
             id: "1.20.1".into(),
             wanted: "原版 1.20.1".into(),
             found: "装着 Forge".into(),
+            inherited_by: Vec::new(),
+            claimed: true,
         }
         .into();
         assert_eq!(occupied.code, code::MODPACK_BASE_OCCUPIED);
@@ -1218,7 +1223,30 @@ mod tests {
             occupied.message,
             "游戏目录里已有一个叫「1.20.1」的版本，它装着 Forge，不是这个整合包要用的原版 1.20.1。导入会把它的版本文件换掉，先给它改个名字再导入"
         );
-        assert_eq!(occupied.detail.unwrap()["id"], json!("1.20.1"));
+        let detail = occupied.detail.unwrap();
+        assert_eq!(detail["id"], json!("1.20.1"));
+        assert_eq!(detail["inherited_by"], json!([]));
+        assert_eq!(detail.as_object().unwrap().len(), 2);
+
+        // 有别的版本直接继承着它时它改不了名，原文里的出路换成先把继承它的版本移走或删掉，detail 带上是哪些。
+        let inherited: CommandError = CoreError::BaseVersionOccupied {
+            id: "fabric-loader-0.15.0-1.20.1".into(),
+            wanted: "加载器 Fabric 0.15.0".into(),
+            found: "装着 Quilt".into(),
+            inherited_by: vec!["叠加一".into(), "叠加二".into()],
+            claimed: false,
+        }
+        .into();
+        assert_eq!(inherited.code, code::MODPACK_BASE_OCCUPIED);
+        assert_eq!(
+            inherited.message,
+            "游戏目录里已有一个叫「fabric-loader-0.15.0-1.20.1」的版本，它装着 Quilt，不是这个整合包要用的加载器 Fabric 0.15.0。它被「叠加一」、「叠加二」继承着，导入会把它的版本文件换掉；要导入这个整合包，得先把继承它的版本移走或删掉"
+        );
+        let detail = inherited.detail.unwrap();
+        assert_eq!(detail["id"], json!("fabric-loader-0.15.0-1.20.1"));
+        assert_eq!(detail["inherited_by"], json!(["叠加一", "叠加二"]));
+        // 目录是玩家的还是启动器落下的只写进原文，detail 里没有这一项。
+        assert_eq!(detail.as_object().unwrap().len(), 2);
 
         let invalid: CommandError = CoreError::from(ModpackError::ManifestInvalid {
             document: "manifest.json",

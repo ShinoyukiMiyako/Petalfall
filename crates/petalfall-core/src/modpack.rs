@@ -799,10 +799,14 @@ impl Petalfall {
             let Some(found) = occupied_by(&found, loader) else {
                 continue;
             };
-            if crate::instances::is_unclaimed_base_version(self.game_dir(), id).await
-                && (loader.is_none()
-                    || !crate::instances::is_inherited_base_version(self.game_dir(), id).await?)
-            {
+            let unclaimed = crate::instances::is_unclaimed_base_version(self.game_dir(), id).await;
+            if unclaimed && loader.is_none() {
+                continue;
+            }
+            // 拒收的报文要点出继承着它的版本：有人继承时改名会被拒，「改个名字」的出路走不通。
+            let inherited_by =
+                crate::instances::base_version_dependents(self.game_dir(), id).await?;
+            if unclaimed && inherited_by.is_empty() {
                 continue;
             }
             return Err(CoreError::BaseVersionOccupied {
@@ -816,6 +820,8 @@ impl Petalfall {
                     ),
                 },
                 found,
+                inherited_by,
+                claimed: !unclaimed,
             });
         }
         Ok(())
@@ -3230,6 +3236,53 @@ mod tests {
             assert!(!versions.join("周末包").exists());
         }
 
+        // 那个装着 Fabric 的实例还被别的版本直接继承着：改名要求没人继承它，照着「改个名字」做不下去。报文点出
+        // 是谁继承着它，出路写全：先把它们移走或删掉，再给它改名。
+        let json = fabric_instance_json("test");
+        write_game_version(&petalfall, "test", &json);
+        let stacked = ["叠加一", "叠加二"];
+        for id in stacked {
+            write_game_version(
+                &petalfall,
+                id,
+                &format!(r#"{{"id":"{id}","inheritsFrom":"test","mainClass":"M"}}"#),
+            );
+        }
+        let err = import_as(&petalfall, pack.clone(), "周末包")
+            .await
+            .unwrap_err();
+        let CoreError::BaseVersionOccupied {
+            id,
+            inherited_by,
+            claimed,
+            ..
+        } = &err
+        else {
+            panic!("{err:?}");
+        };
+        assert_eq!(id, "test");
+        assert_eq!(inherited_by, &stacked);
+        assert!(*claimed);
+        assert_eq!(
+            err.to_string(),
+            "游戏目录里已有一个叫「test」的版本，它装着 Fabric，不是这个整合包要用的原版 test。它被「叠加一」、「叠加二」继承着，导入会把它的版本文件换掉；要导入这个整合包，得先把继承它的版本移走或删掉，再给它改个名字"
+        );
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), json);
+        assert!(!versions.join("周末包").exists());
+        for id in stacked {
+            std::fs::remove_dir_all(versions.join(id)).unwrap();
+        }
+        // 照报文做完第一步（继承它的版本没了）再导入还是拒收，这回说的是改名：所以上面那句把两步一起说了。
+        let err = import_as(&petalfall, pack.clone(), "周末包")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "游戏目录里已有一个叫「test」的版本，它装着 Fabric，不是这个整合包要用的原版 test。导入会把它的版本文件换掉，先给它改个名字再导入"
+        );
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), json);
+        assert!(!versions.join("周末包").exists());
+
         // 同一个目录要是落樱自己落下的（记在依赖版本记录里、没人在里面玩过），装着什么都照常还原成原版；
         // 原版的位置上实例本来就直接继承它，有人继承也不拦。
         write_game_version(&petalfall, "test", &fabric_instance_json("test"));
@@ -3246,6 +3299,50 @@ mod tests {
         let restored = std::fs::read_to_string(&theirs).unwrap();
         assert!(!restored.contains("fabric-loader"), "{restored}");
         assert!(versions.join("周末包").is_dir());
+    }
+
+    /// 继承着被占的版本的有一长串时，报文只点前三个、写明总数；正好三个时全点出来，不写总数。目录是玩家的，
+    /// 出路说到改名为止；是启动器落下的，说到把继承它的版本移走或删掉为止。
+    #[test]
+    fn a_long_list_of_versions_inheriting_an_occupied_base_is_cut_to_three_and_counted() {
+        let message = |inherited_by: &[&str], claimed: bool| {
+            CoreError::BaseVersionOccupied {
+                id: "1.20.1".to_owned(),
+                wanted: "原版 1.20.1".to_owned(),
+                found: "装着 Forge".to_owned(),
+                inherited_by: inherited_by.iter().map(|id| (*id).to_owned()).collect(),
+                claimed,
+            }
+            .to_string()
+        };
+        let head =
+            "游戏目录里已有一个叫「1.20.1」的版本，它装着 Forge，不是这个整合包要用的原版 1.20.1。";
+        let tail =
+            "继承着，导入会把它的版本文件换掉；要导入这个整合包，得先把继承它的版本移走或删掉";
+        let rename = "，再给它改个名字";
+
+        assert_eq!(
+            message(&["甲", "乙", "丙"], true),
+            format!("{head}它被「甲」、「乙」、「丙」{tail}{rename}")
+        );
+        assert_eq!(
+            message(&["甲", "乙", "丙", "丁"], true),
+            format!("{head}它被「甲」、「乙」、「丙」等 4 个版本{tail}{rename}")
+        );
+        let many: Vec<String> = (1..=12).map(|n| format!("叠加{n}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert_eq!(
+            message(&many, true),
+            format!("{head}它被「叠加1」、「叠加2」、「叠加3」等 12 个版本{tail}{rename}")
+        );
+        assert_eq!(
+            message(&["甲", "乙", "丙", "丁"], false),
+            format!("{head}它被「甲」、「乙」、「丙」等 4 个版本{tail}")
+        );
+        assert_eq!(
+            message(&[], true),
+            format!("{head}导入会把它的版本文件换掉，先给它改个名字再导入")
+        );
     }
 
     /// 加载器的位置同理：整合包要的加载器版本目录名下认得出是别的东西时拒收，装着另一种加载器、或除了要的那种
@@ -3332,23 +3429,55 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, CoreError::BaseVersionOccupied { id, found, .. }
-                if id == NATURAL_FABRIC && found == "装着 Quilt"),
+            matches!(&err, CoreError::BaseVersionOccupied { id, found, inherited_by, claimed, .. }
+                if id == NATURAL_FABRIC && found == "装着 Quilt" && inherited_by == &["叠在上面的"] && !claimed),
             "{err:?}"
         );
+        // 它是落樱落下的，不列在实例库里，玩家改不了它的名：出路只说到把继承它的版本移走或删掉。
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "游戏目录里已有一个叫「{NATURAL_FABRIC}」的版本，它装着 Quilt，不是这个整合包要用的加载器 Fabric 0.15.0。它被「叠在上面的」继承着，导入会把它的版本文件换掉；要导入这个整合包，得先把继承它的版本移走或删掉"
+            )
+        );
         assert_eq!(std::fs::read_to_string(&theirs).unwrap(), quilt);
-        std::fs::remove_dir_all(petalfall.game_dir().join("versions").join("叠在上面的")).unwrap();
+        // 照报文做完再导入就成：没人继承了，落樱落下的照常重装。
+        let stacked = petalfall.game_dir().join("versions").join("叠在上面的");
+        std::fs::remove_dir_all(&stacked).unwrap();
+        import_as(&petalfall, pack.clone(), "继承者走了照装")
+            .await
+            .unwrap();
+        assert_eq!(main_class(), KNOT);
 
         // 记录里有它，可玩家拿它当实例玩过（里面有存档）：按玩家的算，照样拒收。
         write_game_version(&petalfall, NATURAL_FABRIC, &quilt);
         let save = theirs.parent().unwrap().join("saves").join("世界");
         std::fs::create_dir_all(&save).unwrap();
         std::fs::write(save.join("level.dat"), b"level").unwrap();
-        let err = import_as(&petalfall, pack, "玩过的不动").await.unwrap_err();
+        let err = import_as(&petalfall, pack.clone(), "玩过的不动")
+            .await
+            .unwrap_err();
         assert!(
-            matches!(&err, CoreError::BaseVersionOccupied { id, found, .. }
-                if id == NATURAL_FABRIC && found == "装着 Quilt"),
+            matches!(&err, CoreError::BaseVersionOccupied { id, found, inherited_by, claimed, .. }
+                if id == NATURAL_FABRIC && found == "装着 Quilt" && inherited_by.is_empty() && *claimed),
             "{err:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), quilt);
+
+        // 玩家的目录又被别的版本继承着：要两步，报文一起说。
+        write_game_version(
+            &petalfall,
+            "叠在上面的",
+            &format!(r#"{{"id":"叠在上面的","inheritsFrom":"{NATURAL_FABRIC}","mainClass":"M"}}"#),
+        );
+        let err = import_as(&petalfall, pack, "玩过又被继承的不动")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "游戏目录里已有一个叫「{NATURAL_FABRIC}」的版本，它装着 Quilt，不是这个整合包要用的加载器 Fabric 0.15.0。它被「叠在上面的」继承着，导入会把它的版本文件换掉；要导入这个整合包，得先把继承它的版本移走或删掉，再给它改个名字"
+            )
         );
         assert_eq!(std::fs::read_to_string(&theirs).unwrap(), quilt);
     }

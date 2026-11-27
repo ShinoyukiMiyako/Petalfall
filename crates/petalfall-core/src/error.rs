@@ -140,13 +140,19 @@ pub enum CoreError {
     /// 整合包要把原版或加载器装进 `versions/<id>`，那个名字下却已经有一个别的版本：玩家或别的启动器给一个
     /// 装着别的东西的版本起了这个名字。照装会把它的版本 JSON 换掉。都是给人看的短语：`wanted` 是整合包要装在
     /// 这里的东西；`found` 接在「它」后面，说现在在这里的是什么（「装着 Forge」「继承自 1.20.1」）。
+    /// `inherited_by` 是经 `inheritsFrom` 直接继承它的版本，按 id 排序。`claimed` 说这个目录是不是玩家的：不在
+    /// 依赖版本记录里，或者被当实例用过，记录或痕迹读不出来时也算；启动器自己落下、没人玩过的为假。它只决定
+    /// 原文里的出路怎么写。
     #[error(
-        "游戏目录里已有一个叫「{id}」的版本，它{found}，不是这个整合包要用的{wanted}。导入会把它的版本文件换掉，先给它改个名字再导入"
+        "游戏目录里已有一个叫「{id}」的版本，它{found}，不是这个整合包要用的{wanted}。{}",
+        occupied_way_out(inherited_by, *claimed)
     )]
     BaseVersionOccupied {
         id: String,
         wanted: String,
         found: String,
+        inherited_by: Vec<String>,
+        claimed: bool,
     },
     /// 启动器写在实例里的 JSON 文件（整合包信息、未完成标记、版本 JSON）读不懂。
     #[error("读不懂 {path}")]
@@ -309,6 +315,35 @@ fn blocked_names(files: &[crate::blocked::BlockedFile]) -> String {
         .map(|file| file.file_name.as_str())
         .collect::<Vec<_>>()
         .join("、")
+}
+
+/// [`CoreError::BaseVersionOccupied`] 报文的后半句，把到能导入为止要做的事说全。没人继承时给它改个名字就行。
+/// 有别的版本直接继承着它时改名会被拒（改名前要求没人继承），得先把继承它的版本移走或删掉。那之后目录是玩家的
+/// （`claimed`）导入照样拒收，还得改名，所以两步一起说：只说第一步的话，玩家照做完再导入还是失败。启动器自己
+/// 落下的目录没人继承了就照常重装，它不列在实例库里、玩家也改不了它的名，不提改名。
+fn occupied_way_out(inherited_by: &[String], claimed: bool) -> String {
+    // 名单嵌在一句话中间，全列出来这句话就长得读不下去；全量在 detail 里。
+    const NAMED: usize = 3;
+    if inherited_by.is_empty() {
+        return "导入会把它的版本文件换掉，先给它改个名字再导入".to_owned();
+    }
+    let mut named = inherited_by
+        .iter()
+        .take(NAMED)
+        .map(|id| format!("「{id}」"))
+        .collect::<Vec<_>>()
+        .join("、");
+    if inherited_by.len() > NAMED {
+        named = format!("{named}等 {} 个版本", inherited_by.len());
+    }
+    let rename = if claimed {
+        "，再给它改个名字"
+    } else {
+        ""
+    };
+    format!(
+        "它被{named}继承着，导入会把它的版本文件换掉；要导入这个整合包，得先把继承它的版本移走或删掉{rename}"
+    )
 }
 
 /// 游戏目录不能用的具体原因。[`GameDirProblem::code`] 是给前端分支用的稳定码。
