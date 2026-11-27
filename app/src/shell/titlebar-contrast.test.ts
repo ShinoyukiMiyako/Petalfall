@@ -1,10 +1,9 @@
 // 标题栏搜索入口（regular、wide 档的伪输入框）：放大镜与占位文字继承入口的字色，占位文字要被读到，不能用 text-3
 // （日樱落在白底约 2.19:1），静止取 text-2；悬停照旧比静止提一级，提到 text。底是入口自己的实心底。
 import { describe, expect, it } from "vitest";
-import { APPEARANCES, contrast, declarationOf, readCss, resolveColor, tokensOf, type AppearanceName, type Rgb } from "../test/contrast";
+import { APPEARANCES, contrast, declarationOf, readCss, resolveColor, tokensOf, windowGrounds, type AppearanceName } from "../test/contrast";
 
 const css = readCss(new URL("./TitleBar.module.css", import.meta.url));
-const shellCss = readCss(new URL("./AppShell.module.css", import.meta.url));
 
 function ratio(appearance: AppearanceName, selector: ".search" | ".search:hover"): number {
   const tokens = tokensOf(appearance);
@@ -33,21 +32,6 @@ describe("标题栏搜索入口的占位文字与放大镜", () => {
 // 叠上右上角的晕染后日樱低到 1.70、夜樱低到 2.06，失焦与聚焦一样取 text-2。
 // 标题栏自己没有底色，三键落在应用根的窗口底色上，上面叠着背景层的氛围晕染：每一团晕染都按起始处（最浓处）的不透明度
 // 叠到窗口底上，取其中最不利的一处。三键的类名只在 TitleBar.module.css 里有效（CSS 模块），失焦规则只需在这一份里查。
-
-/** 氛围晕染的一团：起始色是「某色 N% 与 transparent」的径向渐变。 */
-const GLOW = /radial-gradient\([^,]+, (color-mix\(in srgb, var\(--sk-[a-z0-9-]+\) \d+%, transparent\)), transparent \d+%\)/g;
-
-/** 窗口底色，以及每一团晕染最浓处叠在窗口底上的颜色；有认不出的晕染就抛错，免得漏掉一团。 */
-function windowGrounds(tokens: Map<string, string>): { base: Rgb; glows: Rgb[] } {
-  const base = resolveColor(declarationOf(shellCss, ".app", "background"), tokens, [0, 0, 0]);
-  const ref = /^var\((--sk-[a-z0-9-]+)\)$/.exec(declarationOf(shellCss, ".backdrop", "background"));
-  if (ref === null) throw new Error("背景层的底不是单个令牌");
-  const ambience = tokens.get(ref[1]);
-  if (ambience === undefined) throw new Error(`令牌 ${ref[1]} 没有定义`);
-  const glows = [...ambience.matchAll(GLOW)].map((m) => resolveColor(m[1], tokens, base));
-  if (glows.length === 0 || glows.length !== ambience.split("radial-gradient(").length - 1) throw new Error(`认不全氛围晕染：${ambience}`);
-  return { base, glows };
-}
 
 function keyRatios(appearance: AppearanceName): { base: number; worst: number } {
   const tokens = tokensOf(appearance);

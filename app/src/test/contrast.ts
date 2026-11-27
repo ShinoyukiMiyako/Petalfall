@@ -115,6 +115,26 @@ export function resolveColor(value: string, tokens: Map<string, string>, backdro
   return hex(value);
 }
 
+const shellCss = readCss(new URL("../shell/AppShell.module.css", import.meta.url));
+
+/** 氛围晕染的一团：起始色是「某色 N% 与 transparent」的径向渐变。 */
+const GLOW = /radial-gradient\([^,]+, (color-mix\(in srgb, var\(--sk-[a-z0-9-]+\) \d+%, transparent\)), transparent \d+%\)/g;
+
+/**
+ * 应用根的窗口底色，以及背景层氛围晕染每一团最浓处（起始色按它的不透明度叠到窗口底上）的颜色，晕染按书写顺序。
+ * 标题栏与它上面的入口自己没有底，落在这几处上。有认不出的晕染就抛错，免得漏掉一团。
+ */
+export function windowGrounds(tokens: Map<string, string>): { base: Rgb; glows: Rgb[] } {
+  const base = resolveColor(declarationOf(shellCss, ".app", "background"), tokens, [0, 0, 0]);
+  const ref = /^var\((--sk-[a-z0-9-]+)\)$/.exec(declarationOf(shellCss, ".backdrop", "background"));
+  if (ref === null) throw new Error("背景层的底不是单个令牌");
+  const ambience = tokens.get(ref[1]);
+  if (ambience === undefined) throw new Error(`令牌 ${ref[1]} 没有定义`);
+  const glows = [...ambience.matchAll(GLOW)].map((m) => resolveColor(m[1], tokens, base));
+  if (glows.length === 0 || glows.length !== ambience.split("radial-gradient(").length - 1) throw new Error(`认不全氛围晕染：${ambience}`);
+  return { base, glows };
+}
+
 const channel = (c: number) => {
   const s = c / 255;
   return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;

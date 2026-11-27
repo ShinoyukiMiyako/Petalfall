@@ -6,14 +6,13 @@
 // 快览的行在浮层面板上，行里的取消键是幽灵图标按钮，它的叠层再叠在行的叠层上。
 // 下载入口打开浮层时是另一种状态，仍铺 bg-2，不在这里核。
 import { describe, expect, it } from "vitest";
-import { APPEARANCES, contrast, declarationOf, declarationsOf, readCss, resolveColor, tokensOf, type AppearanceName, type Rgb } from "../test/contrast";
+import { APPEARANCES, contrast, declarationOf, declarationsOf, readCss, resolveColor, tokensOf, windowGrounds, type AppearanceName, type Rgb } from "../test/contrast";
 
 const textInputCss = readCss(new URL("./TextInput.module.css", import.meta.url));
 const iconButtonCss = readCss(new URL("./IconButton.module.css", import.meta.url));
 const popoverCss = readCss(new URL("./Popover.module.css", import.meta.url));
 const titleBarCss = readCss(new URL("../shell/TitleBar.module.css", import.meta.url));
 const peekCss = readCss(new URL("../shell/DownloadPeek.module.css", import.meta.url));
-const shellCss = readCss(new URL("../shell/AppShell.module.css", import.meta.url));
 const capsuleCss = readCss(new URL("../launch/LaunchCapsule.module.css", import.meta.url));
 
 type Tokens = Map<string, string>;
@@ -26,25 +25,10 @@ interface Ground {
 const BLACK: Rgb = [0, 0, 0];
 const solid = (css: string, selector: string) => (tokens: Tokens) => resolveColor(declarationOf(css, selector, "background"), tokens, BLACK);
 
-/** 氛围晕染的一团：起始色是「某色 N% 与 transparent」的径向渐变。 */
-const GLOW = /radial-gradient\([^,]+, (color-mix\(in srgb, var\(--sk-[a-z0-9-]+\) \d+%, transparent\)), transparent \d+%\)/g;
-
-/** 晕染的各团起始色；有认不出的晕染就抛错，免得漏掉一团。 */
-function glowColors(tokens: Tokens): string[] {
-  const ref = /^var\((--sk-[a-z0-9-]+)\)$/.exec(declarationOf(shellCss, ".backdrop", "background"));
-  if (ref === null) throw new Error("背景层的底不是单个令牌");
-  const ambience = tokens.get(ref[1]);
-  if (ambience === undefined) throw new Error(`令牌 ${ref[1]} 没有定义`);
-  const glows = [...ambience.matchAll(GLOW)].map((m) => m[1]);
-  if (glows.length === 0 || glows.length !== ambience.split("radial-gradient(").length - 1) throw new Error(`认不全氛围晕染：${ambience}`);
-  return glows;
-}
-
-const WINDOW = solid(shellCss, ".app");
 const WINDOW_GROUNDS: readonly Ground[] = [
-  { name: "窗口底", color: WINDOW },
-  { name: "右上晕染最浓处", color: (tokens) => resolveColor(glowColors(tokens)[0], tokens, WINDOW(tokens)) },
-  { name: "左下晕染最浓处", color: (tokens) => resolveColor(glowColors(tokens)[1], tokens, WINDOW(tokens)) },
+  { name: "窗口底", color: (tokens) => windowGrounds(tokens).base },
+  { name: "右上晕染最浓处", color: (tokens) => windowGrounds(tokens).glows[0] },
+  { name: "左下晕染最浓处", color: (tokens) => windowGrounds(tokens).glows[1] },
 ];
 
 const LOADING_FACE = solid(capsuleCss, '.layer[data-layer="loading"]');
