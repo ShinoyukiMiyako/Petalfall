@@ -16,6 +16,7 @@ import {
   HOT_CATEGORIES,
   installedCount,
   instancesFromPack,
+  liveFitInstance,
   PAGE_SIZE,
   parsePlatformTime,
   partialFailure,
@@ -178,6 +179,29 @@ describe("搜索参数", () => {
     it("适配实例这一刻不在候选里（刚被删、开始重装）：照筛选里的加载器搜，不借", () => {
       expect(searchArgsOf(fitMods(neo), "", [neoNew, quilt]).loaders).toEqual(["neoforge"]);
       expect(searchArgsOf(fitMods(quilt), "", []).loaders).toEqual(["quilt"]);
+    });
+
+    it("同一个 id 的实例换了加载器或游戏版本、与筛选里选中那一刻的对不上：照筛选里的加载器搜，不按实时的实例借", () => {
+      // 按实时的实例算分别会是 ["forge"]、["fabric"]、["neoforge", "forge"]
+      expect(searchArgsOf(fitMods(neo), "", [summary("整合", { mcVersion: "1.20.1", loader: "forge" })])).toMatchObject({ loaders: ["neoforge"], gameVersions: ["1.20.1"] });
+      expect(searchArgsOf(fitMods(quilt), "", [summary("织布", { mcVersion: "1.20.4", loader: "fabric" })])).toMatchObject({ loaders: ["quilt"], gameVersions: ["1.20.4"] });
+      expect(searchArgsOf(fitMods(neoNew), "", [summary("新整合", { mcVersion: "1.20.1", loader: "neoforge" })])).toMatchObject({ loaders: ["neoforge"], gameVersions: ["1.21.1"] });
+      // 「全部」同理
+      expect(searchArgsOf(withFitInstance(DEFAULT_FILTERS, quilt), "", [summary("织布", { mcVersion: "1.20.4", loader: "fabric" })]).loaders).toEqual(["quilt"]);
+    });
+
+    it("适配实例还成立：还在候选里，加载器与游戏版本都和选中那一刻一致；原版实例按加载器不限比", () => {
+      expect(liveFitInstance(fitMods(neo), candidates)).toBe(neo);
+      expect(liveFitInstance(fitMods(quilt), candidates)).toBe(quilt);
+      expect(liveFitInstance(fitMods(neo), [summary("整合", { mcVersion: "1.20.1", loader: "forge" })])).toBeNull();
+      expect(liveFitInstance(fitMods(neo), [summary("整合", { mcVersion: "1.21.1", loader: "neoforge" })])).toBeNull();
+      expect(liveFitInstance(fitMods(neo), [neoNew, quilt])).toBeNull();
+      const vanilla = summary("原版", { mcVersion: "1.21", loader: "vanilla" });
+      expect(liveFitInstance(fitMods(vanilla), [vanilla])).toBe(vanilla);
+      expect(liveFitInstance(fitMods(vanilla), [summary("原版", { mcVersion: "1.21", loader: "fabric" })])).toBeNull();
+      expect(liveFitInstance(fitMods(vanilla), [summary("原版", { mcVersion: "1.21.1", loader: "vanilla" })])).toBeNull();
+      // 没选适配，手动选的版本与加载器恰好和某个实例一样也不算
+      expect(liveFitInstance({ ...DEFAULT_FILTERS, kind: "mod", loader: "neoforge", gameVersion: "1.20.1" }, candidates)).toBeNull();
     });
 
     it("浮层、说明行与条件数只认实例自己的加载器，借来的不列出、不计数", () => {

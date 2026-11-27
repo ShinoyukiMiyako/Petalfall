@@ -44,6 +44,7 @@ import {
   installedBySource,
   installedCount,
   instancesFromPack,
+  liveFitInstance,
   partialFailure,
   PREFETCH_MARGIN_PX,
   projectOrigins,
@@ -91,9 +92,10 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
     if (route.importFile !== undefined) setImporting({ file: route.importFile });
   }
 
-  // 适配实例被删掉或变得不可用（开始重装、损坏）时回到不限
+  // 适配实例被删掉或变得不可用（开始重装、损坏）时回到不限。同一个 id 的实例换了加载器或游戏版本（换了游戏目录后恰好同名、
+  // 被别的启动器原地改装）也一样：筛选里的版本与加载器是选中那一刻抄下的，说明行与浮层照它写，搜索却会按实时的实例借加载器
   const candidates = fitCandidates(instances);
-  if (filters.fitInstance !== null && instancesReady && !candidates.some((i) => i.id === filters.fitInstance)) {
+  if (filters.fitInstance !== null && instancesReady && liveFitInstance(filters, candidates) === null) {
     setFilters(withFitInstance(filters, null));
   }
 

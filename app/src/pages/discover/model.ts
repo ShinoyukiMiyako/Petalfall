@@ -126,11 +126,28 @@ export function toggleCategory(filters: DiscoverFilters, key: string): DiscoverF
   return { ...filters, category: filters.category === key ? null : key };
 }
 
+/** 适配实例写进筛选的加载器：原版实例没有加载器，为不限。选中时与核对它是否还成立时同一种取法。 */
+function fitLoaderOf(instance: InstanceSummary): LoaderChoice | null {
+  return instance.loader === "vanilla" ? null : instance.loader;
+}
+
 /** 选中适配实例 = 版本与加载器取它的值；原版实例没有加载器，加载器筛选回到不限。 */
 export function withFitInstance(filters: DiscoverFilters, instance: InstanceSummary | null): DiscoverFilters {
   if (instance === null) return { ...filters, fitInstance: null };
   if (instance.mcVersion === null) throw new Error(`实例 ${instance.id} 认不出游戏版本，不能作为适配实例`);
-  return { ...filters, fitInstance: instance.id, gameVersion: instance.mcVersion, loader: instance.loader === "vanilla" ? null : instance.loader };
+  return { ...filters, fitInstance: instance.id, gameVersion: instance.mcVersion, loader: fitLoaderOf(instance) };
+}
+
+/**
+ * 适配实例此刻还成立时给出它，否则为 null。筛选里的版本与加载器是选中那一刻从实例抄下来的，说明行、浮层与条件数都照它写：
+ * 实例不在候选里（刚被删、开始重装），或同一个 id 的实例换了加载器、游戏版本（换了游戏目录后恰好同名、被别的启动器原地改装），
+ * 抄下来的就不再代表这个实例，再按实时的实例借加载器，搜的就和说明行写的不是一回事。
+ */
+export function liveFitInstance(filters: DiscoverFilters, candidates: readonly InstanceSummary[]): InstanceSummary | null {
+  if (filters.fitInstance === null) return null;
+  const fit = candidates.find((i) => i.id === filters.fitInstance);
+  if (fit === undefined) return null;
+  return fitLoaderOf(fit) === filters.loader && fit.mcVersion === filters.gameVersion ? fit : null;
 }
 
 /** 手动改了版本或加载器：适配实例回到不限。 */
@@ -177,9 +194,10 @@ export function hasConditions(filters: DiscoverFilters): boolean {
 function searchLoaders(filters: DiscoverFilters, candidates: readonly InstanceSummary[]): LoaderChoice[] {
   if (filters.loader === null || !loaderFilterApplies(filters.kind)) return [];
   if (filters.kind === "modpack") return [filters.loader];
-  const fit = filters.fitInstance === null ? undefined : candidates.find((i) => i.id === filters.fitInstance);
-  // 适配实例这一刻不在候选里（刚被删、开始重装）：页面在同一次渲染里就把适配清掉，这一次照筛选里的加载器搜、不借
-  if (fit === undefined) return [filters.loader];
+  const fit = liveFitInstance(filters, candidates);
+  // 适配实例这一刻已不成立（不在候选里，或加载器、游戏版本与筛选里的对不上）：页面在同一次渲染里就把适配清掉，
+  // 这一次照筛选里的加载器搜、不借
+  if (fit === null) return [filters.loader];
   return runnableLoaders(fit.loader, fit.mcVersion);
 }
 

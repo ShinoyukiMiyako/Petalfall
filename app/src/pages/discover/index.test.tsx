@@ -352,6 +352,59 @@ describe("发现页：搜索", () => {
     expect(lastSearch()).toMatchObject({ resourceTypes: ["mod"], gameVersions: ["1.20.1"], loaders: ["neoforge", "forge"] });
   });
 
+  describe("同一个 id 的适配实例换了加载器或游戏版本：适配回到不限，搜索与说明行都照筛选里的版本与加载器", () => {
+    const NEO = instanceDto("整合", { mc_version: "1.20.1", loaders: [{ kind: "neoforge", version: "47.1.106" }] });
+    const fitTrigger = () => {
+      const el = document.querySelector<HTMLButtonElement>('button[role="combobox"][aria-label="适配实例"]');
+      if (el === null) throw new Error("找不到适配实例下拉");
+      return el;
+    };
+    const infoParts = () => {
+      const info = document.querySelector('section[aria-label="搜索资源"] [aria-live="polite"]');
+      if (info === null) throw new Error("找不到结果说明行");
+      return [...info.children].filter((el) => el.tagName === "SPAN" && el.querySelector("[data-current], button") === null).map((el) => el.textContent);
+    };
+
+    // 按实时的实例借，前一种会搜 Fabric；后一种搜的仍是 NeoForge，但工具条会一直写着适配一个已经不是 1.20.1 的实例
+    it.each([
+      ["换了加载器", instanceDto("整合", { mc_version: "1.20.1", loaders: [{ kind: "fabric", version: "0.16.5" }] })],
+      ["换了游戏版本", instanceDto("整合", { mc_version: "1.21.1", loaders: [{ kind: "neoforge", version: "21.1.77" }] })],
+    ])("被别的启动器原地改装（%s）、重扫之后", async (_, changed) => {
+      bootOverrides(ipc, { instances: [NEO], config: configDto({ selected_version: "整合" }) });
+      await mount({ page: "discover", kind: "mod", forInstance: "整合" });
+      expect(labelOf(fitTrigger())).toBe("适配：整合");
+      expect(lastSearch()).toMatchObject({ gameVersions: ["1.20.1"], loaders: ["neoforge", "forge"] });
+
+      ipc.overrides.set("list_instances", () => [changed]);
+      await act(async () => {
+        await launcher.actions.refreshInstances();
+        await settle();
+      });
+      await flush();
+      expect(labelOf(fitTrigger())).toBe("适配：不限");
+      expect(searchCalls().map((a) => [a.gameVersions, a.loaders])).toEqual([
+        [["1.20.1"], ["neoforge", "forge"]],
+        [["1.20.1"], ["neoforge"]],
+      ]);
+      expect(infoParts()).toEqual(["1.20.1", "NeoForge"]);
+    });
+
+    it("换了游戏目录、新目录里恰好有同名的 Fabric 实例，回到发现页恢复上次的筛选时", async () => {
+      bootOverrides(ipc, { instances: [NEO], config: configDto({ selected_version: "整合" }) });
+      await mount({ page: "discover", kind: "mod", forInstance: "整合" });
+      expect(lastSearch()).toMatchObject({ gameVersions: ["1.20.1"], loaders: ["neoforge", "forge"] });
+      view?.unmount();
+      view = undefined;
+
+      ipc.overrides.set("list_instances", () => [instanceDto("整合", { mc_version: "1.20.1", loaders: [{ kind: "fabric", version: "0.16.5" }] })]);
+      await mount();
+      expect(labelOf(fitTrigger())).toBe("适配：不限");
+      expect(searchCalls().map((a) => a.loaders)).not.toContainEqual(["fabric"]);
+      expect(lastSearch()).toMatchObject({ resourceTypes: ["mod"], gameVersions: ["1.20.1"], loaders: ["neoforge"] });
+      expect(infoParts()).toEqual(["1.20.1", "NeoForge"]);
+    });
+  });
+
   it("输入停 300 ms 才搜；生效的关键词写回路由", async () => {
     await mount();
     expect(lastSearch().query).toBeNull();
