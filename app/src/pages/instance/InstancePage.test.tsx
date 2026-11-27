@@ -2112,6 +2112,7 @@ describe("实例详情：补全修不好的损坏实例", () => {
 describe("实例详情：损坏实例上进入存档、导出与移动的原因", () => {
   const LOST = "缺少版本 JSON，也没有记下当初装的是什么";
   const REIMPORT = "整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。";
+  const UNREADABLE = `版本 JSON 读不出来：文件 IO 失败: D:\\Games\\.minecraft\\versions\\${ID}\\${ID}.json：拒绝访问。 (os error 5)`;
 
   /** 悬停后关联的提示气泡里的文字；没有关联气泡时报错。 */
   const tipOf = async (el: HTMLElement): Promise<string | null | undefined> => {
@@ -2146,6 +2147,11 @@ describe("实例详情：损坏实例上进入存档、导出与移动的原因"
       "整合包没导入完：指向重新导入",
       { incomplete: { kind: "modpack", outcome: "pending", started_at: NOW - DAY, spec: null, error: null } },
       { enter: REIMPORT, export: REIMPORT, move: REIMPORT },
+    ],
+    [
+      "版本 JSON 读不出来：不说文件不完整，直接用后端原因",
+      { status: "broken", broken_reason: UNREADABLE, unrepairable_reason: UNREADABLE, unrepairable_kind: "unreadable", mc_version: null },
+      { enter: UNREADABLE, export: UNREADABLE, move: UNREADABLE },
     ],
   ])("%s", async (_name, patch, expected) => {
     instances = instances.map((i) => (i.id === ID ? { ...i, ...patch } : i));

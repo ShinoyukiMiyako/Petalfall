@@ -10,9 +10,23 @@ const idle = { pins: [] as string[], busyTaskInstanceIds: new Set<string>() };
 const LOST = "缺少版本 JSON，也没有记下当初装的是什么";
 const REIMPORT = "整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。";
 const MODPACK_PENDING: InstanceDto["incomplete"] = { kind: "modpack", outcome: "pending", started_at: 1_700_000_000_000, spec: null, error: null };
+const INSTALL_PENDING: InstanceDto["incomplete"] = {
+  kind: "install",
+  outcome: "pending",
+  started_at: 1_700_000_000_000,
+  spec: { mc_version: "1.21.1", loader: "fabric", loader_version: "0.16.10" },
+  error: null,
+};
+const UNREADABLE = "版本 JSON 读不出来：文件 IO 失败: D:\\Games\\.minecraft\\versions\\生存\\生存.json：另一个程序正在使用此文件，进程无法访问。 (os error 32)";
+const RENAMABLE = `${LOST}；目录里有一份叫 1.20.1-NeoForge.json 的版本文件，把实例改名成 1.20.1-NeoForge 就能认出来`;
 
 const of = (over: Partial<InstanceDto>): InstanceSummary => instanceFromDto(instanceDto("生存", over), idle);
 const lost = (reason: string) => of({ status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, mc_version: null });
+// 读不出来的带着记下安装内容的安装标记：有记录也修不好
+const unreadable = () =>
+  of({ status: "broken", broken_reason: UNREADABLE, unrepairable_reason: UNREADABLE, unrepairable_kind: "unreadable", incomplete: INSTALL_PENDING, mc_version: null });
+const renamable = () =>
+  of({ status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: RENAMABLE, unrepairable_kind: "no_record", rename_to: "1.20.1-NeoForge", mc_version: null });
 const reasons = (inst: InstanceSummary) => ({
   enter: brokenBlockReason(inst, "实例需要先修复"),
   export: exportReason(inst, null),
@@ -42,6 +56,15 @@ describe("损坏实例被挡住的原因", () => {
     expect(reasons(lost(reason)).export).toBe(`实例文件不完整，补全修不好：${reason}`);
   });
 
+  it("版本 JSON 读不出来的不说文件不完整：直接用后端原因，不冠「补全修不好」的前缀", () => {
+    expect(reasons(unreadable())).toEqual({ enter: UNREADABLE, export: UNREADABLE, move: UNREADABLE });
+  });
+
+  it("带改名目标的照旧冠上前缀，后面是后端原因连同改名提示", () => {
+    const line = `实例文件不完整，补全修不好：${RENAMABLE}`;
+    expect(reasons(renamable())).toEqual({ enter: line, export: line, move: line });
+  });
+
   it("整合包没导入完的指向重新导入；后端同时报了原因也先说重新导入，与页面上给的入口一致", () => {
     expect(reasons(of({ incomplete: MODPACK_PENDING }))).toEqual({ enter: REIMPORT, export: REIMPORT, move: REIMPORT });
     const both = of({ status: "broken", broken_reason: "整合包没有导入完", unrepairable_reason: LOST, incomplete: MODPACK_PENDING });
@@ -58,6 +81,25 @@ describe("损坏实例被挡住的原因", () => {
     expect(repairReason(lost(LOST), locksOf(lost(LOST), false))).toBe(LOST);
     const repairable = of({ status: "broken", broken_reason: "缺少客户端 jar" });
     expect(repairReason(repairable, locksOf(repairable, false))).toBeUndefined();
+  });
+
+  it("同一实例的补全原因与被挡住的原因取自同一判定：修不好的那句一字不差，只按出路决定冠不冠前缀", () => {
+    const backendPack = "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入";
+    const cases: [string, InstanceSummary, { repair: string | undefined; blocked: string }][] = [
+      ["修得好", of({ status: "broken", broken_reason: "缺少客户端 jar" }), { repair: undefined, blocked: "实例需要先修复" }],
+      // 后端那句与前端的重新导入说明措辞不同：两边都得是前端那句，任何一边自己另判先后都会在这里分叉
+      [
+        "整合包没导入完、后端也报了原因",
+        of({ status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: backendPack, unrepairable_kind: "modpack", incomplete: MODPACK_PENDING, mc_version: null }),
+        { repair: REIMPORT, blocked: REIMPORT },
+      ],
+      ["读不出来", unreadable(), { repair: UNREADABLE, blocked: UNREADABLE }],
+      ["带改名目标", renamable(), { repair: RENAMABLE, blocked: `实例文件不完整，补全修不好：${RENAMABLE}` }],
+      ["没有记录", lost(LOST), { repair: LOST, blocked: `实例文件不完整，补全修不好：${LOST}` }],
+    ];
+    for (const [name, inst, expected] of cases) {
+      expect({ name, repair: repairReason(inst, locksOf(inst, false)), blocked: brokenBlockReason(inst, "实例需要先修复") }).toEqual({ name, ...expected });
+    }
   });
 
   it("没坏的实例导出与移动照常可用", () => {

@@ -1,10 +1,10 @@
 // 头图菜单、设置页「实例管理」与崩溃页共用的一组实例操作：重命名、固定、打开文件夹、导出整合包、移到别的游戏目录、补全与删除。
 // 几处入口的锁定判断与反馈都从这里出，保证完全一致（删除确认与实例库共用 delete.tsx）。动作一律经外层统一错误处理执行。
 
-import { ACTION_ERROR, lockReason, MODPACK_REIMPORT_COPY } from "../../copy/flows";
+import { ACTION_ERROR, lockReason } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { locksOf, type InstanceLocks } from "../../domain/instance-locks";
-import { instanceNameError, needsReimport, repairRefusal } from "../../domain/rules";
+import { instanceNameError, repairExit, repairRefusal } from "../../domain/rules";
 import { useRunner } from "../../shell/useRunner";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { busyInstanceId } from "../../state/selectors";
@@ -53,13 +53,16 @@ export interface InstanceOps {
 }
 
 /**
- * 损坏实例上导出、移动与进入存档被挡住的原因。修得好的照旧说修复后才能做（repairable）；整合包没导入完的补全补不回来，
- * 指向重新导入；后端说补全修不好的不承诺修复，写明后端给的原因。整合包半成品先判：头图菜单、概览与设置页给它的入口都是重新导入。
+ * 损坏实例上导出、移动与进入存档被挡住的原因。修得好的照旧说修复后才能做（repairable）；修不好的不承诺修复，说的是 rules 的
+ * repairRefusal 那一句，与补全入口同一份判定，先后顺序不在这里另存一份。整合包没导入完的指向重新导入；版本 JSON 读不出来的文件
+ * 可能完好，后端原因自己就说清了是读不出来，不再冠上「文件不完整」；其余冠上 LOCK_REASON.unrepairable。
  */
-export function brokenBlockReason(inst: Pick<InstanceSummary, "status" | "incomplete" | "unrepairableReason">, repairable: string): string {
-  if (needsReimport(inst)) return MODPACK_REIMPORT_COPY.note;
-  if (inst.unrepairableReason !== null) return LOCK_REASON.unrepairable(inst.unrepairableReason);
-  return repairable;
+export function brokenBlockReason(inst: Pick<InstanceSummary, "status" | "incomplete" | "unrepairableReason" | "unrepairableKind" | "renameTo">, repairable: string): string {
+  const refusal = repairRefusal(inst);
+  if (refusal === null) return repairable;
+  const exit = repairExit(inst);
+  if (exit === null) throw new Error(`补全被拒却判不出剩下的出路：${refusal}`);
+  return exit.kind === "reimport" || exit.kind === "rescan" ? refusal : LOCK_REASON.unrepairable(refusal);
 }
 
 /**
