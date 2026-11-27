@@ -210,14 +210,14 @@
 /*
  * 顶上的标签与图钉也是卡面的兄弟，而卡面只在下沿压暗：描边标签与幽灵图钉没有底，柔色调的底是半透明的，
  * 深浅材质上都可能读不清。垫一层表面色、字照常用正文色与色调色，日夜都在自己的表面上读。
- * 未按下的图钉悬停时交回图标按钮自己的悬停底：图钉不在卡面里、接不到卡面下发的底色，这里照样下发表面色，
- * 半透明的悬停叠层铺在它上面，不直接落在材质上。按下的图钉本来没有悬停变化，一直垫着。
+ * 图钉不在卡面里、接不到卡面下发的底色，这里照样下发表面色，由图标按钮自己垫底：静止垫着它，悬停的半透明叠层铺在它上面，
+ * 按下（已固定）是强调色与它的混色。图钉不再在下面那条里点名：那条权重比图标按钮的按下态高，会把开态的强调底整个换成表面色。
  */
 .coverArea:has(> .cover:is([data-source="texture"], [data-source="remote"])) {
   --icon-button-base: var(--sk-surface);
 }
 
-.coverArea:has(> .cover:is([data-source="texture"], [data-source="remote"])) :is(.chip, .currentTag, .pin:not(:hover), .pin[aria-pressed="true"]) {
+.coverArea:has(> .cover:is([data-source="texture"], [data-source="remote"])) :is(.chip, .currentTag) {
   background-color: var(--sk-surface);
 }
 

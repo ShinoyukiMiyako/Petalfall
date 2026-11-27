@@ -110,6 +110,13 @@ describe("卡面与新建卡的悬停", () => {
     }
   });
 
+  it("卡面上的图钉只由图标按钮垫底：页面样式不给图钉写底色，已固定的开态保留强调色混出的底，不被换成表面色", () => {
+    // 卡面这一层下发垫底色，图标按钮的静止、悬停与按下都按它画
+    expect(css).toMatch(/\.coverArea:has\(> \.cover:is\(\[data-source="texture"\], \[data-source="remote"\]\)\)\s*\{\s*--icon-button-base: var\(--sk-surface\);\s*\}/);
+    const pinBackgrounds = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter((rule) => /\.pin\b/.test(rule[1]) && /(^|;)\s*background(-color)?\s*:/.test(rule[2])).map((rule) => rule[1].trim());
+    expect(pinBackgrounds).toEqual([]);
+  });
+
   it("卡面版本号的字色随卡面形态换时与卡面、标签同一档淡过去（入场时长、减速曲线）；带模糊的文字阴影不过渡，随形态瞬切", () => {
     expect(declarations(".coverVersion").transition).toBe("color var(--sk-dur-in) var(--sk-ease-out)");
     // 阴影仍随媒体形态挂上，只是不补间（那条规则的选择器里带逗号，declarations 按逗号拆分组匹配不到它）
