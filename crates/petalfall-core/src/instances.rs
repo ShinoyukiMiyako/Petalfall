@@ -1224,6 +1224,39 @@ pub(crate) async fn hide_base_versions(game_dir: &Path, scan: &mut VersionScan) 
     scan.broken.retain(|broken| !hidden.contains(&broken.id));
 }
 
+/// `versions/<id>` 是不是启动器自己落下、玩家没拿来当实例用的依赖版本目录：记在依赖版本记录里，目录上又没有
+/// 实例痕迹，与 [`hide_base_versions`] 按记录藏起来的是同一类。记录或痕迹读不出来时按不是算：看不清的目录当成
+/// 玩家的。
+pub(crate) async fn is_unclaimed_base_version(game_dir: &Path, id: &str) -> bool {
+    let recorded = match read_base_record(game_dir).await {
+        Ok(record) => record.versions.iter().any(|recorded| recorded == id),
+        Err(err) => {
+            let error = error_with_causes(&err);
+            tracing::warn!(id, %error, "依赖版本记录读不出来，这个版本目录按玩家的算");
+            false
+        }
+    };
+    if !recorded {
+        return false;
+    }
+    let dir = petalfall_install::GameLayout::new(game_dir).version_dir(id);
+    match has_instance_traces(&dir).await {
+        Ok(traces) => !traces,
+        Err(err) => {
+            let error = error_with_causes(&err);
+            tracing::warn!(id, %error, "读不出实例痕迹，这个版本目录按玩家的算");
+            false
+        }
+    }
+}
+
+/// 游戏目录里有没有别的版本经 `inheritsFrom` 直接继承 `versions/<id>`。只算版本 JSON 读得懂的：读不出来或
+/// 读不懂的版本说不清继承着谁，不算。版本目录扫不出来时照实报错。
+pub(crate) async fn is_inherited_base_version(game_dir: &Path, id: &str) -> Result<bool> {
+    let scan = discover_versions(game_dir).await?;
+    Ok(!dependents_in(&scan, id).is_empty())
+}
+
 /// 版本目录是不是加载器安装器落下的样子：继承着别的版本，目录名里带着加载器的版本号
 /// （`neoforge-21.1.265`、`1.20.1-forge-47.2.0`、`fabric-loader-0.16.10-1.21.1`）。
 fn is_natural_loader_version(version: &DiscoveredVersion) -> bool {

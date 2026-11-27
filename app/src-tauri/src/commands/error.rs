@@ -114,6 +114,9 @@ pub mod code {
     /// 新实例名不可用（detail.name、rule：empty / too_long / illegal_char / reserved / leading_dot /
     /// duplicate）。
     pub const INSTANCE_NAME_INVALID: &str = "instance_name_invalid";
+    /// 整合包要用的原版或加载器的版本目录名下已经有一个别的版本，装了会换掉它的版本 JSON（detail.id 为那个
+    /// 版本）。前端没有统一说法，显示后端原文。
+    pub const MODPACK_BASE_OCCUPIED: &str = "modpack_base_occupied";
     /// 启动器写在实例里的 JSON 文件读不懂（detail.path）。
     pub const JSON_FILE_INVALID: &str = "json_file_invalid";
     /// 系统时钟早于 1970 年。
@@ -440,6 +443,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::ClaimFolderInvalid { .. } => code::IO,
         CoreError::Modpack(e) => modpack_code(e),
         CoreError::InstanceNameInvalid { .. } => code::INSTANCE_NAME_INVALID,
+        CoreError::BaseVersionOccupied { .. } => code::MODPACK_BASE_OCCUPIED,
         CoreError::JsonFileInvalid { .. } => code::JSON_FILE_INVALID,
         CoreError::JsonSerialize(_) => code::INTERNAL,
         CoreError::SystemClock(_) => code::SYSTEM_CLOCK,
@@ -766,6 +770,9 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::InstanceNameInvalid { name, rule } => {
             detail.insert("name".to_owned(), json!(name));
             detail.insert("rule".to_owned(), json!(rule.code()));
+        }
+        CoreError::BaseVersionOccupied { id, .. } => {
+            detail.insert("id".to_owned(), json!(id));
         }
         CoreError::JsonFileInvalid { path, .. } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
@@ -1198,6 +1205,20 @@ mod tests {
             collision.detail.unwrap()["path"],
             json!("overrides/周末包.json")
         );
+
+        // 同样没有统一说法、显示原文的一条：是哪个版本、它是什么、该怎么办都要在这句里。
+        let occupied: CommandError = CoreError::BaseVersionOccupied {
+            id: "1.20.1".into(),
+            wanted: "原版 1.20.1".into(),
+            found: "装着 Forge".into(),
+        }
+        .into();
+        assert_eq!(occupied.code, code::MODPACK_BASE_OCCUPIED);
+        assert_eq!(
+            occupied.message,
+            "游戏目录里已有一个叫「1.20.1」的版本，它装着 Forge，不是这个整合包要用的原版 1.20.1。导入会把它的版本文件换掉，先给它改个名字再导入"
+        );
+        assert_eq!(occupied.detail.unwrap()["id"], json!("1.20.1"));
 
         let invalid: CommandError = CoreError::from(ModpackError::ManifestInvalid {
             document: "manifest.json",

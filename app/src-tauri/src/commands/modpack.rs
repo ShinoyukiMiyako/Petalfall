@@ -260,6 +260,10 @@ pub(crate) async fn preview_modpack_with(
 /// （detail.used_by 为实例名）；它们自己开着游戏时导入报 `instance_busy`（detail.id 为那个版本），这时写不动
 /// 原版的 natives，加载器目录也不该被重写。
 ///
+/// 清单与包里的文件在建实例目录之前就查：包里的文件落在实例自己的版本文件上报 `modpack_unsafe_path`
+/// （detail.path），要装原版或加载器的那个版本目录名下已经有一个别的版本报 `modpack_base_occupied`（detail.id），
+/// 出路都写在错误原文里。后一种占住名字之后还会再查一遍，那时游戏目录原本不在的话已经建出来了。
+///
 /// 动手之前先核对当前游戏目录的数据格式记号：目录被更新的落樱用过报 `game_dir_data_too_new`，记号读不懂报
 /// `data_format_unreadable`，这时平台整合包不下载、平台接口不问。
 ///

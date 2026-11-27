@@ -50,6 +50,11 @@ describe("taskFailureReason", () => {
     expect(taskFailureReason({ code: "modpack_unsafe_path", message })).toBe(message);
   });
 
+  it("整合包要用的版本目录名下已有别的版本：照后端原文，是哪个版本、该怎么办都写在原文里", () => {
+    const message = "游戏目录里已有一个叫「1.20.1」的版本，它装着 Forge，不是这个整合包要用的原版 1.20.1。导入会把它的版本文件换掉，先给它改个名字再导入";
+    expect(taskFailureReason({ code: "modpack_base_occupied", message })).toBe(message);
+  });
+
   it("其余照后端原文", () => {
     expect(taskFailureReason({ code: "download_failed", message: "跳转次数过多：https://x/a.jar" })).toBe("跳转次数过多：https://x/a.jar");
   });

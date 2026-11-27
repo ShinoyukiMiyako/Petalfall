@@ -137,6 +137,17 @@ pub enum CoreError {
         name: String,
         rule: petalfall_instance::NameViolation,
     },
+    /// 整合包要把原版或加载器装进 `versions/<id>`，那个名字下却已经有一个别的版本：玩家或别的启动器给一个
+    /// 装着别的东西的版本起了这个名字。照装会把它的版本 JSON 换掉。都是给人看的短语：`wanted` 是整合包要装在
+    /// 这里的东西；`found` 接在「它」后面，说现在在这里的是什么（「装着 Forge」「继承自 1.20.1」）。
+    #[error(
+        "游戏目录里已有一个叫「{id}」的版本，它{found}，不是这个整合包要用的{wanted}。导入会把它的版本文件换掉，先给它改个名字再导入"
+    )]
+    BaseVersionOccupied {
+        id: String,
+        wanted: String,
+        found: String,
+    },
     /// 启动器写在实例里的 JSON 文件（整合包信息、未完成标记、版本 JSON）读不懂。
     #[error("读不懂 {path}")]
     JsonFileInvalid {

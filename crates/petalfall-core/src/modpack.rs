@@ -4,11 +4,13 @@
 //! 导入总是新建一个实例目录 `versions/<实例名>/`，按顺序：
 //!
 //! 1. 读清单、去掉用户选择跳过的可选文件、校验实例名并查重、确认包里没有文件落在实例自己的版本文件上
-//!    （`ensure_pack_spares_instance_files`）；CurseForge 包先把全部文件 id 换成下载
+//!    （`ensure_pack_spares_instance_files`）、确认原版与加载器要落的版本目录名下不是别的东西
+//!    （`Petalfall::ensure_natural_versions_usable`）；CurseForge 包先把全部文件 id 换成下载
 //!    地址——有作者禁止第三方分发、（设置打开时）拼出的地址也下不了、用户也还没手动下载认领的文件就在这
 //!    一步整体报错，不先装几百 MB 游戏再告诉用户装不完。这一步不动游戏目录（[`Petalfall::prepare_modpack`]），调用方可以在这之后占住实例名再往下走。
-//! 2. 核对游戏目录的数据格式记号，原子地建目录（同名即报错），写下带任务 id 的未完成标记
-//!    （[`Petalfall::import_modpack`] 从这里开始）。
+//! 2. 核对游戏目录的数据格式记号，把原版与加载器要落的版本目录再查一遍（准备之后可能有实例被改名或移到
+//!    那个名字下），原子地建目录（同名即报错），写下带任务 id 的未完成标记（[`Petalfall::import_modpack`]
+//!    从这里开始）。
 //! 3. 装整合包要求的原版与加载器（与「安装版本」同一条路径，落在它们自然的版本目录里）。这次新落下的目录
 //!    记进依赖版本记录，不进实例库；目录原本就在的是玩家的，不记。
 //! 4. 在实例目录写一份以实例名为 id 的版本 JSON：有加载器时是加载器 JSON 的副本，原版时只
@@ -37,14 +39,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use petalfall_download::{CredentialScope, DownloadCredential, DownloadTask};
 use petalfall_install::GameLayout;
 use petalfall_instance::{
-    IncompleteKind, IncompleteMarker, IsolationOverride, MarkerStore, NameViolation,
-    PETALFALL_META_DIR, VERSIONS_DIR, VersionSettings, VersionSettingsStore, check_name_format,
+    DiscoveredVersion, IncompleteKind, IncompleteMarker, IsolationOverride, MarkerStore,
+    NameViolation, PETALFALL_META_DIR, VERSIONS_DIR, VersionSettings, VersionSettingsStore,
+    check_name_format, discover_version,
 };
 use petalfall_modpack::{
     CurseForgeFileRef, ModrinthFile, PackArchive, PackFormat, PackLoader, PackLoaderKind,
     PackManifest, RemoteFiles, SafeRelativePath,
 };
 use petalfall_modplatform::{CurseForgeClient, CurseForgeFile, CurseForgeMod, Platform};
+use petalfall_version::LoaderKind;
 use serde::{Deserialize, Serialize};
 
 use crate::blocked::{BlockedFile, CLAIMS_DIR, ClaimedCopy, PACK_CACHE_DIR, place_claimed};
@@ -752,6 +756,7 @@ impl Petalfall {
         }
         self.ensure_modpack_name_free(&name).await?;
         ensure_pack_spares_instance_files(&self.layout(), &name, &archive)?;
+        self.ensure_natural_versions_usable(manifest).await?;
         let version_dir = self.game_dir().join(VERSIONS_DIR).join(&name);
 
         emit(
@@ -768,6 +773,52 @@ impl Petalfall {
             .await?;
         tracing::debug!(%name, ?source, remote = remote.downloads.len(), claimed = remote.claimed.len(), skipped, "整合包导入已准备好");
         Ok((name, archive, remote))
+    }
+
+    /// 整合包要用的原版与加载器装在各自的自然版本目录里（[`natural_versions`]）。那个名字下已经有一个别的版本时
+    /// 不能导入：安装会把它的版本 JSON 换成原版或那个加载器的。玩家给一个装了加载器的实例起了游戏版本号当名字
+    /// （别的启动器里这是常见的默认名），导入一个同游戏版本的整合包，那个实例的加载器就没了、Mod 不再加载。
+    ///
+    /// 只在认得出它是别的东西时才拦（[`occupied_by`]）。不拦的还有两种：目录不在、缺版本 JSON 或 JSON 读不懂
+    /// 的，那里没有认得出的版本可丢，安装会补上；启动器自己落下、玩家没拿来当实例用的依赖版本目录。后一种在
+    /// 加载器的位置上，导入出的实例各有一份版本 JSON 的副本，重装它不影响它们（1.20.1 上 Forge 与 NeoForge 的
+    /// 版本号撞上时，两个整合包就共用这样一个目录名）；可要是有别的版本直接继承着它（别的启动器建的叠加版本，
+    /// 或移动实例时连基底一起带过来的），换掉它就换了那个版本的底，照样拦。在原版的位置上，导入出的实例本来就
+    /// 直接继承它，重装等于把它还原成这些实例要的那个原版，不看有没有人继承。
+    ///
+    /// 查两遍。准备阶段一遍：这时还没占名字、没建目录，平台整合包虽然已经下载，游戏与加载器都还没装，早一步
+    /// 报出来。落盘一步建实例目录之前再一遍：准备阶段查过之后还要解析、探测远程文件，调用方再去占名字，这期间
+    /// 别的命令可能把一个实例改名或移到这个名字下；到了落盘，调用方已经占住这几个名字，改名、新建、删除这些
+    /// 命令进不来。
+    async fn ensure_natural_versions_usable(&self, manifest: &PackManifest) -> Result<()> {
+        let wanted = std::iter::once(None).chain(manifest.loader.as_ref().map(Some));
+        for (id, loader) in natural_versions(manifest).iter().zip(wanted) {
+            let Some(found) = discover_version(self.game_dir(), id).await? else {
+                continue;
+            };
+            let Some(found) = occupied_by(&found, loader) else {
+                continue;
+            };
+            if crate::instances::is_unclaimed_base_version(self.game_dir(), id).await
+                && (loader.is_none()
+                    || !crate::instances::is_inherited_base_version(self.game_dir(), id).await?)
+            {
+                continue;
+            }
+            return Err(CoreError::BaseVersionOccupied {
+                id: id.clone(),
+                wanted: match loader {
+                    None => format!("原版 {}", manifest.minecraft),
+                    Some(loader) => format!(
+                        "加载器 {} {}",
+                        detected_kind(loader.kind).as_str(),
+                        strip_minecraft_prefix(&loader.version, &manifest.minecraft)
+                    ),
+                },
+                found,
+            });
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -796,6 +847,8 @@ impl Petalfall {
         if checked == GameDirCheck::Absent {
             self.guard_game_dir(GuardMode::Use).await?;
         }
+        self.ensure_natural_versions_usable(&archive.manifest)
+            .await?;
         let version_dir = versions.join(&name);
         create_instance_dir(&version_dir, &name, created)?;
         // 名字下还留着的记录属于在启动器之外被删掉的同名旧实例，与新建实例同一处理：放在目录建成之后，
@@ -1776,6 +1829,57 @@ fn loader_choice(kind: PackLoaderKind) -> LoaderChoice {
         PackLoaderKind::Quilt => LoaderChoice::Quilt,
         PackLoaderKind::Forge => LoaderChoice::Forge,
         PackLoaderKind::NeoForge => LoaderChoice::NeoForge,
+    }
+}
+
+/// 整合包清单里的加载器种类，对应到版本 JSON 上探测出的种类。
+fn detected_kind(kind: PackLoaderKind) -> LoaderKind {
+    match kind {
+        PackLoaderKind::Fabric => LoaderKind::Fabric,
+        PackLoaderKind::Quilt => LoaderKind::Quilt,
+        PackLoaderKind::Forge => LoaderKind::Forge,
+        PackLoaderKind::NeoForge => LoaderKind::NeoForge,
+    }
+}
+
+/// 盘上这个版本若认得出不是整合包要装在这个名字下的东西，说出它是什么（接在「它」后面的短语）；是同一个东西、
+/// 或认不出它是别的东西时为 `None`。`loader` 为 `None` 表示这个名字下要装的是原版。
+///
+/// 原版的位置上，装着任何加载器、或继承着别的版本的都不是原版。加载器的位置上，探得到的加载器不是这一种、或
+/// 除了它还装着别的（比如 OptiFine）才算；一个加载器都探不出来的版本 JSON 说不清是什么，照常重装。
+fn occupied_by(found: &DiscoveredVersion, loader: Option<&PackLoader>) -> Option<String> {
+    let kinds: Vec<LoaderKind> = found.loaders.iter().map(|loader| loader.kind).collect();
+    let names = |kinds: &[LoaderKind]| {
+        let names: Vec<&str> = kinds.iter().map(|kind| kind.as_str()).collect();
+        names.join("、")
+    };
+    match loader {
+        None if !kinds.is_empty() => Some(format!("装着 {}", names(&kinds))),
+        None => found
+            .json
+            .inherits_from
+            .as_deref()
+            .map(str::trim)
+            .filter(|parent| !parent.is_empty())
+            .map(|parent| format!("继承自 {parent}")),
+        Some(loader) => {
+            let wanted = detected_kind(loader.kind);
+            let others: Vec<LoaderKind> = kinds
+                .iter()
+                .copied()
+                .filter(|kind| *kind != wanted)
+                .collect();
+            match others.len() {
+                0 => None,
+                // 要的那种也在：只说「装着 A、B」读起来像它已经是这个加载器了，把多出来的点出来。
+                extra if extra < kinds.len() => Some(format!(
+                    "除了 {} 还装着 {}",
+                    wanted.as_str(),
+                    names(&others)
+                )),
+                _ => Some(format!("装着 {}", names(&kinds))),
+            }
+        }
     }
 }
 
@@ -2985,6 +3089,16 @@ mod tests {
             .await
     }
 
+    /// `versions/` 下现有的目录名，按名字排好。
+    fn listed_dirs(petalfall: &Petalfall) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(petalfall.game_dir().join("versions"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     async fn listed_ids(petalfall: &Petalfall) -> Vec<String> {
         let list = petalfall.list_instances().await.unwrap();
         list.into_iter().map(|instance| instance.id).collect()
@@ -3063,6 +3177,224 @@ mod tests {
         );
         std::fs::remove_dir_all(&outcome.version_dir).unwrap();
         assert_eq!(listed_ids(&petalfall).await, [NATURAL_FABRIC, "test"]);
+    }
+
+    /// 一个装着 Fabric 的版本 JSON，id 由调用方定：玩家给装了加载器的实例起的名字。
+    fn fabric_instance_json(id: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","type":"release","mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
+                "libraries":[{{"name":"net.fabricmc:fabric-loader:0.14.0"}}]}}"#
+        )
+    }
+
+    /// 玩家有一个装了 Fabric 的实例，名字正好是游戏版本号（别的启动器里这是常见的默认名）。整合包要把原版装进
+    /// 这个名字的目录，照装会把那个实例的版本 JSON 换成原版，它的加载器就没了。导入在准备阶段就拒收，说明是哪个
+    /// 版本、它是什么、该怎么办；那个实例的版本 JSON 一个字节不变，新实例的目录也不建。继承着别的版本的同名目录
+    /// 同样不是原版，同样拒收。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pack_whose_game_version_names_a_modded_instance_is_refused() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall(tmp.path(), &server);
+        let pack = tmp.path().join("pack.mrpack");
+        write_pack(&pack, &index(serde_json::json!({"minecraft": "test"})), &[]);
+        let versions = petalfall.game_dir().join("versions");
+        let theirs = versions.join("test").join("test.json");
+
+        for (json, found) in [
+            (fabric_instance_json("test"), "装着 Fabric"),
+            (
+                r#"{"id":"test","inheritsFrom":"1.20.1","mainClass":"net.minecraft.client.main.Main"}"#
+                    .to_owned(),
+                "继承自 1.20.1",
+            ),
+        ] {
+            write_game_version(&petalfall, "test", &json);
+
+            let err = import_as(&petalfall, pack.clone(), "周末包")
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(&err, CoreError::BaseVersionOccupied { id, .. } if id == "test"),
+                "{err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "游戏目录里已有一个叫「test」的版本，它{found}，不是这个整合包要用的原版 test。导入会把它的版本文件换掉，先给它改个名字再导入"
+                )
+            );
+            assert_eq!(std::fs::read_to_string(&theirs).unwrap(), json);
+            assert!(!versions.join("周末包").exists());
+        }
+
+        // 同一个目录要是落樱自己落下的（记在依赖版本记录里、没人在里面玩过），装着什么都照常还原成原版；
+        // 原版的位置上实例本来就直接继承它，有人继承也不拦。
+        write_game_version(&petalfall, "test", &fabric_instance_json("test"));
+        write_game_version(
+            &petalfall,
+            "继承原版的",
+            r#"{"id":"继承原版的","inheritsFrom":"test","mainClass":"M"}"#,
+        );
+        petalfall
+            .record_base_versions(&["test".to_owned()])
+            .await
+            .unwrap();
+        import_as(&petalfall, pack, "周末包").await.unwrap();
+        let restored = std::fs::read_to_string(&theirs).unwrap();
+        assert!(!restored.contains("fabric-loader"), "{restored}");
+        assert!(versions.join("周末包").is_dir());
+    }
+
+    /// 加载器的位置同理：整合包要的加载器版本目录名下认得出是别的东西时拒收，装着另一种加载器、或除了要的那种
+    /// 还多装了别的都算。一个加载器都探不出来的版本 JSON 说不清是什么，照常重装。那个目录要是落樱自己上次导入时
+    /// 落下的、玩家没拿它当实例用，装着什么都照常重装：导入出的实例各有一份版本 JSON 的副本，换掉它不影响它们。
+    /// 有别的版本直接继承着它的、玩家在里面玩过的，照样拒收。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_loader_version_directory_holding_something_else_is_refused_unless_the_launcher_put_it_there()
+     {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        mount_fabric(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = fabric_pack(tmp.path());
+        let petalfall = petalfall(tmp.path(), &server);
+        let theirs = petalfall
+            .game_dir()
+            .join("versions")
+            .join(NATURAL_FABRIC)
+            .join(format!("{NATURAL_FABRIC}.json"));
+        let main_class = || -> String {
+            let landed: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&theirs).unwrap()).unwrap();
+            landed["mainClass"].as_str().unwrap().to_owned()
+        };
+        const KNOT: &str = "net.fabricmc.loader.impl.launch.knot.KnotClient";
+        let quilt = format!(
+            r#"{{"id":"{NATURAL_FABRIC}","inheritsFrom":"test","mainClass":"org.quiltmc.loader.impl.launch.knot.KnotClient",
+                "libraries":[{{"name":"org.quiltmc:quilt-loader:0.26.0"}}]}}"#
+        );
+        let fabric_with_optifine = format!(
+            r#"{{"id":"{NATURAL_FABRIC}","inheritsFrom":"test","mainClass":"{KNOT}",
+                "libraries":[{{"name":"net.fabricmc:fabric-loader:0.15.0"}},{{"name":"optifine:OptiFine:1.20.1_HD_U_I6"}}]}}"#
+        );
+
+        for (json, found) in [
+            (&quilt, "装着 Quilt"),
+            (&fabric_with_optifine, "除了 Fabric 还装着 OptiFine"),
+        ] {
+            write_game_version(&petalfall, NATURAL_FABRIC, json);
+            let err = import_as(&petalfall, pack.clone(), "周末包")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "游戏目录里已有一个叫「{NATURAL_FABRIC}」的版本，它{found}，不是这个整合包要用的加载器 Fabric 0.15.0。导入会把它的版本文件换掉，先给它改个名字再导入"
+                )
+            );
+            assert_eq!(&std::fs::read_to_string(&theirs).unwrap(), json);
+            // 拒收在装任何东西之前：原版没落下，实例目录也没建。
+            assert_eq!(listed_dirs(&petalfall), [NATURAL_FABRIC]);
+        }
+
+        write_game_version(
+            &petalfall,
+            NATURAL_FABRIC,
+            &format!(r#"{{"id":"{NATURAL_FABRIC}","inheritsFrom":"test","mainClass":"M"}}"#),
+        );
+        import_as(&petalfall, pack.clone(), "认不出的照装")
+            .await
+            .unwrap();
+        assert_eq!(main_class(), KNOT);
+
+        write_game_version(&petalfall, NATURAL_FABRIC, &quilt);
+        petalfall
+            .record_base_versions(&[NATURAL_FABRIC.to_owned()])
+            .await
+            .unwrap();
+        import_as(&petalfall, pack.clone(), "落樱落下的照装")
+            .await
+            .unwrap();
+        assert_eq!(main_class(), KNOT);
+
+        // 记录里有它、没人在里面玩过，却有别的版本直接继承它（别的启动器建的叠加版本，或移动实例时连基底一起
+        // 带过来的）：换掉它就换了那个版本的底，照样拒收。落樱自己导入的实例拿的是副本，不继承它。
+        write_game_version(&petalfall, NATURAL_FABRIC, &quilt);
+        write_game_version(
+            &petalfall,
+            "叠在上面的",
+            &format!(r#"{{"id":"叠在上面的","inheritsFrom":"{NATURAL_FABRIC}","mainClass":"M"}}"#),
+        );
+        let err = import_as(&petalfall, pack.clone(), "有人继承的不动")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::BaseVersionOccupied { id, found, .. }
+                if id == NATURAL_FABRIC && found == "装着 Quilt"),
+            "{err:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), quilt);
+        std::fs::remove_dir_all(petalfall.game_dir().join("versions").join("叠在上面的")).unwrap();
+
+        // 记录里有它，可玩家拿它当实例玩过（里面有存档）：按玩家的算，照样拒收。
+        write_game_version(&petalfall, NATURAL_FABRIC, &quilt);
+        let save = theirs.parent().unwrap().join("saves").join("世界");
+        std::fs::create_dir_all(&save).unwrap();
+        std::fs::write(save.join("level.dat"), b"level").unwrap();
+        let err = import_as(&petalfall, pack, "玩过的不动").await.unwrap_err();
+        assert!(
+            matches!(&err, CoreError::BaseVersionOccupied { id, found, .. }
+                if id == NATURAL_FABRIC && found == "装着 Quilt"),
+            "{err:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), quilt);
+    }
+
+    /// 准备阶段查过之后、落盘之前，自然版本目录下冒出了一个别的版本（准备还要解析远程文件，这期间别的命令把
+    /// 一个装着加载器的实例改名或移到了这个名字下）：落盘一步建实例目录之前再查一遍，照样拒收，那个版本的
+    /// JSON 一个字节不变，实例目录不建，建目录的记号不置位。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_base_version_taken_between_preparing_and_importing_is_still_refused() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall(tmp.path(), &server);
+        let pack = tmp.path().join("pack.mrpack");
+        write_pack(&pack, &index(serde_json::json!({"minecraft": "test"})), &[]);
+        let versions = petalfall.game_dir().join("versions");
+
+        let prepared = petalfall
+            .prepare_modpack(
+                &ModpackSource::File { path: pack },
+                Some("周末包"),
+                &ImportSelection::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let created = prepared.dir_created();
+        let json = fabric_instance_json("test");
+        write_game_version(&petalfall, "test", &json);
+
+        let err = petalfall
+            .import_modpack(prepared, "task-late", None)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, CoreError::BaseVersionOccupied { id, found, .. }
+                if id == "test" && found == "装着 Fabric"),
+            "{err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(versions.join("test").join("test.json")).unwrap(),
+            json
+        );
+        assert!(!versions.join("周末包").exists());
+        assert!(!created.get());
     }
 
     /// 一个整合包落下基底后，下一个用同样基底的整合包看到的是「目录原本就在」：记录不因此变，基底照样不列出。
