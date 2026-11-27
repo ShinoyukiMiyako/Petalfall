@@ -2039,7 +2039,7 @@ mod tests {
         );
     }
 
-    /// 响应里没有某个哈希：代表该文件无更新（或平台未收录），不是错误，也不该报更新。
+    /// 响应里没有某个哈希：平台未收录，或这个文件在这组加载器与游戏版本下一个版本都没有。不是错误，也不该报更新。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn check_updates_treats_missing_hash_in_response_as_no_update() {
         let tmp = tempfile::tempdir().unwrap();

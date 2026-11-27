@@ -1225,7 +1225,7 @@ mod tests {
         assert!(!got.contains_key("hash-b"));
     }
 
-    /// 批量查更新：一次请求带走整批哈希与实例条件，没更新的哈希不出现在结果里（缺键即无更新）。
+    /// 批量查更新：一次请求带走整批哈希与实例条件，平台没给回的哈希不出现在结果里（未收录，或这组条件下没有任何版本）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn latest_versions_by_hashes_posts_batch_and_maps_by_hash() {
         let server = MockServer::start().await;
