@@ -1,6 +1,7 @@
 // 启动胶囊样式里的动效约定：jsdom 不算样式，这里直接读 CSS 文本断言。
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { APPEARANCES, contrast, declarationOf, resolveColor, tokensOf, type AppearanceName } from "../test/contrast";
 import { BREATH_CYCLES } from "./breath";
 
 const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -85,6 +86,22 @@ describe("文字行", () => {
     expect(inner).toBe(34);
     expect(twoLines).toBe(32.5);
     expect(twoLines).toBeLessThanOrEqual(inner);
+  });
+});
+
+// 中性的胶囊内按钮（「完整日志」「查看诊断」）只出现在失败与崩溃面上，底色要对那一面看得出来
+describe("胶囊内按钮的底", () => {
+  function ratios(appearance: AppearanceName) {
+    const tokens = tokensOf(appearance);
+    const face = resolveColor(declarationOf(css, '.layer[data-layer="danger"]', "background"), tokens, [0, 0, 0]);
+    const on = (selector: string) => contrast(resolveColor(declarationOf(css, selector, "background"), tokens, face), face);
+    return { rest: on(".pill"), hover: on('.pill:hover:not([aria-disabled="true"])') };
+  }
+
+  it.each(Object.keys(APPEARANCES) as AppearanceName[])("%s：静止的底在失败面上看得出，悬停再深一档", (appearance) => {
+    const { rest, hover } = ratios(appearance);
+    expect(rest).toBeGreaterThanOrEqual(1.15);
+    expect(hover).toBeGreaterThan(rest);
   });
 });
 

@@ -350,7 +350,10 @@
   gap: var(--sk-space-4);
 }
 
-/* 胶囊内按钮：高 = 胶囊高 − 14，中性底 */
+/*
+ * 胶囊内按钮：高 = 胶囊高 − 14。中性的只出现在失败与崩溃面上，底与悬停铺半透明叠层：实色 bg-2 落在日樱的 danger-tint 上
+ * 只差 1.02:1，「完整日志」这类按钮几乎看不见；叠层随所在的面加深或提亮，日夜都看得出
+ */
 .pill {
   display: inline-flex;
   align-items: center;
@@ -359,7 +362,7 @@
   padding: 0 var(--sk-space-14);
   border: 0;
   border-radius: var(--sk-r-pill);
-  background: var(--sk-bg-2);
+  background: var(--sk-fill-hover);
   color: var(--sk-text);
   font-family: inherit;
   font-size: var(--sk-fs-small);
@@ -373,7 +376,7 @@
 }
 
 .pill:hover:not([aria-disabled="true"]) {
-  background: var(--sk-bg-3);
+  background: var(--sk-fill-press);
 }
 
 .pill:active:not([aria-disabled="true"]) {
