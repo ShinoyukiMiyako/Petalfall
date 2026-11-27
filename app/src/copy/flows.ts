@@ -277,6 +277,8 @@ export const AVATAR_LINE = {
   brokenReimport: "整合包没导入完，需要重新导入",
   /** 后端说补全修不好：不说需要修复，后端给的原因在启动入口与实例页的提示里，这一行放不下。 */
   brokenUnrepairable: "文件不完整，补全修不好",
+  /** 补全修不好是因为版本 JSON 读不出来（被占用、没有权限）：文件可能完好，不说文件不完整。 */
+  brokenUnreadable: "版本 JSON 读不出来",
   playUnknown: "上次游玩读不到",
 } as const;
 

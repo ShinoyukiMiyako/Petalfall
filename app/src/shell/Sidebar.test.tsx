@@ -314,6 +314,38 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("版本 JSON 读不出来的固定实例：名称提示第二行不说文件不完整", () => {
+  const UNREADABLE = "版本 JSON 读不出来：文件 IO 失败: D:\\Games\\.minecraft\\versions\\生存\\生存.json：拒绝访问。 (os error 5)";
+  const RENAMABLE = "缺少版本 JSON，也没有记下当初装的是什么；目录里有一份叫 1.20.1.json 的版本文件，把实例改名成 1.20.1 就能认出来";
+
+  it("照后端给的种类说读不出来；同样修不好、种类是没有记录（带不带改名目标）的照旧说文件不完整", () => {
+    expect(pinLine({ kind: "broken", reason: UNREADABLE, reimport: false }, { ...inst, unrepairableReason: UNREADABLE, unrepairableKind: "unreadable", renameTo: null }, T0)).toBe(
+      "版本 JSON 读不出来",
+    );
+    const missing: LaunchView = { kind: "broken", reason: "缺少版本 JSON", reimport: false };
+    expect(pinLine(missing, { ...inst, unrepairableReason: RENAMABLE, unrepairableKind: "no_record", renameTo: "1.20.1" }, T0)).toBe("文件不完整，补全修不好");
+    expect(pinLine(missing, { ...inst, unrepairableReason: "缺少版本 JSON，也没有记下当初装的是什么", unrepairableKind: "no_record", renameTo: null }, T0)).toBe("文件不完整，补全修不好");
+  });
+
+  it("悬停固定着的读不出来的实例：名称提示第二行写版本 JSON 读不出来", async () => {
+    ipc.overrides.set("list_instances", () => [
+      instanceDto("生存", { status: "broken", broken_reason: UNREADABLE, unrepairable_reason: UNREADABLE, unrepairable_kind: "unreadable", mc_version: null }),
+      instanceDto("创造"),
+      instanceDto("空岛"),
+    ]);
+    await mount();
+    act(() => {
+      item("pin:生存").dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    });
+    act(() => {
+      vi.advanceTimersByTime(TOOLTIP_TIMING.sidebarDelay);
+    });
+    const tip = document.querySelector("[role='tooltip']");
+    if (tip === null) throw new Error("悬停后没有出现名称提示");
+    expect(tip.querySelector("[class*='pinLine']")?.textContent).toBe("版本 JSON 读不出来");
+  });
+});
+
 describe("设置上的更新点", () => {
   const info = (patch: Record<string, unknown>) => ({
     current_version: "0.1.0",
