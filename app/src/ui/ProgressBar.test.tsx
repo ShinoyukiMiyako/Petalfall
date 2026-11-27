@@ -1,25 +1,15 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { MotionConfig, type MotionValue } from "framer-motion";
-import { describe, expect, it, vi } from "vitest";
-import { drainFrames, render, stepFrames, waitForFrames, type Rendered } from "../test/dom";
+import { describe, expect, it } from "vitest";
+import { render, SETTLE_FRAMES, startFrameClock, stepFrames, waitForFrames, type Rendered } from "../test/dom";
 import { fillOffset, MIN_VISIBLE_PROGRESS, nextProgressTarget, ProgressBar, useSmoothProgress } from "./ProgressBar";
 import { ProgressRing, RING_EMPTY_TEXT, RING_PLACEHOLDER, RING_STROKE, ringHasLabel } from "./ProgressRing";
 
 let view: Rendered | undefined;
 
-/**
- * 逐帧数填充走过几个中间值的用例让帧跟着假时钟走，用 stepFrames 逐帧推进。按真实时间走的话，机器满载时帧来得稀，
- * 弹簧落定之前录到的中间帧就少；弹簧起步那一帧与下一帧隔得比整段平滑还长时，一个中间值也录不到。
- * 换之前先在真实计时器上把帧循环排空（见 test/dom 的 drainFrames）。
- */
-async function startFrameClock() {
-  await drainFrames();
-  vi.useFakeTimers();
-}
-
-/** 进度平滑（settle 弹簧）在这么多帧（约 1 秒）之内落定。 */
-const SETTLE_FRAMES = 60;
+// 逐帧数填充走过几个中间值的用例走假时钟（startFrameClock），用 stepFrames 逐帧推进。按真实时间走的话，机器满载时帧来得稀，
+// 弹簧落定之前录到的中间帧就少；弹簧起步那一帧与下一帧隔得比整段平滑还长时，一个中间值也录不到。
 
 describe("进度推演", () => {
   it("同一标识内只增不减：小于当前目标的新值被忽略", () => {

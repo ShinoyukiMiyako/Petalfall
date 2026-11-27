@@ -10,7 +10,7 @@ import { SIDEBAR_COPY } from "../copy/shell";
 import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
-import { keydown, render, stepFrames, stubMatchMedia, stubResizeObserver } from "../test/dom";
+import { keydown, render, SETTLE_FRAMES, stepFrames, stubMatchMedia, stubResizeObserver } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, cancelledError, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../test/launcher";
 import { ChromeProvider, type ChromeApi } from "./chrome";
@@ -23,8 +23,6 @@ vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).f
 
 const PACK = "周末联机";
 const NOW = Date.UTC(2026, 9, 31, 12);
-/** 入场与退场都播得完的帧数：入场弹簧最长，退场是 fade.out。 */
-const SETTLE_FRAMES = 60;
 const chrome: ChromeApi = { scrollContentToTop: vi.fn(), focusContent: vi.fn() };
 
 let launcher: LauncherApi;

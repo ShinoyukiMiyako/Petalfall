@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { COVER_PRESETS, type InstanceCover } from "../../art/iso/covers";
 import type { SpringName } from "../../lib/motion";
 import { OverlayProvider, OverlayRoot } from "../../shell/overlay";
-import { drainFrames, render, stepFrames, stubResizeObserver, waitForFrames, type Rendered } from "../../test/dom";
+import { render, SETTLE_FRAMES, startFrameClock, stepFrames, stubResizeObserver, waitForFrames, type Rendered } from "../../test/dom";
 import { PackForm, type PackFacts } from "./PackForm";
 
 // 方块要读材质、画 canvas，和这里要验的位移无关：换成一个标着封面的占位
@@ -46,16 +46,9 @@ afterEach(() => {
   reflowed.clear();
 });
 
-/**
- * 断言弹回途中取值的用例让帧跟着假时钟走，用 stepFrames 逐帧推进。按真实时间走的话，机器满载时两帧之间可能隔得比
- * 整段弹回还长，下一帧直接写成落定的 none，录到的缩放里就没有走近原大的那几帧。录到的第一帧倒不受影响：
- * framer-motion 建动画与解析关键帧相隔超过 40 ms 时从解析的那一帧起算，第一帧最多走 40 ms。
- * 换之前先在真实计时器上把帧循环排空（见 test/dom 的 drainFrames）。
- */
-async function startFrameClock() {
-  await drainFrames();
-  vi.useFakeTimers();
-}
+// 断言弹回途中取值的用例走假时钟。按真实时间走的话，机器满载时两帧之间可能隔得比
+// 整段弹回还长，下一帧直接写成落定的 none，录到的缩放里就没有走近原大的那几帧。录到的第一帧倒不受影响：
+// framer-motion 建动画与解析关键帧相隔超过 40 ms 时从解析的那一帧起算，第一帧最多走 40 ms。
 
 interface FormOptions {
   reduced?: "always" | "never";
@@ -99,9 +92,6 @@ const scales = (transforms: string[]) =>
     const m = /scale\(([\d.]+)\)/.exec(t);
     return m === null ? [] : [Number(m[1])];
   });
-
-/** 舞台方块的弹回（pop 弹簧）在这么多帧（约 1 秒）之内落定。 */
-const SETTLE_FRAMES = 60;
 
 describe("舞台方块换封面", () => {
   it("挂载时不动；换了封面从 0.94 弹回原大", async () => {

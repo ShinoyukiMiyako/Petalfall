@@ -433,6 +433,19 @@ export async function drainFrames(): Promise<void> {
 }
 
 /**
+ * 让帧跟着假时钟走，之后用 stepFrames 逐帧推进：先在真实计时器上把帧循环排空，再装假定时器（见上面帧循环怎么走）。
+ * 断言动画某一刻的取值、逐帧采样、或断言一段时间里一直没动的用例用它。按真实时间走的话，机器满载时帧来得稀：
+ * 让出一下就可能先跑掉几帧，量到的已经不是起点；两帧之间隔得比整段动画还长时，中间值一个也录不到；没动也可能只是一帧都没来。
+ */
+export async function startFrameClock(): Promise<void> {
+  await drainFrames();
+  vi.useFakeTimers();
+}
+
+/** 用 stepFrames 等动画落定的帧数（约 1 秒）：lib/motion 的弹簧感知时长都不过 0.35 s，用到它的入场、形变、平滑与淡入淡出都在这之内停到终点。 */
+export const SETTLE_FRAMES = 60;
+
+/**
  * 每个用例结束后的组件收尾，test/setup.ts 经 test/teardown 调用：卸载还挂着的组件，停在假定时器上的再把帧循环排空，
  * 之后 setup 才换回真实计时器。真实计时器上排着的帧不会卡住，照常按真实时间到点，不为它多等两个帧长。
  */
@@ -454,6 +467,20 @@ export function keydown(target: EventTarget, key: string, init: KeyboardEventIni
     target.dispatchEvent(event);
   });
   return event;
+}
+
+/**
+ * 按浏览器的样子在焦点所在处按一次回车或空格。jsdom 只派发事件，下面两样都不做（无头 Edge 里用真实按键核对过）：
+ * - 焦点所在的子树带上 inert 后，浏览器在下一个输入事件到来之前把焦点挪回 body，按键落在 body 上；
+ * - 聚焦着的按钮收到没被取消的回车或空格时触发一次 click。
+ */
+export function press(key: "Enter" | " "): void {
+  const focused = document.activeElement;
+  if (focused instanceof HTMLElement && focused.closest("[inert]") !== null) act(() => focused.blur());
+  const target = document.activeElement ?? document.body;
+  const down = keydown(target, key);
+  if (key === " ") act(() => void target.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true, cancelable: true })));
+  if (target instanceof HTMLButtonElement && !target.disabled && !down.defaultPrevented) act(() => target.click());
 }
 
 /**

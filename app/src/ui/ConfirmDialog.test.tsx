@@ -6,7 +6,7 @@ import { MotionConfig, motion, visualElementStore } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { drainFrames, render, stepFrames, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
+import { render, SETTLE_FRAMES, startFrameClock, stepFrames, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import { ConfirmDialog } from "./ConfirmDialog";
 import confirmStyles from "./ConfirmDialog.module.css";
 
@@ -36,18 +36,8 @@ beforeEach(() => {
   stubResizeObserver();
 });
 
-/**
- * 断言动画在某一刻的值（提交那一刻的起点、途中逐帧的值）的用例让帧跟着假时钟走，用 stepFrames 逐帧推进。
- * 按真实时间走的话，机器满载时 await act 让出的那一下就可能先跑掉一两帧，量到的已经不是起点；逐帧采样也会漏帧。
- * 换之前先在真实计时器上把帧循环排空（见 test/dom 的 drainFrames）。
- */
-async function startFrameClock() {
-  await drainFrames();
-  vi.useFakeTimers();
-}
-
-/** 弹窗的入场与 morph 形变（时长约 350 ms 的弹簧）在这么多帧（约 1 秒）之内都落定。 */
-const SETTLE_FRAMES = 60;
+// 断言动画在某一刻的值（提交那一刻的起点、途中逐帧的值）的用例走假时钟（startFrameClock），用 stepFrames 逐帧推进：
+// 按真实时间走的话，机器满载时 await act 让出的那一下就可能先跑掉一两帧，量到的已经不是起点；逐帧采样也会漏帧。
 
 function mount(ui: ReactNode) {
   view = render(

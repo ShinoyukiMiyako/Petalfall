@@ -17,7 +17,7 @@ import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { MANUAL_LOGIN } from "../../state/login";
 import type { ModalProps } from "../../ui/Modal";
-import { render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations } from "../../test/dom";
+import { press, render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { AUTHLIB_DIALOG_COPY, DEVICE_DIALOG_COPY, OFFLINE_DIALOG_COPY } from "../../copy/login";
@@ -621,20 +621,6 @@ describe("微软设备码弹窗", () => {
     expect(writeText).toHaveBeenCalledWith("PF7Q-X2LM");
     expect(opened).toEqual(["https://www.microsoft.com/link"]);
   });
-
-  /**
-   * 按浏览器的样子在焦点所在处按一次回车或空格（同 ui/Modal.test.tsx 的 press）。jsdom 只派发事件，这两样都不做：
-   * 焦点所在的子树带上 inert 后，浏览器在下一个输入事件到来之前把焦点挪回 body；聚焦着的按钮收到没被取消的回车或空格时触发 click。
-   */
-  const press = (key: "Enter" | " ") => {
-    const focused = document.activeElement;
-    if (focused instanceof HTMLElement && focused.closest("[inert]") !== null) act(() => focused.blur());
-    const target = document.activeElement ?? document.body;
-    const down = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
-    act(() => void target.dispatchEvent(down));
-    if (key === " ") act(() => void target.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true, cancelable: true })));
-    if (target instanceof HTMLButtonElement && !target.disabled && !down.defaultPrevented) act(() => target.click());
-  };
 
   // 退场中的面板处理函数停在关上那一刻：「复制并打开网页」没有自带判断，退场途中还按得到的话会再复制一次、再开一次网页
   it("关掉登录后的退场途中：整层带 inert，回车与空格不再复制代码、不再打开网页", async () => {

@@ -7,7 +7,7 @@ import { act, useState, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LOADING_DELAY_MS } from "../domain/limits";
 import { FOCUS_FALLBACK_ATTR, OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { drainFrames, keydown, render, stepFrames, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
+import { keydown, press, render, SETTLE_FRAMES, startFrameClock, stepFrames, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import { Button } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import confirmStyles from "./ConfirmDialog.module.css";
@@ -41,18 +41,8 @@ beforeEach(() => {
   stubResizeObserver();
 });
 
-/**
- * 断言动画在某一刻的值（提交那一刻的起点、途中逐帧的值）的用例让帧跟着假时钟走，用 stepFrames 逐帧推进。
- * 按真实时间走的话，机器满载时 await act 让出的那一下就可能先跑掉几帧，量到的已经不是起点，甚至整段形变已经播完。
- * 换之前先在真实计时器上把帧循环排空（见 test/dom 的 drainFrames）。
- */
-async function startFrameClock() {
-  await drainFrames();
-  vi.useFakeTimers();
-}
-
-/** 弹窗的入场与 morph 形变（时长约 350 ms 的弹簧）在这么多帧（约 1 秒）之内都落定。 */
-const SETTLE_FRAMES = 60;
+// 断言动画在某一刻的值（提交那一刻的起点、途中逐帧的值）的用例走假时钟（startFrameClock），用 stepFrames 逐帧推进：
+// 按真实时间走的话，机器满载时 await act 让出的那一下就可能先跑掉几帧，量到的已经不是起点，甚至整段形变已经播完。
 
 function mount(ui: ReactNode) {
   view = render(
@@ -982,20 +972,6 @@ describe("Modal 随父级退场", () => {
     await vi.waitFor(() => expect(document.body.textContent).toContain("向导"), { timeout: 3000, interval: 20 });
   });
 });
-
-/**
- * 按浏览器的样子在焦点所在处按一次回车或空格。jsdom 只派发事件，下面两样都不做（无头 Edge 里用真实按键核对过）：
- * - 焦点所在的子树带上 inert 后，浏览器在下一个输入事件到来之前把焦点挪回 body，按键落在 body 上；
- * - 聚焦着的按钮收到没被取消的回车或空格时触发一次 click。
- */
-function press(key: "Enter" | " ") {
-  const focused = document.activeElement;
-  if (focused instanceof HTMLElement && focused.closest("[inert]") !== null) act(() => focused.blur());
-  const target = document.activeElement ?? document.body;
-  const down = keydown(target, key);
-  if (key === " ") act(() => void target.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true, cancelable: true })));
-  if (target instanceof HTMLButtonElement && !target.disabled && !down.defaultPrevented) act(() => target.click());
-}
 
 // 退场中的面板画的是关上那一刻的样子，处理函数也停在那一刻：「复制并打开网页」这类没有自带判断的按钮在退场的
 // 一百多毫秒里接得住回车或空格的话，动作会再跑一次（再写一次剪贴板、再开一次网页）

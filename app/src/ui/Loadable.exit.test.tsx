@@ -4,23 +4,13 @@
 import { act } from "react";
 import { expect, it, vi } from "vitest";
 import type { LoadingView } from "../lib/loading-gate";
-import { drainFrames, render, stepFrames, waitForFrames, type Rendered } from "../test/dom";
+import { render, SETTLE_FRAMES, startFrameClock, stepFrames, waitForFrames, type Rendered } from "../test/dom";
 import { Loadable } from "./Loadable";
 
 let view: Rendered | undefined;
 
-/**
- * 断言退场途中某一刻取值的用例让帧跟着假时钟走。按真实时间走的话，机器满载时两帧之间隔得比淡出（120 ms）还长，
- * 下一帧就直接把退场播完、骨架已经撤下，轮询等不到半透明的那一刻；拉回之后往 0 走的那一段（200 ms）同理。
- * 换之前先在真实计时器上把帧循环排空（见 test/dom 的 drainFrames）。
- */
-async function startFrameClock() {
-  await drainFrames();
-  vi.useFakeTimers();
-}
-
-/** 骨架的淡入（200 ms）与淡出（120 ms）在这么多帧（约 1 秒）之内都落定。 */
-const SETTLE_FRAMES = 60;
+// 断言退场途中某一刻取值的用例走假时钟。按真实时间走的话，机器满载时两帧之间隔得比淡出（120 ms）还长，
+// 下一帧就直接把退场播完、骨架已经撤下，轮询等不到半透明的那一刻；拉回之后往 0 走的那一段（200 ms）同理。
 
 const tree = (state: LoadingView) => (
   <Loadable view={state} skeleton={<span data-skeleton="" />}>

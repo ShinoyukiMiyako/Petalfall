@@ -11,7 +11,7 @@ import { OverlayProvider, OverlayRoot } from "../../../shell/overlay";
 import { INITIAL_UPDATER_STATE, type DownloadSource, type UpdateInfo, type UpdaterChannels, type UpdaterPhase } from "../../../state/updater/machine";
 import { useDownloadHold } from "../../../state/updater/useDownloadHold";
 import { deferred, type Deferred } from "../../../test/launcher";
-import { keydown, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
+import { keydown, render, SETTLE_FRAMES, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
 import s from "../settings.module.css";
 import { ChannelPicker, StatusLine } from "./UpdateCard";
 import { updateCardView, type CardContext, type ChannelChangeCost, type ChannelId } from "./update-view";
@@ -77,9 +77,6 @@ function statusButton(): HTMLButtonElement {
 
 /** 按钮上看得见的文案：文案槽（LabelSlot）里叠着全部候选，看得见的只有标着 data-current 的那条。 */
 const buttonLabel = () => (statusButton().querySelector("[data-align] > [data-current]") ?? statusButton()).textContent;
-
-/** settle 弹簧约 0.26 s 停稳；走 1 s 的帧足够它落到目标上。 */
-const SETTLE_FRAMES = 60;
 
 describe("更新卡下载中的次句", () => {
   it("每 100 ms 一条进度：从 0 开始传的第一条立即换上，不停在 0 B；之后已下大小每 500 ms 才换一次，进度停下后最后一条到点补上", () => {
