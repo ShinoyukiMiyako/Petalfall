@@ -1081,10 +1081,12 @@ async fn history_json_matches_snapshot() {
 #[tokio::test]
 async fn filled_options_json_matches_snapshot() {
     let dir = tempfile::tempdir().expect("建临时目录");
-    // 交给启动前补全写记账的同一个函数，按文件把样本里的行当成这次补上的：写法一变，快照跟着变。
+    // 交给启动前补全写记账的同一个函数，按文件把样本里的行当成这次补上的：写法一变，快照跟着变。写函数收的是
+    // 增量，不收整份记账，所以这里穷举解构、不写 `..`：记账一加字段，这里先编译不过，逼人决定新字段怎么经写函数
+    // 落到盘上。
     let sample = filled_lines_sample();
-    let filled: Vec<(&str, Vec<String>)> = sample
-        .files
+    let FilledLines { files } = &sample;
+    let filled: Vec<(&str, Vec<String>)> = files
         .iter()
         .map(|(relative, lines)| (relative.as_str(), lines.clone()))
         .collect();
@@ -1096,6 +1098,14 @@ async fn filled_options_json_matches_snapshot() {
         &dir.path()
             .join(PETALFALL_META_DIR)
             .join("filled-options.json"),
+    );
+    // 样本本身不经写函数序列化：读回的整份与样本比对，样本里填的字段没写到盘上（或写了读不回来）就挂，不靠快照
+    // 碰巧与旧样本相同。
+    let read: FilledLines = serde_json::from_slice(&written).expect("读回补行记账");
+    assert_eq!(
+        serde_json::to_value(&read).expect("读回的记账能序列化"),
+        serde_json::to_value(&sample).expect("样本能序列化"),
+        "盘上的补行记账与样本对不上：样本里的字段没有全部经写函数落到盘上"
     );
     assert_matches_snapshot("filled-options.json", "filled-options.json", &written);
 }
