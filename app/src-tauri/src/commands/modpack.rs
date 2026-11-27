@@ -7,11 +7,12 @@ use std::sync::Mutex;
 
 use petalfall_core::data_format::GuardMode;
 use petalfall_core::{
-    is_safe_file_name, BlockedFile, BundleReason, ClaimReport, EventSink, ExportBundledMod,
-    ExportExtra, ExportMatch, GameSlot, ImportSelection, InstanceModpack, MarkerError,
-    MarkerSettlement, ModpackExportOptions, ModpackExportOutcome, ModpackExportPreview,
-    ModpackExportTarget, ModpackInstallOutcome, ModpackPreview, ModpackSource, ModpackSummary,
-    PackFileAvailability, PackFileOrigin, PackFormat, PackLoader, PackModEntry, Petalfall,
+    is_safe_file_name, BlockedFile, BundleReason, ClaimReport, DiscardedImport, EventSink,
+    ExportBundledMod, ExportExtra, ExportMatch, GameSlot, ImportSelection, InstanceDirCreated,
+    InstanceModpack, MarkerError, MarkerSettlement, ModpackExportOptions, ModpackExportOutcome,
+    ModpackExportPreview, ModpackExportTarget, ModpackInstallOutcome, ModpackPreview,
+    ModpackSource, ModpackSummary, PackFileAvailability, PackFileOrigin, PackFormat, PackLoader,
+    PackModEntry, Petalfall,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -316,8 +317,9 @@ pub(crate) async fn install_modpack_with(
     let task = tasks.register(task_id)?;
     let petalfall = snapshot.with_cancel(task.token().clone());
     // 占用守卫与实例名放在导入的 future 之外：取消宽限期满时 run 会丢弃 future，实例名得一直占到下面
-    // 按名字清理完半成品，否则清理前的空档里别的命令就能动这个目录。
-    let reserved: Mutex<Option<(String, ChainGuard)>> = Mutex::new(None);
+    // 按名字清理完半成品，否则清理前的空档里别的命令就能动这个目录。一起留着的还有「实例目录是不是这次导入
+    // 建的」的记号：future 被丢弃之后只有它说得清名下的目录归谁。
+    let reserved: Mutex<Option<(String, ChainGuard, InstanceDirCreated)>> = Mutex::new(None);
     let result = task
         .run(async {
             // 准备阶段不核对游戏目录：平台整合包要整个下载到缓存，CurseForge 的包还要问平台接口，到导入那一步才被拒
@@ -340,14 +342,15 @@ pub(crate) async fn install_modpack_with(
                     return Err(busy);
                 }
             };
-            // 准备阶段查重与占住之间，别的命令可能抢先建了同名实例；占住之后仍然空闲，名下之后出现的
-            // 目录才能认定是这次导入建的，失败时才可以放心按名字删。
+            // 准备阶段查重与占住之间，别的命令可能抢先建了同名实例：占住之后再查一遍，撞上就趁早报重名。
+            // 这一遍只是为了早点报：它按目录列表比名字，看不出名字是另一个目录的别名，也挡不住之后才冒出来的
+            // 目录，失败时删不删只看导入有没有建出目录。
             if let Err(taken) = petalfall.ensure_modpack_name_free(prepared.name()).await {
                 prepared.discard().await;
                 return Err(taken.into());
             }
             *reserved.lock().expect("整合包导入的占用槽锁已中毒") =
-                Some((prepared.name().to_owned(), guard));
+                Some((prepared.name().to_owned(), guard, prepared.dir_created()));
             Ok(petalfall
                 .import_modpack(prepared, task_id, Some(events))
                 .await?)
@@ -355,20 +358,23 @@ pub(crate) async fn install_modpack_with(
         .await;
     match result {
         Ok(outcome) => {
-            // 导入成功说明实例目录是这次建的；失败时这里分不清目录建没建出来，半成品删掉了的由下面连选中一起清。
+            // 导入成功说明实例目录是这次建的；失败时半成品删掉了的由下面连选中一起清。
             // 占用守卫还留在 reserved 里，按导入所在的游戏目录清，理由同下面的清理。
             drop_namesake_pins(facade, petalfall.game_dir(), &outcome.version_id, task_id).await;
             Ok(outcome_dto(outcome))
         }
         Err(err) => {
-            let name = reserved
+            let import = reserved
                 .lock()
                 .expect("整合包导入的占用槽锁已中毒")
                 .as_ref()
-                .map(|(name, _)| name.clone());
-            // 占用守卫还留在 reserved 里：清配置时别的命令不能在这个名字下新建实例，清掉的只会是旧引用。
-            if let Some(name) = name {
-                if discard_failed_import(&petalfall, &name, task_id, &err).await {
+                .map(|(name, _, created)| (name.clone(), created.clone()));
+            // 实例目录不是这次导入建的（还没走到建目录就失败了，或名下已经有别人的目录、建的时候撞上）：没有
+            // 半成品要清，名下的目录与配置里对这个名字的引用都不动，discard_failed_import 返回假。
+            // 占用守卫还留在 reserved 里：清配置时别的命令不能用这个名字新建实例，清掉的只会是旧引用。守卫按
+            // 名字的字面比，挡不住名字的另一种写法，所以删目录不靠它，只认 created。
+            if let Some((name, created)) = import {
+                if discard_failed_import(&petalfall, &name, &created, task_id, &err).await {
                     forget_discarded_import(facade, petalfall.game_dir(), &name, task_id).await;
                 }
             }
@@ -377,24 +383,30 @@ pub(crate) async fn install_modpack_with(
     }
 }
 
-/// 导入失败后按名字删掉半成品。导入自己的失败路径已经删过一次，这里兜住两种情况：取消宽限期满时
-/// 导入的 future 被丢弃、清理代码没机会跑；删目录失败（文件被杀毒软件等占用）。还是删不掉就把未完成
-/// 标记落成这次导入的结局，列表里显示导入已经失败或取消，而不是一直停在进行中，用户可以自己删。
-/// 清理的问题只记日志：返回给前端的仍是导入本身的错误，用户要看到的是导入为什么没成。
+/// 导入失败后按名字删掉半成品。导入自己的失败路径已经删过一次，这里兜住三种情况：取消宽限期满时
+/// 导入的 future 被丢弃、清理代码没机会跑；实例目录建成了、未完成标记却没写下，导入自己不删；删目录
+/// 失败（文件被杀毒软件等占用）。还是删不掉就把未完成标记落成这次导入的结局，列表里显示导入已经失败或
+/// 取消，而不是一直停在进行中，用户可以自己删。清理的问题只记日志：返回给前端的仍是导入本身的错误，用户
+/// 要看到的是导入为什么没成。
 ///
-/// 返回半成品目录是否已不在：删掉了或本来就不在为真；删不掉、改记结局时为假，它还列在实例库里。
+/// 这次导入没建出实例目录（`created` 没置位）时什么都不做：名下的目录不是这次建的，不删，也不改它的标记。
+///
+/// 返回要不要接着清配置里对这个名字的引用：这次导入建出过实例目录、现在已不在（这里删掉了，或导入自己删过了）
+/// 为真；没建出目录的为假，引用是别人的；删不掉、改记结局的也为假，它还列在实例库里。
 async fn discard_failed_import(
     petalfall: &Petalfall,
     name: &str,
+    created: &InstanceDirCreated,
     task_id: &str,
     err: &CommandError,
 ) -> bool {
-    let cleanup = match petalfall.discard_modpack_import(name).await {
-        Ok(true) => {
+    let cleanup = match petalfall.discard_modpack_import(name, created).await {
+        Ok(DiscardedImport::Removed) => {
             tracing::info!(task_id, name, "已删除导入未完成的实例");
             return true;
         }
-        Ok(false) => return true,
+        Ok(DiscardedImport::AlreadyGone) => return true,
+        Ok(DiscardedImport::NotCreated) => return false,
         Err(cleanup) => cleanup,
     };
     tracing::error!(task_id, name, error = %cleanup, "删除导入未完成的实例失败，改为记下导入的结局");
@@ -1160,6 +1172,141 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, code::IO);
         assert!(other.is_dir());
+    }
+
+    /// 系统盘上的临时目录：系统盘默认生成 8.3 短名，测试用的临时目录却常被指到不生成短名的数据盘上。
+    /// 找不到系统的临时目录就用默认的。
+    fn tempdir_on_the_system_drive() -> tempfile::TempDir {
+        std::env::var_os("LOCALAPPDATA")
+            .map(|local| PathBuf::from(local).join("Temp"))
+            .filter(|temp| temp.is_dir())
+            .and_then(|temp| tempfile::tempdir_in(temp).ok())
+            .unwrap_or_else(|| tempfile::tempdir().unwrap())
+    }
+
+    /// 实例名是另一个实例的 8.3 短名：在生成短名的卷上（系统盘默认如此）`ALLTHE~1` 指向「All the Mods 10」，
+    /// 按目录列表查重看不出来，建目录时才撞上。导入报重名，被别名指到的那个实例连同存档原样留着：失败清理只删
+    /// 这次导入建出来的目录。配置里按这个名字记着的侧栏固定与当前选中也原样留着：它们指的是那个实例。
+    ///
+    /// 卷不生成短名时这个名字不指向任何目录，前提不成立，不测（用例照样记为通过）。不挑卷的是下面拿「Σ」造
+    /// 撞名的那一条；不挑平台的是直接调清理的那一条，与 core 的
+    /// `only_a_directory_the_import_created_is_ever_discarded`。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn import_named_after_another_instances_short_name_leaves_that_instance_alone() {
+        let server = MockServer::start().await;
+        let dir = tempdir_on_the_system_drive();
+        let facade = importing_facade(
+            dir.path(),
+            &server,
+            PetalfallConfig {
+                sidebar_pins: vec!["ALLTHE~1".to_owned()],
+                selected_version: Some("ALLTHE~1".to_owned()),
+                ..PetalfallConfig::default()
+            },
+        );
+        let versions = dir.path().join(".minecraft").join("versions");
+        let level = versions
+            .join("All the Mods 10")
+            .join("saves")
+            .join("世界")
+            .join("level.dat");
+        std::fs::create_dir_all(level.parent().unwrap()).unwrap();
+        std::fs::write(&level, b"level").unwrap();
+        if !versions.join("ALLTHE~1").is_dir() {
+            eprintln!("这个卷不生成 8.3 短名，前提不成立，跳过");
+            return;
+        }
+
+        let err = import_vanilla_as(&facade, dir.path(), "test", "ALLTHE~1")
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, code::INSTANCE_NAME_INVALID);
+        assert_eq!(err.detail.unwrap()["rule"], serde_json::json!("duplicate"));
+        assert_eq!(std::fs::read(&level).unwrap(), b"level");
+        assert_eq!(
+            std::fs::read_dir(&versions)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            ["All the Mods 10"]
+        );
+        let config = facade.read().await.config().clone();
+        assert_eq!(config.sidebar_pins, ["ALLTHE~1"]);
+        assert_eq!(config.selected_version.as_deref(), Some("ALLTHE~1"));
+        assert!(saved_config(dir.path()).await.is_none(), "配置没变，不落盘");
+    }
+
+    /// 名下的目录不是这次导入建的：导入报重名之后，那个目录连同存档原样留着，配置里按这个名字记着的侧栏固定与
+    /// 当前选中也不动。撞名的造法：查重按整串小写比，认不出「ΟΔΟΣ」与「ΟΔΟσ」是同一个名字，不分大小写的文件
+    /// 系统却认，建目录时才撞上。文件系统区分大小写时它们是两个目录，前提不成立，不测。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn import_colliding_with_someone_elses_directory_leaves_its_pin_and_selection_alone() {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let facade = importing_facade(
+            dir.path(),
+            &server,
+            PetalfallConfig {
+                sidebar_pins: vec!["ΟΔΟσ".to_owned(), "生存".to_owned()],
+                selected_version: Some("ΟΔΟσ".to_owned()),
+                ..PetalfallConfig::default()
+            },
+        );
+        let versions = dir.path().join(".minecraft").join("versions");
+        let level = versions
+            .join("ΟΔΟΣ")
+            .join("saves")
+            .join("世界")
+            .join("level.dat");
+        std::fs::create_dir_all(level.parent().unwrap()).unwrap();
+        std::fs::write(&level, b"level").unwrap();
+        if !versions.join("ΟΔΟσ").is_dir() {
+            eprintln!("这个文件系统区分大小写，前提不成立，跳过");
+            return;
+        }
+
+        let err = import_vanilla_as(&facade, dir.path(), "test", "ΟΔΟσ")
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, code::INSTANCE_NAME_INVALID);
+        assert_eq!(err.detail.unwrap()["rule"], serde_json::json!("duplicate"));
+        assert_eq!(std::fs::read(&level).unwrap(), b"level");
+        let config = facade.read().await.config().clone();
+        assert_eq!(config.sidebar_pins, ["ΟΔΟσ", "生存"]);
+        assert_eq!(config.selected_version.as_deref(), Some("ΟΔΟσ"));
+        assert!(saved_config(dir.path()).await.is_none(), "配置没变，不落盘");
+    }
+
+    /// 这次导入没建出实例目录时，失败清理什么都不做，返回假：名下那个目录是别人的，不删，它的未完成标记也不改，
+    /// 调用方不去清配置里对这个名字的引用。
+    #[tokio::test]
+    async fn cleanup_after_an_import_that_created_no_directory_touches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), "http://127.0.0.1:9");
+        let petalfall = facade.snapshot().await;
+        let theirs = dir
+            .path()
+            .join(".minecraft")
+            .join("versions")
+            .join("别人的");
+        let marker = petalfall_core::MarkerStore::for_version_dir(&theirs);
+        marker
+            .save(&petalfall_core::IncompleteMarker::pending(
+                petalfall_core::IncompleteKind::Modpack {
+                    task_id: "mp#theirs".to_owned(),
+                },
+                1,
+            ))
+            .await
+            .unwrap();
+        let before = std::fs::read(marker.path()).unwrap();
+        let err = CommandError::invalid_argument("导入没成");
+
+        let not_created = InstanceDirCreated::default();
+        assert!(!discard_failed_import(&petalfall, "别人的", &not_created, "mp#1", &err).await);
+        assert_eq!(std::fs::read(marker.path()).unwrap(), before);
     }
 
     /// 只装原版 test、没有远程文件与覆盖文件的本地整合包。

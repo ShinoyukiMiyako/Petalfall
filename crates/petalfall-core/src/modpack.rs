@@ -18,7 +18,9 @@
 //!    下载来的默认值）。
 //! 7. 写整合包信息，去掉未完成标记。
 //!
-//! 任何一步失败或取消，都按未完成标记删掉这个实例目录；标记里的任务 id 保证只删本次建的目录。
+//! 写下未完成标记之后任何一步失败或取消，导入自己删掉这次建出的实例目录；标记没写下、删不掉或导入的 future
+//! 被丢弃时，由调用方经 [`Petalfall::discard_modpack_import`] 再清。名下的目录是不是这次建的只认
+//! [`InstanceDirCreated`]，不看未完成标记；建目录时撞上已有目录的，什么都不删。
 //! 原版与加载器的自然版本目录留着：它们是完整可用的版本，别的实例也可能在用。
 //!
 //! 进度按步骤报（`CoreEvent::Phase`）。开工时还没读到包（平台整合包要先下载），加载器、有没有要放的文件与覆盖
@@ -28,6 +30,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use petalfall_download::{CredentialScope, DownloadCredential, DownloadTask};
@@ -272,6 +276,58 @@ pub struct PreparedModpack {
     cache_dir: Option<PathBuf>,
     /// 步骤报到了哪，表已改写成确切的：落盘一步接着报，前端看到的是同一个任务的下一步。
     phases: PhaseCursor,
+    /// 落盘一步建出实例目录时置位，见 [`InstanceDirCreated`]。
+    dir_created: InstanceDirCreated,
+}
+
+/// 这次导入有没有建出实例目录。准备结果交给落盘一步之前先取一份（[`PreparedModpack::dir_created`]）。
+///
+/// 导入失败或被放弃之后，调用方要按实例名清掉半成品（[`Petalfall::discard_modpack_import`]）。名字查过重、
+/// 占住了，也不等于名下的目录就是这次建的：Windows 上同一个目录可以有不止一个名字（生成 8.3 短名的卷上，
+/// `ALLTHE~1` 指向「All the Mods 10」；文件系统把「Σ」与「σ」折叠成同一个字母，查重按整串小写比却认不出
+/// 词尾的那一个），按目录列表查重看不出来，建目录时才撞上；查重与建目录之间，别的程序也可能抢先建出同名
+/// 目录。所以清理只认这个记号：建目录那一步成功才置位，没置位时名下的目录是别人的，一个字节都不能动。
+///
+/// 置了位也不等于名下的目录永远是这次的：导入失败时自己会把建出来的目录删掉，删成了就再记一笔。那之后名下
+/// 再出现的目录是别人的（别的命令把实例改名或移到了这个名字的另一种写法下，或别的程序建的），同样不能动。
+#[derive(Debug, Clone, Default)]
+pub struct InstanceDirCreated(Arc<AtomicU8>);
+
+/// 建出来了，还没有被导入自己删掉：名下的目录是这次导入的半成品。
+const DIR_CREATED: u8 = 1;
+/// 建出来过，导入自己的失败路径已经把它删掉。
+const DIR_REMOVED_BY_IMPORT: u8 = 2;
+
+impl InstanceDirCreated {
+    /// 实例目录是不是这次导入建出来的（后来有没有被导入自己删掉不论）。
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::SeqCst) != 0
+    }
+
+    fn set(&self) {
+        self.0.store(DIR_CREATED, Ordering::SeqCst);
+    }
+
+    fn set_removed_by_import(&self) {
+        self.0.store(DIR_REMOVED_BY_IMPORT, Ordering::SeqCst);
+    }
+
+    fn removed_by_import(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == DIR_REMOVED_BY_IMPORT
+    }
+}
+
+/// [`Petalfall::discard_modpack_import`] 清理的结果。前两种都说明这次导入建出过实例目录、它的半成品现在已经
+/// 不在，调用方接着清配置里对这个名字的引用；第三种什么都没动，引用也不该动。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardedImport {
+    /// 这次导入建的实例目录还留着（导入的 future 被丢弃了，或导入自己没删掉），已经删掉。
+    Removed,
+    /// 这次导入建过实例目录，它已经不在：导入自己的失败路径删掉了（这时不再看盘，名下后来出现的目录不是
+    /// 这次的），或来清的时候名下已经没有目录。
+    AlreadyGone,
+    /// 这次导入没建出实例目录：名下有没有目录都与它无关，没有查也没有动。
+    NotCreated,
 }
 
 /// 清单里的远程文件准备成的样子：要下载的，与认领到暂存位、直接复制的。
@@ -299,6 +355,12 @@ impl PreparedModpack {
     /// 调用方据此在导入期间占住它们，不必等实例 JSON 写出来再扫。
     pub fn natural_versions(&self) -> Vec<String> {
         natural_versions(&self.archive.manifest)
+    }
+
+    /// 落盘一步有没有建出实例目录的记号。导入的 future 可能被丢弃，调用方要在交出准备结果之前取走这一份，
+    /// 之后才知道名下的目录该不该由自己清。
+    pub fn dir_created(&self) -> InstanceDirCreated {
+        self.dir_created.clone()
     }
 
     /// 不导入了：删掉平台整合包的下载缓存，本地文件不动。
@@ -536,6 +598,7 @@ impl Petalfall {
                     claimed: remote.claimed,
                     cache_dir,
                     phases,
+                    dir_created: InstanceDirCreated::default(),
                 })
             }
             Err(err) => {
@@ -546,9 +609,13 @@ impl Petalfall {
     }
 
     /// 导入的第二步：建实例目录、写下带 `task_id` 的未完成标记，装游戏与加载器、下载远程文件、
-    /// 解出覆盖文件、写整合包信息。任何一步失败都删掉这个实例目录；任务被强行放弃（future 被丢弃）
-    /// 或这里删不掉时，由调用方经 [`Petalfall::discard_modpack_import`] 按实例名再清一次。平台整合包的
-    /// 下载缓存不论成败都删掉。步骤接着准备一步报到的地方往下报。
+    /// 解出覆盖文件、写整合包信息。写下标记之后任何一步失败都删掉这个实例目录；目录建成了、标记却没写下，
+    /// 任务被强行放弃（future 被丢弃），或这里删不掉时，目录还留着，由调用方经
+    /// [`Petalfall::discard_modpack_import`] 再清一次。平台整合包的下载缓存不论成败都删掉。步骤接着准备一步
+    /// 报到的地方往下报。
+    ///
+    /// 实例目录由这一步原子地建出来，名下已经有目录就报重名、什么都不动；建成时置位准备结果带的
+    /// [`InstanceDirCreated`]，调用方凭它判断名下的目录是不是这次建的。
     ///
     /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，不下载、
     /// 不建实例目录。游戏目录原本不在时，建好 `versions/` 就补写记号，之后才建实例目录、落任何数据。
@@ -567,6 +634,7 @@ impl Petalfall {
             claimed,
             cache_dir,
             phases,
+            dir_created,
         } = prepared;
         let announcer = PhaseAnnouncer::resume(events, phases);
         let outcome = self
@@ -579,6 +647,7 @@ impl Petalfall {
                     downloads: remote,
                     claimed,
                 },
+                &dir_created,
                 task_id,
                 &announcer,
                 events,
@@ -588,30 +657,48 @@ impl Petalfall {
         outcome
     }
 
-    /// 删掉一次没成的导入留下的实例目录 `versions/<name>`，返回目录原先是否存在。
+    /// 删掉一次没成的导入留下的实例目录 `versions/<name>`，结果分三种，见 [`DiscardedImport`]。
     ///
-    /// 调用方从定下实例名起就占住这个名字，并在占住之后经 [`Petalfall::ensure_modpack_name_free`] 确认过
-    /// 名字仍然空闲：这期间名下出现的目录只可能是这次导入建的，所以不看未完成标记——标记可能还没
-    /// 来得及写下，也可能读不出来，按标记找会漏掉这两种半成品。
+    /// 目录是不是这次导入建的只认 `created`（[`PreparedModpack::dir_created`]）：没置位就立刻返回
+    /// [`DiscardedImport::NotCreated`]，游戏目录不核对、名字不校验、盘上什么都不看。调用方占住了名字、查过重也
+    /// 不够，见 [`InstanceDirCreated`]。导入自己已经把目录删掉的，同样立刻返回
+    /// [`DiscardedImport::AlreadyGone`]、不看盘：从它删掉到这里之间，名下再出现的目录不是这次的，而占住名字的
+    /// 守卫按名字的字面比，挡不住名字的另一种写法。不看未完成标记：标记可能还没来得及写下，也可能读不出来，
+    /// 按标记找会漏掉这两种半成品。
     ///
     /// 只处理文件，配置里对这个名字的引用不在这里清：导入跑在门面快照上，这里改了配置也到不了门面。半成品目录在的
-    /// 时候侧栏固定的校验认这个名字，配置里也可能本来就留着同名的旧固定，所以返回 `Ok`（不论目录原先在不在）之后，
-    /// 调用方要趁还占着这个名字，在门面上经 [`Petalfall::forget_moved_instance`] 按导入所在的游戏目录清掉（导入途中
-    /// 当前目录可能已经切走），否则之后再建或再导入同名实例时它一出现就是已固定。返回错误时半成品还在、仍列在实例库里，
-    /// 引用不清。
+    /// 时候侧栏固定的校验认这个名字，配置里也可能本来就留着同名的旧固定，所以返回 [`DiscardedImport::Removed`]
+    /// 或 [`DiscardedImport::AlreadyGone`] 之后，调用方要趁还占着这个名字，在门面上经
+    /// [`Petalfall::forget_moved_instance`] 按导入所在的游戏目录清掉（导入途中当前目录可能已经切走），否则之后
+    /// 再建或再导入同名实例时它一出现就是已固定。返回 [`DiscardedImport::NotCreated`] 时名下的目录与这些引用都是
+    /// 别人的，不清；返回错误时半成品还在、仍列在实例库里，引用也不清。
     ///
-    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，什么都不删。
-    pub async fn discard_modpack_import(&self, name: &str) -> Result<bool> {
+    /// 记号停在「建了」时，动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、
+    /// 记号读不懂时报错，什么都不删。
+    pub async fn discard_modpack_import(
+        &self,
+        name: &str,
+        created: &InstanceDirCreated,
+    ) -> Result<DiscardedImport> {
+        // 放在最前面：没置位时连报错都不该有，调用方拿到错误会去改写名下那个目录的未完成标记。
+        if !created.get() {
+            return Ok(DiscardedImport::NotCreated);
+        }
+        if created.removed_by_import() {
+            return Ok(DiscardedImport::AlreadyGone);
+        }
         self.guard_game_dir(GuardMode::Use).await?;
         let dir = self.instance_dir(name)?;
         match tokio::fs::metadata(&dir).await {
             Ok(meta) if meta.is_dir() => {}
-            Ok(_) => return Ok(false),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Ok(_) => return Ok(DiscardedImport::AlreadyGone),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(DiscardedImport::AlreadyGone);
+            }
             Err(source) => return Err(petalfall_base::Error::Io { path: dir, source }.into()),
         }
         remove_instance_dir(&dir).await?;
-        Ok(true)
+        Ok(DiscardedImport::Removed)
     }
 
     /// 半成品删不掉时（文件被占用）把它的未完成标记落成这次导入的结局：否则标记一直停在进行中，
@@ -691,6 +778,7 @@ impl Petalfall {
         source: &ModpackSource,
         name: String,
         remote: RemotePlan,
+        created: &InstanceDirCreated,
         task_id: &str,
         announcer: &PhaseAnnouncer,
         events: Option<&EventSink>,
@@ -709,7 +797,7 @@ impl Petalfall {
             self.guard_game_dir(GuardMode::Use).await?;
         }
         let version_dir = versions.join(&name);
-        create_instance_dir(&version_dir, &name).await?;
+        create_instance_dir(&version_dir, &name, created)?;
         // 名字下还留着的记录属于在启动器之外被删掉的同名旧实例，与新建实例同一处理：放在目录建成之后，
         // 撞名时那份记录是现有实例的；清不掉不拦导入，改动已记下待补，在这个实例的第一局记下之前一定先补上。
         if let Err(err) = self.forget_play_records(&name).await {
@@ -735,8 +823,12 @@ impl Petalfall {
                 modpack,
             }),
             Err(err) => {
-                if let Err(cleanup) = remove_instance_dir(&version_dir).await {
-                    tracing::error!(dir = %version_dir.display(), error = %cleanup, "导入失败后未能删除半成品实例");
+                match remove_instance_dir(&version_dir).await {
+                    // 删成了就当场记下，与上一行之间没有让出点：调用方凭它知道不必、也不该再按名字删一次。
+                    Ok(()) => created.set_removed_by_import(),
+                    Err(cleanup) => {
+                        tracing::error!(dir = %version_dir.display(), error = %cleanup, "导入失败后未能删除半成品实例");
+                    }
                 }
                 Err(err)
             }
@@ -991,8 +1083,9 @@ impl Petalfall {
 
     /// 不区分大小写地检查 `versions/` 下有没有同名目录；有就报与准备阶段相同的重名错误。
     ///
-    /// 准备阶段已经查过一次；调用方占住实例名之后要再查一次：两次之间别的命令可能抢先建了同名实例，
-    /// 而只有占住之后仍然空闲，名下的目录才能认定是这次导入建的（见 [`Petalfall::discard_modpack_import`]）。
+    /// 准备阶段已经查过一次；调用方占住实例名之后再查一次，两次之间别的命令可能抢先建了同名实例，早一步
+    /// 报重名。查过了也只说明目录列表里此刻没有这个名字：别名认不出来，之后才冒出来的目录也挡不住。名下的目录
+    /// 是不是这次导入建的不看这里，只认 [`InstanceDirCreated`]。
     pub async fn ensure_modpack_name_free(&self, name: &str) -> Result<()> {
         let versions = self.game_dir().join(VERSIONS_DIR);
         let mut entries = match tokio::fs::read_dir(&versions).await {
@@ -1694,10 +1787,17 @@ fn strip_minecraft_prefix<'a>(version: &'a str, minecraft: &str) -> &'a str {
         .unwrap_or(version)
 }
 
-/// 原子地建实例目录（`versions/` 由调用方先建好）：同名目录已存在（含并发导入抢先建好）即报重名。
-async fn create_instance_dir(version_dir: &Path, name: &str) -> Result<()> {
-    match tokio::fs::create_dir(version_dir).await {
-        Ok(()) => Ok(()),
+/// 原子地建实例目录（`versions/` 由调用方先建好）：同名目录已存在（含并发导入抢先建好，含名字是另一个目录
+/// 的别名）即报重名。建成才置位 `created`。
+///
+/// 同步建：建目录与置位之间不能有让出点。导入的 future 随时可能被丢弃，异步建的话目录也许已经建出来、记号却
+/// 没来得及置位，半成品就没人清了。只是一次建目录的系统调用，不值得为它挪到阻塞线程上。
+fn create_instance_dir(version_dir: &Path, name: &str, created: &InstanceDirCreated) -> Result<()> {
+    match std::fs::create_dir(version_dir) {
+        Ok(()) => {
+            created.set();
+            Ok(())
+        }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
             Err(name_error(name, NameViolation::Duplicate))
         }
@@ -3686,6 +3786,100 @@ mod tests {
         );
     }
 
+    /// 已经置位的记号：这次导入建出了实例目录。
+    fn dir_was_created() -> InstanceDirCreated {
+        let created = InstanceDirCreated::default();
+        created.set();
+        created
+    }
+
+    /// 准备之后、落盘之前，名下冒出了别人的目录（别的程序抢先建的；或名字是另一个实例目录的别名，查重看不出来）：
+    /// 导入报重名，记号没置位，凭这个记号去清理一个字节都不删。目录由导入自己建出来、装游戏失败、导入当场把它
+    /// 删掉的：记号置位，清理不再看盘，名下后来出现的目录连同存档原样留着。记号停在「建了」、目录还留着的
+    /// （导入的 future 被丢弃）：清理删得掉。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_directory_the_import_created_is_ever_discarded() {
+        let server = MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall(tmp.path(), &server);
+        let pack = tmp.path().join("pack.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "no-such-version"})),
+            &[],
+        );
+        let source = ModpackSource::File { path: pack };
+        let selection = ImportSelection::default();
+        let prepare = || petalfall.prepare_modpack(&source, Some("周末包"), &selection, None);
+        let theirs = petalfall.game_dir().join("versions").join("周末包");
+        let save = theirs.join("saves").join("世界").join("level.dat");
+
+        let prepared = prepare().await.unwrap();
+        let created = prepared.dir_created();
+        assert!(!created.get(), "还没落盘");
+        std::fs::create_dir_all(save.parent().unwrap()).unwrap();
+        std::fs::write(&save, b"level").unwrap();
+        let err = petalfall
+            .import_modpack(prepared, "task-theirs", None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::InstanceNameInvalid { name, rule: NameViolation::Duplicate } if name == "周末包"),
+            "{err:?}"
+        );
+        assert!(!created.get(), "目录不是这次建的");
+        assert_eq!(
+            petalfall
+                .discard_modpack_import("周末包", &created)
+                .await
+                .unwrap(),
+            DiscardedImport::NotCreated
+        );
+        assert_eq!(std::fs::read(&save).unwrap(), b"level");
+        // 没置位时名字都不校验：不看盘、不报错，调用方拿不到错误，也就不会去改写名下那个目录的标记。
+        assert_eq!(
+            petalfall
+                .discard_modpack_import("..\\邻居", &created)
+                .await
+                .unwrap(),
+            DiscardedImport::NotCreated
+        );
+
+        std::fs::remove_dir_all(&theirs).unwrap();
+        mount_vanilla(&server).await;
+        let prepared = prepare().await.unwrap();
+        let created = prepared.dir_created();
+        // 清单里没有这个版本：实例目录建好之后装游戏失败，导入自己把目录删了。
+        let err = petalfall
+            .import_modpack(prepared, "task-ours", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Install(_)), "{err:?}");
+        assert!(created.get(), "目录是这次建的");
+        assert!(!theirs.exists());
+        // 导入自己删掉之后，名下又出现的目录不是这次的（别的命令把一个实例改名到了这个名字的另一种写法下）：
+        // 清理不看盘，原样返回，那个目录连同存档留着。
+        std::fs::create_dir_all(save.parent().unwrap()).unwrap();
+        std::fs::write(&save, b"level").unwrap();
+        assert_eq!(
+            petalfall
+                .discard_modpack_import("周末包", &created)
+                .await
+                .unwrap(),
+            DiscardedImport::AlreadyGone
+        );
+        assert_eq!(std::fs::read(&save).unwrap(), b"level");
+        // 导入的 future 被丢弃时记号停在「建了」、目录留着：调用方凭它删掉。
+        assert_eq!(
+            petalfall
+                .discard_modpack_import("周末包", &dir_was_created())
+                .await
+                .unwrap(),
+            DiscardedImport::Removed
+        );
+        assert!(!theirs.exists());
+    }
+
     /// 按名字删半成品：标记读不出来、还没写下标记的都删得掉；名下没有目录时什么都不做；
     /// 别的实例原样留着；带路径成分的名字直接拒绝。
     #[tokio::test]
@@ -3703,18 +3897,29 @@ mod tests {
         write_marker(&ours, "t1").await.unwrap();
         std::fs::create_dir_all(versions.join("邻居")).unwrap();
 
+        let created = dir_was_created();
         for name in ["标记坏了", "还没写标记", "正常的"] {
-            assert!(
-                petalfall.discard_modpack_import(name).await.unwrap(),
+            assert_eq!(
+                petalfall
+                    .discard_modpack_import(name, &created)
+                    .await
+                    .unwrap(),
+                DiscardedImport::Removed,
                 "{name}"
             );
             assert!(!versions.join(name).exists(), "{name}");
         }
-        assert!(!petalfall.discard_modpack_import("正常的").await.unwrap());
+        assert_eq!(
+            petalfall
+                .discard_modpack_import("正常的", &created)
+                .await
+                .unwrap(),
+            DiscardedImport::AlreadyGone
+        );
         assert!(versions.join("邻居").is_dir());
         assert!(matches!(
             petalfall
-                .discard_modpack_import("..\\邻居")
+                .discard_modpack_import("..\\邻居", &created)
                 .await
                 .unwrap_err(),
             CoreError::Instance(crate::InstanceError::InvalidId { .. })
@@ -6507,7 +6712,10 @@ mod tests {
 
     async fn call_cleanup(petalfall: &Petalfall, entry: &str) -> Result<()> {
         match entry {
-            "discard_modpack_import" => petalfall.discard_modpack_import("半成品").await.map(drop),
+            "discard_modpack_import" => petalfall
+                .discard_modpack_import("半成品", &dir_was_created())
+                .await
+                .map(drop),
             "settle_modpack_import" => {
                 petalfall
                     .settle_modpack_import("半成品", "task-h", MarkerSettlement::Cancelled)
@@ -6561,7 +6769,7 @@ mod tests {
         let before = disk_state(tmp.path());
 
         let err = petalfall
-            .discard_modpack_import("半成品")
+            .discard_modpack_import("半成品", &dir_was_created())
             .await
             .unwrap_err();
 
