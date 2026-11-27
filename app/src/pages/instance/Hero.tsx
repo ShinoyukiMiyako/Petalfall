@@ -85,7 +85,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   // 侧栏满了：点了由状态层弹上限提示，所以图钉只标 aria-disabled、名称换成上限那一句
   const pinLabel = pinBlocked ? TOAST_COPY.pinLimit : inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin;
   const pinReason = pinBlocked ? TOAST_COPY.pinLimit : undefined;
-  // 版本 JSON 读不出来时文件可能完好，放开占用或修好权限后重新扫描就恢复：损坏标签照实说读不出来
+  // 版本 JSON 读不出来时文件可能完好，放开占用或修好权限后重新扫描就读得出来：损坏标签照实说读不出来
   const exit = repairExit(inst);
   const brokenLabel = exit !== null && exit.kind === "rescan" ? HERO_COPY.brokenUnreadable : HERO_COPY.broken;
   // 禁用原因走菜单项的悬停提示气泡，不放右侧提示位：那一位与标签同一行、不折行，长原因会把标签挤成省略号

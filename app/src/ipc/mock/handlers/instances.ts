@@ -440,7 +440,7 @@ function seedInstances(): MockInstance[] {
       coverFiles: [],
       misnamedJson: { name: "1.20.1-NeoForge", mcVersion: "1.20.1", loaders: [{ kind: "neoforge", version: "47.1.106" }], javaMajor: 17 },
     },
-    // 实例放在网盘的同步文件夹里，同步程序正锁着版本 JSON：读不出来，记着当初装的是什么也修不好；文件可能完好，放开占用后重新扫描就恢复。
+    // 实例放在网盘的同步文件夹里，同步程序正锁着版本 JSON：读不出来，记着当初装的是什么也修不好；文件可能完好，放开占用后重新扫描就读得出来；它还带着安装标记，扫描后还要再修复一次。
     // 路径是种子所在的默认游戏目录，与后端 Io 错误的写法一致。
     {
       dto: {

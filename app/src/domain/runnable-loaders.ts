@@ -1,5 +1,5 @@
 // 实例能跑哪些加载器的 Mod。与后端 crates/petalfall-core/src/compat.rs 的 runnable_loaders 是同一条规则：后端据它判落位、
-// 下推版本过滤，前端据它下推搜索、判版本行能不能装进实例。改一边必须同步改另一边，否则搜得到的 Mod 判成装不上，
+// 下推版本过滤，前端据它下推搜索、判版本行能不能装进实例。浏览器预览的假后端（ipc/mock/handlers/mods.ts 的 runnableKinds）另有一份。改规则要三处一起改，否则搜得到的 Mod 判成装不上，
 // 或判成装得上的 Mod 在搜索里被平台先筛掉。
 
 import type { LoaderChoice } from "../ipc/instances";

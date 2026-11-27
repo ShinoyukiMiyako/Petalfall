@@ -202,7 +202,7 @@ export type RepairExit = { kind: "reimport" } | { kind: "rescan" } | { kind: "re
 /**
  * 补全修不好的实例剩下的出路，实例库与实例详情页共用这一份；修得好或没坏为 null，与 canRepair、repairRefusal 一一对应。
  * 整合包没导入完的先判，与 repairRefusal 同理：缺的 Mod 与配置只有重新导入补得回来。版本 JSON 读不出来的文件可能完好，
- * 放开占用或修好权限后重新扫描就恢复，不该引导玩家删掉它。目录里有一份改个名就认得出的版本 JSON 时给改名，其余只剩删除。
+ * 放开占用或修好权限后重新扫描就读得出来（带着未完成标记的还要再修复一次），不该引导玩家删掉它。目录里有一份改个名就认得出的版本 JSON 时给改名，其余只剩删除。
  */
 export function repairExit(inst: Pick<InstanceSummary, "status" | "incomplete" | "unrepairableReason" | "unrepairableKind" | "renameTo">): RepairExit | null {
   if (repairRefusal(inst) === null) return null;
