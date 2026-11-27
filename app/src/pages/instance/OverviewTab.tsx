@@ -140,7 +140,7 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashAt, crashAct
           !holdInstall &&
           view.kind === "broken" &&
           (exit !== null && exit.kind === "reimport" ? (
-            <ReimportBanner key="reimport" inst={inst} reason={view.reason} ops={ops} />
+            <ReimportBanner key="reimport" inst={inst} ops={ops} />
           ) : (
             <BrokenBanner key="broken" inst={inst} reason={view.reason} exit={exit} ops={ops} />
           ))}
@@ -302,8 +302,11 @@ function BrokenBanner({ inst, reason, exit, ops }: { inst: InstanceSummary; reas
   );
 }
 
-/** 整合包没导入完：补全补不回来，横幅改给重新导入与删除。 */
-function ReimportBanner({ inst, reason, ops }: { inst: InstanceSummary; reason: string; ops: InstanceOps }) {
+/**
+ * 整合包没导入完：补全补不回来，横幅改给重新导入与删除。正文是重新导入的说明，与 repairRefusal、导出移动的禁用原因同一句：
+ * 损坏原因会随版本 JSON 在不在变成「缺少版本 JSON」之类，不提整合包，玩家看不出为什么叫他重新导入。
+ */
+function ReimportBanner({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) {
   const { go } = useNav();
   return (
     <Banner
@@ -321,7 +324,7 @@ function ReimportBanner({ inst, reason, ops }: { inst: InstanceSummary; reason: 
         </>
       }
     >
-      {reason}
+      {MODPACK_REIMPORT_COPY.note}
     </Banner>
   );
 }

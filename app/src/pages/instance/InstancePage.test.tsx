@@ -1971,9 +1971,18 @@ describe("实例详情：整合包没导入完", () => {
     );
   });
 
+  const NOTE = "整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。";
+
+  /** 此刻在场（不在退场中）的重新导入横幅的正文；没有这条横幅时报错。 */
+  const reimportBody = (): string | null | undefined => {
+    const title = [...document.querySelectorAll("div")].find((el) => el.childElementCount === 0 && el.textContent === "实例文件不完整，暂时无法启动" && el.closest("[inert]") === null);
+    if (title === undefined) throw new Error("没有重新导入的横幅");
+    return title.nextElementSibling?.textContent;
+  };
+
   it("概览横幅与头图菜单不给补全，改为重新导入与删除", async () => {
     await open("overview");
-    expect(text()).toContain("整合包没有导入完，删掉这个实例后重新导入");
+    expect(reimportBody()).toBe(NOTE);
     expect(() => button("修复实例")).toThrow();
     click(button("更多操作"));
     const labels = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map(textOf);
@@ -1983,6 +1992,35 @@ describe("实例详情：整合包没导入完", () => {
     click(button("重新导入"));
     expect(nav.route).toEqual({ page: "discover", kind: "modpack", open: { platform: "curseforge", projectId: "285109" } });
     expect(callsOf(ipc, "repair_instance")).toEqual([]);
+  });
+
+  it("导入在写版本 JSON 之前就被中断：损坏原因是缺少版本 JSON，横幅正文照样是重新导入的说明，与导出的禁用原因同一句", async () => {
+    instances = instances.map((i) =>
+      i.id === ID
+        ? {
+            ...i,
+            broken_reason: "缺少版本 JSON",
+            unrepairable_reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入",
+            unrepairable_kind: "modpack",
+            mc_version: null,
+          }
+        : i,
+    );
+    await open("overview");
+    expect(reimportBody()).toBe(NOTE);
+    expect(text()).not.toContain("缺少版本 JSON");
+    click(button("更多操作"));
+    const exportItem = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "导出整合包");
+    if (exportItem === undefined) throw new Error("菜单里没有「导出整合包」");
+    act(() => {
+      exportItem.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = exportItem.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("「导出整合包」悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe(NOTE);
   });
 
   it("头图启动胶囊写「重新导入整合包」，点了去发现页打开那个整合包，不发补全", async () => {
