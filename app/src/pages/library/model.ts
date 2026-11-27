@@ -140,7 +140,8 @@ export function brokenInstances(list: readonly InstanceSummary[]): BrokenInstanc
 }
 
 /**
- * 修复横幅的标题。有修得好的时只数它们：与「立即修复」「全部修复」能兑现的个数一致，修不好的留给正文各说各的。
+ * 修复横幅的标题。有修得好的时只数它们，修不好的留给正文各说各的。数的是需要修复的实例：此刻被锁着（被当作基底、在备份、
+ * 在移动）的也算，「全部修复」这一轮跳过它们，它们留在横幅上，锁放开后照样能修。
  * 一个都修不好时不说需要修复；全是版本 JSON 读不出来的，文件可能完好、放开占用就恢复，说暂时无法启动而不说修不好。
  */
 export function repairBannerTitle(broken: BrokenInstances): string {

@@ -2060,14 +2060,23 @@ describe("实例库：动作", () => {
     expect(launcher.state.tasks).toEqual([]);
   });
 
-  it("修复横幅的「全部修复」：被占着的实例这轮不排，其余照排", async () => {
+  it("修复横幅的「全部修复」：两个修得好的、其中一个被占着时标题照样写 2 个，点了只为没被占着的排补全，被占着的留在横幅上带原因禁用", async () => {
+    // 补全一直不结束：排上的那个停在安装中，横幅只剩被占着的那一个
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
     instances = [...instances, instanceDto("也坏了", { status: "broken", broken_reason: "缺少客户端 jar", activity: "backing_up" })];
     await mount();
     const repairAll = byText<HTMLButtonElement>("button", LIBRARY_COPY.repairAll);
+    const banner = repairAll.closest<HTMLElement>(`.${bannerStyles.banner}`);
+    if (banner === null) throw new Error("没有修复横幅");
+    expect(banner.textContent).toBe("2 个实例需要修复「坏掉的」「也坏了」缺少游戏文件，补全后就能启动。全部修复");
     expect(repairAll.getAttribute("aria-disabled")).toBeNull();
     click(repairAll);
     await flush();
     expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的"]);
+    expect(banner.textContent).toBe("1 个实例需要修复「也坏了」缺少游戏文件，补全后就能启动。立即修复");
+    const repairOne = byText<HTMLButtonElement>("button", LIBRARY_COPY.repairOne, banner);
+    expect(repairOne.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(repairOne)).toBe("正在备份或恢复这个实例的存档，完成后才能补全");
   });
 
   it("整合包没导入完的实例在备份或恢复存档：底栏「删除」带原因禁用，不发删除预览", async () => {

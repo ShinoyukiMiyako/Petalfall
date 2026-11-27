@@ -188,9 +188,12 @@ describe("统计与签名", () => {
     ]);
   });
 
-  it("修复横幅的标题：有修得好的只数修得好的，与修复按钮兑现的个数一致", () => {
+  it("修复横幅的标题：有修得好的只数修得好的，此刻被锁着、修复按钮这一轮跳过的也算", () => {
     const lost = "缺少版本 JSON，也没有记下当初装的是什么";
-    const fixable = Array.from({ length: 1 + Math.floor(Math.random() * 4) }, (_, i) => inst(`修得好${i}`, { status: "broken", brokenReason: "缺少客户端 jar" }));
+    // 第一个正在备份存档：「全部修复」这一轮不排它，标题照样数它
+    const fixable = Array.from({ length: 1 + Math.floor(Math.random() * 4) }, (_, i) =>
+      inst(`修得好${i}`, { status: "broken", brokenReason: "缺少客户端 jar", activity: i === 0 ? "backing_up" : null }),
+    );
     const list = [...fixable, inst("修不好", { status: "broken", brokenReason: "缺少版本 JSON", unrepairableReason: lost, unrepairableKind: "no_record", mcVersion: null })];
     expect(repairBannerTitle(brokenInstances(list))).toBe(`${fixable.length} 个实例需要修复`);
   });

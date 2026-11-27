@@ -37,7 +37,7 @@ export const LIBRARY_COPY = {
   dirVersions: (count: number) => `${count} 个版本`,
   dirVersionsUnknown: "版本数读不到",
 
-  /** 有修得好的实例时的标题，count 只数修得好的：与修复按钮能兑现的个数一致。 */
+  /** 有修得好的实例时的标题，count 只数修得好的；此刻被锁着、修复按钮这一轮跳过的也算在内。 */
   repairTitle: (count: number) => `${count} 个实例需要修复`,
   /** 横幅列出的实例一个都修不好时的标题：补全一律被拒，不说需要修复。 */
   unrepairableTitle: (count: number) => `${count} 个实例补全修不好`,
