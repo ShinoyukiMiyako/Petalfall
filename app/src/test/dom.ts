@@ -231,21 +231,19 @@ export function fakeAnimate<E extends Element = Element>(record?: (el: E, frames
   };
 }
 
-/** 假 Web Animations 记下的一次 animate 调用，同时充当返回给组件的 Animation。 */
-export interface FakeAnimation {
+/**
+ * stubSpanAnimations 记下的一次 animate 调用，同时充当返回给组件的 Animation：就是 fakeAnimate 建的那一个，
+ * 形状与暂停、播放、取消的规矩都相同，组件与让位碰得到的几样一样不缺；另带调用时的元素、关键帧与时间参数。
+ * 用例可以直接改 currentTime，模拟动画播到一半：组件被打断时按它算出此刻的值。
+ */
+export interface FakeAnimation extends StubAnimation {
   readonly el: Element;
   readonly frames: Keyframe[];
   readonly options: KeyframeAnimationOptions;
-  /** 用例可以直接改它，模拟动画播到一半：组件被打断时按它算出此刻的值。 */
-  currentTime: number | null;
-  playState: AnimationPlayState;
+  /** 组件调过 cancel。 */
   cancelled: boolean;
+  /** 经 SpanAnimationsStub 的 finish、finishAll 播完。 */
   finished: boolean;
-  onfinish: (() => void) | null;
-  cancel(): void;
-  /** 暂停不挪时间（让位从静止起步时先停在起点、隔几帧再播）。 */
-  pause(): void;
-  play(): void;
 }
 
 export interface SpanAnimationsStub {
@@ -274,31 +272,21 @@ export function stubSpanAnimations(): SpanAnimationsStub {
   Object.defineProperty(proto, "animate", {
     configurable: true,
     writable: true,
-    value(this: Element, frames: Keyframe[], options: KeyframeAnimationOptions) {
-      const animation: FakeAnimation = {
-        el: this,
+    value: fakeAnimate((el, frames, options, stub) => {
+      const cancel = stub.cancel;
+      const animation: FakeAnimation = Object.assign(stub, {
+        el,
         frames,
         options,
-        currentTime: 0,
-        playState: "running",
         cancelled: false,
         finished: false,
-        onfinish: null,
-        cancel() {
+        cancel(this: FakeAnimation) {
           this.cancelled = true;
-          this.playState = "idle";
-          this.currentTime = null;
+          cancel.call(this);
         },
-        pause() {
-          this.playState = "paused";
-        },
-        play() {
-          this.playState = "running";
-        },
-      };
+      });
       played.push(animation);
-      return animation;
-    },
+    }),
   });
   let restored = false;
   const restore = () => {
@@ -310,8 +298,7 @@ export function stubSpanAnimations(): SpanAnimationsStub {
   onTestFinished(restore);
   const finish = (animation: FakeAnimation) =>
     act(() => {
-      animation.currentTime = Number(animation.options.duration);
-      animation.playState = "finished";
+      animation.finish();
       animation.finished = true;
       animation.onfinish?.();
     });

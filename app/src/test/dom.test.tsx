@@ -76,6 +76,18 @@ describe("stubSpanAnimations", () => {
     waapi.restore();
     expect(typeof span.animate).toBe("undefined");
   });
+
+  it("交给组件的 Animation 与 fakeAnimate 同一个形状：建好时起步时刻为空、fill 记成默认的 auto；取消后标记、回到 idle，再暂停停在起点", () => {
+    const waapi = stubSpanAnimations();
+    const span = document.createElement("span");
+    span.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 120 });
+    const [animation] = waapi.played;
+    expect([animation.startTime, animation.fill, animation.playState, animation.currentTime, animation.oncancel]).toEqual([null, "auto", "running", 0, null]);
+    animation.cancel();
+    expect([animation.cancelled, animation.playState, animation.currentTime]).toEqual([true, "idle", null]);
+    animation.pause();
+    expect([animation.playState, animation.currentTime]).toEqual(["paused", 0]);
+  });
 });
 
 describe("drainFrames", () => {
