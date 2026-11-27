@@ -163,13 +163,13 @@ fn run(webview: Webview, log: &Arc<SetupLog>) -> Result<ExitCode, Box<dyn Error>
     ));
 
     if let Webview::Unavailable { reason } = &webview {
-        log.warn(format_args!("WebView2 不可用，改走原生向导：{reason}"));
+        log.warn(format_args!("WebView2 不可用，改走原生安装程序：{reason}"));
         return fall_back(&context);
     }
     match Interface::start(&context) {
         Ok(interface) => interface.run(&context, instance, log),
         Err(err) => {
-            log.error(format_args!("建窗失败，改走原生向导：{err}"));
+            log.error(format_args!("建窗失败，改走原生安装程序：{err}"));
             fall_back(&context)
         }
     }
