@@ -1568,6 +1568,80 @@ mod tests {
         }
     }
 
+    /// 过期的半装记录连同核验查出的不符项一起交给组装，探测结果与没有记录时一字不差：核验比的是记录那个版本、
+    /// 记录那个目录，登记的是另一个版本或在另一个目录时，完好的程序文件同样报不符，拿它改判就绕过了降级保护、
+    /// 「换到」页的确认和别处的登记。
+    #[test]
+    fn mismatches_under_an_expired_record_leave_the_probe_as_without_a_record() {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+
+        use crate::verify::Mismatch;
+
+        const RECORDED: &str = "1.0.0-beta.5";
+        const EXE_LEN: u64 = 4096;
+        let cut = 1 + RandomState::new().build_hasher().finish() % (EXE_LEN - 1);
+        let elsewhere = tempfile::tempdir().unwrap();
+        // 登记的事实、安装包版本、记录是否落在登记目录
+        let cases = [
+            // 换通道：登记的比载荷新，装回较早版本要在「换到」页上确认
+            (("1.1.0-dev.61", true), RECORDED, true),
+            // 同通道里登记的比载荷新：降级保护
+            (("1.0.0-beta.6", true), RECORDED, true),
+            // 登记的比记录新：那次安装早被盖过了
+            (("1.0.0-beta.6", true), "1.0.0-beta.6", true),
+            // 登记在别的目录
+            (("1.0.0-beta.4", true), RECORDED, false),
+        ];
+        let found_sets = [
+            vec![Mismatch::ExeMissing],
+            vec![Mismatch::ExeLength {
+                expected: EXE_LEN,
+                actual: cut,
+            }],
+            vec![
+                Mismatch::ExeLength {
+                    expected: EXE_LEN,
+                    actual: EXE_LEN + cut,
+                },
+                Mismatch::DisplayVersion {
+                    expected: RECORDED.to_owned(),
+                    actual: None,
+                },
+            ],
+        ];
+        for (installed, payload, in_registered_dir) in cases {
+            for initiation in INITIATIONS {
+                let (_guard, dir, registry) = machine_with(Some(installed));
+                let clean = assemble_with(&registry, payload, Recovery::Clean, started(initiation));
+                let recorded_dir = if in_registered_dir {
+                    Path::new(&dir)
+                } else {
+                    elsewhere.path()
+                };
+                for was_fresh in [true, false] {
+                    for mismatches in &found_sets {
+                        let context = format!(
+                            "{installed:?} 装 {payload}，{initiation:?}，记录在登记目录 {in_registered_dir}，\
+                             首装 {was_fresh}，{mismatches:?}"
+                        );
+                        let recovery = Recovery::Interrupted {
+                            journal: Journal::begin(recorded_dir, was_fresh, RECORDED),
+                            mismatches: mismatches.clone(),
+                        };
+
+                        let assembled =
+                            assemble_with(&registry, payload, recovery, started(initiation));
+
+                        assert_eq!(assembled.probe, clean.probe, "{context}");
+                        assert_eq!(assembled.handoff, clean.handoff, "{context}");
+                        assert_eq!(assembled.relation, clean.relation, "{context}");
+                    }
+                }
+            }
+        }
+    }
+
     /// 首装的数据格式关要等最终目录定了才做：卸载留下的目录里记号再高，探测也只给首装，拦截由选目录和安装前复核给。
     #[test]
     fn a_fresh_install_reads_no_stamp_before_the_target_is_chosen() {
