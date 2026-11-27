@@ -194,6 +194,10 @@ fn is_protected_top_level(component: &str) -> bool {
     component.eq_ignore_ascii_case(petalfall_instance::PETALFALL_META_DIR)
 }
 
+/// 名字是不是 8.3 短名的形状：第一个点之前的那一截以「~数字」结尾，「~」前面有一到六个字符。
+///
+/// 前面那一截里可以再有「~」：长名里的「~」在短名里原样留着，「~Weekend.json」的短名是「~WEEKE~1.JSO」。
+/// 把它当成普通名字放行，包里的文件就能按短名落到别的文件上。
 fn is_dos_short_name(component: &str) -> bool {
     let stem = component.split('.').next().unwrap_or(component);
     let Some((prefix, suffix)) = stem.rsplit_once('~') else {
@@ -201,7 +205,6 @@ fn is_dos_short_name(component: &str) -> bool {
     };
     !prefix.is_empty()
         && prefix.chars().count() <= 6
-        && !prefix.contains('~')
         && !suffix.is_empty()
         && suffix.bytes().all(|byte| byte.is_ascii_digit())
 }

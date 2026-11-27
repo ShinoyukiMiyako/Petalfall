@@ -148,6 +148,11 @@ fn rejects_windows_aliases_invalid_characters_and_controls() {
         "mods/LONGFI~1.JAR",
         "config/screen~12/options.txt",
         "mods/资源包~2.zip",
+        // 长名里的「~」在短名里原样留着：「~Weekend.json」的短名就是「~WEEKE~1.JSO」。
+        "~WEEKE~1.JSO",
+        "~WEEKE~1/lwjgl.dll",
+        "config/A~BLON~1.TXT",
+        "mods/~$BUDG~1.XLS",
     ] {
         assert!(
             matches!(
@@ -155,6 +160,19 @@ fn rejects_windows_aliases_invalid_characters_and_controls() {
                 Err(PathValidationError::DosShortName { .. })
             ),
             "DOS 短文件名别名未被拒绝: {path}"
+        );
+    }
+
+    // 带「~」但不是短名形状的名字照常放行：结尾不是「~数字」，或最后一个「~」前面超过六个字符。
+    for path in [
+        "mods/~backup.jar",
+        "config/a~b.txt",
+        "config/notes~draft~2026.txt",
+        "saves/world~/level.dat",
+    ] {
+        assert!(
+            validate_relative_path(path).is_ok(),
+            "普通名称被误拒绝: {path}"
         );
     }
 }
