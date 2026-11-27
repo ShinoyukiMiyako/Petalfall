@@ -16,7 +16,7 @@ use petalfall_install::{
 use petalfall_java::JavaInstallation;
 use petalfall_version::VersionJson;
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, InstallPhase, emit};
 use crate::facade::{Petalfall, make_context};
 use crate::java::JavaEnv;
@@ -338,7 +338,8 @@ impl Petalfall {
     /// 经 [`Petalfall::resolve_tool_java_with`] 取备用 Java：不看设置里固定的 Java（处理器只是安装期的工具），本机按
     /// [`PROCESSOR_FALLBACK_LOCAL_MAJORS`] 的先后找，都没有且开着自动下载才下 Mojang 的 Java
     /// [`PROCESSOR_FALLBACK_JAVA_MAJOR`]。不报步骤：这时已经在处理器那一步，Java 那一步早报过了，再报会让步骤倒退；
-    /// 下载运行时的进度算进处理器这一步，与校验一步里补下载的做法一样。
+    /// 下载运行时的进度算进处理器这一步，与校验一步里补下载的做法一样。取回的就是 `primary` 时交回
+    /// [`FallbackJavaError::SameJava`]。
     async fn fetch_processor_fallback_java(
         &self,
         primary: PathBuf,
@@ -359,11 +360,20 @@ impl Petalfall {
             )
             .await;
         let fallback = fallback_outcome(resolved)?;
-        // 取回的就是先用的那个时安装器认出是同一个、不重跑，这里也不说改用它。取回的总带主版本，写出来是以全角
-        // 括号收尾的「Java 17（路径）」，后面直接接中文。
-        if fallback.path != primary {
-            emit(events, CoreEvent::stage(format!("改用 {fallback}重跑")));
+        // 同一个 java 可执行文件会以两种写法到这里：先用的是设置里固定的 Java 时是用户写的那种，取回的是识别缓存记下的
+        // 那种，大小写可以不同，一边也可以是符号链接。按识别缓存认 Java 的口径比，认出是同一个就交给安装器照没换报，
+        // 也不说改用它。规范化要读盘，放进阻塞线程池。
+        let candidate = fallback.path.clone();
+        let same = tokio::task::spawn_blocking(move || {
+            petalfall_java::canonical_key(&candidate) == petalfall_java::canonical_key(&primary)
+        })
+        .await
+        .map_err(|join| FallbackJavaError::Unavailable(Box::new(CoreError::from(join))))?;
+        if same {
+            return Err(FallbackJavaError::SameJava);
         }
+        // 取回的总带主版本，写出来是以全角括号收尾的「Java 17（路径）」，后面直接接中文。
+        emit(events, CoreEvent::stage(format!("改用 {fallback}重跑")));
         Ok(fallback)
     }
 }
@@ -1370,7 +1380,7 @@ mod tests {
     }
 
     /// 去取之前先说为什么要换，取到之后再说换成了哪个 Java（版本与路径都是实际取到的，这里本机只有 21）；设置里
-    /// 固定的 Java 不看，不多出「使用设置里指定的 Java」那一句。取回的就是先用的那个时不说改用它。
+    /// 固定的 Java 不看，不多出「使用设置里指定的 Java」那一句。取回的就是先用的那个时告诉安装器是同一个，不说改用它。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_reason_is_announced_before_fetching_and_the_java_after() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1405,7 +1415,11 @@ mod tests {
         let same = petalfall
             .processor_fallback_java(8, &managed_21, Some(&tx), only_managed_21_env())
             .unwrap();
-        assert_eq!(same().await.unwrap(), picked);
+        let outcome = same().await;
+        assert!(
+            matches!(outcome, Err(FallbackJavaError::SameJava)),
+            "实际：{outcome:?}"
+        );
         assert_eq!(stage_texts(&mut rx), vec![reason.to_owned()]);
     }
 
@@ -1689,5 +1703,36 @@ mod tests {
             })
         );
         f.assert_rerun_with_java_17(&mut rx);
+    }
+
+    /// 先用的 Java 与取回的是同一个文件、只是大小写写法不同：照样认作同一个，告诉安装器不必重跑，也不说改用它。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fallback_java_spelled_in_another_case_is_the_same_java() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let managed_21 = complete_java_home(&root.join("runtime").join("21"));
+        let config = PetalfallConfig {
+            auto_download_java: false,
+            ..PetalfallConfig::default()
+        };
+        let petalfall = Petalfall::for_test(config, root.clone(), root.clone());
+        let primary = root.join(r"RUNTIME\21\BIN\JAVA.EXE");
+        assert_ne!(primary, managed_21, "按路径比是两个");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let fetch = petalfall
+            .processor_fallback_java(8, &primary, Some(&tx), only_managed_21_env())
+            .unwrap();
+        let outcome = fetch().await;
+
+        assert!(
+            matches!(outcome, Err(FallbackJavaError::SameJava)),
+            "实际：{outcome:?}"
+        );
+        assert_eq!(
+            stage_texts(&mut rx),
+            vec!["安装器生成的文件与它声明的不符，换一个 Java 重跑"]
+        );
     }
 }

@@ -805,7 +805,10 @@ fn configure_no_window(cmd: &mut Command) {
 fn configure_no_window(_cmd: &mut Command) {}
 
 /// 去重与缓存键：优先用规范化后的绝对路径，失败退回原路径；统一小写（Windows 路径大小写不敏感）。
-fn canonical_key(exe: &Path) -> String {
+///
+/// 公开出来是让别处判断两种写法是不是同一个 java 可执行文件时与识别缓存同一口径：缓存交回的是它记下的那种写法，
+/// 与设置里固定的写法可以大小写不同，或一边是符号链接。
+pub fn canonical_key(exe: &Path) -> String {
     std::fs::canonicalize(exe)
         .unwrap_or_else(|_| exe.to_path_buf())
         .to_string_lossy()

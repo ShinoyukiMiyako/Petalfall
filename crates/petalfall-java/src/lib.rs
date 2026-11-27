@@ -29,7 +29,7 @@ pub mod version;
 pub use detect::{
     DetectScope, DetectSource, FAILED_PROBE_RETRY_AFTER, JAVA_EXE, JavaInstallation, JavaRunner,
     MANAGED_RUNTIME_DIR, MAX_PROBE_WORKERS, PROBE_TIMEOUT, ProbeCache, ProbeFailureKind,
-    ProbeFailureRecord, SystemSources, detect_all, detect_with, java_exe_in_home,
+    ProbeFailureRecord, SystemSources, canonical_key, detect_all, detect_with, java_exe_in_home,
     managed_runtime_root, missing_runtime_files, probe, probe_cached, run_java_version,
     run_java_version_with_timeout,
 };

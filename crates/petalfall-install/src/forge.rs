@@ -310,7 +310,8 @@ enum Target<'t> {
 static FORGE_INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 处理器产物校验不过时换用的 Java 从哪里取，交回 java 可执行文件与它的主版本（主版本只用来写报错正文）。按需
-/// 求值：只有真的对不上才去取，取的时候可能要下载一个运行时；一次安装最多求值一次。
+/// 求值：只有真的对不上才去取，取的时候可能要下载一个运行时；一次安装最多求值一次。取回的就是注入的那个 Java 时
+/// 交回 [`FallbackJavaError::SameJava`]，是不是同一个由来源判断（见那一项）。
 pub type FallbackJava<'a> = Box<dyn Fn() -> FallbackJavaFuture<'a> + Send + Sync + 'a>;
 
 /// [`FallbackJava`] 每次求值交回的 future。
@@ -318,11 +319,15 @@ pub type FallbackJavaFuture<'a> = Pin<
     Box<dyn Future<Output = std::result::Result<JavaExecutable, FallbackJavaError>> + Send + 'a>,
 >;
 
-/// 没能取到备用 Java。
+/// 没能取到另一个可以换上的 Java。
 #[derive(Debug)]
 pub enum FallbackJavaError {
     /// 取的途中被取消：安装照常以取消结束。
     Cancelled,
+    /// 取回的就是处理器正在用的那个 Java：同一个 Java 再跑一遍只会生成同样的字节，安装器不重跑，照没换 Java 报。
+    /// 同一个 java 可执行文件会以不同写法到来源手里（大小写不同、一边是符号链接），认不认得出要按来源认 Java 的
+    /// 口径，安装器自己不另做一套路径规范化，所以由来源判断。
+    SameJava,
     /// 取不到（本机没有、关着自动下载、下载失败等）：原因挂进 [`Error::ProcessorOutputMismatch`]，玩家据此知道补上
     /// 什么就能装上。
     Unavailable(Box<dyn std::error::Error + Send + Sync>),
@@ -681,28 +686,25 @@ impl<'a> ForgeInstaller<'a> {
         if self.cx.cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err(petalfall_download::Error::Cancelled.into());
         }
-        let fallback = match fetch().await {
+        let fetched = fetch().await;
+        // 取 Java 可能花了几分钟：这期间取消了就不再删产物、不再起第二个处理器。来源因为被打断而报取不到（探测被打断
+        // 之类）时也照样以取消结束，不报成产物不符。
+        if self.cx.cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(petalfall_download::Error::Cancelled.into());
+        }
+        let fallback = match fetched {
             Ok(java) => java,
             Err(FallbackJavaError::Cancelled) => {
                 return Err(petalfall_download::Error::Cancelled.into());
             }
             Err(FallbackJavaError::Unavailable(reason)) => {
-                // 取的途中被取消、来源报的却是取不到（探测被打断之类）：照样以取消结束，不报成产物不符。
-                if self.cx.cancel.is_some_and(CancellationToken::is_cancelled) {
-                    return Err(petalfall_download::Error::Cancelled.into());
-                }
                 return Err(mismatch.to_error(&processor.jar, &first, None, Some(reason)));
             }
+            Err(FallbackJavaError::SameJava) => {
+                tracing::warn!(jar = %processor.jar, java = %first.path.display(), "取到的备用 Java 就是正在用的这个，处理器不重跑");
+                return Err(mismatch.to_error(&processor.jar, &first, None, None));
+            }
         };
-        // 取 Java 可能花了几分钟：这期间取消了就不再删产物、不再起第二个处理器。
-        if self.cx.cancel.is_some_and(CancellationToken::is_cancelled) {
-            return Err(petalfall_download::Error::Cancelled.into());
-        }
-        // 取回的还是正在用的这个 Java 时，同一个 Java 再跑一遍只会生成同样的字节。
-        if fallback.path == first.path {
-            tracing::warn!(jar = %processor.jar, java = %first.path.display(), "取到的备用 Java 就是正在用的这个，处理器不重跑");
-            return Err(mismatch.to_error(&processor.jar, &first, None, None));
-        }
         tracing::warn!(
             jar = %processor.jar,
             from = %first.path.display(),
@@ -3659,7 +3661,7 @@ mod tests {
         }
     }
 
-    /// 取回的备用 Java 就是正在用的那个：不重跑，照报产物对不上。
+    /// 来源认出取回的备用 Java 就是正在用的那个：不删产物、不重跑，照没换 Java 报产物对不上。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_fallback_that_is_the_same_java_is_not_rerun() {
         let f = fixture();
@@ -3668,24 +3670,36 @@ mod tests {
         let log = f.root.join("java-runs.log");
         let old = producing_java(&f, "java-8", &log, &OUTPUTS);
         let calls = std::sync::atomic::AtomicUsize::new(0);
-        // 认的是同一个可执行文件：来源报的主版本不同也不算换了 Java。
-        let fallback = fallback_from(&calls, || Ok(java_of(&old, 17)));
+        let fallback = fallback_from(&calls, || Err(FallbackJavaError::SameJava));
 
         let err = install_with_fallback(&f, &java_of(&old, 8), &installer, Some(fallback))
             .await
             .unwrap_err();
 
-        let (jar, path, _, _, java, retried_with) = mismatch_of(&err);
+        let path = library(&f, OUT_B);
+        let expected = sha1_hex(&declared_bytes(OUT_B));
+        let actual = sha1_hex(&wrong_bytes(OUT_B, "java-8"));
         assert_eq!(
-            (jar, path, java, retried_with),
+            mismatch_of(&err),
             (
                 PROCESSOR_JAR,
-                library(&f, OUT_B).as_path(),
+                path.as_path(),
+                expected.as_str(),
+                actual.as_str(),
                 &java_of(&old, 8),
                 None
             )
         );
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "处理器 {PROCESSOR_JAR} 用 Java 8 生成的 out-1-b.jar 与安装器声明的不符；文件 {}，期望 sha1 {expected}，实际 {actual}；Java 在 {}",
+                path.display(),
+                old.display()
+            )
+        );
         assert!(std::error::Error::source(&err).is_none());
+        assert_first_run_outputs_kept(&f);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(java_runs(&log), ["java-8"]);
     }
