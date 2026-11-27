@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// 百分数随平滑逐帧走。数中间值的用例走假时钟（startFrameClock），用 stepFrames 逐帧推进；其余用例走真实时间，用 waitForFrames 等。
+// 百分数随平滑逐帧走。数中间值与断言一直不动的用例走假时钟（startFrameClock），用 stepFrames 逐帧推进；其余用例走真实时间，用 waitForFrames 等。
 import { MotionConfig, motionValue } from "framer-motion";
 import { act, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -37,8 +37,6 @@ function watchTexts(): { seen: string[]; stop(): void } {
   return { seen, stop: () => observer.disconnect() };
 }
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
 describe("进度旁的百分数", () => {
   it("挂载时直接写当前进度；进度变了跟着进度条同一种平滑一帧帧走过去，不当场跳到新值", async () => {
     await startFrameClock();
@@ -57,9 +55,11 @@ describe("进度旁的百分数", () => {
   });
 
   it("同一批内只进不退：后端分批上报回落时停在原处", async () => {
+    // 断言的是「一直没动」：按真实时间睡一段的话，机器满载时这段里可能一帧都没走，往回走的平滑也照样过，所以走假时钟推满帧数
+    await startFrameClock();
     view = render(<SmoothPercent value={0.8} track="a" />);
     view.rerender(<SmoothPercent value={0.3} track="a" />);
-    await sleep(120);
+    await stepFrames(SETTLE_FRAMES);
     expect(text()).toBe("80%");
   });
 
