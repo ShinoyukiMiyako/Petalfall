@@ -69,8 +69,8 @@ const unrepairable = (id: string, overrides: Partial<InstanceDto> = {}) =>
 /** 版本 JSON 被别的程序占着、读不出来时后端给的原因：带着这个实例自己那份文件的路径。 */
 const unreadableReason = (id: string) =>
   `版本 JSON 读不出来：文件 IO 失败: D:\\Games\\Launcher\\.minecraft\\versions\\${id}\\${id}.json：另一个程序正在使用此文件，进程无法访问。 (os error 32)`;
-/** 版本 JSON 读不出来的损坏实例：带着安装记录也修不好，文件可能完好。 */
-const unreadable = (id: string) =>
+/** 版本 JSON 读不出来的损坏实例：带着安装记录也修不好，文件可能完好。overrides 的 incomplete 为 null 时是没有未完成标记的。 */
+const unreadable = (id: string, overrides: Partial<InstanceDto> = {}) =>
   instanceDto(id, {
     status: "broken",
     broken_reason: unreadableReason(id),
@@ -78,6 +78,7 @@ const unreadable = (id: string) =>
     unrepairable_kind: "unreadable",
     incomplete: { kind: "install", outcome: "pending", started_at: null, spec: { mc_version: "1.21.1", loader: "fabric", loader_version: "0.16.10" }, error: null },
     mc_version: null,
+    ...overrides,
   });
 /** 目录里有一份叫 to.json 的版本文件时后端接在原因后面的改名提示，与后端同一个全角分号格式。 */
 const renameHint = (to: string) => `${UNREPAIRABLE}；目录里有一份叫 ${to}.json 的版本文件，把实例改名成 ${to} 就能认出来`;
@@ -1466,24 +1467,54 @@ describe("实例库：动作", () => {
     expect(banner.querySelector("button")).toBeNull();
   });
 
-  it("修不好的不止一个：全是读不出来的标题说暂时无法启动、各自成句；掺着只能删除的标题说无法启动；都不给按钮", async () => {
-    instances = [...instances.filter((i) => i.id !== "坏掉的"), unreadable("网盘甲"), unreadable("网盘乙")];
+  it("修不好的不止一个、其中有读不出来的：横幅给「重新扫描」，点了重读一次列表；全是读不出来的标题说暂时无法启动、各自说原因、怎么恢复只说一次；掺着只能删除的标题说无法启动", async () => {
+    instances = [...instances.filter((i) => i.id !== "坏掉的"), unreadable("网盘甲", { incomplete: null }), unreadable("网盘乙", { incomplete: null })];
     await mount();
     const banner = () => {
       const live = [...document.querySelectorAll<HTMLElement>(`.${bannerStyles.banner}`)].filter((el) => el.closest("[inert]") === null);
       if (live.length !== 1) throw new Error(`修复横幅应当恰有一条，实为 ${live.length} 条`);
       return live[0];
     };
+    const buttons = () => [...banner().querySelectorAll("button")].map((b) => b.textContent);
     const hint = REPAIR_EXIT_COPY.unreadableHint;
-    expect(banner().textContent).toBe(`2 个实例暂时无法启动「网盘甲」暂时无法启动：${unreadableReason("网盘甲")}。${hint}「网盘乙」暂时无法启动：${unreadableReason("网盘乙")}。${hint}`);
-    expect(banner().querySelector("button")).toBeNull();
-    instances = [...instances.filter((i) => i.id !== "网盘乙"), unrepairable("旧电脑拷来的")];
-    await act(async () => {
-      await launcher.actions.refreshInstances();
-      await settle();
-    });
-    expect(banner().textContent).toBe(`2 个实例无法启动「网盘甲」暂时无法启动：${unreadableReason("网盘甲")}。${hint}「旧电脑拷来的」补全修不好：${UNREPAIRABLE}。`);
-    expect(banner().querySelector("button")).toBeNull();
+    expect(banner().textContent).toBe(`2 个实例暂时无法启动「网盘甲」暂时无法启动：${unreadableReason("网盘甲")}。「网盘乙」暂时无法启动：${unreadableReason("网盘乙")}。${hint}${REPAIR_EXIT_COPY.rescan}`);
+    expect(buttons()).toEqual([REPAIR_EXIT_COPY.rescan]);
+    // 网盘乙的占用放开了，网盘甲还锁着；这期间又拷进来一个没有安装记录的
+    instances = [...instances.filter((i) => i.id !== "网盘乙"), instanceDto("网盘乙"), unrepairable("旧电脑拷来的")];
+    const scans = callsOf(ipc, "list_instances").length;
+    click(byText<HTMLButtonElement>("button", REPAIR_EXIT_COPY.rescan, banner()));
+    await flush();
+    expect(callsOf(ipc, "list_instances")).toHaveLength(scans + 1);
+    expect(banner().textContent).toBe(`2 个实例无法启动「网盘甲」暂时无法启动：${unreadableReason("网盘甲")}。${hint}「旧电脑拷来的」补全修不好：${UNREPAIRABLE}。${REPAIR_EXIT_COPY.rescan}`);
+    expect(buttons()).toEqual([REPAIR_EXIT_COPY.rescan]);
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+  });
+
+  it("修得好的掺着读不出来的：「立即修复」旁边跟一个次一级的「重新扫描」，点了只重读一次列表、不排补全；修得好的转入安装后重新扫描升到主按钮位", async () => {
+    // 补全一直不结束：修得好的那个停在安装中，横幅只剩读不出来的那一个
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    instances = [...instances, unreadable("网盘同步的", { incomplete: null })];
+    await mount();
+    const repair = byText<HTMLButtonElement>("button", LIBRARY_COPY.repairOne);
+    const banner = repair.closest<HTMLElement>(`.${bannerStyles.banner}`);
+    if (banner === null) throw new Error("没有修复横幅");
+    const unreadableLine = `「网盘同步的」暂时无法启动：${unreadableReason("网盘同步的")}。${REPAIR_EXIT_COPY.unreadableHint}`;
+    expect(banner.textContent).toBe(`1 个实例需要修复「坏掉的」缺少游戏文件，补全后就能启动。${unreadableLine}${LIBRARY_COPY.repairOne}${REPAIR_EXIT_COPY.rescan}`);
+    const rescan = byText<HTMLButtonElement>("button", REPAIR_EXIT_COPY.rescan, banner);
+    expect([...banner.querySelectorAll("button")]).toEqual([repair, rescan]);
+    expect([repair.getAttribute("data-variant"), rescan.getAttribute("data-variant")]).toEqual(["secondary", "ghost"]);
+    const scans = callsOf(ipc, "list_instances").length;
+    click(rescan);
+    await flush();
+    expect(callsOf(ipc, "list_instances")).toHaveLength(scans + 1);
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    click(repair);
+    await flush();
+    expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的"]);
+    expect(banner.closest("[inert]")).toBeNull();
+    expect(banner.textContent).toBe(`1 个实例暂时无法启动${unreadableLine}${REPAIR_EXIT_COPY.rescan}`);
+    expect(byText<HTMLButtonElement>("button", REPAIR_EXIT_COPY.rescan, banner).getAttribute("data-variant")).toBe("secondary");
   });
 
   it("修不好的不止一个：横幅不给批量删除，各自卡片菜单里的「删除实例」照常可用", async () => {

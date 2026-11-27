@@ -533,6 +533,13 @@
   gap: var(--sk-space-10);
 }
 
+/* 修复横幅里修复与旁边的重新扫描：两个按钮在加载层里是同一层内容，间距照横幅按钮位自己的 */
+.repairActions {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
 /* 列表读得特别慢时骨架下方的一行说明 */
 .slowHint {
   margin: 0;

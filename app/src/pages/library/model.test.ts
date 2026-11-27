@@ -417,7 +417,22 @@ describe("文案", () => {
           { name: "乙", reason: same, exit: "rescan" },
         ],
       ),
-    ).toBe(`「坏掉的」缺少游戏文件，补全后就能启动。「甲」暂时无法启动：${same}${REPAIR_EXIT_COPY.unreadableHint}「乙」暂时无法启动：${same}${REPAIR_EXIT_COPY.unreadableHint}`);
+    ).toBe(`「坏掉的」缺少游戏文件，补全后就能启动。「甲」暂时无法启动：${same}「乙」暂时无法启动：${same}${REPAIR_EXIT_COPY.unreadableHint}`);
+  });
+
+  it("修复横幅：几个读不出来的各自说原因、排在一起，怎么恢复只在末尾说一次；中间夹着的只能删除的排到它们后面", () => {
+    const lost = "缺少版本 JSON，也没有记下当初装的是什么";
+    const locked = (id: string) => `版本 JSON 读不出来：文件 IO 失败: D:\\v\\${id}\\${id}.json：另一个程序正在使用此文件，进程无法访问。 (os error 32)`;
+    const names = Array.from({ length: 2 + Math.floor(Math.random() * 4) }, (_, i) => `网盘${i}`);
+    // 每个读不出来的后面都夹一个只能删除的：读不出来的仍按第一次出现的位置排成一段
+    const lines = names.flatMap((name, i) => [
+      { name, reason: locked(name), exit: "rescan" as const },
+      { name: `旧档${i}`, reason: lost, exit: "delete" as const },
+    ]);
+    const body = LIBRARY_COPY.repairBody([], lines);
+    const unreadable = names.map((name) => `「${name}」暂时无法启动：${locked(name)}。`).join("");
+    expect(body).toBe(`${unreadable}${REPAIR_EXIT_COPY.unreadableHint}${names.map((_, i) => `「旧档${i}」`).join("")}补全修不好：${lost}。`);
+    expect(body.split(REPAIR_EXIT_COPY.unreadableHint)).toHaveLength(2);
   });
 
   it("修复横幅的标题：一个都修不好时说补全修不好，全是读不出来的说暂时无法启动，两样掺着说无法启动，不说需要修复；有修得好的照旧", () => {

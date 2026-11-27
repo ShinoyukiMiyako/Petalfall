@@ -157,7 +157,15 @@ export default function LibraryPage() {
   const repairAll = () => {
     for (const inst of queueable) void run(() => actions.repairInstance(inst.id), ACTION_ERROR.repair);
   };
-  // 只列着一个修不好的实例时，横幅按它剩下的出路给一个按钮；列着多个时出路留在各自卡片的菜单与详情页上，横幅不做批量操作
+  // 读不出来的文件可能完好，占用放开或权限修好后重读一次列表就恢复。重新扫描重读的是整张列表，不是逐个实例的批量动作，
+  // 横幅里有一个读不出来的就给，不论旁边还列着什么
+  const unreadable = broken.unrepairable.some((u) => u.exit.kind === "rescan");
+  const rescanButton = (variant: "secondary" | "ghost") => (
+    <Button key="rescan" size="sm" variant={variant} icon="refresh" onClick={() => void run(() => actions.refreshInstances(), ACTION_ERROR.refreshInstances)}>
+      {REPAIR_EXIT_COPY.rescan}
+    </Button>
+  );
+  // 只列着一个修不好的实例时，横幅按它剩下的出路给一个按钮；列着多个时删除与改名留在各自卡片的菜单与详情页上，横幅不做批量操作
   const lone = broken.repairable.length === 0 && broken.unrepairable.length === 1 ? broken.unrepairable[0] : null;
   const deleteInstance = useDeleteInstance();
   // 每种按钮各带一个 key：点了修复、修得好的转入安装后按钮位换成另一个实例的出路时整个重挂，
@@ -171,12 +179,7 @@ export default function LibraryPage() {
           </Button>
         );
       case "rescan":
-        // 文件可能完好，占用放开或权限修好后重读一次列表就恢复
-        return (
-          <Button key="rescan" size="sm" icon="refresh" onClick={() => void run(() => actions.refreshInstances(), ACTION_ERROR.refreshInstances)}>
-            {REPAIR_EXIT_COPY.rescan}
-          </Button>
-        );
+        return rescanButton("secondary");
       case "rename":
         // 实例库没有改名入口：带去详情页，那里的横幅给改名按钮，校验与失败的说法都在那一套里
         return (
@@ -185,6 +188,24 @@ export default function LibraryPage() {
           </Button>
         );
     }
+  };
+  // 有修得好的给修复，掺着读不出来的时重新扫描作为次一级的按钮跟在旁边；一个都修不好时按出路给，修不好的不止一个时只在
+  // 有读不出来的时给重新扫描。修复与旁边的重新扫描包在同一层里：重新扫描随列表变化出现、消失时，修复按钮不重挂
+  const hasRepairActions = broken.repairable.length > 0 || lone !== null || unreadable;
+  const repairActions = () => {
+    if (broken.repairable.length > 0) {
+      return (
+        <div key="repair" className={styles.repairActions}>
+          <Button key="repair" size="sm" disabledReason={queueable.length === 0 ? repairReason(broken.repairable[0]) : undefined} onClick={repairAll}>
+            {broken.repairable.length > 1 ? LIBRARY_COPY.repairAll : LIBRARY_COPY.repairOne}
+          </Button>
+          {unreadable && rescanButton("ghost")}
+        </div>
+      );
+    }
+    if (lone !== null) return loneAction(lone);
+    if (unreadable) return rescanButton("secondary");
+    throw new Error("修复横幅没有按钮可给，却占着按钮位");
   };
 
   const clearFilter = () => setView({ loader: "all", query: "" });
@@ -266,18 +287,11 @@ export default function LibraryPage() {
               </Loadable>
             }
             actions={
-              // 全都修不好时不给修复按钮：补全一律被拒；只剩一个修不好的换成它的出路，多个时不给按钮。还在读时不知道，按记下的形状先占着按钮位
-              gate.view === "content" && broken.repairable.length === 0 && lone === null ? undefined : (
+              // 全都修不好时不给修复按钮：补全一律被拒；只剩一个修不好的换成它的出路，多个时只在有读不出来的时给重新扫描。
+              // 还在读时不知道，按记下的形状先占着按钮位
+              gate.view === "content" && !hasRepairActions ? undefined : (
                 <Loadable view={gate.view} skeleton={<Skeleton shape="block" width={REPAIR_SKELETON.actionWidth} height={REPAIR_SKELETON.actionHeight} radius="sm" />}>
-                  {() =>
-                    lone !== null ? (
-                      loneAction(lone)
-                    ) : (
-                      <Button key="repair" size="sm" disabledReason={queueable.length === 0 ? repairReason(broken.repairable[0]) : undefined} onClick={repairAll}>
-                        {broken.repairable.length > 1 ? LIBRARY_COPY.repairAll : LIBRARY_COPY.repairOne}
-                      </Button>
-                    )
-                  }
+                  {repairActions}
                 </Loadable>
               )
             }

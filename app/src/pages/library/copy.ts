@@ -14,10 +14,15 @@ export interface UnrepairableLine {
 
 const quoted = (names: readonly string[]) => names.map((n) => `「${n}」`).join("");
 
-/** 修不好的实例在正文里的一句。读不出来的文件可能完好，说暂时无法启动并接上怎么恢复，不说补全修不好。 */
-function unrepairableSentence(names: readonly string[], reason: string, exit: UnrepairableExit["kind"]): string {
-  if (exit === "rescan") return `${quoted(names)}暂时无法启动：${sentence(reason)}${REPAIR_EXIT_COPY.unreadableHint}`;
-  return sentence(`${quoted(names)}补全修不好：${reason}`);
+/**
+ * 正文里修不好的一段：只能删除或改名的一句；或者几个读不出来的实例，各自一句原因，末尾共用一句怎么恢复。
+ * 读不出来的文件可能完好，说暂时无法启动，不说补全修不好。
+ */
+type BodyPart = { kind: "unrepairable"; names: string[]; reason: string } | { kind: "unreadable"; hint: string; lines: { name: string; reason: string }[] };
+
+function partSentence(part: BodyPart): string {
+  if (part.kind === "unrepairable") return sentence(`${quoted(part.names)}补全修不好：${part.reason}`);
+  return part.lines.map(({ name, reason }) => `${quoted([name])}暂时无法启动：${sentence(reason)}`).join("") + part.hint;
 }
 
 export const LIBRARY_COPY = {
@@ -51,25 +56,39 @@ export const LIBRARY_COPY = {
   /**
    * 横幅正文：补全修得好的合成一句；修不好的另起，写明后端给的原因，不承诺补全后就能启动。只能删除的实例原因相同时并成一句
    * （从旧电脑拷来的一批实例往往是同一个原因）。带改名目标的不并：原因里那句改名提示只核对过这一个实例改不改得成，
-   * 实例名不分大小写唯一，几个实例最多一个能照做；读不出来的各自带着自己的路径，也不并。按各句第一次出现的先后排，
-   * 只有一拨时只出那一拨。
+   * 实例名不分大小写唯一，几个实例最多一个能照做。读不出来的各自带着自己的路径，各自成句，但排在一起、怎么恢复只在末尾说一次：
+   * 同一句提示跟在每个实例后面重复，读着像复读。按各段第一次出现的先后排，只有一拨时只出那一拨。
    */
   repairBody: (repairable: readonly string[], unrepairable: readonly UnrepairableLine[]) => {
     if (repairable.length === 0 && unrepairable.length === 0) throw new Error("修复横幅没有要列的实例");
     const fixable = repairable.length === 0 ? "" : `${quoted(repairable)}缺少游戏文件，补全后就能启动。`;
-    const lines: { names: string[]; reason: string; exit: UnrepairableExit["kind"] }[] = [];
+    const parts: BodyPart[] = [];
     const mergeable = new Map<string, string[]>();
+    // 读不出来的按接在后面的那句提示归拢：同一句提示只说一次
+    const unreadable = new Map<string, { name: string; reason: string }[]>();
     for (const { name, reason, exit } of unrepairable) {
+      if (exit === "rescan") {
+        const hint = REPAIR_EXIT_COPY.unreadableHint;
+        const lines = unreadable.get(hint);
+        if (lines !== undefined) {
+          lines.push({ name, reason });
+          continue;
+        }
+        const part = { kind: "unreadable" as const, hint, lines: [{ name, reason }] };
+        parts.push(part);
+        unreadable.set(hint, part.lines);
+        continue;
+      }
       const names = exit === "delete" ? mergeable.get(reason) : undefined;
       if (names !== undefined) {
         names.push(name);
         continue;
       }
-      const line = { names: [name], reason, exit };
-      lines.push(line);
-      if (exit === "delete") mergeable.set(reason, line.names);
+      const part = { kind: "unrepairable" as const, names: [name], reason };
+      parts.push(part);
+      if (exit === "delete") mergeable.set(reason, part.names);
     }
-    return fixable + lines.map((line) => unrepairableSentence(line.names, line.reason, line.exit)).join("");
+    return fixable + parts.map(partSentence).join("");
   },
   repairOne: "立即修复",
   repairAll: "全部修复",
