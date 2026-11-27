@@ -41,8 +41,10 @@ function loaderMatters(type: ResourceType): boolean {
 }
 
 /**
- * 这个版本能不能装进某个就绪实例：游戏版本对上（平台没标注视为不限），Mod 还要标着实例能跑的加载器之一（同样没标注视为不限）。
- * 能跑哪些与后端落位判定同一条规则：只标 fabric 的版本也能装进 Quilt 实例，只标 forge 的也能装进 1.20.1 的 NeoForge 实例。
+ * 这个版本能不能装进某个就绪实例：游戏版本对上（平台没标注视为不限），Mod 与整合包还要加载器对得上（同样没标注视为不限）。
+ * Mod 认实例能跑的全部加载器，与后端落位判定同一条规则：只标 fabric 的版本也能装进 Quilt 实例，只标 forge 的也能装进
+ * 1.20.1 的 NeoForge 实例。整合包只认实例自己的那一家：借用说的是实例的加载器能加载另一家写的 Mod，整合包导入后按它自己
+ * 声明的加载器新建实例，不装进这个实例。
  * 与后端兼容判定「缺元数据的维度不算不匹配」同一口径。
  */
 export function fitsInstance(version: ModVersionInfo, instance: InstanceSummary, type: ResourceType): boolean {
@@ -50,8 +52,11 @@ export function fitsInstance(version: ModVersionInfo, instance: InstanceSummary,
   const gameOk = version.game_versions.length === 0 || version.game_versions.includes(instance.mcVersion);
   if (!gameOk) return false;
   if (!loaderMatters(type) || version.loaders.length === 0) return true;
-  const runnable: readonly ModLoader[] = runnableLoaders(instance.loader, instance.mcVersion);
-  return version.loaders.some((l) => runnable.includes(l));
+  if (type === "mod") {
+    const runnable: readonly ModLoader[] = runnableLoaders(instance.loader, instance.mcVersion);
+    return version.loaders.some((l) => runnable.includes(l));
+  }
+  return instance.loader !== "vanilla" && version.loaders.some((l) => l === instance.loader);
 }
 
 export function fitsAnyInstance(version: ModVersionInfo, instances: readonly InstanceSummary[], type: ResourceType): boolean {

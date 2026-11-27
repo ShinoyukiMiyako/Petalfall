@@ -168,9 +168,15 @@ export function hasConditions(filters: DiscoverFilters): boolean {
 /**
  * 下推给平台的加载器。选了适配实例时按这个实例现算它能跑的全部加载器，借来的那一家一并下推：只标 forge、只标 fabric
  * 的 Mod 在平台那一步就会被筛掉，详情里判得再准也搜不到。借来的不进筛选状态，浮层、说明行与条件数只认实例自己的那一家。
+ *
+ * 借用说的是实例的加载器能加载另一家写的 Mod。整合包导入后按它自己声明的加载器新建实例，不装进适配实例，「整合包」下不借。
+ * 「全部」里 Mod 与整合包混在一起，平台只收一份加载器条件，照 Mod 借：「全部」是默认类型，不借就把只标被借那一家、却装得进
+ * 适配实例的 Mod 在平台那一步筛掉，正是借用要解决的问题；代价是结果里混进只标被借那一家的整合包，它们的版本在详情里
+ * 不算适配（fitsInstance 对整合包不借），不会被默认当成「能装进我的实例」。
  */
 function searchLoaders(filters: DiscoverFilters, candidates: readonly InstanceSummary[]): LoaderChoice[] {
   if (filters.loader === null || !loaderFilterApplies(filters.kind)) return [];
+  if (filters.kind === "modpack") return [filters.loader];
   const fit = filters.fitInstance === null ? undefined : candidates.find((i) => i.id === filters.fitInstance);
   // 适配实例这一刻不在候选里（刚被删、开始重装）：页面在同一次渲染里就把适配清掉，这一次照筛选里的加载器搜、不借
   if (fit === undefined) return [filters.loader];

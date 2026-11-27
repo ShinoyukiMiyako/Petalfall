@@ -140,6 +140,20 @@ describe("搜索参数", () => {
       expect(searchArgsOf(withFitInstance(DEFAULT_FILTERS, neo), "", candidates).loaders).toEqual(["neoforge", "forge"]);
     });
 
+    it("整合包导入后按自己声明的加载器新建实例、不装进适配实例：「整合包」下只下推实例自己的那一家，「全部」混着 Mod 照样借", () => {
+      const fitPacks = (instance: typeof neo) => withFitInstance({ ...DEFAULT_FILTERS, kind: "modpack" }, instance);
+      expect(searchArgsOf(fitPacks(neo), "", candidates)).toMatchObject({ resourceTypes: ["modpack"], loaders: ["neoforge"], gameVersions: ["1.20.1"] });
+      expect(searchArgsOf(fitPacks(quilt), "", candidates)).toMatchObject({ resourceTypes: ["modpack"], loaders: ["quilt"], gameVersions: ["1.20.4"] });
+      expect(searchArgsOf(fitPacks(neoNew), "", candidates).loaders).toEqual(["neoforge"]);
+      // 说明行写的与下推的是同一家
+      expect(conditionParts(fitPacks(neo), LABELS)).toEqual(["1.20.1", "NeoForge"]);
+      expect(searchArgsOf(withFitInstance(DEFAULT_FILTERS, quilt), "", candidates).loaders).toEqual(["quilt", "fabric"]);
+      // 适配不变、只换类型：切回 Mod 或全部借用随之恢复，再切到整合包又只剩自己的那一家
+      expect(searchArgsOf(withKind(fitPacks(neo), "mod"), "", candidates).loaders).toEqual(["neoforge", "forge"]);
+      expect(searchArgsOf(withKind(fitPacks(quilt), "all"), "", candidates).loaders).toEqual(["quilt", "fabric"]);
+      expect(searchArgsOf(withKind(fitMods(neo), "modpack"), "", candidates).loaders).toEqual(["neoforge"]);
+    });
+
     it("资源包、光影、数据包与加载器无关，适配实例时照样不下推加载器", () => {
       for (const kind of ["resourcepack", "shader", "datapack"] as const) {
         const args = searchArgsOf(withFitInstance({ ...DEFAULT_FILTERS, kind }, neo), "", candidates);

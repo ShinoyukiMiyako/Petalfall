@@ -340,6 +340,18 @@ describe("发现页：搜索", () => {
     expect(parts).toEqual(["1.20.1", "NeoForge"]);
   });
 
+  it("「整合包」下适配 1.20.1 的 NeoForge 实例：只下推实例自己的加载器，切到 Mod 才把 Forge 借上", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("整合", { mc_version: "1.20.1", loaders: [{ kind: "neoforge", version: "47.1.106" }] })], config: configDto({ selected_version: "整合" }) });
+    await mount({ page: "discover", kind: "modpack", forInstance: "整合" });
+    expect(document.body.textContent).toContain("适配：整合");
+    expect(lastSearch()).toMatchObject({ resourceTypes: ["modpack"], gameVersions: ["1.20.1"], loaders: ["neoforge"] });
+    const modTab = [...document.querySelectorAll<HTMLElement>('[role="tab"]')].find((t) => t.textContent === "Mod");
+    if (modTab === undefined) throw new Error("找不到 Mod 标签");
+    act(() => modTab.click());
+    await flush();
+    expect(lastSearch()).toMatchObject({ resourceTypes: ["mod"], gameVersions: ["1.20.1"], loaders: ["neoforge", "forge"] });
+  });
+
   it("输入停 300 ms 才搜；生效的关键词写回路由", async () => {
     await mount();
     expect(lastSearch().query).toBeNull();

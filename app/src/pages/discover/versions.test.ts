@@ -74,6 +74,26 @@ describe("能不能装进实例", () => {
     expect(fitsAnyInstance(on1201(["forge"]), [neo1202, quilt], "mod")).toBe(false);
     expect(fitsAnyInstance(on1201(["forge"]), [neo1202, neo], "mod")).toBe(true);
   });
+
+  it("整合包导入后按自己声明的加载器新建实例、不装进这个实例：只比实例自己的那一家，不借", () => {
+    const quilt = summary("织布", { mcVersion: "1.21.1", loader: "quilt" });
+    const neo = summary("整合", { mcVersion: "1.20.1", loader: "neoforge" });
+    const pack = (loaders: ModVersionInfo["loaders"]) => modVersion("p", { loaders, game_versions: ["1.20.1", "1.21.1"] });
+
+    expect(fitsInstance(pack(["forge"]), neo, "modpack")).toBe(false);
+    expect(fitsInstance(pack(["fabric"]), quilt, "modpack")).toBe(false);
+    expect(fitsInstance(pack(["neoforge"]), neo, "modpack")).toBe(true);
+    expect(fitsInstance(pack(["quilt"]), quilt, "modpack")).toBe(true);
+    expect(fitsInstance(pack(["fabric", "quilt"]), quilt, "modpack")).toBe(true);
+    expect(fitsInstance(pack(["fabric"]), fabric, "modpack")).toBe(true);
+    expect(fitsInstance(pack(["fabric"]), vanilla, "modpack")).toBe(false);
+    expect(fitsInstance(pack([]), neo, "modpack")).toBe(true);
+    expect(fitsAnyInstance(pack(["forge"]), [quilt, neo], "modpack")).toBe(false);
+    expect(fitsAnyInstance(pack(["fabric"]), [neo, quilt], "modpack")).toBe(false);
+    // 同一份版本当 Mod 判照样借
+    expect(fitsInstance(pack(["forge"]), neo, "mod")).toBe(true);
+    expect(fitsInstance(pack(["fabric"]), quilt, "mod")).toBe(true);
+  });
 });
 
 describe("支持版本的排序", () => {
