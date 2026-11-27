@@ -506,6 +506,37 @@ describe("下载任务页：历史", () => {
     expect(row("安装 Locked").textContent).toContain("第 2 次尝试");
     expect(hasButton(row("安装 Locked"), "查看这些文件")).toBe(false);
   });
+
+  it("导入因包里的文件落在实例自己的版本文件上失败：重试置灰、聚焦写明结果不会变，点了不发命令；版本目录被占的照常可点", async () => {
+    const collision = "整合包里的 overrides/周末包.json 落在实例「周末包」自己的版本文件（版本 JSON、主 jar 或 natives 目录）上，换一个实例名再导入";
+    const pack = (id: string, name: string, error: { code: string; message: string }) =>
+      record(id, "failed", {
+        kind: "modpack",
+        title: `导入整合包 ${name}`,
+        detail: "1.0.0",
+        instance_id: name,
+        error,
+        spec: { command: "install_modpack", args: { source: { kind: "file", path: `D:\\packs\\${name}.mrpack` }, name, excludedOptional: [] } },
+      });
+    bootOverrides(ipc, {
+      journal: [
+        pack("collision", "周末包", { code: "modpack_unsafe_path", message: collision }),
+        pack("occupied", "樱落", { code: "modpack_base_occupied", message: "游戏目录里已有一个叫「1.20.1」的版本，它装着 Forge，不是这个整合包要用的原版 1.20.1。导入会把它的版本文件换掉，先给它改个名字再导入" }),
+      ],
+    });
+    ipc.overrides.set("install_modpack", () => new Promise(() => undefined));
+    await mount();
+    expect(row("导入整合包 周末包").textContent).toContain(collision);
+    const retry = buttonIn(row("导入整合包 周末包"), "重试");
+    expect(retry.getAttribute("aria-disabled")).toBe("true");
+    act(() => focusByKeyboard(retry));
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toContain("原样重试，结果不会变");
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "install_modpack")).toEqual([]);
+    expect(launcher.state.tasks.find((t) => t.id === "collision")).toMatchObject({ status: "failed", attempt: 1 });
+    expect(buttonIn(row("导入整合包 樱落"), "重试").getAttribute("aria-disabled")).toBeNull();
+  });
 });
 
 describe("下载任务页：断网", () => {
@@ -535,6 +566,32 @@ describe("下载任务页：断网", () => {
     act(() => buttonIn(row("failed-java"), "重试").click());
     await flush();
     expect(callsOf(ipc, "install_java")).toEqual([{ requiredMajor: 17, taskId: "failed-java#2" }]);
+  });
+
+  it("断网：原样重试必然同样失败的导入，重试置灰的原因写结果不会变，不写联网后才能重试：联网之后它照样点不了", async () => {
+    vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    bootOverrides(ipc, {
+      journal: [
+        record("traversal", "failed", {
+          kind: "modpack",
+          title: "导入整合包 周末包",
+          detail: "1.0.0",
+          instance_id: "周末包",
+          error: { code: "modpack_unsafe_path", message: "整合包里的路径不安全：overrides/../evil.txt" },
+          spec: { command: "install_modpack", args: { source: { kind: "file", path: "D:\\packs\\周末包.mrpack" }, name: "周末包", excludedOptional: [] } },
+        }),
+        record("failed-java", "failed", { error: { code: "network_failed", message: "dns" }, spec: { command: "install_java", args: { requiredMajor: 17 } } }),
+      ],
+    });
+    await mount();
+    const tooltipOf = (button: HTMLElement) => {
+      act(() => focusByKeyboard(button));
+      return document.querySelector('[role="tooltip"]')?.textContent;
+    };
+    const retry = buttonIn(row("导入整合包 周末包"), "重试");
+    expect(retry.getAttribute("aria-disabled")).toBe("true");
+    expect(tooltipOf(retry)).toBe("原样重试，结果不会变");
+    expect(tooltipOf(buttonIn(row("failed-java"), "重试"))).toBe("联网后才能重试");
   });
 
   it("断网：备份与恢复存档只碰本机文件，失败后的重试不置灰，点了照常重排", async () => {

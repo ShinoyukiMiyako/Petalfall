@@ -976,6 +976,13 @@ export const RETRY_GAME_DIR_REASON = {
   currentUnknown: "还没读到当前的游戏目录，读到后再重试",
 } as const;
 
+/**
+ * 原样再跑一次结果必然相同的失败，重试被挡住的原因：任务行、发现页的安装面板与实例页的失败说明上重试按钮的置灰说明，与点了
+ * 重试之后的报错共用。只说为什么不给重试，不提该换什么：落点撞名的要换实例名（失败原因里写着），其余几种是包本身导入不了，
+ * 换实例名没有用，一句话里说不全。
+ */
+export const RETRY_REPEATS_REASON = "原样重试，结果不会变";
+
 function namedList(names: readonly string[], limit: number): string {
   const named = names
     .slice(0, limit)

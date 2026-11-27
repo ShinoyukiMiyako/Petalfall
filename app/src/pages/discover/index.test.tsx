@@ -14,7 +14,7 @@ import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type Windo
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import type { ProjectDetail, SearchArgs, SearchEntry, SearchResultDto } from "../../state/queries/discover";
 import type { BlockedFileDto, PackModDto } from "../../state/store";
-import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { focusByKeyboard, keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
 import { emulateFocusFixup, refuseHiddenFocus } from "../../test/focus-fixup";
 import { bootOverrides, callsOf, cancelledError, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
@@ -1386,6 +1386,36 @@ describe("发现页：整合包", () => {
       "没装成：有文件只能从 CurseForge 下载，需要先设置环境变量 PETALFALL_CURSEFORGE_API_KEY",
     ]);
     expect(buttonByText("重试", dialog())).toBeDefined();
+  });
+
+  it("平台整合包导入撞上实例自己的版本文件：面板写后端原文，重试置灰、聚焦写明结果不会变，点了不重排", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    const pack = entry("M1", { title: "樱落", resource_type: "modpack", loaders: ["fabric"] });
+    const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });
+    const message = "整合包里的 overrides/樱落.json 落在实例「樱落」自己的版本文件（版本 JSON、主 jar 或 natives 目录）上，换一个实例名再导入";
+    pages = () => result([pack]);
+    ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
+    ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
+    ipc.overrides.set("install_modpack", () => {
+      throw new IpcError("modpack_unsafe_path", message, { path: "overrides/樱落.json" });
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    act(() => card("樱落").click());
+    await flush();
+    act(() => buttonByText("安装为新实例", dialog()).click());
+    await flush();
+    expect(dialog().textContent).toContain(`没装成：${message}`);
+
+    const retry = buttonByText("重试", dialog());
+    expect(retry.getAttribute("aria-disabled")).toBe("true");
+    focusByKeyboard(retry);
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toContain("原样重试，结果不会变");
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "install_modpack")).toHaveLength(1);
+    expect(launcher.state.tasks.map((t) => [t.status, t.attempt])).toEqual([["failed", 1]]);
   });
 
   it("平台整合包的名称按去掉首尾空格后的样子校验：前面多个空格撞上已有实例就报重名，末尾多个空格照常装、装成去掉空格的名字", async () => {

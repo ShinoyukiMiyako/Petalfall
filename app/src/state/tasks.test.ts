@@ -864,6 +864,37 @@ describe("下载队列：发起时的游戏目录", () => {
     expect(retryBlockedReason(backup(B), A, moving)).toBe(`这个任务发起于游戏目录 ${B}，切回去再重试`);
   });
 
+  it("导入以包里的路径不安全失败：原样再试结果必然相同，重试带原因挡下、批量不收；版本目录被占与网络失败照常；发起于别的目录时也先说这个原因", () => {
+    const imported = (id: string, error: Task["error"], gameDir: string = A) =>
+      task(id, {
+        kind: "modpack",
+        instanceId: "周末包",
+        status: "failed",
+        error,
+        gameDir,
+        spec: { command: "install_modpack", args: { source: { kind: "file", path: "D:/packs/周末包.mrpack" }, name: "周末包", excludedOptional: [] } },
+      });
+    const collision = { code: "modpack_unsafe_path", message: "整合包里的 overrides/周末包.json 落在实例「周末包」自己的版本文件（版本 JSON、主 jar 或 natives 目录）上，换一个实例名再导入" };
+    const tasks = [
+      imported("collision", collision),
+      imported("traversal", { code: "modpack_unsafe_path", message: "整合包里的路径不安全：overrides/../evil.txt" }),
+      imported("occupied", { code: "modpack_base_occupied", message: "游戏目录里已有一个叫「1.20.1」的版本，它装着 Forge，不是这个整合包要用的原版 1.20.1。导入会把它的版本文件换掉，先给它改个名字再导入" }),
+      imported("network", { code: "network_failed", message: "连接超时" }),
+    ];
+    const repeats = "原样重试，结果不会变";
+    expect(tasks.map((t) => retryBlockedReason(t, A, new Set()))).toEqual([repeats, repeats, null, null]);
+    expect(tasks.filter((t) => batchRetryable(t, A, new Set())).map((t) => t.id)).toEqual(["occupied", "network"]);
+    // 读包阶段就定下来的几种同样挡；清单不合法（导出也会报）与包损坏（读盘的暂时故障也会报）照常给重试
+    const byCode = (code: string) => retryBlockedReason(imported(code, { code, message: "后端原文" }), A, new Set());
+    expect(["modpack_manifest_missing", "modpack_unsupported_extension", "modpack_unsupported_compression"].map(byCode)).toEqual([repeats, repeats, repeats]);
+    expect(["modpack_manifest_invalid", "modpack_corrupt", "instance_name_invalid", "download_failed"].map(byCode)).toEqual([null, null, null, null]);
+    // 原样重试必然同样失败的先说它：切回发起的目录、读到当前目录之后也不会变，先说目录的话玩家白切一次
+    expect(retryBlockedReason(imported("elsewhere", collision, B), A, new Set())).toBe(repeats);
+    expect(retryBlockedReason(imported("unknown", collision), null, new Set())).toBe(repeats);
+    // 别的失败照旧先看目录
+    expect(retryBlockedReason(imported("network-elsewhere", { code: "network_failed", message: "连接超时" }, B), A, new Set())).toBe(`这个任务发起于游戏目录 ${B}，切回去再重试`);
+  });
+
   it("移动成功后已结束的失败与取消跟着实例记到目标目录：同一实例（不分大小写）、已知发起于源目录的才迁；新建导入、移动、已完成、排队中、别的实例、别的目录与旧记录不动", () => {
     const C = "F:\\Other\\.minecraft";
     const done = { ...move(A), status: "done" as const, error: null, finishedAt: T0 };

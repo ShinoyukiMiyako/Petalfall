@@ -12,6 +12,7 @@ import { useLauncherActions } from "../../state/launcher";
 import { useOnline } from "../../state/online";
 import type { InstanceTab } from "../../state/route";
 import type { BlockedFileDto } from "../../state/store";
+import { retryRepeatsReason } from "../../state/tasks";
 import { BannerSlot } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
@@ -86,6 +87,8 @@ function StagePanel({ stage, banner }: { stage: InstallStageTabProps["stage"]; b
     const taskId = stage.taskId;
     const files = stage.error.blocked_files;
     const reason = taskFailureReason(stage.error);
+    const repeats = retryRepeatsReason(stage);
+    const body = files !== undefined ? INSTALL_STAGE_COPY.failedBlockedBody(reason) : repeats !== null ? INSTALL_STAGE_COPY.failedRepeatsBody(reason) : INSTALL_STAGE_COPY.failedBody(reason);
     return (
       <>
         <Card padding="lg">
@@ -93,12 +96,12 @@ function StagePanel({ stage, banner }: { stage: InstallStageTabProps["stage"]; b
             scene="error"
             titleAs="h2"
             title={stage.modpack ? INSTALL_STAGE_COPY.failedTitle.modpack : INSTALL_STAGE_COPY.failedTitle.create}
-            body={files === undefined ? INSTALL_STAGE_COPY.failedBody(reason) : INSTALL_STAGE_COPY.failedBlockedBody(reason)}
+            body={body}
             action={
               <>
                 {files === undefined ? (
-                  // 与下载任务页同一个口径：断网时重试必然又失败一次
-                  <Button icon="refresh" disabledReason={online ? undefined : TASKS_COPY.offline.retryReason} onClick={() => void run(() => actions.retryTask(taskId), ACTION_ERROR.install)}>
+                  // 与下载任务页同一个口径：原样重试必然同样失败、断网时重试必然又失败一次，都置灰并说明；前者联网也不会变，先说它
+                  <Button icon="refresh" disabledReason={repeats !== null ? repeats : online ? undefined : TASKS_COPY.offline.retryReason} onClick={() => void run(() => actions.retryTask(taskId), ACTION_ERROR.install)}>
                     {INSTALL_STAGE_COPY.retry}
                   </Button>
                 ) : (

@@ -22,7 +22,7 @@ import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, useLauncherSelector, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
-import { fakeAnimate, keydown, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered, type ResizeObserverStub, type StubAnimation } from "../../test/dom";
+import { fakeAnimate, focusByKeyboard, keydown, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered, type ResizeObserverStub, type StubAnimation } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { emulateFocusFixup } from "../../test/focus-fixup";
 import { CORE_EVENT } from "../../ipc/tasks";
@@ -1405,6 +1405,64 @@ describe("实例详情：新建与导入还没装好", () => {
     expect(launcher.state.tasks.filter((t) => t.instanceId === NAME).map((t) => [t.status, t.attempt])).toEqual([["running", 2]]);
     expect(text()).toContain(RUNNING);
     expect(text()).not.toContain("安装没有完成");
+  });
+
+  it("导入撞上实例自己的版本文件：说明块只写原因、不说可以重试，重试置灰写明结果不会变，点了不重排", async () => {
+    const message = `整合包里的 overrides/${NAME}.json 落在实例「${NAME}」自己的版本文件（版本 JSON、主 jar 或 natives 目录）上，换一个实例名再导入`;
+    let attempts = 0;
+    ipc.overrides.set("install_modpack", () => {
+      attempts += 1;
+      return Promise.reject(new IpcError("modpack_unsafe_path", message, { path: `overrides/${NAME}.json` }));
+    });
+    function KeptPlaceholder() {
+      const creation = useLauncherSelector((s) => creationRef(s.tasks, NAME), creationRefEqual);
+      if (creation === null) return null;
+      const stage = installStage({ id: NAME, placeholder: true, activity: "installing" }, creation);
+      return stage.kind === "none" ? null : <InstallStageTab tab="crash" instanceId={NAME} stage={stage} />;
+    }
+    view = render(
+      <Providers>
+        <Probe />
+        <KeptPlaceholder />
+      </Providers>,
+    );
+    await flush();
+    await act(async () => {
+      await launcher.actions.installModpack({
+        source: { kind: "file", path: `D:/整合包/${NAME}.mrpack` },
+        name: NAME,
+        cover: "grass",
+        packName: NAME,
+        packVersion: "1.0.0",
+        modCount: 12,
+        mcVersion: "1.21.1",
+        loader: "fabric",
+        loaderVersion: "0.16.10",
+        excludedOptional: [],
+      });
+      await settle();
+    });
+    expect(text()).toContain("导入没有完成");
+    expect(text()).toContain(`${message}。`);
+    expect(text()).not.toContain("可以重试");
+
+    const retry = button("重试");
+    expect(retry.getAttribute("aria-disabled")).toBe("true");
+    focusByKeyboard(retry);
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toContain("原样重试，结果不会变");
+    click(retry);
+    await flush();
+    expect(attempts).toBe(1);
+    expect(launcher.state.tasks.filter((t) => t.instanceId === NAME).map((t) => [t.status, t.attempt])).toEqual([["failed", 1]]);
+
+    // 断网时说的仍是这个原因，不是「联网后才能重试」：联网之后它照样点不了
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    onTestFinished(() => onLine.mockRestore());
+    act(() => {
+      window.dispatchEvent(new Event("offline"));
+    });
+    focusByKeyboard(button("重试"));
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe("原样重试，结果不会变");
   });
 
   it("没装成是因为有文件要手动下载：说明块不提重试，「查看这些文件」打开清单，都找到后重新安装", async () => {

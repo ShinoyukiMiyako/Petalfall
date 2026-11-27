@@ -264,4 +264,46 @@ describe("排队的任务撞上基底占用", () => {
     await settle();
     expect(store.getState().toasts.at(-1)).toMatchObject({ title: "导入「NF Pack 2」没有完成", action: { label: "查看", to: { page: "tasks", filter: "failed" } } });
   });
+
+  const COLLISION = "整合包里的 overrides/NF Pack 2.json 落在实例「NF Pack 2」自己的版本文件（版本 JSON、主 jar 或 natives 目录）上，换一个实例名再导入";
+  const OCCUPIED = `游戏目录里已有一个叫「${BASE}」的版本，它装着 Forge，不是这个整合包要用的原版 ${BASE}。导入会把它的版本文件换掉，先给它改个名字再导入`;
+  const REPEATS = "原样重试，结果不会变";
+  /** 「NF Pack 2」的包里有文件落在它自己的版本文件上；别的名字撞上版本目录名被别的版本占着。 */
+  const rejectCollision = () =>
+    ipc.overrides.set("install_modpack", (args) =>
+      Promise.reject(
+        args.name === "NF Pack 2" ? new IpcError("modpack_unsafe_path", COLLISION, { path: "overrides/NF Pack 2.json" }) : new IpcError("modpack_base_occupied", OCCUPIED, { id: BASE, inherited_by: [] }),
+      ),
+    );
+
+  it("包里的文件落在实例自己的版本文件上：单条重试带原因拒绝、不发命令；全部重试跳过它，版本目录被占的照常排回", async () => {
+    rejectCollision();
+    await importAs("NF Pack 2");
+    await importAs("NF Pack 3");
+    await settle();
+    const [collided, taken] = store.getState().tasks;
+    expect([collided.error?.code, taken.error?.code]).toEqual(["modpack_unsafe_path", "modpack_base_occupied"]);
+
+    expect(() => store.actions.retryTask(collided.id)).toThrow(REPEATS);
+    ipc.overrides.set("install_modpack", () => new Promise(() => undefined));
+    expect(store.actions.retryFailedTasks()).toBe(1);
+    await settle();
+    expect(store.getState().tasks.map((t) => [t.id, t.status, t.attempt])).toEqual([
+      [collided.id, "failed", 1],
+      [taken.id, "running", 2],
+    ]);
+    expect(callsOf(ipc, "install_modpack").map((a) => a.name)).toEqual(["NF Pack 2", "NF Pack 3", "NF Pack 3"]);
+  });
+
+  it("包里的文件落在实例自己的版本文件上：通知只写原因，不给原样必然再失败的重试；版本目录被占的照常给重试", async () => {
+    rejectCollision();
+    await importAs("NF Pack 2");
+    await settle();
+    const collision = store.getState().toasts.at(-1);
+    expect([collision?.tone, collision?.title, collision?.body, collision?.action]).toEqual(["error", "导入「NF Pack 2」没有完成", COLLISION, undefined]);
+
+    await importAs("NF Pack 3");
+    await settle();
+    expect(store.getState().toasts.at(-1)).toMatchObject({ tone: "error", title: "导入「NF Pack 3」没有完成", body: OCCUPIED, action: { label: "重试" } });
+  });
 });

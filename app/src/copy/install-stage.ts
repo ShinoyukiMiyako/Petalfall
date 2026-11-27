@@ -21,6 +21,8 @@ export const INSTALL_STAGE_COPY = {
    * 文件找齐后由清单重新安装；开着时清单里随时能点「重新安装」再试。
    */
   failedBlockedBody: (reason: string) => sentence(reason),
+  /** 原样重试必然同样失败：重试置灰并说明，正文只写原因，不说「可以重试」。 */
+  failedRepeatsBody: (reason: string) => sentence(reason),
   retry: "重试",
   viewBlocked: "查看这些文件",
   viewTasks: "查看下载任务",

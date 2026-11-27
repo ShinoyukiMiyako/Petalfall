@@ -4,7 +4,7 @@
 // 「重试排到队尾」都不需要改写 createdAt。每次尝试的命令 taskId 是「任务 id + 尝试次数」：后端会记住
 // 「取消时不在运行」的 id，同 id 再登记会直接是已取消状态，重试必须换新 id。
 
-import { MOVE_INTERRUPTED_CODE, RETRY_GAME_DIR_REASON, RETRY_MOVING_REASON, TASK_INTERRUPTED_CODE, taskFailureReason } from "../copy/flows";
+import { MOVE_INTERRUPTED_CODE, RETRY_GAME_DIR_REASON, RETRY_MOVING_REASON, RETRY_REPEATS_REASON, TASK_INTERRUPTED_CODE, taskFailureReason } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
 import { MAX_PARALLEL_TASKS, TASK_HISTORY_LIMIT } from "../domain/limits";
 import { sameGameDir } from "../domain/paths";
@@ -563,6 +563,32 @@ export function settledOnRestart(task: Task): boolean {
   return task.error !== null && task.error.code === MOVE_INTERRUPTED_CODE;
 }
 
+/**
+ * 原样再跑一次结果必然相同的错误码，都只有导入整合包会报，结果只取决于包的字节与实例名：重试带的是同一份参数，本地的包
+ * 读的是同一个路径，平台的包重新下载后核对过大小与哈希，还是同一份字节。
+ * - modpack_unsafe_path：包里的路径不安全、有符号链接条目，或包里的文件落在实例自己的版本文件上（这一种换一个实例名就能导入）。
+ * - modpack_manifest_missing、modpack_unsupported_extension、modpack_unsupported_compression：包里没有清单、文件不是
+ *   认得的扩展名、要解的条目用了不支持的压缩方式。平台的包每次重试都要把整包再下一遍。
+ * 不在内的：modpack_manifest_invalid，导出整合包也会报它，导出的重试按那一刻盘上的文件重新规划；modpack_corrupt，读盘的
+ * 暂时故障也报它，平台的包重新下载正是它的出路；modpack_base_occupied，玩家照原文处理完占着那个版本目录名的版本（改名；
+ * 有别的版本继承它时先把它们移走或删掉）之后，原样重试就能成。
+ */
+export const REPEATS_ON_RETRY_CODES: ReadonlySet<string> = new Set([
+  "modpack_unsafe_path",
+  "modpack_manifest_missing",
+  "modpack_unsupported_extension",
+  "modpack_unsupported_compression",
+]);
+
+/**
+ * 原样重试必然同样失败时重试被挡住的原因，不挡为 null。任务行的重试按钮、单条重试、「全部重试」与断网恢复的计数经
+ * retryBlockedReason 按它；失败通知据此不给重试，发现页的安装面板与实例页的失败说明据此置灰重试。只看错误记录：
+ * 实例页的失败说明手里只有它。
+ */
+export function retryRepeatsReason(task: Pick<Task, "error">): string | null {
+  return task.error !== null && REPEATS_ON_RETRY_CODES.has(task.error.code) ? RETRY_REPEATS_REASON : null;
+}
+
 /** Java 运行时装在数据目录里，与游戏目录无关：这些任务的重试不看游戏目录，命令也不带它。 */
 export const GAME_DIR_FREE_COMMANDS: ReadonlySet<string> = new Set(["install_java"]);
 
@@ -619,12 +645,16 @@ export function movingKeys(instances: readonly Pick<InstanceSummary, "id" | "act
 
 /**
  * 此刻重试被挡住的原因，不挡为 null。current 是当前游戏目录，moving 是正在移到别的游戏目录的实例（见 movingKeys）。
- * 先看游戏目录（见 retryGameDirReason）：切回去之前一直成立，目录对上了，moving 里的才是这个目录里的那个实例。
- * 再看实例在不在移动：重试的任务与移动互斥，只能排在它后面，移动成功时被取消（见 strandedByMove），移动期间重试没有意义；
+ * 先看原样重试是不是必然同样失败（见 retryRepeatsReason）：它只看错误记录，在哪个游戏目录都成立、不随时间变；排在目录后面
+ * 的话，玩家照着「切回去再重试」切回去，重试仍然点不了。
+ * 再看游戏目录（见 retryGameDirReason）：切回去之前一直成立，目录对上了，moving 里的才是这个目录里的那个实例。
+ * 最后看实例在不在移动：重试的任务与移动互斥，只能排在它后面，移动成功时被取消（见 strandedByMove），移动期间重试没有意义；
  * 移动有了结局就不挡。新建与导入不看移动，它们不找移走的这个实例。
  * 单条重试、「全部重试」、断网恢复的计数与任务行的重试按钮都按它。
  */
 export function retryBlockedReason(task: Task, current: string | null, moving: ReadonlySet<string>): string | null {
+  const repeats = retryRepeatsReason(task);
+  if (repeats !== null) return repeats;
   const dir = retryGameDirReason(task, current);
   if (dir !== null) return dir;
   if (task.instanceId === null || CREATES_INSTANCE.has(task.spec.command)) return null;
@@ -633,7 +663,7 @@ export function retryBlockedReason(task: Task, current: string | null, moving: R
 
 /**
  * 「全部重试」与断网恢复的批量重试收不收这个任务，current 与 moving 同 retryBlockedReason。要走手动下载清单的不收（见 awaitsManualFiles）；
- * 游戏目录对不上、不知道或实例正在移动的不收（见 retryBlockedReason），断网恢复的通知也不数它们。移动一律不收：它不需要网络，
+ * 游戏目录对不上、不知道、原样重试必然同样失败或实例正在移动的不收（见 retryBlockedReason），断网恢复的通知也不数它们。移动一律不收：它不需要网络，
  * 是玩家逐个确认过的大动作，批量里没人看着它从哪移到哪。
  */
 export function batchRetryable(task: Task, current: string | null, moving: ReadonlySet<string>): boolean {

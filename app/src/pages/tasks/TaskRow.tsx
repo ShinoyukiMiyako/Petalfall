@@ -96,7 +96,7 @@ export interface TaskRowProps {
   meta: TaskMetaContext;
   /** 关联的实例还在实例列表里（新建被取消后实例已撤掉，就不给「查看实例」）。 */
   hasInstance: boolean;
-  /** 重试不行时的原因（发起于别的游戏目录，或断网时必然失败）：按钮置灰并在悬停时说明；能重试为 undefined。 */
+  /** 重试不行时的原因（原样重试必然同样失败、发起于别的游戏目录、实例正在移动，或断网时必然失败）：按钮置灰并在悬停时说明；能重试为 undefined。 */
   retryBlocked: string | undefined;
   onCancel(): void;
   onRetry(): void;

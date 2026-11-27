@@ -380,7 +380,7 @@ function TaskListRow({ task: placed, finishing, queuePosition, now, handlers }: 
   // 换成已结束的样子：进度条、百分数与取消键撤掉，整行变淡。在场的行换状态时页面总会给新的对象，运行中的 placed
   // 碰上已完成的任务只会是这样的退场副本（行离开分组或整组退场都是），按收尾画，与有收尾这一拍时离开前的样子相同。
   const holding = finishing || (running && task.status === "done");
-  // 目录对不上是切回去之前一直成立的原因，先说它；实例在移动要等移动有结局；断网只是眼下
+  // 原样重试必然同样失败的在哪个目录、联不联网都不会变，先说它；目录对不上是切回去之前一直成立的原因；实例在移动要等移动有结局；断网只是眼下
   const blockedReason = task.status === "failed" ? retryBlockedReason(task, handlers.gameDir, handlers.moving) : null;
   return (
     <TaskRow

@@ -146,6 +146,7 @@ import {
   newTask,
   restoreJournal,
   retryBlockedReason,
+  retryRepeatsReason,
   retryTask,
   sharedSavesKeys,
   startComposite,
@@ -516,7 +517,7 @@ export interface LauncherActions {
   cancelTask(id: string): Promise<void>;
   cancelAllTasks(): Promise<void>;
   retryTask(id: string): void;
-  /** 把失败的任务重新排进队列（已有同一件事在队列里的跳过；移动、要手动下载的、游戏目录对不上的与实例正在移动的不收，见 batchRetryable），返回重新排进去的个数。 */
+  /** 把失败的任务重新排进队列（已有同一件事在队列里的跳过；移动、要手动下载的、游戏目录对不上的、原样重试必然同样失败的与实例正在移动的不收，见 batchRetryable），返回重新排进去的个数。 */
   retryFailedTasks(): number;
   clearFinishedTasks(): void;
   /** 打开下载快览或进入下载任务页时调用：此刻的失败都算看过了。 */
@@ -2450,9 +2451,11 @@ export class LauncherStore {
 
   /**
    * 带手动下载清单的失败，通知上不给重试，转去失败筛选看清单：「自动下载受限的 CurseForge 文件」关着时原样重跑只会再失败；
-   * 开着时清单里能直接点「重新安装」再试。
+   * 开着时清单里能直接点「重新安装」再试。原样重试必然同样失败的（见 retryRepeatsReason）不给动作：有出路的写在正文的原因里，
+   * 失败筛选里也只有一个置灰的重试。
    */
-  private failedTaskAction(task: Task, error: TaskError): ToastAction {
+  private failedTaskAction(task: Task, error: TaskError): ToastAction | undefined {
+    if (retryRepeatsReason({ error }) !== null) return undefined;
     return error.blocked_files === undefined
       ? { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.install }
       : { label: TASK_TOAST.viewAction, to: { page: "tasks", filter: "failed" } };

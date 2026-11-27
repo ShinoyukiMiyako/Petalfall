@@ -6,6 +6,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { APP_NAME } from "../lib/app-info";
+import { REPEATS_ON_RETRY_CODES } from "../state/tasks";
 import { MOVE_INTERRUPTED_CODE, TASK_INTERRUPTED_CODE, taskFailureReason } from "./flows";
 
 /** 插值位的占位符。 */
@@ -497,6 +498,10 @@ describe("任务失败原因与后端码表对齐", () => {
     expect(codes).toContain("instance_move_blocked");
     expect(taskFailureReason({ code: "instance_move_blocked", message: RAW, move_blocker: { kind: "name_taken" } })).toBe("目标游戏目录里已有同名的版本，先给这个实例改个名字再移");
     expect(taskFailureReason({ code: "instance_move_blocked", message: RAW })).toBe(RAW);
+  });
+
+  it("原样再试必然同样失败、因此不给重试的码都在后端码表里：码改了名，这类失败就会悄悄又能重试", () => {
+    expect([...REPEATS_ON_RETRY_CODES].filter((code) => !codes.includes(code))).toEqual([]);
   });
 
   it("码表解析本身：只认字符串常量", () => {

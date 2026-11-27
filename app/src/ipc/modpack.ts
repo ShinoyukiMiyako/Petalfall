@@ -161,7 +161,8 @@ export const summarizePlatformModpack = (platform: Platform, projectId: string, 
  * 进度经 core-event 推送并带 task_id，可用 cancelTask(taskId) 取消；失败或取消后不留半成品实例。
  * 还有需要手动下载的文件时以 distribution_blocked 失败，detail.files 只列没认领到的。
  * 包里的文件落在实例自己的版本文件上报 modpack_unsafe_path（detail.path）；要装原版或加载器的版本目录名下已经有
- * 一个别的版本报 modpack_base_occupied（detail.id）。这两种的出路写在错误原文里，界面显示原文。
+ * 一个别的版本报 modpack_base_occupied（detail.id、detail.inherited_by）。这两种的出路写在错误原文里，界面显示原文。
+ * modpack_unsafe_path 与读包阶段的几种失败原样重试必然同样失败，界面上的重试置灰（见 state/tasks.ts 的 retryRepeatsReason）。
  */
 export const installModpack = (taskId: string, gameDir: string, source: ModpackSource, name: string | null, excludedOptional: readonly string[]): Promise<ModpackInstallOutcomeDto> =>
   invoke<ModpackInstallOutcomeDto>("install_modpack", { taskId, gameDir, source, name, excludedOptional });
