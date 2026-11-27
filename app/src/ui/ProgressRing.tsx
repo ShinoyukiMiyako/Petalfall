@@ -84,7 +84,7 @@ export function ProgressRing({ value, size = 36, tone = "accent", track, capAt99
         <circle className={styles.track} cx={center} cy={center} r={radius} fill="none" strokeWidth={stroke} />
         {/* 进度为 0 时不画填充：圆头描边在零长度时仍会画出一个点 */}
         <AnimatePresence>
-          {!empty && target > 0 && <RingFill key="fill" center={center} radius={radius} stroke={stroke} circumference={circumference} dashOffset={dashOffset} appear={mounted.current} />}
+          {!empty && target > 0 && <RingFill key="fill" tone={tone} center={center} radius={radius} stroke={stroke} circumference={circumference} dashOffset={dashOffset} appear={mounted.current} />}
         </AnimatePresence>
       </svg>
       {ringHasLabel(size) && (
@@ -99,8 +99,9 @@ export function ProgressRing({ value, size = 36, tone = "accent", track, capAt99
 /**
  * 填充弧：出现时淡入（appear：进度环挂载之后才出现），转为没有进度时淡出。退场期间停在最后显示的位置：
  * 没有 track 时平滑值会随占位的 0 往回走，不停住的话弧会一边淡出一边倒退。
+ * 色调标在弧自己身上：退场中的弧拿到的是 AnimatePresence 留下的退场那一刻的属性，调用方同时把色调换成灰也碰不到它。
  */
-function RingFill({ center, radius, stroke, circumference, dashOffset, appear }: { center: number; radius: number; stroke: number; circumference: number; dashOffset: MotionValue<number>; appear: boolean }) {
+function RingFill({ tone, center, radius, stroke, circumference, dashOffset, appear }: { tone: ProgressTone; center: number; radius: number; stroke: number; circumference: number; dashOffset: MotionValue<number>; appear: boolean }) {
   const present = useIsPresent();
   const frozen = useRef<number | null>(null);
   // 退场途中进度又回来时（同一个键重新出现）继续跟随
@@ -109,6 +110,7 @@ function RingFill({ center, radius, stroke, circumference, dashOffset, appear }:
   return (
     <motion.circle
       className={styles.fill}
+      data-tone={tone}
       cx={center}
       cy={center}
       r={radius}

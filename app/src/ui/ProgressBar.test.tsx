@@ -442,6 +442,25 @@ describe("ProgressRing", () => {
     expect(offsetOf(fill)).toBeCloseTo(circumference * 0.4, 5);
   });
 
+  // 下载任务页的总进度环：空闲时调用方在同一次渲染里把进度换成 null、色调换成灰
+  it("转为没有进度、色调同时换成灰：退场中的弧留着原来的色调淡出；弧还在时换色调照常换到弧上", () => {
+    const tree = (value: number | null, tone: "accent" | "ok" | "muted") => <ProgressRing value={value} size={84} tone={tone} label="下载总进度" />;
+    const fill = () => {
+      const el = view?.container.querySelectorAll("circle")[1];
+      if (el === undefined) throw new Error("进度环没有填充弧");
+      return el;
+    };
+    view = render(tree(0.6, "accent"));
+    expect(fill().getAttribute("data-tone")).toBe("accent");
+    view.rerender(tree(0.6, "ok"));
+    const arc = fill();
+    expect(arc.getAttribute("data-tone")).toBe("ok");
+    view.rerender(tree(null, "muted"));
+    expect(emptyRing().dataset.tone).toBe("muted");
+    expect(fill()).toBe(arc);
+    expect(arc.getAttribute("data-tone")).toBe("ok");
+  });
+
   it("挂载时就有进度的填充弧直接显示；挂载之后才出现的从透明淡入", () => {
     // SVG 元素上 framer-motion 把透明度写成属性
     view = render(<ProgressRing value={0.5} size={36} label="下载" />);
@@ -470,5 +489,14 @@ describe("进度填充的样式", () => {
   it("进度环换色调时描边色与圆心字色一次性过渡", () => {
     expect(ruleOf("./ProgressRing.module.css", ".fill")).toContain("transition: stroke var(--sk-dur-hover) var(--sk-ease)");
     expect(ruleOf("./ProgressRing.module.css", ".label")).toContain("transition: color var(--sk-dur-hover) var(--sk-ease)");
+  });
+
+  it("进度环的描边色按填充弧自己的色调标记取，不跟根：退场中的弧不随根换色", () => {
+    // 地址经变量给出，同 ruleOf：字面量写在 new URL 里会被构建当成资源地址改写成 http
+    const file = "./ProgressRing.module.css";
+    const css = strip(readFileSync(new URL(file, import.meta.url), "utf8"));
+    expect(css).not.toMatch(/\.ring\[data-tone=/);
+    expect(css).toMatch(/\n\.fill\[data-tone="muted"\] \{\s*--ring-fill: var\(--sk-text-3\);\s*\}/);
+    expect(css).toMatch(/\n\.fill\[data-tone="ok"\] \{\s*--ring-fill: var\(--sk-ok\);\s*\}/);
   });
 });

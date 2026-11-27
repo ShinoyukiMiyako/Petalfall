@@ -13,23 +13,27 @@
   transform: rotate(-90deg);
 }
 
-.ring[data-tone="ok"] {
+/*
+ * 色调按填充弧自己身上的标记取，不跟根：转为没有进度时调用方常在同一次渲染里把色调换成灰，
+ * 退场中的弧留着退场那一刻的标记，以原来的颜色淡出，不边淡出边变成 text-3
+ */
+.fill[data-tone="ok"] {
   --ring-fill: var(--sk-ok);
 }
 
-.ring[data-tone="info"] {
+.fill[data-tone="info"] {
   --ring-fill: var(--sk-info);
 }
 
-.ring[data-tone="warn"] {
+.fill[data-tone="warn"] {
   --ring-fill: var(--sk-warn);
 }
 
-.ring[data-tone="danger"] {
+.fill[data-tone="danger"] {
   --ring-fill: var(--sk-danger);
 }
 
-.ring[data-tone="muted"] {
+.fill[data-tone="muted"] {
   --ring-fill: var(--sk-text-3);
 }
 
@@ -37,7 +41,7 @@
   stroke: var(--sk-bg-3);
 }
 
-/* 色调随状态换（有任务时强调色、空闲时灰）：描边色与圆心字色一次性过渡，不在一帧里换色 */
+/* 弧还在时换了色调：描边色过渡过去，圆心字色随占位与否同样过渡，都不在一帧里换色 */
 .fill {
   stroke: var(--ring-fill);
   transition: stroke var(--sk-dur-hover) var(--sk-ease);
