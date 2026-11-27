@@ -2799,6 +2799,8 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
 
   it("介绍末尾的「在网页上打开」用系统浏览器打开工程页，打不开时报出来", async () => {
     const { IpcError } = await import("../../ipc/errors");
+    // 第一次点击走到假后端的 opener，它在浏览器预览里真开标签页；jsdom 没有实现 window.open
+    vi.stubGlobal("open", vi.fn());
     const mod = entry("M1", { title: "有工程页", resource_type: "mod", loaders: ["fabric"] });
     const url = "https://modrinth.com/mod/sodium";
     pages = () => result([mod]);
