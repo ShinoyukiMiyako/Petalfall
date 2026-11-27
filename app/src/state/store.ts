@@ -2451,12 +2451,11 @@ export class LauncherStore {
 
   /**
    * 带手动下载清单的失败，通知上不给重试，转去失败筛选看清单：「自动下载受限的 CurseForge 文件」关着时原样重跑只会再失败；
-   * 开着时清单里能直接点「重新安装」再试。原样重试必然同样失败的（见 retryRepeatsReason）不给动作：有出路的写在正文的原因里，
-   * 失败筛选里也只有一个置灰的重试。
+   * 开着时清单里能直接点「重新安装」再试。原样重试必然同样失败的（见 retryRepeatsReason）同样不给重试、转去失败筛选：出路写在
+   * 原因的末尾（如「换一个实例名再导入」），通知正文最多三行，长的原因到那里被截掉；任务行按页面宽度排一行，悬停时给出全文。
    */
-  private failedTaskAction(task: Task, error: TaskError): ToastAction | undefined {
-    if (retryRepeatsReason({ error }) !== null) return undefined;
-    return error.blocked_files === undefined
+  private failedTaskAction(task: Task, error: TaskError): ToastAction {
+    return error.blocked_files === undefined && retryRepeatsReason({ error }) === null
       ? { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.install }
       : { label: TASK_TOAST.viewAction, to: { page: "tasks", filter: "failed" } };
   }

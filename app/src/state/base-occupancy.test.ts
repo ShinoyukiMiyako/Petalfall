@@ -295,12 +295,12 @@ describe("排队的任务撞上基底占用", () => {
     expect(callsOf(ipc, "install_modpack").map((a) => a.name)).toEqual(["NF Pack 2", "NF Pack 3", "NF Pack 3"]);
   });
 
-  it("包里的文件落在实例自己的版本文件上：通知只写原因，不给原样必然再失败的重试；版本目录被占的照常给重试", async () => {
+  it("包里的文件落在实例自己的版本文件上：通知不给原样必然再失败的重试，转去失败筛选看全文；版本目录被占的照常给重试", async () => {
     rejectCollision();
     await importAs("NF Pack 2");
     await settle();
     const collision = store.getState().toasts.at(-1);
-    expect([collision?.tone, collision?.title, collision?.body, collision?.action]).toEqual(["error", "导入「NF Pack 2」没有完成", COLLISION, undefined]);
+    expect([collision?.tone, collision?.title, collision?.body, collision?.action]).toEqual(["error", "导入「NF Pack 2」没有完成", COLLISION, { label: "查看", to: { page: "tasks", filter: "failed" } }]);
 
     await importAs("NF Pack 3");
     await settle();
