@@ -2856,19 +2856,18 @@ export class LauncherStore {
   // ---------------------------------------------------------------- 启动内部
 
   /**
-   * 普通启动与直达共用的拦截链：同一实例已在加载或运行时直接返回；别的实例占着游戏进程时弹替换确认；
-   * 安装中抛错；损坏的：补全修不好的报出原因，修得好的普通启动转成「修复并启动」、直达抛错；没有账户先登录，
+   * 普通启动与直达共用的拦截链：同一实例已在加载或运行时直接返回；安装中抛错；损坏的：补全修不好的报出原因，
+   * 直达抛错；别的实例占着游戏进程时弹替换确认；修得好的损坏实例的普通启动转成「修复并启动」；没有账户先登录，
    * 登录后带着同一个 quickPlay 继续。
    */
   private async requestLaunch(id: string, quickPlay: launchIpc.QuickPlayArg | null): Promise<void> {
     const inst = this.instance(id);
     const s = this.raw.session;
-    if (s !== null && isSessionActive(s)) {
-      // 同一实例在多个入口上点启动，只有第一次生效
-      if (s.instanceId === id) return;
-      this.set({ launchPrompt: { instanceId: id, occupantId: s.instanceId, occupantPhase: s.phase === "running" ? "running" : "loading", quickPlay } });
-      return;
-    }
+    const occupant = s !== null && isSessionActive(s) ? s : null;
+    // 同一实例在多个入口上点启动，只有第一次生效
+    if (occupant !== null && occupant.instanceId === id) return;
+    // 这几项拒绝与此刻谁占着游戏进程无关，排在替换确认之前：失败通知会一直留着，另一个实例在跑时点它的重试，
+    // 先问替换的话，玩家确认后那一局已被结束，这里才报出起不来，两头落空
     if (inst.status === "installing") throw new Error(LAUNCH_COPY.stillInstalling);
     if (inst.status === "broken") {
       // 入口都按原因禁用了修复并启动，还走到这里的是边角路径：失败通知上的重试点下去时实例已重扫成修不好、补全完成后
@@ -2879,6 +2878,12 @@ export class LauncherStore {
       // 修复完成后的自动启动是普通启动，带不上直达目标：入口按损坏禁用直达。直达失败后点重试、实例已重扫成修得好的
       // 损坏时会走到这里，报给玩家的是先修复，标题沿用调用方的启动失败
       if (quickPlay !== null) throw new Error(LAUNCH_COPY.needsRepair);
+    }
+    if (occupant !== null) {
+      this.set({ launchPrompt: { instanceId: id, occupantId: occupant.instanceId, occupantPhase: occupant.phase === "running" ? "running" : "loading", quickPlay } });
+      return;
+    }
+    if (inst.status === "broken") {
       await this.actions.repairInstance(id, { launchAfter: true });
       return;
     }

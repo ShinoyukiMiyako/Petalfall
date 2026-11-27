@@ -117,6 +117,97 @@ describe("直达走与启动相同的拦截链", () => {
     expect(s.getState().session).toMatchObject({ instanceId: "生存", quickPlay: WORLD });
   });
 
+  describe("别的实例在运行时点失败通知上的重试", () => {
+    const unrepairable = instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null });
+    const repairable = instanceDto("生存", { status: "broken", broken_reason: "缺少客户端 jar" });
+
+    /** 「生存」以 first 启动失败，留下带重试的通知；接着「创造」开起来在运行。返回那条通知上的重试。 */
+    async function staleRetry(s: LauncherStore, first: QuickPlayArg | null) {
+      ipc.overrides.set("launch_game", (args) => {
+        if (args.versionId === "生存") throw new IpcError("files_offline", "还缺文件", { count: 3 });
+        return { pid: 1 };
+      });
+      // 结束游戏以退出事件为准：后端结束进程后推送 killed 退出
+      ipc.overrides.set("stop_game", () => {
+        queueMicrotask(() => emit(GAME_EXIT_EVENT, { version_id: "创造", exit_code: 0, crashed: false, killed: true, duration_ms: 1000 } satisfies GameExitEvent));
+        return null;
+      });
+      await (first === null ? s.actions.launch("生存") : s.actions.quickPlay("生存", first));
+      const retry = s.getState().toasts.find((t) => t.tone === "error")?.action;
+      if (retry === undefined || !("run" in retry)) throw new Error("启动失败的通知应带重试");
+      expect(retry.errorTitle).toBe("「生存」启动失败");
+      await s.actions.launch("创造");
+      expect(s.getState().session).toMatchObject({ instanceId: "创造", phase: "running" });
+      return retry;
+    }
+
+    it.each<[string, QuickPlayArg | null, (s: LauncherStore) => Promise<void>, string]>([
+      [
+        "实例已重扫成补全修不好：报出后端给的原因原文",
+        null,
+        async (s) => {
+          instances = instances.map((i) => (i.id === "生存" ? unrepairable : i));
+          await s.actions.refreshInstances();
+        },
+        "缺少版本 JSON，也没有记下当初装的是什么",
+      ],
+      [
+        "实例正在补全：报实例还在安装",
+        null,
+        async (s) => {
+          // 补全一直不返回：实例停在安装中
+          ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+          await s.actions.repairInstance("生存");
+        },
+        "实例还在安装",
+      ],
+      [
+        "直达失败、实例已重扫成修得好的损坏：报先修复",
+        WORLD,
+        async (s) => {
+          instances = instances.map((i) => (i.id === "生存" ? repairable : i));
+          await s.actions.refreshInstances();
+        },
+        "实例需要先修复",
+      ],
+    ])("%s；不弹替换确认，也不结束正在跑的那一局", async (_name, first, change, reason) => {
+      const s = await boot();
+      const retry = await staleRetry(s, first);
+      await change(s);
+      await settle();
+      const repairsBefore = callsOf(ipc, "repair_instance").length;
+
+      await expect(Promise.resolve().then(() => retry.run())).rejects.toMatchObject({ message: reason });
+      await settle();
+      expect(s.getState().launchPrompt).toBeNull();
+      expect(callsOf(ipc, "stop_game")).toEqual([]);
+      expect(s.getState().session).toMatchObject({ instanceId: "创造", phase: "running" });
+      expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["生存", "创造"]);
+      expect(callsOf(ipc, "repair_instance")).toHaveLength(repairsBefore);
+    });
+
+    it("实例已重扫成修得好的损坏、普通启动的重试：照旧先弹替换确认，确认后结束那一局再修复并启动", async () => {
+      const s = await boot();
+      const retry = await staleRetry(s, null);
+      instances = instances.map((i) => (i.id === "生存" ? repairable : i));
+      await s.actions.refreshInstances();
+      await settle();
+      ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+
+      await retry.run();
+      expect(s.getState().launchPrompt).toEqual({ instanceId: "生存", occupantId: "创造", occupantPhase: "running", quickPlay: null });
+      expect(callsOf(ipc, "repair_instance")).toEqual([]);
+
+      await s.actions.resolveLaunchPrompt(true);
+      await settle();
+      expect(callsOf(ipc, "stop_game")).toHaveLength(1);
+      expect(s.getState().tasks.filter((t) => t.spec.command === "repair_instance").map((t) => t.instanceId)).toEqual(["生存"]);
+      expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["生存"]);
+      // 补全还没完成，接着的启动还没开始
+      expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["生存", "创造"]);
+    });
+  });
+
   it("损坏的实例不提供直达：报给玩家先修复，不启动也不排补全；普通启动照旧转成修复并启动", async () => {
     const s = await boot();
     await expect(s.actions.quickPlay("坏了", SERVER)).rejects.toMatchObject({ message: "实例需要先修复" });
