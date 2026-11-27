@@ -120,7 +120,7 @@ export interface UnrepairableInstance {
 export interface BrokenInstances {
   /** 补全能修好的：横幅的按钮只为它们排补全。 */
   repairable: InstanceSummary[];
-  /** 补全修不好的：补全一律被拒，横幅写明原因；只列着一个时按它的出路给按钮。 */
+  /** 补全修不好的：补全一律被拒，横幅写明原因；只列着一个时按它的出路给按钮，其中有读不出来的时横幅给重新扫描。 */
   unrepairable: UnrepairableInstance[];
 }
 

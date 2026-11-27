@@ -171,7 +171,7 @@ export default function LibraryPage() {
   const repairAll = () => {
     for (const inst of queueable) void run(() => actions.repairInstance(inst.id), ACTION_ERROR.repair);
   };
-  // 读不出来的文件可能完好，占用放开或权限修好后重读一次列表就恢复。重新扫描重读的是整张列表，不是逐个实例的批量动作，
+  // 读不出来的文件可能完好，占用放开或权限修好后重读一次列表，版本 JSON 就读得出来。重新扫描重读的是整张列表，不是逐个实例的批量动作，
   // 横幅里有一个读不出来的就给，不论旁边还列着什么
   const unreadable = broken.unrepairable.some((u) => u.exit.kind === "rescan");
   // 后端每扫一次都要把每个实例的设置、未完成标记、崩溃记录、工作目录读一遍，版本目录在网络盘或机械盘上时要几秒：进行中转圈并挡住
