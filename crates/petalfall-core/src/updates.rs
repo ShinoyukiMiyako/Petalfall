@@ -10,8 +10,9 @@
 //! 原版实例（未装任何 Mod 加载器）直接返回空：没有加载器就不会有 Mod 在跑，扫它纯属浪费一轮网络请求。
 //!
 //! 请求量是这里的头号约束：一个实例几十上百个 Mod，逐个问平台立刻撞上限流。Modrinth 侧是一次按哈希
-//! 取当前版本，加上按当前发布通道分组、每组一次的按哈希取最新版本（全是正式版时就是一次）；CurseForge
-//! 侧与锁定了版本的 Mod 逐工程查版本列表，有界并发且走版本列表缓存。
+//! 取当前版本，加上按当前发布通道分组、每组一次的按哈希取最新版本（全是正式版时就是一次）；借着别家跑的
+//! 实例上，组里有只标被借那一家的结果时，这一组再按实例自己那一家多问一次。CurseForge 侧与锁定了版本的 Mod
+//! 逐工程查版本列表，有界并发且走版本列表缓存。
 //!
 //! 玩家的更新设置在这里生效：忽略更新的 Mod 不进任何查询；锁定版本的只报不晚于锁定版本的更新；推给
 //! 玩家的候选只能与当前装的同一发布通道或更稳定（装正式版只报正式版）。
@@ -36,6 +37,7 @@ use crate::modfs::{
     NETWORK_CONCURRENCY, bounded_map, ledger_key, local_concurrency, lock_mods_dir, present, refuse,
 };
 use crate::mods::{InstanceDirs, mod_file_path, scan_installed};
+use crate::modversions::sort_by_published_desc;
 
 /// 一个可更新项。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -256,6 +258,13 @@ impl Petalfall {
         }
         modrinth_groups.sort_by_key(|(channel, _)| channel.admitted().len());
 
+        // 实例自己装的那几家：借着别家跑的实例拿到只标被借那一家的结果时，按它们再问一次。
+        let own_loaders: Vec<_> = loaders
+            .all
+            .iter()
+            .copied()
+            .filter(|loader| !loaders.borrowed.iter().any(|pair| pair.borrowed == *loader))
+            .collect();
         let mut candidates = Vec::new();
         for (channel, targets) in &modrinth_groups {
             let hashes: Vec<String> = targets.keys().cloned().collect();
@@ -267,46 +276,64 @@ impl Petalfall {
                     channel.admitted(),
                 )
                 .await?;
+            let mut borrowed_builds = Vec::new();
             for (hash, version) in latest {
-                let Some((file_name, entry)) = targets.get(&hash) else {
+                let Some(target) = targets.get(&hash) else {
                     continue;
                 };
-                // 端点返回的是该文件在本实例加载器/版本下的最新兼容版本，可能正是当前这个。
-                if version.id == entry.version_id {
-                    continue;
-                }
-                let Some(info) = version.to_version_info() else {
+                let Some(info) = version
+                    .to_version_info()
+                    .filter(|info| offers_update(info, &target.1, by_hash.get(&hash), *channel))
+                else {
                     continue;
                 };
-                // 通道过滤已经下推，这里再校一遍：服务端忽略了过滤条件时，不能因此把测试版推给正式版玩家。
-                if !channel.admits(info.release_channel) {
+                // 端点按时间只给一个，分不出同一发布里给实例那一家传的构建：借着别家跑的实例拿到只标被借那一家
+                // 的结果时（Quilt 实例拿到只标 fabric 的、1.20.1 的 NeoForge 实例拿到只标 forge 的），留到下面
+                // 按实例自己那一家再问一次。
+                if loaders.borrowed.iter().any(|pair| {
+                    info.loaders.contains(&pair.borrowed) && !info.loaders.contains(&pair.own)
+                }) {
+                    borrowed_builds.push((hash, target, info));
                     continue;
                 }
-                // 玩家装的可能是比「最新兼容」更新的测试版或别的加载器的构建：平台给回的那个反而更旧，
-                // 推给他就是一次降级。
-                if let Some(current) = by_hash.get(&hash)
-                    && info.date_published <= current.date_published
-                {
-                    continue;
-                }
-                // 端点按时间只给一个，分不出同一发布里给实例那一家传的构建：借着别家跑的实例拿到没标自己
-                // 那一家的结果时（Quilt 实例拿到只标 fabric 的、1.20.1 的 NeoForge 实例拿到只标 forge 的），
-                // 改走版本列表在本地挑。
-                if loaders
-                    .borrowed
-                    .iter()
-                    .any(|pair| !info.loaders.contains(&pair.own))
-                {
-                    listed_targets.push((file_name.clone(), entry.clone()));
-                    continue;
-                }
-                candidates.push(UpdateCandidate {
-                    file_name: file_name.clone(),
-                    title: entry.title.clone(),
-                    current_version_id: entry.version_id.clone(),
-                    current_version_number: entry.version_number.clone(),
-                    latest: info,
+                candidates.push(update_candidate(target, info));
+            }
+            if borrowed_builds.is_empty() {
+                continue;
+            }
+            // 整组只多这一次请求，不逐个走版本列表：版本列表按实例的 MC 版本筛过，当前版本在平台上只标了 1.20
+            // 这类时不在里面，比不出新旧；1.20.1 上只标 forge 的 Mod 又多，逐个请求会占满令牌桶。
+            let hashes: Vec<String> = borrowed_builds
+                .iter()
+                .map(|(hash, _, _)| hash.clone())
+                .collect();
+            let own = modrinth
+                .latest_versions_by_hashes(
+                    &hashes,
+                    &own_loaders,
+                    &[mc_version.as_str()],
+                    channel.admitted(),
+                )
+                .await?;
+            for (hash, target, borrowed) in borrowed_builds {
+                let current = by_hash.get(&hash);
+                let current_info = current.and_then(ModrinthVersion::to_version_info);
+                // 借来的那份是两家里最新的，自家那份与它同一发布时排到它前面，取第一份算得上更新的：借来那份
+                // 只是当前版本同一发布的另一份构建时，自家更新的发布照样报。
+                let mut builds = vec![borrowed];
+                builds.extend(own.get(&hash).and_then(ModrinthVersion::to_version_info));
+                sort_by_published_desc(&mut builds);
+                prefer_own_builds(&mut builds, &loaders.borrowed);
+                let chosen = builds.into_iter().find(|build| {
+                    offers_update(build, &target.1, current, *channel)
+                        // 同一发布的另一份构建只是传得晚，换过去什么都没更新。
+                        && !current_info
+                            .as_ref()
+                            .is_some_and(|current| is_borrowed_twin(build, current))
                 });
+                if let Some(chosen) = chosen {
+                    candidates.push(update_candidate(target, chosen));
+                }
             }
         }
 
@@ -609,6 +636,36 @@ fn curseforge_ready(
     }
 }
 
+/// Modrinth 批量端点给回的 `info` 能不能当 `entry` 的更新推给玩家。`current` 是这一轮按哈希查回的当前版本，
+/// `channel` 是它所在的通道组。
+///
+/// 端点返回的是该文件在本实例加载器、版本下的最新兼容版本，可能正是当前这个。通道过滤已经下推，这里再校
+/// 一遍：服务端忽略了过滤条件时，不能因此把测试版推给正式版玩家。玩家装的可能是比「最新兼容」更新的测试版
+/// 或别的加载器的构建：平台给回的那个反而更旧，推给他就是一次降级。
+fn offers_update(
+    info: &ModVersionInfo,
+    entry: &LedgerEntry,
+    current: Option<&ModrinthVersion>,
+    channel: ReleaseChannel,
+) -> bool {
+    info.version_id != entry.version_id
+        && channel.admits(info.release_channel)
+        && current.is_none_or(|current| info.date_published > current.date_published)
+}
+
+fn update_candidate(
+    (file_name, entry): &(String, LedgerEntry),
+    latest: ModVersionInfo,
+) -> UpdateCandidate {
+    UpdateCandidate {
+        file_name: file_name.clone(),
+        title: entry.title.clone(),
+        current_version_id: entry.version_id.clone(),
+        current_version_number: entry.version_number.clone(),
+        latest,
+    }
+}
+
 /// 从版本列表（已按发布时间倒序）里挑出该推给玩家的更新；没有返回 `None`。
 ///
 /// 候选必须同时满足：不是当前版本、通道被当前版本的通道放行、发布时间严格晚于当前版本、锁定了版本时
@@ -894,18 +951,46 @@ mod tests {
         )
     }
 
-    /// Quilt 实例上跑一次更新检查：玩家装着 `current`，批量端点回 `latest`，版本列表回 `listed`。
+    /// 把版本 JSON 标的 MC 版本换成 `game_versions`（JSON 数组）。
+    fn on_game_versions(version: String, game_versions: &str) -> String {
+        version.replace(
+            r#""game_versions":["1.20.1"]"#,
+            &format!(r#""game_versions":{game_versions}"#),
+        )
+    }
+
+    /// 挂一个批量查更新的回答：只认下推的加载器恰好是 `loaders`（顺序也算）、MC 版本是 1.20.1 的请求。
+    /// 按前缀比的 `body_partial_json` 分不出只带 neoforge 与带着 neoforge、forge 两家的请求。
+    async fn mount_update(server: &MockServer, loaders: serde_json::Value, body: String) {
+        Mock::given(method("POST"))
+            .and(path("/version_files/update"))
+            .and(move |request: &wiremock::Request| {
+                serde_json::from_slice::<serde_json::Value>(&request.body).is_ok_and(|sent| {
+                    sent["loaders"] == loaders
+                        && sent["game_versions"] == serde_json::json!(["1.20.1"])
+                })
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(server)
+            .await;
+    }
+
+    /// Quilt 实例上跑一次更新检查：玩家装着 `current`，带 quilt、fabric 两家的批量查询回 `latest`，只带 quilt 的
+    /// 回 `own`（`None` 即这一家没有结果）。
     async fn quilt_updates(
         current: impl FnOnce(&str) -> String,
         latest: String,
-        listed: impl FnOnce(&str) -> Vec<String>,
+        own: impl FnOnce(&str) -> Option<String>,
     ) -> Vec<UpdateCandidate> {
         borrowed_updates(
             ("1.20.1-quilt", QUILT_JSON),
-            serde_json::json!(["quilt", "fabric"]),
+            (
+                serde_json::json!(["quilt", "fabric"]),
+                serde_json::json!(["quilt"]),
+            ),
             current,
             latest,
-            listed,
+            own,
         )
         .await
     }
@@ -919,29 +1004,33 @@ mod tests {
         "libraries":[{"name":"net.neoforged.fancymodloader:loader:47.2.2"},
                      {"name":"net.minecraftforge:accesstransformers:8.0.4"}]}"#;
 
-    /// 1.20.1 的 NeoForge 实例上跑一次更新检查，参数同 [`quilt_updates`]。
+    /// 1.20.1 的 NeoForge 实例上跑一次更新检查，参数同 [`quilt_updates`]，只带 neoforge 的查询回 `own`。
     async fn neoforge_1_20_1_updates(
         current: impl FnOnce(&str) -> String,
         latest: String,
-        listed: impl FnOnce(&str) -> Vec<String>,
+        own: impl FnOnce(&str) -> Option<String>,
     ) -> Vec<UpdateCandidate> {
         borrowed_updates(
             ("my-pack", NEOFORGE_1_20_1_JSON),
-            serde_json::json!(["neoforge", "forge"]),
+            (
+                serde_json::json!(["neoforge", "forge"]),
+                serde_json::json!(["neoforge"]),
+            ),
             current,
             latest,
-            listed,
+            own,
         )
         .await
     }
 
-    /// 在 `instance`（实例 id 与版本 JSON）上跑一次更新检查：批量端点只认下推了 `pushed` 这组加载器的请求。
+    /// 在 `instance`（实例 id 与版本 JSON）上跑一次更新检查：下推 `all` 这组加载器的批量查询回 `latest`，只下推
+    /// 实例自己那一家（`own_only`）的回 `own`。版本列表一次都不该问。
     async fn borrowed_updates(
         (instance, json): (&str, &str),
-        pushed: serde_json::Value,
+        (all, own_only): (serde_json::Value, serde_json::Value),
         current: impl FnOnce(&str) -> String,
         latest: String,
-        listed: impl FnOnce(&str) -> Vec<String>,
+        own: impl FnOnce(&str) -> Option<String>,
     ) -> Vec<UpdateCandidate> {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path();
@@ -955,25 +1044,12 @@ mod tests {
             format!(r#"{{"{sha1}":{}}}"#, current(&sha1)),
         )
         .await;
-        Mock::given(method("POST"))
-            .and(path("/version_files/update"))
-            .and(body_partial_json(serde_json::json!({
-                "loaders": pushed,
-                "game_versions": ["1.20.1"]
-            })))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string(format!(r#"{{"{sha1}":{latest}}}"#)),
-            )
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/project/AANobbMI/version"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(format!("[{}]", listed(&sha1).join(","))),
-            )
-            .mount(&server)
-            .await;
+        mount_update(&server, all, format!(r#"{{"{sha1}":{latest}}}"#)).await;
+        let own = match own(&sha1) {
+            Some(own) => format!(r#"{{"{sha1}":{own}}}"#),
+            None => "{}".to_owned(),
+        };
+        mount_update(&server, own_only, own).await;
 
         let petalfall = petalfall_at(mc, &server.uri());
         save_ledger(
@@ -987,7 +1063,16 @@ mod tests {
             )],
         )
         .await;
-        petalfall.check_updates(instance).await.unwrap()
+        let found = petalfall.check_updates(instance).await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.url.path().starts_with("/version_files")),
+            "只该有批量请求：{:?}",
+            requests.iter().map(|r| r.url.path()).collect::<Vec<_>>()
+        );
+        found
     }
 
     /// 真实数据：AppleSkin 2.5.0+mc1.20 之后的版本只标 fabric，只拿 quilt 去问平台就报不出更新。
@@ -1015,8 +1100,8 @@ mod tests {
             "bb",
         );
 
-        let found =
-            quilt_updates(current, newest.clone(), |sha1| vec![newest, current(sha1)]).await;
+        // 只带 quilt 问到的最新版就是装着的这个 2.5.0。
+        let found = quilt_updates(current, newest, |sha1| Some(current(sha1))).await;
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].current_version_id, "current");
@@ -1048,7 +1133,7 @@ mod tests {
             "bb",
         );
 
-        let found = quilt_updates(current, twin.clone(), |sha1| vec![twin, current(sha1)]).await;
+        let found = quilt_updates(current, twin, |sha1| Some(current(sha1))).await;
 
         assert_eq!(found, Vec::new());
     }
@@ -1089,10 +1174,7 @@ mod tests {
             r#"["quilt"]"#,
         );
 
-        let found = quilt_updates(current, fabric.clone(), |sha1| {
-            vec![fabric, quilt, current(sha1)]
-        })
-        .await;
+        let found = quilt_updates(current, fabric, |_| Some(quilt)).await;
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].latest.version_id, "quilt");
@@ -1126,9 +1208,7 @@ mod tests {
             r#"["forge"]"#,
         );
 
-        let found =
-            neoforge_1_20_1_updates(current, newest.clone(), |sha1| vec![newest, current(sha1)])
-                .await;
+        let found = neoforge_1_20_1_updates(current, newest, |sha1| Some(current(sha1))).await;
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].current_version_id, "current");
@@ -1163,8 +1243,7 @@ mod tests {
             r#"["forge"]"#,
         );
 
-        let found =
-            neoforge_1_20_1_updates(current, twin.clone(), |sha1| vec![twin, current(sha1)]).await;
+        let found = neoforge_1_20_1_updates(current, twin, |sha1| Some(current(sha1))).await;
 
         assert_eq!(found, Vec::new());
     }
@@ -1208,13 +1287,198 @@ mod tests {
             r#"["neoforge"]"#,
         );
 
-        let found = neoforge_1_20_1_updates(current, forge.clone(), |sha1| {
-            vec![forge, neoforge, current(sha1)]
-        })
-        .await;
+        let found = neoforge_1_20_1_updates(current, forge, |_| Some(neoforge)).await;
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].latest.version_id, "neoforge");
+    }
+
+    /// 装着的版本在平台上只标了 1.20（整合包带进来、按哈希认出的那种），按实例的 MC 版本筛过的版本列表里没有它；
+    /// 只标 forge 的 1.20.1 新版照样报：当前版本取自按哈希查回的那一份。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forge_only_update_is_offered_when_the_installed_version_lacks_the_game_version() {
+        let current = |sha1: &str| {
+            on_game_versions(
+                on_loaders(
+                    modrinth_version(
+                        "current",
+                        "AANobbMI",
+                        "1.0.0",
+                        "2025-01-01T00:00:00Z",
+                        "installed.jar",
+                        sha1,
+                    ),
+                    r#"["forge"]"#,
+                ),
+                r#"["1.20"]"#,
+            )
+        };
+        let newest = on_loaders(
+            modrinth_version(
+                "newest",
+                "AANobbMI",
+                "1.2.0",
+                "2026-01-01T00:00:00Z",
+                "newest.jar",
+                "bb",
+            ),
+            r#"["forge"]"#,
+        );
+
+        let found = neoforge_1_20_1_updates(current, newest, |_| None).await;
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].current_version_id, "current");
+        assert_eq!(found[0].latest.version_id, "newest");
+    }
+
+    /// 晚传的 forge 构建只是装着的这份 neoforge 构建的孪生，算不上更新；比装着的新的 neoforge 发布照样报。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_late_forge_twin_does_not_hide_a_newer_neoforge_release() {
+        let current = |sha1: &str| {
+            on_loaders(
+                modrinth_version(
+                    "current",
+                    "AANobbMI",
+                    "1.4.0-neoforge",
+                    "2026-01-01T00:00:00Z",
+                    "installed.jar",
+                    sha1,
+                ),
+                r#"["neoforge"]"#,
+            )
+        };
+        let late_twin = on_loaders(
+            modrinth_version(
+                "late-twin",
+                "AANobbMI",
+                "1.4.0-forge",
+                "2026-03-01T00:00:00Z",
+                "late-twin.jar",
+                "bb",
+            ),
+            r#"["forge"]"#,
+        );
+        let newer = on_loaders(
+            modrinth_version(
+                "newer",
+                "AANobbMI",
+                "1.5.0-neoforge",
+                "2026-02-01T00:00:00Z",
+                "newer.jar",
+                "cc",
+            ),
+            r#"["neoforge"]"#,
+        );
+
+        let found = neoforge_1_20_1_updates(current, late_twin, |_| Some(newer)).await;
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].latest.version_id, "newer");
+    }
+
+    /// 1.20.1 的 NeoForge 实例上 60 个 Mod 的新版只标 forge：整次检查只多一次批量请求，只带 neoforge、只问这 60
+    /// 个，一个版本列表都不问；新版标着 neoforge 的两个照常直接报，不进这次请求。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forge_only_updates_cost_one_more_batch_request_not_one_per_mod() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "my-pack", NEOFORGE_1_20_1_JSON).await;
+        let mut entries = Vec::new();
+        let mut current = Vec::new();
+        let mut latest = Vec::new();
+        let mut forge_only = Vec::new();
+        let mut expected = Vec::new();
+        for i in 0..62 {
+            let file_name = format!("mod{i}.jar");
+            let project = format!("project{i}");
+            let payload = format!("payload-{i}");
+            let (_, sha1) = put_mod(mc, "my-pack", &file_name, payload.as_bytes()).await;
+            current.push(format!(
+                r#""{sha1}":{}"#,
+                on_loaders(
+                    modrinth_version(
+                        &format!("current{i}"),
+                        &project,
+                        "1.0.0",
+                        "2025-01-01T00:00:00Z",
+                        &file_name,
+                        &sha1,
+                    ),
+                    r#"["forge"]"#,
+                )
+            ));
+            let loaders = if i < 60 {
+                forge_only.push(sha1.clone());
+                r#"["forge"]"#
+            } else {
+                r#"["neoforge"]"#
+            };
+            latest.push(format!(
+                r#""{sha1}":{}"#,
+                on_loaders(
+                    modrinth_version(
+                        &format!("newest{i}"),
+                        &project,
+                        "1.1.0",
+                        "2026-01-01T00:00:00Z",
+                        &format!("mod{i}-1.1.0.jar"),
+                        "bb",
+                    ),
+                    loaders,
+                )
+            ));
+            expected.push((file_name.clone(), format!("newest{i}")));
+            entries.push(ledger_entry(
+                &file_name,
+                &project,
+                &format!("current{i}"),
+                Some(&sha1),
+            ));
+        }
+
+        let server = MockServer::start().await;
+        mount_post(
+            &server,
+            "/version_files",
+            format!("{{{}}}", current.join(",")),
+        )
+        .await;
+        mount_update(
+            &server,
+            serde_json::json!(["neoforge", "forge"]),
+            format!("{{{}}}", latest.join(",")),
+        )
+        .await;
+        mount_update(&server, serde_json::json!(["neoforge"]), "{}".to_owned()).await;
+        let petalfall = petalfall_at(mc, &server.uri());
+        save_ledger(&petalfall, "my-pack", entries).await;
+
+        let found = petalfall.check_updates("my-pack").await.unwrap();
+
+        expected.sort();
+        assert_eq!(
+            found
+                .iter()
+                .map(|c| (c.file_name.clone(), c.latest.version_id.clone()))
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(count_requests(&requests, "/version_files"), 1);
+        assert_eq!(count_requests(&requests, "/version_files/update"), 2);
+        assert_eq!(requests.len(), 3);
+        let own: Vec<serde_json::Value> = requests
+            .iter()
+            .filter(|r| r.url.path() == "/version_files/update")
+            .map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).unwrap())
+            .filter(|body| body["loaders"] == serde_json::json!(["neoforge"]))
+            .collect();
+        assert_eq!(own.len(), 1);
+        let mut asked: Vec<String> = serde_json::from_value(own[0]["hashes"].clone()).unwrap();
+        asked.sort();
+        forge_only.sort();
+        assert_eq!(asked, forge_only);
     }
 
     /// 平台给回的「最新兼容版」比玩家正在用的还旧：不报更新，否则就是一次降级。
