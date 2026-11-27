@@ -3,7 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { springAt, type SpringName } from "./motion";
 import { elapsedSeconds, playTrack, playTween, scaleTrack, Slide, springTrack } from "./slide";
 
-const SAMPLE_S = 1 / 120;
+/**
+ * 第 i 个采样点的时刻（秒），与 springTrack、scaleTrack 同一算法：先乘毫秒间隔、再换成秒。
+ * 换成 i / 120 这类算法，浮点末位可能差一点，恰落在舍入边界上的那一帧就对不上。
+ */
+const sampleAt = (i: number) => (i * (1000 / 120)) / 1000;
 const r2 = (value: number) => Math.round(value * 100) / 100;
 const r4 = (value: number) => Math.round(value * 10000) / 10000;
 const scalesOf = (frames: Keyframe[]) => frames.map((frame) => Number(frame.scale));
@@ -54,7 +58,7 @@ describe("springTrack：轨迹", () => {
   it("每一帧都是弹簧解析解在该时刻的位移", () => {
     const { frames } = springTrack("settle", 64, 0, -120, 0);
     for (const i of [1, 5, 12]) {
-      expect(frames[i].translate).toBe(`${r2(springAt("settle", 64, 0, i * SAMPLE_S).x)}px ${r2(springAt("settle", -120, 0, i * SAMPLE_S).x)}px`);
+      expect(frames[i].translate).toBe(`${r2(springAt("settle", 64, 0, sampleAt(i)).x)}px ${r2(springAt("settle", -120, 0, sampleAt(i)).x)}px`);
     }
   });
 
@@ -68,12 +72,12 @@ describe("springTrack：轨迹", () => {
     const { frames } = springTrack("settle", 0, 0, -50, -600);
     const second = Number(String(frames[1].translate).split(" ")[1].replace("px", ""));
     expect(second).toBeLessThan(-50);
-    expect(second).toBeCloseTo(springAt("settle", -50, -600, SAMPLE_S).x, 1);
+    expect(second).toBeCloseTo(springAt("settle", -50, -600, sampleAt(1)).x, 1);
   });
 
   it("换一枚弹簧：帧取自那枚弹簧的解", () => {
     const { frames } = springTrack("pop", 0, 0, -100, 0);
-    expect(frames[6].translate).toBe(`0px ${r2(springAt("pop", -100, 0, 6 * SAMPLE_S).x)}px`);
+    expect(frames[6].translate).toBe(`0px ${r2(springAt("pop", -100, 0, sampleAt(6)).x)}px`);
   });
 });
 
@@ -89,7 +93,7 @@ describe("scaleTrack：缩放轨迹", () => {
 
   it("每一帧都是弹簧解析解在该时刻的缩放，保留四位小数", () => {
     const { frames } = scaleTrack("pop", 0.6);
-    for (const i of [1, 5, 12, 24]) expect(Number(frames[i].scale)).toBe(r4(1 + springAt("pop", -0.4, 0, i * SAMPLE_S).x));
+    for (const i of [1, 5, 12, 24]) expect(Number(frames[i].scale)).toBe(r4(1 + springAt("pop", -0.4, 0, sampleAt(i)).x));
   });
 
   it("tap：临界阻尼，单调收拢到 1，不过冲", () => {
@@ -134,7 +138,7 @@ describe("scaleTrack：缩放轨迹", () => {
       expect(Number(frames[0].scale), label).toBe(from);
       expect(frames[frames.length - 1].scale, label).toBe("1");
       const i = 1 + Math.floor(Math.random() * (frames.length - 2));
-      expect(Number(frames[i].scale), `${label} 第 ${i} 帧`).toBe(r4(1 + springAt(name, from - 1, 0, i * SAMPLE_S).x));
+      expect(Number(frames[i].scale), `${label} 第 ${i} 帧`).toBe(r4(1 + springAt(name, from - 1, 0, sampleAt(i)).x));
     }
   });
 });
@@ -236,7 +240,7 @@ describe("Slide", () => {
     const { frames } = calls[1];
     expect(frames[0].translate).toBe(`0px ${r2(234 + mid.x)}px`);
     const dy = 234 + mid.x - 134;
-    expect(frames[1].translate).toBe(`0px ${r2(134 + springAt("settle", dy, mid.v, SAMPLE_S).x)}px`);
+    expect(frames[1].translate).toBe(`0px ${r2(134 + springAt("settle", dy, mid.v, sampleAt(1)).x)}px`);
     expect(frames[frames.length - 1].translate).toBe("0px 134px");
   });
 
