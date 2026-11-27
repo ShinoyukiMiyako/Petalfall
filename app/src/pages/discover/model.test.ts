@@ -88,7 +88,7 @@ describe("分类显示名", () => {
 
 describe("搜索参数", () => {
   it("首页参数：关键词去空白，空白关键词为 null，每页 24 条，游标为 null", () => {
-    expect(searchArgsOf(DEFAULT_FILTERS, "  sodium  ")).toEqual({
+    expect(searchArgsOf(DEFAULT_FILTERS, "  sodium  ", [])).toEqual({
       query: "sodium",
       resourceTypes: [],
       category: null,
@@ -99,25 +99,84 @@ describe("搜索参数", () => {
       limit: PAGE_SIZE,
       cursor: null,
     });
-    expect(searchArgsOf(DEFAULT_FILTERS, "   ").query).toBeNull();
+    expect(searchArgsOf(DEFAULT_FILTERS, "   ", []).query).toBeNull();
     expect(PAGE_SIZE).toBe(24);
   });
 
   it("类型换成后端资源类型；加载器只对全部、Mod、整合包生效", () => {
     const base: DiscoverFilters = { ...DEFAULT_FILTERS, loader: "forge", gameVersion: "1.20.1", platform: "curseforge", category: "vanilla-like" };
-    expect(searchArgsOf({ ...base, kind: "mod" }, "").loaders).toEqual(["forge"]);
-    expect(searchArgsOf({ ...base, kind: "modpack" }, "").resourceTypes).toEqual(["modpack"]);
-    const shader = searchArgsOf({ ...base, kind: "shader" }, "");
+    expect(searchArgsOf({ ...base, kind: "mod" }, "", []).loaders).toEqual(["forge"]);
+    expect(searchArgsOf({ ...base, kind: "modpack" }, "", []).resourceTypes).toEqual(["modpack"]);
+    const shader = searchArgsOf({ ...base, kind: "shader" }, "", []);
     expect(shader.resourceTypes).toEqual(["shader"]);
     expect(shader.loaders).toEqual([]);
     expect(shader.gameVersions).toEqual(["1.20.1"]);
     expect(shader.platform).toBe("curseforge");
-    expect(searchArgsOf({ ...base, kind: "resourcepack" }, "").resourceTypes).toEqual(["resource_pack"]);
-    expect(searchArgsOf({ ...base, kind: "datapack" }, "").resourceTypes).toEqual(["data_pack"]);
+    expect(searchArgsOf({ ...base, kind: "resourcepack" }, "", []).resourceTypes).toEqual(["resource_pack"]);
+    expect(searchArgsOf({ ...base, kind: "datapack" }, "", []).resourceTypes).toEqual(["data_pack"]);
+  });
+
+  describe("适配实例时下推实例能跑的全部加载器", () => {
+    const neo = summary("整合", { mcVersion: "1.20.1", loader: "neoforge" });
+    const neoNew = summary("新整合", { mcVersion: "1.21.1", loader: "neoforge" });
+    const quilt = summary("织布", { mcVersion: "1.20.4", loader: "quilt" });
+    const candidates = [neo, neoNew, quilt];
+    const fitMods = (instance: typeof neo) => withFitInstance({ ...DEFAULT_FILTERS, kind: "mod" }, instance);
+
+    it("自己装的在前、借来的在后：1.20.1 的 NeoForge 带上 Forge，Quilt 带上 Fabric，1.21.1 的 NeoForge 不借", () => {
+      expect(searchArgsOf(fitMods(neo), "jei", candidates)).toEqual({
+        query: "jei",
+        resourceTypes: ["mod"],
+        category: null,
+        platform: null,
+        loaders: ["neoforge", "forge"],
+        gameVersions: ["1.20.1"],
+        sort: "relevance",
+        limit: PAGE_SIZE,
+        cursor: null,
+      });
+      expect(searchArgsOf(fitMods(quilt), "", candidates).loaders).toEqual(["quilt", "fabric"]);
+      expect(searchArgsOf(fitMods(neoNew), "", candidates).loaders).toEqual(["neoforge"]);
+      expect(searchArgsOf(withFitInstance(DEFAULT_FILTERS, neo), "", candidates).loaders).toEqual(["neoforge", "forge"]);
+    });
+
+    it("资源包、光影、数据包与加载器无关，适配实例时照样不下推加载器", () => {
+      for (const kind of ["resourcepack", "shader", "datapack"] as const) {
+        const args = searchArgsOf(withFitInstance({ ...DEFAULT_FILTERS, kind }, neo), "", candidates);
+        expect([args.loaders, args.gameVersions]).toEqual([[], ["1.20.1"]]);
+      }
+    });
+
+    it("手动选加载器、没有适配实例时只下推选的那一家，同样是 1.20.1 也不借", () => {
+      const manual: DiscoverFilters = { ...DEFAULT_FILTERS, kind: "mod", loader: "neoforge", gameVersion: "1.20.1" };
+      expect(searchArgsOf(manual, "", candidates).loaders).toEqual(["neoforge"]);
+      expect(searchArgsOf({ ...manual, loader: "quilt" }, "", candidates).loaders).toEqual(["quilt"]);
+    });
+
+    it("从适配实例改成手动选加载器或版本、取消适配后，借来的那家不再下推", () => {
+      expect(searchArgsOf(withLoader(fitMods(neo), "neoforge"), "", candidates).loaders).toEqual(["neoforge"]);
+      expect(searchArgsOf(withGameVersion(fitMods(neo), "1.20.1"), "", candidates).loaders).toEqual(["neoforge"]);
+      expect(searchArgsOf(withFitInstance(fitMods(quilt), null), "", candidates).loaders).toEqual(["quilt"]);
+      expect(searchArgsOf(resetPopoverFilters(fitMods(neo)), "", candidates).loaders).toEqual([]);
+      expect(searchArgsOf(clearFilters(fitMods(neo)), "", candidates).loaders).toEqual([]);
+    });
+
+    it("适配实例这一刻不在候选里（刚被删、开始重装）：照筛选里的加载器搜，不借", () => {
+      expect(searchArgsOf(fitMods(neo), "", [neoNew, quilt]).loaders).toEqual(["neoforge"]);
+      expect(searchArgsOf(fitMods(quilt), "", []).loaders).toEqual(["quilt"]);
+    });
+
+    it("浮层、说明行与条件数只认实例自己的加载器，借来的不列出、不计数", () => {
+      const fit = fitMods(neo);
+      expect(fit.loader).toBe("neoforge");
+      expect(conditionParts(fit, LABELS)).toEqual(["1.20.1", "NeoForge"]);
+      expect(popoverFilterCount(fit)).toBe(2);
+      expect(conditionParts(fitMods(quilt), LABELS)).toEqual(["1.20.4", "Quilt"]);
+    });
   });
 
   it("缓存 key 与状态层的 search: 前缀写法一致", () => {
-    const args = searchArgsOf(DEFAULT_FILTERS, "iris");
+    const args = searchArgsOf(DEFAULT_FILTERS, "iris", []);
     expect(searchKey(args)).toBe(`search:${JSON.stringify(args)}`);
   });
 });
@@ -216,7 +275,7 @@ describe("分页累积", () => {
       modrinth: { offset: 24, exhausted: true, total: 24, absorbed: [] },
       curseforge: { offset: 0, exhausted: false, total: null, absorbed: [] },
     };
-    const request = { ...searchArgsOf(DEFAULT_FILTERS, ""), cursor };
+    const request = { ...searchArgsOf(DEFAULT_FILTERS, "", []), cursor };
     const failed = [{ platform: "curseforge" as const, message: "503" }];
     expect(stalledPage(request, result([], { errors: failed, next_cursor: structuredClone(cursor) }))).toBe(true);
     expect(stalledPage(request, result([], { next_cursor: structuredClone(cursor) }))).toBe(false);
@@ -224,7 +283,7 @@ describe("分页累积", () => {
     expect(stalledPage(request, result([], { errors: failed, next_cursor: { ...cursor, modrinth: { ...cursor.modrinth, offset: 25 } } }))).toBe(false);
     expect(stalledPage(request, result([], { errors: failed, next_cursor: { ...cursor, curseforge: { ...cursor.curseforge, absorbed: ["X"] } } }))).toBe(false);
     // 首页请求不带游标，给回的游标总是新的
-    expect(stalledPage(searchArgsOf(DEFAULT_FILTERS, ""), result([], { errors: failed, next_cursor: cursor }))).toBe(false);
+    expect(stalledPage(searchArgsOf(DEFAULT_FILTERS, "", []), result([], { errors: failed, next_cursor: cursor }))).toBe(false);
   });
 });
 

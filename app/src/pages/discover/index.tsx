@@ -108,7 +108,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
     nav.replace(writeBack);
   }, [appliedRoute, committedQuery, kind, nav]);
 
-  const pages = useResultPages(searchArgsOf(filters, committedQuery), restored === null ? null : restored.pages);
+  const pages = useResultPages(searchArgsOf(filters, committedQuery, candidates), restored === null ? null : restored.pages);
 
   // 离开时把筛选与已翻到的页留给下次进来
   const latest = useRef({ filters, pages: pages.state });

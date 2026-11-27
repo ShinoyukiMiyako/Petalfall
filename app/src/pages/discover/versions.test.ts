@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ModVersionInfo } from "../../state/queries/discover";
 import { modVersion, summary } from "./fixtures";
 import { uniqueName } from "./names";
 import { fitsAnyInstance, fitsInstance, gameVersionSummary, sortGameVersions } from "./versions";
@@ -49,6 +50,29 @@ describe("能不能装进实例", () => {
     expect(fitsAnyInstance(modVersion("a", { loaders: ["quilt"] }), [fabric, vanilla], "mod")).toBe(false);
     expect(fitsAnyInstance(modVersion("a", { loaders: ["quilt", "fabric"] }), [vanilla, fabric], "mod")).toBe(true);
     expect(fitsAnyInstance(modVersion("a"), [], "mod")).toBe(false);
+  });
+
+  it("只标被借那一家的版本：Quilt 实例收 Fabric 的，1.20.1 的 NeoForge 实例收 Forge 的，别的组合照旧不收", () => {
+    const quilt = summary("织布", { mcVersion: "1.21.1", loader: "quilt" });
+    const neo = summary("整合", { mcVersion: "1.20.1", loader: "neoforge" });
+    const neo1202 = summary("新整合", { mcVersion: "1.20.2", loader: "neoforge" });
+    const forge = summary("锻造", { mcVersion: "1.20.1", loader: "forge" });
+    const on1201 = (loaders: ModVersionInfo["loaders"]) => modVersion("b", { loaders, game_versions: ["1.20.1"] });
+
+    expect(fitsInstance(modVersion("a", { loaders: ["fabric"] }), quilt, "mod")).toBe(true);
+    expect(fitsInstance(modVersion("a", { loaders: ["quilt"] }), quilt, "mod")).toBe(true);
+    expect(fitsInstance(modVersion("a", { loaders: ["forge"] }), quilt, "mod")).toBe(false);
+    expect(fitsInstance(modVersion("a", { loaders: ["quilt"] }), fabric, "mod")).toBe(false);
+
+    expect(fitsInstance(on1201(["forge"]), neo, "mod")).toBe(true);
+    expect(fitsInstance(on1201(["neoforge"]), neo, "mod")).toBe(true);
+    expect(fitsInstance(on1201(["fabric"]), neo, "mod")).toBe(false);
+    expect(fitsInstance(on1201(["neoforge"]), forge, "mod")).toBe(false);
+    expect(fitsInstance(modVersion("b", { loaders: ["forge"], game_versions: ["1.20.2"] }), neo1202, "mod")).toBe(false);
+    expect(fitsInstance(modVersion("b", { loaders: ["forge"], game_versions: ["1.21.1"] }), summary("最新", { mcVersion: "1.21.1", loader: "neoforge" }), "mod")).toBe(false);
+
+    expect(fitsAnyInstance(on1201(["forge"]), [neo1202, quilt], "mod")).toBe(false);
+    expect(fitsAnyInstance(on1201(["forge"]), [neo1202, neo], "mod")).toBe(true);
   });
 });
 

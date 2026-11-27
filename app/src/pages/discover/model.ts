@@ -1,6 +1,7 @@
 // 发现页的筛选模型：界面上的筛选状态、它与后端搜索参数的换算、条件说明、分页累积。纯函数，测试直接驱动。
 
 import type { InstanceSummary } from "../../domain/adapt";
+import { runnableLoaders } from "../../domain/runnable-loaders";
 import type { LoaderKind, Platform, ResourceKind } from "../../domain/types";
 import type { LoaderChoice } from "../../state/queries/catalog";
 import type { DiscoverableType, InstanceSources, ResourceType, SearchArgs, SearchEntry, SearchResultDto, SortField } from "../../state/queries/discover";
@@ -164,15 +165,27 @@ export function hasConditions(filters: DiscoverFilters): boolean {
   return filters.category !== null || filters.fitInstance !== null || popoverFilterCount(filters) > 0;
 }
 
-/** 一页搜索的参数。query 为防抖后的关键词；首页 cursor 为 null。 */
-export function searchArgsOf(filters: DiscoverFilters, query: string): SearchArgs {
+/**
+ * 下推给平台的加载器。选了适配实例时按这个实例现算它能跑的全部加载器，借来的那一家一并下推：只标 forge、只标 fabric
+ * 的 Mod 在平台那一步就会被筛掉，详情里判得再准也搜不到。借来的不进筛选状态，浮层、说明行与条件数只认实例自己的那一家。
+ */
+function searchLoaders(filters: DiscoverFilters, candidates: readonly InstanceSummary[]): LoaderChoice[] {
+  if (filters.loader === null || !loaderFilterApplies(filters.kind)) return [];
+  const fit = filters.fitInstance === null ? undefined : candidates.find((i) => i.id === filters.fitInstance);
+  // 适配实例这一刻不在候选里（刚被删、开始重装）：页面在同一次渲染里就把适配清掉，这一次照筛选里的加载器搜、不借
+  if (fit === undefined) return [filters.loader];
+  return runnableLoaders(fit.loader, fit.mcVersion);
+}
+
+/** 一页搜索的参数。query 为防抖后的关键词；首页 cursor 为 null。candidates 是能当适配实例的实例（fitCandidates）。 */
+export function searchArgsOf(filters: DiscoverFilters, query: string, candidates: readonly InstanceSummary[]): SearchArgs {
   const trimmed = query.trim();
   return {
     query: trimmed === "" ? null : trimmed,
     resourceTypes: resourceTypesOf(filters.kind),
     category: filters.category,
     platform: filters.platform,
-    loaders: filters.loader !== null && loaderFilterApplies(filters.kind) ? [filters.loader] : [],
+    loaders: searchLoaders(filters, candidates),
     gameVersions: filters.gameVersion === null ? [] : [filters.gameVersion],
     sort: filters.sort,
     limit: PAGE_SIZE,

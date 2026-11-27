@@ -27,7 +27,7 @@ let loads: number;
 
 /** 与发现页一样：列表尾一直在视野里（结果少），能接下一页就接。 */
 function Harness() {
-  const current = useResultPages(searchArgsOf(DEFAULT_FILTERS, ""), null);
+  const current = useResultPages(searchArgsOf(DEFAULT_FILTERS, "", []), null);
   pages = current;
   const { canLoadMore, loadMore } = current;
   useEffect(() => {

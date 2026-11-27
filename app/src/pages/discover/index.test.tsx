@@ -328,6 +328,18 @@ describe("发现页：搜索", () => {
     expect(lastSearch()).toMatchObject({ gameVersions: ["1.21.1"], loaders: ["fabric"] });
   });
 
+  it("适配 1.20.1 的 NeoForge 实例：搜索把借来的 Forge 排在后面一并下推，说明行只写实例自己的加载器", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("整合", { mc_version: "1.20.1", loaders: [{ kind: "neoforge", version: "47.1.106" }] })], config: configDto({ selected_version: "整合" }) });
+    await mount({ page: "discover", kind: "mod", forInstance: "整合" });
+    expect(document.body.textContent).toContain("适配：整合");
+    expect(lastSearch()).toMatchObject({ gameVersions: ["1.20.1"], loaders: ["neoforge", "forge"] });
+    const info = document.querySelector('section[aria-label="搜索资源"] [aria-live="polite"]');
+    if (info === null) throw new Error("找不到结果说明行");
+    // 说明行里除了计数槽与「清除筛选」，剩下的就是条件片段
+    const parts = [...info.children].filter((el) => el.tagName === "SPAN" && el.querySelector("[data-current], button") === null).map((el) => el.textContent);
+    expect(parts).toEqual(["1.20.1", "NeoForge"]);
+  });
+
   it("输入停 300 ms 才搜；生效的关键词写回路由", async () => {
     await mount();
     expect(lastSearch().query).toBeNull();
