@@ -61,13 +61,14 @@ export function instanceTask(state: LauncherState, instanceId: string): Task | n
 }
 
 /**
- * 安装中的实例此刻对应的任务：有未完成的就是它。没有时，这个实例最近一次写整个目录的任务（新建、导入、补全）若已完成，
- * 就是它结束后的那次重扫还没回来（状态层在这一段里照旧按安装中派生），给出这个已完成的任务，入口按满格画，不翻回排队。
- * 最近那次失败或取消了，或这次运行里没有这样的任务（后端报着在装）时为 null。只对状态是安装中的实例有意义。
+ * 安装中的实例此刻对应的任务：有未完成的写整个目录的任务（新建、导入、补全）就是它。只认这几种命令：实例上还可能挂着排在
+ * 它前面的装 Mod、导出整合包或存档任务，取第一个活动任务会把它们的进度与步骤画成安装。没有时，这个实例最近一次写整个目录的
+ * 任务若已完成，就是它结束后的那次重扫还没回来（状态层在这一段里照旧按安装中派生），给出这个已完成的任务，入口按满格画，
+ * 不翻回排队。最近那次失败或取消了，或这次运行里没有这样的任务（后端报着在装）时为 null。只对状态是安装中的实例有意义。
  */
 export function installTask(state: LauncherState, instanceId: string): Task | null {
-  const active = instanceTask(state, instanceId);
-  if (active !== null) return active;
+  const active = state.tasks.find((t) => t.instanceId === instanceId && isActiveTask(t) && INSTANCE_TASK_COMMANDS.has(t.spec.command));
+  if (active !== undefined) return active;
   // 任务表按入队与重试的先后排：同一实例上写整个目录的任务互斥，排在最后的就是最近的那次
   let latest: Task | null = null;
   for (const t of state.tasks) if (t.instanceId === instanceId && INSTANCE_TASK_COMMANDS.has(t.spec.command)) latest = t;

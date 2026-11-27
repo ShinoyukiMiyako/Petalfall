@@ -141,6 +141,21 @@ describe("启动视图判定", () => {
     expect(launchView(state({}), a)).toEqual({ kind: "installing", task: null, queuePosition: null });
   });
 
+  it("安装中、排在补全前面的还有装 Mod 与导出：给出补全，不把它们的步骤画成安装；只有它们在跑、后端报着在装时 task 为 null", () => {
+    const a = inst("A", { status: "installing" });
+    const other = (id: string, command: string, kind: Task["kind"]): Task => ({
+      ...newTask({ gameDir: "D:/Games/.minecraft", id, kind, title: `${command} A`, detail: "", instanceId: "A", spec: { command, args: { id: "A" } } }, T0),
+      status: "running",
+      progress: 0.5,
+      phase: { plan: ["export_hash", "export_identify", "export_pack", "export_verify"], index: 2, batch: null, fraction: 0 },
+    });
+    const mods = other("t1", "install_mods", "mod");
+    const exporting = other("t2", "export_modpack", "modpack_export");
+    const repair = newTask({ gameDir: "D:/Games/.minecraft", id: "t3", kind: "repair", title: "补全 A", detail: "", instanceId: "A", spec: { command: "repair_instance", args: { id: "A" } } }, T0);
+    expect(launchView(state({ tasks: [mods, exporting, repair] }), a)).toEqual({ kind: "installing", task: repair, queuePosition: 1 });
+    expect(launchView(state({ tasks: [mods, exporting] }), a)).toEqual({ kind: "installing", task: null, queuePosition: null });
+  });
+
   it("安装中、本实例没有未完成的任务：最近一次写整个目录的任务已完成时给出它（落地重扫还没回来），名次为 null", () => {
     const a = inst("A", { status: "installing" });
     const created: Task = { ...installTask("A", "t1", "done", 1), finishedAt: T0 + 1000 };
