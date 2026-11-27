@@ -176,7 +176,8 @@ export interface InstanceSummary {
   brokenReason: string | null;
   /**
    * 补全修不好时后端给的原因（补全会以同一句话拒绝）：只在 status 为 broken 时可能非空，补全修得好的损坏实例与别的状态都为 null。
-   * 整合包没导入完的另由 needsReimport 判定，后端在它版本 JSON 还在时不报这一项。点修复有没有用看 rules 的 canRepair。
+   * 整合包没导入完的另由 needsReimport 判定，后端在它版本 JSON 还在时不报这一项。点修复有没有用看 rules 的 canRepair，
+   * 修不好时还剩什么出路看 rules 的 repairExit。
    */
   unrepairableReason: string | null;
   /** 补全为什么修不好，取值与含义同 InstanceDto.unrepairable_kind；unrepairableReason 为 null 时为 null。界面分支只看它，不解析原因文字。 */

@@ -178,8 +178,9 @@ export function needsReimport(inst: Pick<InstanceSummary, "status" | "incomplete
 // ---------------------------------------------------------------- 补全修不好
 
 /**
- * 点修复（补全游戏文件）能不能把实例修好：整合包没导入完的、后端说补全修不好的（版本 JSON 不可用又没记下当初装的是什么），
- * 补全一律被拒，入口不该承诺「补全后就能启动」。只回答修不修得好，不管此刻排不排得上：实例或基底正忙由 instance-locks 判定。
+ * 点修复（补全游戏文件）能不能把实例修好：整合包没导入完的、后端说补全修不好的（版本 JSON 缺失或损坏又没记下当初装的是什么，
+ * 或版本 JSON 读不出来），补全一律被拒，入口不该承诺「补全后就能启动」。只回答修不修得好，不管此刻排不排得上：实例或基底正忙由
+ * instance-locks 判定。
  */
 export function canRepair(inst: Pick<InstanceSummary, "status" | "incomplete" | "unrepairableReason">): boolean {
   return !needsReimport(inst) && inst.unrepairableReason === null;
@@ -193,6 +194,22 @@ export function canRepair(inst: Pick<InstanceSummary, "status" | "incomplete" | 
 export function repairRefusal(inst: Pick<InstanceSummary, "status" | "incomplete" | "unrepairableReason">): string | null {
   if (needsReimport(inst)) return MODPACK_REIMPORT_COPY.note;
   return inst.unrepairableReason;
+}
+
+/** 补全修不好的实例剩下的出路。rename 的 to 是要改成的名字。 */
+export type RepairExit = { kind: "reimport" } | { kind: "rescan" } | { kind: "rename"; to: string } | { kind: "delete" };
+
+/**
+ * 补全修不好的实例剩下的出路，实例库与实例详情页共用这一份；修得好或没坏为 null，与 canRepair、repairRefusal 一一对应。
+ * 整合包没导入完的先判，与 repairRefusal 同理：缺的 Mod 与配置只有重新导入补得回来。版本 JSON 读不出来的文件可能完好，
+ * 放开占用或修好权限后重新扫描就恢复，不该引导玩家删掉它。目录里有一份改个名就认得出的版本 JSON 时给改名，其余只剩删除。
+ */
+export function repairExit(inst: Pick<InstanceSummary, "status" | "incomplete" | "unrepairableReason" | "unrepairableKind" | "renameTo">): RepairExit | null {
+  if (repairRefusal(inst) === null) return null;
+  if (needsReimport(inst)) return { kind: "reimport" };
+  if (inst.unrepairableKind === "unreadable") return { kind: "rescan" };
+  if (inst.renameTo !== null) return { kind: "rename", to: inst.renameTo };
+  return { kind: "delete" };
 }
 
 // ---------------------------------------------------------------- 重新安装加载器

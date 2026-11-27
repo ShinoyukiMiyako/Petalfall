@@ -1661,6 +1661,18 @@ export const MODPACK_REIMPORT_COPY = {
   note: "整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。",
 } as const;
 
+// ---------------------------------------------------------------- 补全修不好时的出路
+
+/** 补全修不好的实例另外两条出路（见 rules 的 repairExit）的说法，实例库与实例详情页共用。 */
+export const REPAIR_EXIT_COPY = {
+  /** 版本 JSON 读不出来时的按钮：重读实例列表。 */
+  rescan: "重新扫描",
+  /** 目录里有一份名字对不上的版本 JSON 时的按钮。 */
+  rename: (name: string) => `改名为「${name}」`,
+  /** 版本 JSON 读不出来时接在后端给的原因之后：文件可能完好，要让玩家知道等占用放开或权限修好就行，不必删掉实例。 */
+  unreadableHint: "关掉占用它的程序或修好读取权限后，重新扫描就能恢复。",
+} as const;
+
 /** 整合包的显示名：「RLCraft 2.9.3」；整合包没写版本时只写名字。实例库卡片、头图标签与实例信息共用。 */
 export function modpackLabel(pack: { name: string; version: string | null }): string {
   return pack.version === null ? pack.name : `${pack.name} ${pack.version}`;
