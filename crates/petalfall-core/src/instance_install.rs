@@ -1145,9 +1145,15 @@ impl PhaseAnnouncer {
             .position(|p| *p == phase)
             .unwrap_or_else(|| panic!("步骤 {phase:?} 不在这次的步骤表 {:?} 里", self.plan));
         let floor = self.next.swap(index + 1, Ordering::Relaxed);
+        // 两种违约分开报：崩溃信息里一眼分得清是把刚报过的一步又报了一遍，还是退回了更早的一步。
+        assert!(
+            index + 1 != floor,
+            "步骤 {phase:?} 报了两遍：上一步报的就是它，步骤表 {:?}",
+            self.plan
+        );
         assert!(
             index >= floor,
-            "步骤 {phase:?} 报在了它后面的步骤之后，或报了两遍：{:?}",
+            "步骤 {phase:?} 报在了它后面的步骤之后：步骤表 {:?}",
             self.plan
         );
         emit(
@@ -1743,7 +1749,7 @@ mod tests {
 
     /// 接着报时已报过的步骤不能再报：回到更早的一步。
     #[test]
-    #[should_panic(expected = "报在了它后面的步骤之后")]
+    #[should_panic(expected = "报在了它后面的步骤之后：")]
     fn a_resumed_announcer_refuses_to_go_back() {
         use InstallPhase::*;
         let announcer = PhaseAnnouncer::new(None, prelude_plan());
@@ -1755,7 +1761,7 @@ mod tests {
 
     /// 接着报时已报过的步骤不能再报：把改写前最后报的那一步再报一遍。
     #[test]
-    #[should_panic(expected = "报了两遍")]
+    #[should_panic(expected = "报了两遍：上一步报的就是它")]
     fn a_resumed_announcer_refuses_the_last_reported_step_again() {
         use InstallPhase::*;
         let announcer = PhaseAnnouncer::new(None, prelude_plan());
