@@ -2994,13 +2994,10 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let started = f.root.join("processor-started");
         let java = f.root.join("spawning-java.cmd");
+        // 两个位置都在脚本所在目录下，经 %~dp0 取：绝对路径写进批处理的话，临时目录带中文时 cmd 会读成乱码。
         std::fs::write(
             &java,
-            format!(
-                "@echo off\r\ncd /d \"{}\"\r\necho up> \"{}\"\r\nping -n 60 127.0.0.1 > nul\r\n",
-                cwd.display(),
-                started.display()
-            ),
+            "@echo off\r\ncd /d \"%~dp0grandchild-cwd\"\r\necho up> \"%~dp0processor-started\"\r\nping -n 60 127.0.0.1 > nul\r\n",
         )
         .unwrap();
         let token = CancellationToken::new();
