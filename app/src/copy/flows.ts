@@ -1673,7 +1673,17 @@ export const REPAIR_EXIT_COPY = {
   rename: (name: string) => `改名为「${name}」`,
   /** 版本 JSON 读不出来时接在后端给的原因之后：文件可能完好，要让玩家知道等占用放开或权限修好就行，不必删掉实例。 */
   unreadableHint: "关掉占用它的程序或修好读取权限后，重新扫描就能恢复。",
+  /**
+   * 同上，但实例还带着未完成标记（装到一半，或上次补全没做完）：扫描只让版本 JSON 重新读得出来，标记还在，接着还得修复一次，
+   * 不能说扫描就恢复。
+   */
+  unreadablePendingHint: "关掉占用它的程序或修好读取权限后重新扫描，扫描后还要再修复一次。",
 } as const;
+
+/** 版本 JSON 读不出来的实例接在原因后面的那句提示；pending：实例还带着未完成标记。 */
+export function unreadableHint(pending: boolean): string {
+  return pending ? REPAIR_EXIT_COPY.unreadablePendingHint : REPAIR_EXIT_COPY.unreadableHint;
+}
 
 /** 整合包的显示名：「RLCraft 2.9.3」；整合包没写版本时只写名字。实例库卡片、头图标签与实例信息共用。 */
 export function modpackLabel(pack: { name: string; version: string | null }): string {
