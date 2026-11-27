@@ -549,7 +549,7 @@ async fn save_probe_cache(data_dir: &Path, cache: &ProbeCache) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::PetalfallConfig;
     use sha1::{Digest, Sha1};
@@ -583,7 +583,7 @@ mod tests {
 
     /// 在 mock 上挂好一个 17 运行时（java 可执行文件、release、lib/modules，与 Mojang 运行时的根目录一样
     /// 齐全），返回清单地址与 java 可执行文件的内容。
-    async fn mount_runtime(server: &MockServer) -> (String, Vec<u8>) {
+    pub(crate) async fn mount_runtime(server: &MockServer) -> (String, Vec<u8>) {
         let base = server.uri();
         let platform = petalfall_java::current_platform();
         let java_bytes = b"MZ-fake-managed-java".to_vec();

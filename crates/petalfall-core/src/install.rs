@@ -1735,4 +1735,204 @@ mod tests {
             vec!["安装器生成的文件与它声明的不符，换一个 Java 重跑"]
         );
     }
+
+    /// 按 Java 根目录的名字作答：名为 `17` 的是 Java 17，名为 `21` 的是 Java 21；识别到别的 Java 就是取法错了。
+    fn java_17_or_21_env(runtime_manifest: String) -> JavaEnv {
+        JavaEnv::for_test(
+            |path: &Path| {
+                let home = path
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::file_name)
+                    .and_then(std::ffi::OsStr::to_str);
+                match home {
+                    Some("17") => Ok("openjdk version \"17.0.8\" 2023-07-18\nOpenJDK 64-Bit Server VM (build 17.0.8+7-LTS, mixed mode)\n".to_owned()),
+                    Some("21") => Ok("openjdk version \"21.0.3\" 2024-04-16\nOpenJDK 64-Bit Server VM (build 21.0.3+9-LTS, mixed mode)\n".to_owned()),
+                    _ => panic!("不该识别 {}", path.display()),
+                }
+            },
+            runtime_manifest,
+        )
+    }
+
+    /// 本机同时有 17 与 21：备用 Java 取 17，不取 21。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_fallback_java_prefers_a_local_17_over_a_local_21() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let managed_17 = complete_java_home(&root.join("runtime").join("17"));
+        complete_java_home(&root.join("runtime").join("21"));
+        let config = PetalfallConfig {
+            auto_download_java: false,
+            ..PetalfallConfig::default()
+        };
+        let petalfall = Petalfall::for_test(config, root.clone(), root.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let fetch = petalfall
+            .processor_fallback_java(
+                8,
+                &root.join("jdk-8").join("bin").join("java.exe"),
+                Some(&tx),
+                java_17_or_21_env(String::new()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            fetch().await.unwrap(),
+            JavaExecutable {
+                path: managed_17.clone(),
+                major: Some(17)
+            }
+        );
+        assert_eq!(
+            stage_texts(&mut rx),
+            vec![
+                "安装器生成的文件与它声明的不符，换一个 Java 重跑".to_owned(),
+                format!("改用 Java 17（{}）重跑", managed_17.display())
+            ]
+        );
+    }
+
+    /// 本机 17、21 都没有、开着自动下载：下载 Mojang 的 Java 17 当备用 Java，下好之后才说改用它。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_fallback_java_downloads_java_17_when_neither_is_local() {
+        let server = MockServer::start().await;
+        let (manifest, java_bytes) = crate::java::tests::mount_runtime(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let config = PetalfallConfig {
+            auto_download_java: true,
+            ..PetalfallConfig::default()
+        };
+        let petalfall = Petalfall::for_test(config, root.clone(), root.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let fetch = petalfall
+            .processor_fallback_java(
+                8,
+                &root.join("jdk-8").join("bin").join("java.exe"),
+                Some(&tx),
+                java_17_or_21_env(manifest),
+            )
+            .unwrap();
+
+        let install_dir = crate::java::runtime_install_dir(&root, 17);
+        let downloaded = petalfall_java::java_exe_in_home(&install_dir);
+        assert_eq!(
+            fetch().await.unwrap(),
+            JavaExecutable {
+                path: downloaded.clone(),
+                major: Some(17)
+            }
+        );
+        assert_eq!(std::fs::read(&downloaded).unwrap(), java_bytes);
+        assert_eq!(
+            stage_texts(&mut rx),
+            vec![
+                "安装器生成的文件与它声明的不符，换一个 Java 重跑".to_owned(),
+                "本地未找到 Java 17，开始下载 Mojang 运行时".to_owned(),
+                format!("开始下载 Java 17 运行时到 {}", install_dir.display()),
+                format!("Java 17 运行时安装完成：{}", downloaded.display()),
+                format!("改用 Java 17（{}）重跑", downloaded.display())
+            ]
+        );
+    }
+
+    /// 设置里固定的那个 Java 17 生成的产物。
+    #[cfg(windows)]
+    const PINNED_JAVA_17_OUTPUT: &[u8] = b"out made by the pinned java 17";
+
+    /// 在 [`rerun_fixture`] 上改两处：设置里固定的换成那个 Java 17，路径的大小写与识别缓存里记的不同；它生成的产物也与
+    /// 安装器声明的不符。游戏要求的仍是 Java 8：处理器先用固定的 Java 17 跑，对不上之后备用 Java 从识别缓存取回的是同一个
+    /// 文件的另一种写法。交回夹具、门面与这时应报的正文：结论里是这个 Java 实际的主版本 17，不是游戏要求的 8，也没换 Java。
+    #[cfg(windows)]
+    async fn pinned_mismatching_java_17() -> (RerunFixture, Petalfall, String) {
+        let (f, mut petalfall) = rerun_fixture().await;
+        let made = f.root.join(r"jdk-17\bin\made.bin");
+        let declared = petalfall_base::fs::sha1_hex(&made).await.unwrap();
+        std::fs::write(&made, PINNED_JAVA_17_OUTPUT).unwrap();
+        let actual = petalfall_base::fs::sha1_hex(&made).await.unwrap();
+        let pinned = f.root.join(r"JDK-17\BIN\JAVA-17.CMD");
+        assert_ne!(pinned, f.java17, "按路径比是两个");
+        petalfall.set_default_java(Some(pinned.clone()));
+        let message = format!(
+            "处理器 test:proc:1 用 Java 17 生成的 out-1.jar 与安装器声明的不符；文件 {}，期望 sha1 {declared}，实际 {actual}；Java 在 {}",
+            f.output.display(),
+            pinned.display()
+        );
+        (f, petalfall, message)
+    }
+
+    #[cfg(windows)]
+    impl RerunFixture {
+        /// 处理器只用固定的 Java 17 跑了一次：备用 Java 取过，认作同一个，没删产物、没重跑，也没说改用它。
+        fn assert_ran_only_the_pinned_java(
+            &self,
+            rx: &mut tokio::sync::mpsc::UnboundedReceiver<CoreEvent>,
+        ) {
+            assert_eq!(std::fs::read(&self.output).unwrap(), PINNED_JAVA_17_OUTPUT);
+            let runs = std::fs::read_to_string(self.root.join("java-runs.log")).unwrap();
+            assert_eq!(runs.lines().map(str::trim).collect::<Vec<_>>(), ["java-17"]);
+            let stages = stage_texts(rx);
+            assert!(
+                stages
+                    .iter()
+                    .any(|text| text == "安装器生成的文件与它声明的不符，换一个 Java 重跑"),
+                "应去取过备用 Java：{stages:?}"
+            );
+            assert!(
+                !stages.iter().any(|text| text.starts_with("改用")),
+                "{stages:?}"
+            );
+        }
+    }
+
+    /// 传统布局装 Forge，设置里固定的是 Java 17、游戏要求的是 Java 8：产物对不上时报错写的是实际所用 Java 的主版本；
+    /// 备用 Java 取回的是同一个文件的另一种写法，认作同一个、不重跑，按没换 Java 报。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_legacy_forge_install_names_the_pinned_java_by_its_own_major_and_does_not_rerun_it() {
+        let (f, petalfall, message) = pinned_mismatching_java_17().await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let err = petalfall
+            .install(
+                "test",
+                Some(LoaderChoice::Forge),
+                Some(RERUN_FORGE),
+                Some(&tx),
+            )
+            .await
+            .unwrap_err();
+        drop(tx);
+
+        assert_eq!(err.to_string(), message);
+        f.assert_ran_only_the_pinned_java(&mut rx);
+    }
+
+    /// 新建 Forge 实例：同样写实际所用 Java 的主版本，同一个文件的另一种写法不重跑。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_new_forge_instance_names_the_pinned_java_by_its_own_major_and_does_not_rerun_it() {
+        let (f, petalfall, message) = pinned_mismatching_java_17().await;
+        let request = crate::instance_install::InstanceRequest {
+            mc_version: "test".to_owned(),
+            loader: Some(LoaderChoice::Forge),
+            loader_version: Some(RERUN_FORGE.to_owned()),
+            use_template: false,
+        };
+        petalfall
+            .create_instance_dir("旧版铁砧", &request)
+            .await
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let err = petalfall
+            .install_instance("旧版铁砧", &request, Some(&tx))
+            .await
+            .unwrap_err();
+        drop(tx);
+
+        assert_eq!(err.to_string(), message);
+        f.assert_ran_only_the_pinned_java(&mut rx);
+    }
 }
