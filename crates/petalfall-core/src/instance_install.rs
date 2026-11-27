@@ -2480,6 +2480,60 @@ mod tests {
                 "{id} 去补全"
             );
         }
+
+        // 命名规则或查重过不了、所以没给提示的，照着名字去改名确实被拒：提示与改名两边的判断由这里绑在一起。
+        for (id, name, violation) in [
+            ("撞名", "atm10".to_owned(), NameViolation::Duplicate),
+            ("太长", "樱".repeat(33), NameViolation::TooLong),
+            (
+                "段尾空格",
+                "生存 ".to_owned(),
+                NameViolation::ReservedByWindows,
+            ),
+            (
+                "段尾点",
+                "生存.".to_owned(),
+                NameViolation::ReservedByWindows,
+            ),
+            ("点开头", ".atm".to_owned(), NameViolation::LeadingDot),
+        ] {
+            match petalfall.rename_instance_files(id, &name).await {
+                Err(CoreError::Instance(InstanceError::InvalidName { violation: got, .. })) => {
+                    assert_eq!(got, violation, "{id}")
+                }
+                other => panic!("{id} 改名成 {name:?} 应被拒：{other:?}"),
+            }
+        }
+
+        // 照提示真的改一次名：改完那份版本 JSON 原样认得出来，重新列表时实例完好，不再有修不好的判定。
+        let original = std::fs::read(versions.join("改得成").join("All the Mods 10.json")).unwrap();
+        petalfall
+            .rename_instance_files("改得成", "All the Mods 10")
+            .await
+            .unwrap();
+        let renamed = versions
+            .join("All the Mods 10")
+            .join("All the Mods 10.json");
+        assert_eq!(std::fs::read(&renamed).unwrap(), original);
+        match probe_version(petalfall.game_dir(), "All the Mods 10")
+            .await
+            .unwrap()
+        {
+            VersionProbe::Found(version) => {
+                assert_eq!(version.json.id, "All the Mods 10");
+                assert_eq!(version.json_path, renamed);
+            }
+            VersionProbe::Broken(broken) => panic!("改名后应认得出：{broken:?}"),
+        }
+        let list = petalfall.list_instances().await.unwrap();
+        assert!(list.iter().all(|i| i.id != "改得成"));
+        let fixed = list.iter().find(|i| i.id == "All the Mods 10").unwrap();
+        assert!(
+            matches!(fixed.version, crate::instances::InstanceVersion::Ready(_)),
+            "{:?}",
+            fixed.version
+        );
+        assert_eq!(fixed.unrepairable, None);
     }
 
     /// Windows 的文件名里放不下的名字（保留字符、控制字符、设备名）在盘上造不出那样的版本 JSON，直接拿名字核对：过不了

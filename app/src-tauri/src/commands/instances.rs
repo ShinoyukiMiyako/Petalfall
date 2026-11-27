@@ -5873,6 +5873,61 @@ mod tests {
         );
     }
 
+    /// 实例目录改过名、里面的版本 JSON 还叫原来的名字：列表给出 rename_to，照它调改名命令，改完重新列表时那个实例
+    /// 完好，修不好的三个字段都是 null。
+    #[tokio::test]
+    async fn renaming_to_the_listed_rename_to_makes_the_instance_ready() {
+        let env = Env::new();
+        let dir = env.game_dir().join("versions").join("atm10");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("All the Mods 10.json"),
+            r#"{"id":"All the Mods 10","type":"release","mainClass":"M"}"#,
+        )
+        .unwrap();
+        let locks = InstanceLocks::default();
+        let fields = |list: &[InstanceDto], id: &str| {
+            let value = serde_json::to_value(list.iter().find(|i| i.id == id).unwrap()).unwrap();
+            json!([
+                value["status"],
+                value["unrepairable_reason"],
+                value["unrepairable_kind"],
+                value["rename_to"]
+            ])
+        };
+
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
+        assert_eq!(
+            fields(&list, "atm10"),
+            json!([
+                "broken",
+                "缺少版本 JSON，也没有记下当初装的是什么；目录里有一份叫 All the Mods 10.json 的版本文件，把实例改名成 All the Mods 10 就能认出来",
+                "no_record",
+                "All the Mods 10"
+            ])
+        );
+        let rename_to = list[0].rename_to.clone().unwrap();
+
+        let outcome = rename_instance_with(&env.facade, &locks, "atm10", &rename_to)
+            .await
+            .unwrap();
+        assert_eq!(outcome.id, "All the Mods 10");
+
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
+        assert_eq!(
+            list.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            ["All the Mods 10"]
+        );
+        assert_eq!(
+            fields(&list, "All the Mods 10"),
+            json!(["ready", null, null, null])
+        );
+    }
+
     /// 版本 JSON 读盘出错的实例（这里是那个位置上放了个目录）：补全与重装加载器两条命令都在占锁读继承链这一步报成
     /// 带原因的不可补全，而不是读盘错误；原因与列表给的是同一句，整合包没导入完的是重新导入那句。
     #[tokio::test]
