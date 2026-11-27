@@ -14,7 +14,7 @@
 use std::collections::HashSet;
 
 use petalfall_download::DownloadTask;
-use petalfall_version::loader::{arg_tokens, flag_value};
+use petalfall_version::loader::{arg_tokens, carries_neoforged_fml, flag_value};
 use petalfall_version::{
     AssetObjectsIndex, Library, RuntimeContext, VersionJson, select_libraries,
 };
@@ -166,9 +166,6 @@ const DEFAULT_FORGE_GROUP: &str = "net.minecraftforge";
 /// 版本 JSON 里也不写：组在它的 FML 里是定死的，补丁 jar 落在 `net/neoforged/forge/` 下。
 const NEOFORGED_FORGE_GROUP: &str = "net.neoforged";
 
-/// NeoForge 自己的 FML 在版本 JSON 库清单里的 maven 组，凭它认出版本带的是哪一家的 FML。
-const NEOFORGED_FML_GROUP: &str = "net.neoforged.fancymodloader";
-
 /// 游戏版本号 `主.次.修订`。
 type McVersion = (u32, u32, u32);
 
@@ -256,13 +253,10 @@ fn derive_processor_outputs(version: &VersionJson, checked_only: bool) -> Result
 }
 
 /// 没写 `--fml.forgeGroup` 时补丁 jar 落在哪个组下，由版本带的是哪一家的 FML 决定：库清单里有 NeoForge 自己的
-/// FML（1.20.1 的 NeoForge）就是 [`NEOFORGED_FORGE_GROUP`]，否则是 Forge 的 [`DEFAULT_FORGE_GROUP`]。
+/// FML（1.20.1 的 NeoForge，判据与加载器识别共用 [`carries_neoforged_fml`]）就是 [`NEOFORGED_FORGE_GROUP`]，
+/// 否则是 Forge 的 [`DEFAULT_FORGE_GROUP`]。
 fn default_forge_group(version: &VersionJson) -> &'static str {
-    let neoforged_fml = version
-        .libraries
-        .iter()
-        .any(|lib| lib.name.split(':').next() == Some(NEOFORGED_FML_GROUP));
-    if neoforged_fml {
+    if carries_neoforged_fml(version) {
         NEOFORGED_FORGE_GROUP
     } else {
         DEFAULT_FORGE_GROUP

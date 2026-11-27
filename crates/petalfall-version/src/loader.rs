@@ -43,9 +43,12 @@ pub fn detect_loaders(version: &VersionJson) -> Vec<LoaderInfo> {
     let tokens = arg_tokens(version);
     let mut out = Vec::new();
     let neoforge_libs = has_group(version, "net.neoforged");
-    // NeoForge 1.20.1（47.x）是 Forge 的分支：坐标是 net.neoforged:forge，启动参数也用 Forge 那几个。
+    // NeoForge 1.20.1（47.x）是 Forge 的分支：坐标是 net.neoforged:forge，启动参数也用 Forge 那几个。它的安装器
+    // 写出的版本 JSON 里既没有这个坐标也不写 --fml.forgeGroup，带的却是 NeoForge 自己的 FML：用着 Forge 的
+    // --fml.forgeVersion 而 FML 是 NeoForge 的，同样是这个分支。
     let neoforge_fork = find_lib_version(version, "net.neoforged", "forge").is_some()
-        || flag_value(&tokens, "--fml.forgeGroup").as_deref() == Some("net.neoforged");
+        || flag_value(&tokens, "--fml.forgeGroup").as_deref() == Some("net.neoforged")
+        || (carries_neoforged_fml(version) && flag_value(&tokens, "--fml.forgeVersion").is_some());
 
     // Forge：forge/fmlloader 库版本含 mc 前缀需剥离；退而用 --fml.forgeVersion，或 FMLTweaker 特征串。
     // 组名只在没有 NeoForge 库时算数：NeoForge 也依赖这个组的工具库（srgutils、unsafe）。
@@ -169,6 +172,15 @@ fn find_lib_version(version: &VersionJson, group: &str, artifact: &str) -> Optio
         let c = l.coordinate()?;
         (c.group == group && c.artifact == artifact).then(|| c.version.to_string())
     })
+}
+
+/// NeoForge 自己的 FML（FancyModLoader）在库清单里的 maven 组。
+const NEOFORGED_FML_GROUP: &str = "net.neoforged.fancymodloader";
+
+/// 版本带的是不是 NeoForge 自己的 FML。1.20.1 的 NeoForge 沿用 Forge 的 `--fml.forgeVersion` 一套参数，认出它
+/// 不是 Forge、它的补丁 jar 落在哪个组下，凭的都是这一条。
+pub fn carries_neoforged_fml(version: &VersionJson) -> bool {
+    has_group(version, NEOFORGED_FML_GROUP)
 }
 
 /// 是否存在某个 group 的库。
@@ -369,7 +381,22 @@ mod tests {
                                  "--fml.mcVersion","1.20.1","--fml.forgeGroup","net.neoforged"],"jvm":[]},
             "libraries":[{"name":"net.minecraftforge:fmlloader:1.20.1-47.1.106"}]
         }"#);
-        for ver in [by_library, by_group_flag] {
+        // 47.1.106 的安装器实际写出的样子：没有 net.neoforged:forge 这个坐标，也不写 --fml.forgeGroup，库清单里
+        // 是 NeoForge 自己的 FML 与 net.minecraftforge 组的工具库。认成 Forge 的话，重新安装加载器会去 Forge
+        // 的仓库找 47.1.106 的安装器，那里没有。
+        let as_installed = v(r#"{
+            "id":"我的整合包",
+            "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "arguments":{"game":["--launchTarget","forgeclient","--fml.forgeVersion","47.1.106",
+                                 "--fml.fmlVersion","47.2.2","--fml.mcVersion","1.20.1",
+                                 "--fml.mcpVersion","20230612.114412"],"jvm":[]},
+            "libraries":[{"name":"net.neoforged.fancymodloader:loader:47.2.2"},
+                         {"name":"net.neoforged.fancymodloader:earlydisplay:47.2.2"},
+                         {"name":"net.minecraftforge:accesstransformers:8.0.4"},
+                         {"name":"net.minecraftforge:JarJarSelector:0.3.19"}]
+        }"#);
+        assert!(carries_neoforged_fml(&as_installed));
+        for ver in [by_library, by_group_flag, as_installed] {
             assert_eq!(
                 detect_loaders(&ver),
                 vec![LoaderInfo {
@@ -378,6 +405,28 @@ mod tests {
                 }]
             );
         }
+    }
+
+    /// Forge 1.20.1 自己的 FML 在 net.minecraftforge 组下：不算带着 NeoForge 的 FML，照旧是 Forge。
+    #[test]
+    fn forge_1_20_1_does_not_carry_the_neoforged_fml() {
+        let ver = v(r#"{
+            "id":"1.20.1-forge-47.4.29","inheritsFrom":"1.20.1",
+            "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "arguments":{"game":["--launchTarget","forgeclient","--fml.forgeVersion","47.4.29",
+                                 "--fml.mcVersion","1.20.1","--fml.forgeGroup","net.minecraftforge",
+                                 "--fml.mcpVersion","20230612.114412"],"jvm":[]},
+            "libraries":[{"name":"net.minecraftforge:fmlloader:1.20.1-47.4.29"},
+                         {"name":"net.minecraftforge:accesstransformers:8.0.4"}]
+        }"#);
+        assert!(!carries_neoforged_fml(&ver));
+        assert_eq!(
+            detect_loaders(&ver),
+            vec![LoaderInfo {
+                kind: LoaderKind::Forge,
+                version: Some("47.4.29".into())
+            }]
+        );
     }
 
     /// Forge 自己的版本同样写 --fml.forgeGroup，组名是 net.minecraftforge，不能被上面那条带走。
