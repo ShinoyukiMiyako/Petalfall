@@ -331,7 +331,8 @@ export const PHASE_WEIGHT: Readonly<Record<InstallPhase, number>> = {
   export_identify: 2,
   export_pack: 8,
   export_verify: 3,
-  restore_verify: 2,
+  // 校验只看条目名与目录结构、不解压，再大的备份也转眼就过
+  restore_verify: 1,
   restore_extract: 8,
   restore_commit: 1,
 };

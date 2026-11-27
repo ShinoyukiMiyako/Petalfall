@@ -452,6 +452,22 @@ describe("下载队列：纯函数", () => {
       expect(tasks[0].progress).toBeCloseTo(19 / 36, 10);
     });
 
+    it("恢复存档备份：校验只查条目名、转眼就过，进入解压时整体只走到一成，大头留给解压", () => {
+      // 权重 1 / 8 / 1，共 10
+      const RESTORE: readonly InstallPhase[] = ["restore_verify", "restore_extract", "restore_commit"];
+      let tasks = applyTaskPhase([task("t1", { status: "running" })], "t1#1", RESTORE, 0);
+      expect(tasks[0].progress).toBe(0);
+      tasks = applyTaskPhase(tasks, "t1#1", RESTORE, 1);
+      expect(tasks[0].progress).toBeCloseTo(1 / 10, 10);
+      tasks = applyTaskDownload(tasks, "t1#1", snap(24, 0, 0, 2e9));
+      tasks = applyTaskDownload(tasks, "t1#1", snap(24, 12, 1e9, 2e9));
+      expect(tasks[0].progress).toBeCloseTo((1 + 8 * 0.5) / 10, 10);
+      tasks = applyTaskDownload(tasks, "t1#1", snap(24, 24, 2e9, 2e9));
+      expect(tasks[0].progress).toBeCloseTo(9 / 10, 10);
+      tasks = applyTaskPhase(tasks, "t1#1", RESTORE, 2);
+      expect(tasks[0].progress).toBeCloseTo(9 / 10, 10);
+    });
+
     describe("阶段进度", () => {
       it("fraction：进新一步为 0；认下批次后取这条快照的比例，同一批内只进不退；上一步晚到的不算；同一步换了一批取新批次的比例", () => {
         let tasks = applyTaskPhase([task("t1", { status: "running" })], "t1#1", VANILLA, 0);
