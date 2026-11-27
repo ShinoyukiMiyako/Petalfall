@@ -837,10 +837,15 @@ async fn no_record_refusal(game_dir: &Path, id: &str, broken: &BrokenVersion) ->
 /// `name` 过得了实例 `id` 改名时的校验才交回它：与 [`Petalfall::rename_instance_files`] 同一个
 /// [`check_instance_name`]，命名规则加上与 `existing` 不分大小写重名（自己除外）。过不了的名字提给玩家，照做只会被
 /// 改名拒绝。
+///
+/// 首尾带空白的名字也不交回：界面提交改名前照 JavaScript 的 `trim` 去掉首尾空白，照提示输进去的名字到后端已经是
+/// 另一个，永远改不成，这些空白在提示文字里也看不出来。后端的命名规则只拒段尾的半角空格，开头的空白与段尾的全角
+/// 空格、不换行空格都放行，所以要另看一遍。`trim` 去掉的比 Unicode 空白多一个 U+FEFF，这里一并算上。
 fn renamable_to(id: &str, name: String, existing: &[String]) -> Option<String> {
-    check_instance_name(&name, existing.iter().map(String::as_str), Some(id))
-        .is_ok()
-        .then_some(name)
+    let submitted = name.trim_matches(|c: char| c.is_whitespace() || c == '\u{FEFF}');
+    (submitted == name
+        && check_instance_name(&name, existing.iter().map(String::as_str), Some(id)).is_ok())
+    .then_some(name)
 }
 
 /// 实例目录顶层名字对不上的那份版本 JSON 的名字（不带 `.json`）：内容能解析成版本 JSON，`id` 又正好是自己的
@@ -2418,7 +2423,7 @@ mod tests {
     }
 
     /// 名字对不上的那份版本 JSON，只有实例改得成它的名字时才点出来：改名的校验（命名规则加不分大小写查重）过不了的，
-    /// 照做只会被改名拒绝，原因里不提改名，与零份、多份时一样。
+    /// 照做只会被改名拒绝，首尾带空白的在界面提交时会被去掉，同样改不成，原因里都不提改名，与零份、多份时一样。
     #[tokio::test]
     async fn a_misnamed_version_json_is_named_only_when_the_instance_can_take_that_name() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2434,6 +2439,8 @@ mod tests {
         put("段尾空格", "生存 ");
         put("段尾点", "生存.");
         put("点开头", ".atm");
+        put("开头空格", " 生存");
+        put("全角空格", "生存\u{3000}");
         put("撞名", "atm10");
         // 已有的实例，与撞名那份只差大小写：Windows 上是同一个文件夹。
         std::fs::create_dir_all(versions.join("ATM10")).unwrap();
@@ -2453,6 +2460,8 @@ mod tests {
             ("段尾空格", no_record(missing)),
             ("段尾点", no_record(missing)),
             ("点开头", no_record(missing)),
+            ("开头空格", no_record(missing)),
+            ("全角空格", no_record(missing)),
             ("撞名", no_record(missing)),
             ("ATM10", no_record(missing)),
         ];
@@ -2494,6 +2503,11 @@ mod tests {
             "生存.",
             ".atm",
             "rlcraft",
+            // 命名规则放行、界面提交时却会被去掉的首尾空白：开头的半角空格，段尾的全角空格、不换行空格与 U+FEFF。
+            " ATM10",
+            "生存\u{3000}",
+            "生存\u{a0}",
+            "\u{feff}生存",
         ] {
             assert_eq!(
                 renamable_to("atm10", name.to_owned(), &existing),
@@ -2501,6 +2515,11 @@ mod tests {
                 "{name:?}"
             );
         }
+        // 中间的空白不受影响。
+        assert_eq!(
+            renamable_to("atm10", "All\u{3000}the Mods".to_owned(), &existing).as_deref(),
+            Some("All\u{3000}the Mods")
+        );
     }
 
     /// 实例目录里的 Fabric 版本 JSON：`clientVersion` 记着原版版本号，改过名也认得出。
