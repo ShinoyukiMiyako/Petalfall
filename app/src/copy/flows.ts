@@ -1116,6 +1116,11 @@ function unsettled(cover: boolean, pin: boolean): string | null {
   return pin ? "没有固定到侧栏" : null;
 }
 
+/** 备份完成通知正文里的大小，清掉了旧的自动备份时带上份数。 */
+function backupSizeLine(size: number, pruned: number): string {
+  return pruned > 0 ? `${formatBytes(size)} · 清理了 ${pruned} 份旧的自动备份` : formatBytes(size);
+}
+
 export const TASK_TOAST = {
   ready: (name: string) => ({ title: `「${name}」已就绪`, body: "可以启动游戏了" }),
   readyElsewhere: (name: string, dir: string, cover: boolean, pin: boolean) => ({ title: `「${name}」已就绪`, body: landedElsewhere(dir, unsettled(cover, pin)) }),
@@ -1148,6 +1153,14 @@ export const TASK_TOAST = {
   java: (major: number) => ({ title: `Java ${major} 已就绪`, body: "需要它的实例会自动使用" }),
   /** 下载完已固定给某个实例（崩溃诊断里的「下载 Java N」）。 */
   javaPinned: (major: number, instance: string) => ({ title: `Java ${major} 已就绪`, body: `「${instance}」下次启动会用它` }),
+  /**
+   * 要固定给它、或通知上要带启动的实例在发起下载时的游戏目录里，当前已换到别的目录：按实例名做会落到这边的同名实例上，
+   * 所以没做。pinned 为 true 时是没固定上。
+   */
+  javaElsewhere: (major: number, instance: string, dir: string, pinned: boolean) => ({
+    title: `Java ${major} 已就绪`,
+    body: pinned ? `「${instance}」在游戏目录 ${dir} 里，当前已换到别的目录，没有固定给它；切回去后在它的设置里选 Java ${major}` : `「${instance}」在游戏目录 ${dir} 里，切回去再启动`,
+  }),
   /** 从任务日志恢复后重试成功、已没有入队时上下文的任务。 */
   finished: (title: string) => ({ title: `已完成：${title}` }),
   failed: (title: string, reason: string) => ({ title: `下载失败：${title}`, body: reason }),
@@ -1186,9 +1199,11 @@ export const TASK_TOAST = {
   /** 备份、导出、恢复存档的任务失败：它们不是下载，不并进「n 个下载失败」。 */
   worldFailed: (title: string, reason: string) => ({ title: `${title}没有完成`, body: reason }),
   backupStarted: (world: string) => ({ title: `已开始备份「${world}」`, body: "进度见下载任务" }),
-  worldBackedUp: (world: string, size: number, pruned: number) => ({
+  worldBackedUp: (world: string, size: number, pruned: number) => ({ title: `已备份「${world}」`, body: backupSizeLine(size, pruned) }),
+  /** 备份途中切了游戏目录：备份在发起时那个目录里，「查看备份」按实例名跳会跳到这边的同名实例上，所以不带。 */
+  worldBackedUpElsewhere: (world: string, size: number, pruned: number, dir: string) => ({
     title: `已备份「${world}」`,
-    body: pruned > 0 ? `${formatBytes(size)} · 清理了 ${pruned} 份旧的自动备份` : formatBytes(size),
+    body: `${backupSizeLine(size, pruned)} · 备份在游戏目录 ${dir} 里，切回去再查看`,
   }),
   worldExported: (world: string, path: string) => ({ title: `已导出「${world}」`, body: path }),
   worldRestored: (world: string, previousInRecycleBin: boolean) =>

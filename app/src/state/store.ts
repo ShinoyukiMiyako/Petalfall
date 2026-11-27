@@ -2470,8 +2470,8 @@ export class LauncherStore {
   }
 
   /**
-   * 新建、导入、补全落地时，发起它的游戏目录已经不是当前目录：返回那个目录；还是当前目录时为 null。跟着要做的事（写封面、
-   * 自动固定、接着启动、通知上的启动按钮）都按实例名作用在当前目录上，目录换了还照做就落到这边的同名实例上。
+   * 新建、导入、补全、存档备份以及带着实例的 Java 下载落地时，发起它的游戏目录已经不是当前目录：返回那个目录；还是当前目录时为 null。
+   * 跟着要做的事（写封面、自动固定、接着启动、固定 Java、通知上的启动与查看备份按钮）都按实例名作用在当前目录上，目录换了还照做就落到这边的同名实例上。
    * 还没读到当前目录时同样不做：说不准是哪个目录。
    */
   private landedElsewhere(task: Task): string | null {
@@ -2692,6 +2692,14 @@ export class LauncherStore {
         this.set((raw) => ({ tasks: raw.tasks.map((t) => (t.id === task.id ? { ...t, detail: TASK_TEXT.javaDetail(runtime.version.raw) } : t)) }));
         this.scheduleJournal();
         invalidateResources("java");
+        // 运行时装在数据目录里、哪个目录都能用；固定与通知上的启动却按实例名作用在当前目录上，下载途中切了目录就落到这边的同名实例上
+        const target = meta.pinFor !== null ? meta.pinFor : meta.launchAfter;
+        const elsewhere = target === null ? null : this.landedElsewhere(task);
+        if (target !== null && elsewhere !== null) {
+          const copy = TASK_TOAST.javaElsewhere(meta.major, target, elsewhere, meta.pinFor !== null);
+          this.pushToast("success", copy.title, copy.body);
+          return;
+        }
         const mark = this.renames.length;
         if (meta.pinFor !== null) await this.actions.updateInstanceSettings(meta.pinFor, { java: runtime.java_executable });
         const copy = meta.pinFor === null ? TASK_TOAST.java(meta.major) : TASK_TOAST.javaPinned(meta.major, this.renamedSince(meta.pinFor, mark));
@@ -2762,6 +2770,13 @@ export class LauncherStore {
         await this.fetchInstances();
         if (meta.op === "backup") {
           const outcome = result as BackupResultDto;
+          // 「查看备份」按实例名跳实例页：备份途中切了目录，就跳到这边的同名实例上。按推通知这一刻比对，读实例列表期间切的也算
+          const elsewhere = this.landedElsewhere(task);
+          if (elsewhere !== null) {
+            const copy = TASK_TOAST.worldBackedUpElsewhere(meta.name, outcome.backup.size_bytes, outcome.pruned, elsewhere);
+            this.pushToast("success", copy.title, copy.body);
+            return;
+          }
           const copy = TASK_TOAST.worldBackedUp(meta.name, outcome.backup.size_bytes, outcome.pruned);
           this.pushToast("success", copy.title, copy.body, { label: TASK_TOAST.viewBackupsAction, to: { page: "instance", id: this.renamedSince(meta.instanceId, mark), tab: "overview" } });
           return;

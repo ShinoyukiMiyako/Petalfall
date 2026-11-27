@@ -5,7 +5,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TASK_JOURNAL_DEBOUNCE_MS } from "../domain/limits";
 import { IpcError } from "../ipc/errors";
-import type { InstallResultDto, InstanceDto, RepairResultDto } from "../ipc/instances";
+import type { BackupResultDto, InstallResultDto, InstanceDto, RepairResultDto } from "../ipc/instances";
+import type { InstalledRuntimeDto } from "../ipc/java";
 import type { ModpackInstallOutcomeDto } from "../ipc/modpack";
 import type { TaskRecordDto } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
@@ -22,6 +23,8 @@ const A = "D:\\Games\\.minecraft";
 const B = "E:\\HMCL\\.minecraft";
 const ELSEWHERE = `这个任务发起于游戏目录 ${A}，切回去再重试`;
 const UNKNOWN = "这条任务记录是旧版本留下的，不知道发起于哪个游戏目录，不能重试；需要的话重新发起";
+const JDK_21: InstalledRuntimeDto = { component: "java-runtime-delta", version: { major: 21, minor: 0, security: 5, build: 11, raw: "21.0.5" }, java_executable: "C:/jdk21/bin/java.exe" };
+const SETTINGS = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
 
 let store: LauncherStore;
 let instances: InstanceDto[];
@@ -438,6 +441,68 @@ describe("发起之后切了目录的新建、导入与补全落地", () => {
     expect(callsOf(ipc, "launch_game")).toEqual([]);
     const done = toastOf("「生存」已修复");
     expect([done.body, done.action]).toEqual([`它在游戏目录 ${A} 里，当前已换到别的目录，没有接着启动；切回去再启动`, undefined]);
+  });
+
+  it("崩溃诊断下载 Java 途中切到 B：不给 B 里的同名实例固定 Java，通知写明在哪、不带启动按钮", async () => {
+    const installed = deferred<InstalledRuntimeDto>();
+    ipc.overrides.set("install_java", () => installed.promise);
+    await store.actions.installJava(21, { pinFor: "生存", launchAfter: "生存" });
+    await settle();
+    await switchTo(B, [instanceDto("生存")]);
+    installed.resolve(JDK_21);
+    await settle();
+
+    expect(callsOf(ipc, "get_instance_settings")).toEqual([]);
+    expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
+    const done = toastOf("Java 21 已就绪");
+    expect([done.body, done.action]).toEqual([`「生存」在游戏目录 ${A} 里，当前已换到别的目录，没有固定给它；切回去后在它的设置里选 Java 21`, undefined]);
+  });
+
+  it("启动失败里下载 Java 途中切到 B：通知不带启动 B 里同名实例的按钮；没指定实例的 Java 下载照常通知", async () => {
+    const forInstance = deferred<InstalledRuntimeDto>();
+    const plain = deferred<InstalledRuntimeDto>();
+    ipc.overrides.set("install_java", (args) => (args.requiredMajor === 21 ? forInstance.promise : plain.promise));
+    await store.actions.installJava(21, { launchAfter: "生存" });
+    await store.actions.installJava(17);
+    await settle();
+    await switchTo(B, [instanceDto("生存")]);
+    forInstance.resolve(JDK_21);
+    plain.resolve({ ...JDK_21, version: { ...JDK_21.version, major: 17, raw: "17.0.13" } });
+    await settle();
+
+    const launch = toastOf("Java 21 已就绪");
+    expect([launch.body, launch.action]).toEqual([`「生存」在游戏目录 ${A} 里，切回去再启动`, undefined]);
+    expect(toastOf("Java 17 已就绪").body).toBe("需要它的实例会自动使用");
+  });
+
+  it("切走又切回发起时的目录再落地：Java 照常固定给实例，通知带启动按钮", async () => {
+    const installed = deferred<InstalledRuntimeDto>();
+    ipc.overrides.set("install_java", () => installed.promise);
+    ipc.overrides.set("get_instance_settings", () => SETTINGS);
+    ipc.overrides.set("set_instance_settings", (args) => args.settings);
+    await store.actions.installJava(21, { pinFor: "生存", launchAfter: "生存" });
+    await settle();
+    await switchTo(B, [instanceDto("生存")]);
+    await switchTo(A.toLowerCase(), [instanceDto("生存")]);
+    installed.resolve(JDK_21);
+    await settle();
+
+    expect(callsOf(ipc, "set_instance_settings")).toMatchObject([{ id: "生存", settings: { java: JDK_21.java_executable } }]);
+    const done = toastOf("Java 21 已就绪");
+    expect([done.body, done.action?.label]).toEqual(["「生存」下次启动会用它", "启动"]);
+  });
+
+  it("备份途中切到 B：通知写明备份在哪个目录，不带跳到 B 里同名实例的「查看备份」", async () => {
+    const backedUp = deferred<BackupResultDto>();
+    ipc.overrides.set("backup_world", () => backedUp.promise);
+    await store.actions.backupWorld("生存", "新的世界", "新的世界");
+    await settle();
+    await switchTo(B, [instanceDto("生存")]);
+    backedUp.resolve({ backup: { file: "1720-manual.zip", kind: "manual", created_at: T0, size_bytes: 1024, name: "新的世界" }, pruned: 2 } as never);
+    await settle();
+
+    const done = toastOf("已备份「新的世界」");
+    expect([done.body, done.action]).toEqual([`1.0 KB · 清理了 2 份旧的自动备份 · 备份在游戏目录 ${A} 里，切回去再查看`, undefined]);
   });
 
   it("切走又切回发起时的目录再落地：照常写封面、固定与接着启动", async () => {
