@@ -277,7 +277,7 @@ function PeekList({ rows, finishing, onCancel, onSettled }: { rows: readonly Tas
              */}
             <AnimatePresence onExitComplete={onSettled}>
               {rows.map((task) => (
-                <PeekRow key={task.id} task={task} finishing={finishing.has(task.id)} enter={mounted.current} onCancel={() => onCancel(task)} />
+                <PeekRow key={task.id} task={task} finishing={finishing.has(task.id)} onCancel={() => onCancel(task)} />
               ))}
             </AnimatePresence>
           </ul>
@@ -300,15 +300,30 @@ function PeekList({ rows, finishing, onCancel, onSettled }: { rows: readonly Tas
 /** 列表那一层正在退场：里面的行跟着整块淡出，行自己的 useIsPresent 却仍是在场（见 ListLayer）。 */
 const ListLeaving = createContext(false);
 
+/** 列表那一层正在挂上：同一刻挂上的行是这一整块的一部分，跟着整层入场，自己不播（见 ListLayer）。 */
+const ListMounting = createContext(false);
+
+/** 列表那一层入场的起点。等第一帧时停着的目标也用它：与 initial 是同一个对象，挂载时 framer-motion 不建一段原地不动的动画。 */
+const LIST_FROM = { opacity: 0 } as const;
+const LIST_IN = { opacity: 1, transition: fade.in } as const;
+
 /**
  * 列表那一层。最后一行走掉时不是行自己退场，而是整块列表冻结在最后一帧、跟着这一层淡出：里面的行仍算在场，
  * 所以退场期间 inert 要打在这一层上，跟着淡出的行同样点不到、聚焦不到；行要知道自己在退场，也看这一层（ListLeaving）。
+ * 快览开着时从空态换成列表，淡入只播这一层：同时挂上的行再各播一遍的话两层透明度相乘，行的入场又等第一帧画出、
+ * 整层不等，行比整层还晚一帧起步。整层与新行同一做法，停在起点、画出第一帧之后才起步（usePaintedOnce）。
  */
 function ListLayer({ enter, children }: { enter: boolean; children: ReactNode }) {
   const present = useIsPresent();
+  const mounted = useMounted();
+  // 冻结挂载那一刻的值：快览打开之后每次渲染给的 enter 都为真，打开时就在的列表不能因此退回起点
+  const [entering] = useState(enter);
+  const painted = usePaintedOnce("list", entering);
   return (
-    <motion.div inert={!present} initial={enter ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }} exit={{ opacity: 0, transition: fade.out }}>
-      <ListLeaving.Provider value={!present}>{children}</ListLeaving.Provider>
+    <motion.div inert={!present} initial={entering ? LIST_FROM : false} animate={painted ? LIST_IN : LIST_FROM} exit={{ opacity: 0, transition: fade.out }}>
+      <ListMounting.Provider value={!mounted.current}>
+        <ListLeaving.Provider value={!present}>{children}</ListLeaving.Provider>
+      </ListMounting.Provider>
     </motion.div>
   );
 }
@@ -381,11 +396,13 @@ function ActiveGlyph({ tasks }: { tasks: readonly Task[] }) {
  * 任务完成的那一刻行就离开列表，冻结下来的是完成前的样子：运行中、进度停在最后一次上报、取消键可按。所以退场中按任务 id
  * 读实时任务，已完成就按收尾画，详情也取实时任务，与有收尾这一拍时离开前的样子相同。在场的行不读：页面每次都给最新的任务。
  */
-function PeekRow({ task: placed, finishing, enter, onCancel }: { task: Task; finishing: boolean; enter: boolean; onCancel: () => void }) {
+function PeekRow({ task: placed, finishing, onCancel }: { task: Task; finishing: boolean; onCancel: () => void }) {
   // ul 的直接子项只能是 li，不能再包一层 Appear；减少动画时进出只留透明度，删掉的行不先缩一下再淡出
   const insert = useInsertItem();
-  // 冻结挂载那一刻的值：快览打开之后每次渲染给的 enter 都为真，打开时就在的行不能因此退回起点
-  const [entering] = useState(enter);
+  // 和列表那一层同一刻挂上的（快览打开时就在的、从空态换上来的）跟着整层，之后才来的自己入场。
+  // 冻结挂载那一刻的值：之后列表那一层的重渲染给的都是已挂上，已经显示着的行不能因此退回起点
+  const layerMounting = useContext(ListMounting);
+  const [entering] = useState(!layerMounting);
   // 自己入场的行先停在起点，画出第一帧之后才换成目标，与 Appear 的子项同一做法：新行挂上的那一帧连同同一刻别的数据引起的渲染
   // 可能很长，入场从提交就计时的话第一帧画出来时淡入已走掉一截。停着的目标与 initial 是同一个对象，挂载时 framer-motion 不建一段原地不动的动画
   const painted = usePaintedOnce("row", entering);

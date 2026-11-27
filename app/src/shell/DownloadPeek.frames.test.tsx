@@ -116,3 +116,47 @@ it.each(["never", "always"] as const)("快览开着时新来的行（减少动�
   expect(shown(arriving)).toEqual(["1", scaled ? "none" : ""]);
   expectSettled(staying);
 });
+
+it("快览开着时从空态换成列表：整层停在起点等第一帧画出再淡入，跟着整层挂上的行自己不再入场", async () => {
+  view = render(
+    <LauncherProvider>
+      <ShellProvider>
+        <Probe />
+        <DownloadPeek />
+        <OverlayRoot />
+      </ShellProvider>
+    </LauncherProvider>,
+  );
+  await flush();
+  const entry = view.container.querySelector<HTMLButtonElement>("button[aria-haspopup='dialog']");
+  if (entry === null) throw new Error("找不到下载入口");
+  act(() => entry.click());
+  await flush();
+  await stepFrames(60);
+  expect(document.querySelector("ul")).toBeNull();
+
+  const title = await startJava(21);
+  // 空态先淡出，播完列表那一层才挂上
+  let frames = 0;
+  while (document.querySelector("ul") === null) {
+    frames += 1;
+    if (frames > 60) throw new Error("空态淡出之后列表没有挂上");
+    await stepFrames(1);
+  }
+  const layer = document.querySelector("ul")?.parentElement;
+  if (!(layer instanceof HTMLElement)) throw new Error("列表外面没有那一层");
+  const arrived = row(title);
+  expect(layer.style.opacity).toBe("0");
+  expectSettled(arrived);
+  await stepFrames(1);
+  expect(layer.style.opacity).toBe("0");
+  // 放行排在绘制之后的任务里，假时钟要再推进一帧才到点
+  await stepFrames(2);
+  const opacity = Number(layer.style.opacity);
+  expect(opacity).toBeGreaterThan(0);
+  expect(opacity).toBeLessThan(1);
+  expectSettled(arrived);
+  await stepFrames(60);
+  expect(layer.style.opacity).toBe("1");
+  expectSettled(arrived);
+});
