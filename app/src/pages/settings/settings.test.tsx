@@ -353,7 +353,7 @@ describe("设置页：骨架与分区导航", () => {
     expect(skeleton()?.hasAttribute("data-pending")).toBe(false);
 
     await click(navItem("关于"));
-    expect(shape()).toEqual(["plain", { subtitle: false, rows: 1 }, { subtitle: false, rows: 0 }, { subtitle: false, rows: 6 }, "plain"]);
+    expect(shape()).toEqual(["plain", { subtitle: false, rows: 1 }, { subtitle: false, rows: 0 }, { subtitle: false, rows: 8 }, "plain"]);
     // 换分区不让加载门从头计时：新面板里的骨架接着显着，不先隐身再等一个出现延迟
     expect([skeleton()?.hasAttribute("data-pending"), skeleton()?.style.opacity]).toEqual([false, "1"]);
     expect(text()).not.toContain("检查更新");
@@ -368,6 +368,8 @@ describe("设置页：骨架与分区导航", () => {
     });
     expect(text()).toContain("检查更新");
     expect(document.querySelector('[role="region"] [aria-busy="true"]')).toBeNull();
+    // 支持卡的骨架行数就是读到后真实的设置行数，换上内容时这张卡不变高变矮
+    expect(section("支持").querySelectorAll(':scope > [class*="row"]').length).toBe(8);
   });
 
   it("配置读不出来：内容列是错误卡，导航照常可点；重试成功后显示分区", async () => {

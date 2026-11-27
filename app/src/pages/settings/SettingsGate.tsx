@@ -42,8 +42,8 @@ const SECTION_SKELETON: Readonly<Record<GatedSection, readonly SkeletonShape[]>>
   java: [card(true, 1, 158), card(false, 0, 30), card(true, 1, 30)],
   // 内存（自动分配与滑杆）、版本隔离、新实例（一行开关）、游戏目录（路径、其他文件夹、数据目录）、存档备份（三行）
   game: [card(true, 1, 76), card(true, 1), card(false, 1), card(true, 0, 200), card(true, 3)],
-  // 品牌卡、启动器更新（状态行与自动检查）、版本信息（六行键值）、支持（六行）、页尾声明
-  about: [{ kind: "plain", height: 126, radius: "lg" }, card(false, 1, 46), card(false, 0, 160), card(false, 6), { kind: "plain", height: 220, radius: "md" }],
+  // 品牌卡、启动器更新（状态行与自动检查）、版本信息（六行键值）、支持（八行）、页尾声明
+  about: [{ kind: "plain", height: 126, radius: "lg" }, card(false, 1, 46), card(false, 0, 160), card(false, 8), { kind: "plain", height: 220, radius: "md" }],
 };
 
 /** 骨架卡用真实的卡头与设置行承载骨架条：行高、内边距、分隔线都与真实卡片一致。 */
