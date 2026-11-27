@@ -15,7 +15,7 @@
 //! CurseForge 的文件列表按页给，客户端翻到页数上限为止（[`petalfall_modplatform::MOD_FILES_MAX_PAGES`]），
 //! 翻不完时列表标明截断（[`ModVersionList::truncated`]）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -73,7 +73,7 @@ impl Petalfall {
     ///
     /// `game_versions` / `loaders` 传空表示该维度不过滤。同一维度内多个取值之间是「或」，两个维度
     /// 之间是「与」。能下推给平台的过滤条件一律下推（Modrinth 支持多值数组，CurseForge 单次只能
-    /// 表达一个值），但下推只当作优化：两个平台的过滤语义并不一致，最终口径由本地那一遍统一。
+    /// 表达一个值，加载器按家分开请求），但下推只当作优化：两个平台的过滤语义并不一致，最终口径由本地那一遍统一。
     ///
     /// 平台没给元数据的版本一律放行，与 [`crate::compat::classify`] 判「可能可行」是同一条口径。
     /// CurseForge 早期文件常常既没标加载器也没标 MC 版本，若把「不知道」当「不匹配」筛掉，落位层
@@ -253,10 +253,12 @@ async fn fetch_modrinth(
 
 /// 拉取 CurseForge 工程文件并归一。
 ///
-/// `/mods/{id}/files` 的 `gameVersion` 与 `modLoaderType` 都只收单值，因此只有该维度恰好请求一个取值
-/// 时才下推。这不只是省流量：该端点是分页的，客户端最多翻 [`petalfall_modplatform::MOD_FILES_MAX_PAGES`]
-/// 页，不下推游戏版本时，一个有上千个文件的大 Mod 翻到上限也可能不含目标 MC 版本的文件，列表会
-/// 「明明有版本却是空的」。
+/// `/mods/{id}/files` 的 `gameVersion` 与 `modLoaderType` 都只收单值。游戏版本只在恰好请求一个取值时下推；
+/// 加载器每家各发一次带 `modLoaderType` 的请求，按文件 id 去重合并，哪一家的列表截断了合并结果就标截断，
+/// 没要求加载器时只发一次不带它的。下推不只是省流量：该端点是分页的，客户端最多翻
+/// [`petalfall_modplatform::MOD_FILES_MAX_PAGES`] 页，不下推游戏版本时，一个有上千个文件的大 Mod 翻到上限也
+/// 可能不含目标 MC 版本的文件，列表会「明明有版本却是空的」；借着别家跑的实例要两家加载器，不下推加载器就把
+/// 这个 MC 版本下各家的文件都翻回来，文件多的工程要翻好几页，还会截断。合并结果的先后由调用方按发布时间统一排。
 async fn fetch_curseforge(
     client: &CurseForgeClient,
     project_id: &str,
@@ -268,20 +270,30 @@ async fn fetch_curseforge(
         [only] => Some(only.as_str()),
         _ => None,
     };
-    let single_loader = match loaders {
-        [only] => Some(*only),
-        _ => None,
+    let pushed: Vec<Option<ModLoader>> = if loaders.is_empty() {
+        vec![None]
+    } else {
+        loaders.iter().copied().map(Some).collect()
     };
-    let listing = client
-        .mod_files(mod_id, single_loader, single_game_version)
-        .await?;
+    let mut seen = HashSet::new();
+    let mut versions = Vec::new();
+    let mut truncated = false;
+    for loader in pushed {
+        let listing = client
+            .mod_files(mod_id, loader, single_game_version)
+            .await?;
+        truncated |= listing.truncated;
+        versions.extend(
+            listing
+                .files
+                .iter()
+                .filter(|file| seen.insert(file.id))
+                .map(CurseForgeFile::to_version_info),
+        );
+    }
     Ok(ModVersionList {
-        versions: listing
-            .files
-            .iter()
-            .map(CurseForgeFile::to_version_info)
-            .collect(),
-        truncated: listing.truncated,
+        versions,
+        truncated,
     })
 }
 
@@ -1074,17 +1086,20 @@ mod tests {
         assert_eq!(ids(&list), vec!["1002"]);
     }
 
+    /// 游戏版本要两个取值时不下推，由本地过滤；加载器仍按家各下推一次。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn curseforge_multi_value_filters_stay_local() {
+    async fn curseforge_multiple_game_versions_stay_local() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/mods/238222/files"))
-            .and(query_param_is_missing("gameVersion"))
-            .and(query_param_is_missing("modLoaderType"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(curseforge_files_body()))
-            .expect(1)
-            .mount(&server)
-            .await;
+        for loader_type in ["1", "4"] {
+            Mock::given(method("GET"))
+                .and(path("/v1/mods/238222/files"))
+                .and(query_param_is_missing("gameVersion"))
+                .and(query_param("modLoaderType", loader_type))
+                .respond_with(ResponseTemplate::new(200).set_body_json(curseforge_files_body()))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
 
         let games = ["1.20.1".to_owned(), "1.21".to_owned()];
         let loaders = [ModLoader::Forge, ModLoader::Fabric];
@@ -1102,6 +1117,7 @@ mod tests {
             &loaders,
         );
         assert_eq!(ids(&list), vec!["1001"]);
+        assert_eq!(requests(&server).await, 2);
     }
 
     /// 一个 CurseForge 文件：`k` 越大越新，id 与文件名都由它派生。
@@ -1231,6 +1247,133 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ids(&old), ["10003"]);
+        assert_eq!(requests(&server).await, 11);
+    }
+
+    /// 一个 1.20.1 的 CurseForge 文件，标着 `loaders` 这几家。
+    fn loader_file(id: u32, date: &str, loaders: &[&str]) -> serde_json::Value {
+        let mut tags = vec!["1.20.1"];
+        tags.extend_from_slice(loaders);
+        serde_json::json!({
+            "id": id, "modId": 238222, "displayName": format!("JEI {id}"),
+            "fileName": format!("jei-{id}.jar"), "releaseType": 1,
+            "fileDate": date, "gameVersions": tags
+        })
+    }
+
+    /// 借着别家跑的实例要两家加载器：两家各发一次带自己 `modLoaderType` 的请求，同一个文件两边都给时只留一份，
+    /// 合并后照发布时间倒序。只要一家时照旧一次请求。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_two_loaders_are_fetched_one_request_each_and_merged() {
+        let server = MockServer::start().await;
+        let both = loader_file(2001, "2026-01-01T00:00:00Z", &["NeoForge", "Forge"]);
+        for (loader_type, files) in [
+            (
+                "6",
+                vec![
+                    loader_file(2003, "2026-03-01T00:00:00Z", &["NeoForge"]),
+                    both.clone(),
+                ],
+            ),
+            (
+                "1",
+                vec![loader_file(2002, "2026-02-01T00:00:00Z", &["Forge"]), both],
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path("/v1/mods/238222/files"))
+                .and(query_param("gameVersion", "1.20.1"))
+                .and(query_param("modLoaderType", loader_type))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": files })),
+                )
+                .mount(&server)
+                .await;
+        }
+        let petalfall = test_petalfall(&server.uri()).with_curseforge_key("test-key");
+        let game = ["1.20.1".to_owned()];
+
+        let list = petalfall
+            .mod_version_list(
+                Platform::CurseForge,
+                "238222",
+                &game,
+                &[ModLoader::NeoForge, ModLoader::Forge],
+            )
+            .await
+            .unwrap();
+        assert!(!list.truncated);
+        assert_eq!(ids(&list.versions), vec!["2003", "2002", "2001"]);
+        let mut sent: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| {
+                r.url
+                    .query_pairs()
+                    .find(|(key, _)| key == "modLoaderType")
+                    .map(|(_, value)| value.into_owned())
+                    .expect("每个请求都带着 modLoaderType")
+            })
+            .collect();
+        sent.sort();
+        assert_eq!(sent, ["1", "6"]);
+
+        let own = petalfall
+            .mod_version_list(
+                Platform::CurseForge,
+                "238222",
+                &game,
+                &[ModLoader::NeoForge],
+            )
+            .await
+            .unwrap();
+        assert_eq!(ids(&own.versions), vec!["2003", "2001"]);
+        assert_eq!(requests(&server).await, 3);
+    }
+
+    /// 两家里有一家的文件列表翻到页数上限，合并结果就标截断，哪怕后问的那一家没截断。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_merged_listing_is_truncated_when_either_loader_is() {
+        let server = MockServer::start().await;
+        for page in 0..10u32 {
+            let files: Vec<serde_json::Value> = (page * 50..page * 50 + 50)
+                .map(|k| loader_file(10_000 + k, "2026-01-01T00:00:00Z", &["NeoForge"]))
+                .collect();
+            Mock::given(method("GET"))
+                .and(path("/v1/mods/238222/files"))
+                .and(query_param("modLoaderType", "6"))
+                .and(query_param("index", (page * 50).to_string()))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": files,
+                    "pagination": {"index": page * 50, "pageSize": 50, "resultCount": 50, "totalCount": 2000}
+                })))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .and(query_param("modLoaderType", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [loader_file(50_000, "2026-06-01T00:00:00Z", &["Forge"])]
+            })))
+            .mount(&server)
+            .await;
+        let petalfall = test_petalfall(&server.uri()).with_curseforge_key("test-key");
+
+        let list = petalfall
+            .mod_version_list(
+                Platform::CurseForge,
+                "238222",
+                &["1.20.1".to_owned()],
+                &[ModLoader::NeoForge, ModLoader::Forge],
+            )
+            .await
+            .unwrap();
+        assert!(list.truncated);
+        assert_eq!(list.versions.len(), 501);
+        assert_eq!(list.versions[0].version_id, "50000");
         assert_eq!(requests(&server).await, 11);
     }
 
