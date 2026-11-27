@@ -4,12 +4,12 @@
 // 形象是原创的人偶：光头、两点眼，本体压到很低的饱和度读作中性；帽子与衣裤按账户色相取色，
 // 头像只取正脸时也能靠帽子认出是哪个账户。日夜两种模式同色，与真皮肤一样不压暗。
 
-import { blankPixels, pixelsToCanvas, type Pixels } from "../illustrations/canvas";
+import { blankPixels, type Pixels } from "../illustrations/canvas";
 import { hslToRgb, type Rgb } from "../illustrations/color";
 import { LruCache } from "../iso/render";
 import { figureParts, type BoxFace, type BoxLayer, type FigurePartName } from "./figure3d";
 import type { SkinModel } from "./layout";
-import type { LoadedSkin } from "./render";
+import { skinBitmapFromPixels, type LoadedSkin } from "./render";
 
 /** M 人偶本体、J 关节缝、E 眼、K 帽身、R 帽檐、C 上衣、T 领口袖口与下摆、P 裤、S 鞋。 */
 export type MannequinCell = "M" | "J" | "E" | "K" | "R" | "C" | "T" | "P" | "S";
@@ -117,7 +117,7 @@ export function mannequinSkin(hue: number, model: SkinModel): LoadedSkin {
   const key = `${hue}|${model}`;
   const hit = mannequins.get(key);
   if (hit) return hit;
-  const skin: LoadedSkin = { bitmap: pixelsToCanvas(mannequinPixels(hue, model)), format: "modern", hat: true, model };
+  const skin: LoadedSkin = { bitmap: skinBitmapFromPixels(mannequinPixels(hue, model)), format: "modern", hat: true, model };
   mannequins.set(key, skin);
   return skin;
 }

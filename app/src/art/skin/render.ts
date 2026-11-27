@@ -62,6 +62,16 @@ function pixelsOf(bitmap: SkinBitmap): Pixels {
   return pixels;
 }
 
+/**
+ * 在内存里按像素生成的皮肤（人偶）的位图。生成时手里已经有整张像素，记下来给切面图用：
+ * 不然第一次画立绘时还要把刚写进画布的像素经 getImageData 读回一遍。
+ */
+export function skinBitmapFromPixels(pixels: Pixels): OffscreenCanvas {
+  const canvas = pixelsToCanvas(pixels);
+  skinPixels.set(canvas, pixels);
+  return canvas;
+}
+
 function cropPixels(source: Pixels, { x, y, w, h }: SkinRect): Pixels {
   const out = blankPixels(w, h);
   for (let row = 0; row < h; row++) {

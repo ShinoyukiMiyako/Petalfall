@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { figureQuads, REST_POSE } from "./figure3d";
 import { FIGURE_FRAME } from "./layout";
-import { mannequinSkin } from "./mannequin";
+import { mannequinPixels, mannequinSkin } from "./mannequin";
 import { paintSkinFigure, skinFigureCanvas, type LoadedSkin } from "./render";
 
 // 这里的替身比 test-canvas 多做一件事：皮肤像素按坐标编码（R = x，G = y），
@@ -187,5 +187,25 @@ describe("人偶", () => {
     const slim = skinFigureCanvas(mannequinSkin(123, "slim"), 5, 1) as unknown as FakeCanvas;
     const slimQuads = figureQuads("modern", "slim", true, REST_POSE);
     expect(slim.draws.map((d) => [d.source.width, d.source.height])).toEqual(slimQuads.map((q) => [q.uv.w, q.uv.h]));
+  });
+
+  // 替身的 getImageData 读出的是按坐标编码、透明度 200 的像素：从画布读回的话切出来的就不是人偶的颜色
+  it("面图直接从生成人偶时的那份像素切，不从画布读回：切出来的是人偶自己的颜色，透明度原样", () => {
+    const hue = 211;
+    const target = new FakeCanvas(120, 216);
+    paintSkinFigure(target.context as unknown as OffscreenCanvasRenderingContext2D, mannequinSkin(hue, "wide"), REST_POSE, 6);
+    const quads = figureQuads("modern", "wide", true, REST_POSE);
+    const index = quads.findIndex((q) => q.part === "body" && q.layer === "inner" && q.face === "front");
+    const { uv, shade } = quads[index];
+    const source = mannequinPixels(hue, "wide");
+    const shaded = (x: number, y: number) => {
+      const i = (y * source.width + x) * 4;
+      const [r, g, b, a] = source.data.slice(i, i + 4);
+      return [Math.round(r * shade), Math.round(g * shade), Math.round(b * shade), a];
+    };
+    const tile = target.draws[index].source;
+    expect(shaded(uv.x, uv.y)[3]).toBe(255);
+    expect(pixel(tile, 0, 0)).toEqual(shaded(uv.x, uv.y));
+    expect(pixel(tile, uv.w - 1, uv.h - 1)).toEqual(shaded(uv.x + uv.w - 1, uv.y + uv.h - 1));
   });
 });
