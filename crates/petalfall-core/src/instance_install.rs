@@ -347,7 +347,7 @@ impl Petalfall {
                 // 落盘，在的话也给不了处理器：先换成原版的。守卫活到下面写好合并结果才放下，中途失败、任务被丢弃
                 // 或 panic 都会还原。进程被硬杀时留下原版那份，未完成标记里记着这次要装的内容（新建由
                 // create_instance_dir、重装由 begin_repair / begin_loader_reinstall 在这之前写下），补全照它重装。
-                let placed = place_json_for_processors(&layout, &base).await?;
+                let placed = place_json_for_processors(&layout, &base)?;
                 // 处理器不看下载池的令牌，取消看的是上下文上挂的那个（make_context 已挂上）：
                 // 取消时正在跑的处理器要被结束，不能等宽限期满被丢下。
                 let java_major = found.first().map(|picked| picked.version.major);

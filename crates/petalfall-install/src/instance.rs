@@ -42,12 +42,16 @@ pub fn merge_for_instance(
 
 /// 把实例的版本 JSON 写到 `versions/<id>/<id>.json`（原子写）。
 pub async fn write_instance_json(layout: &GameLayout, version: &VersionJson) -> Result<()> {
-    let bytes = serde_json::to_vec_pretty(version).map_err(|source| Error::Json {
-        context: "实例版本 JSON".to_owned(),
-        source,
-    })?;
+    let bytes = instance_json_bytes(version)?;
     petalfall_base::fs::atomic_write(layout.version_json(&version.id), &bytes).await?;
     Ok(())
+}
+
+fn instance_json_bytes(version: &VersionJson) -> Result<Vec<u8>> {
+    serde_json::to_vec_pretty(version).map_err(|source| Error::Json {
+        context: "实例版本 JSON".to_owned(),
+        source,
+    })
 }
 
 /// 加载器安装器的处理器开跑之前，把实例的版本 JSON 换成 `version`（装加载器之前、只合并了原版的那份），交回守卫：
@@ -60,27 +64,32 @@ pub async fn write_instance_json(layout: &GameLayout, version: &VersionJson) -> 
 /// 那份是什么样，一律先换成原版的。
 ///
 /// 读已有的那份时出了「不存在」以外的错（被占用、没有权限、那个位置是个目录）照实报错，什么都不换。
-pub async fn place_json_for_processors(
-    layout: &GameLayout,
-    version: &VersionJson,
-) -> Result<PlacedJson> {
+///
+/// 从读原字节、写临时文件到改名换上，整段在调用的线程上同步做完，不是 async：中间有让出点的话，安装的 future 可能在
+/// 异步写把改名交给阻塞线程池之后被丢弃，守卫在 drop 里先还原，那次改名随后才落地，又把原版那份放了回去。文件只有
+/// 几十 KB，与守卫在 drop 里写回原字节一样只阻塞几毫秒。
+pub fn place_json_for_processors(layout: &GameLayout, version: &VersionJson) -> Result<PlacedJson> {
     let path = layout.version_json(&version.id);
-    let restore = match tokio::fs::read(&path).await {
+    let restore = match std::fs::read(&path) {
         Ok(bytes) => Restore::WriteBack(bytes),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Restore::Remove,
         Err(source) => return Err(io_err(&path, source)),
     };
-    // 守卫先于写立起来：写的途中安装的 future 被丢弃时，原版那份可能已经换上了，drop 照样还原。
-    let placed = PlacedJson {
+    let bytes = instance_json_bytes(version)?;
+    let dir = layout.version_dir(&version.id);
+    std::fs::create_dir_all(&dir).map_err(|source| petalfall_base::Error::Io {
+        path: dir.clone(),
+        source,
+    })?;
+    // 原子写失败时目标没被换掉，盘上还是原来那份，不用守卫还原。
+    write_atomically(&path, &bytes).map_err(|source| petalfall_base::Error::Io {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(PlacedJson {
         path,
         restore: Some(restore),
-    };
-    if let Err(err) = write_instance_json(layout, version).await {
-        // 原子写失败时目标没被换掉，盘上还是原来那份，不用还原。
-        placed.keep();
-        return Err(err);
-    }
-    Ok(placed)
+    })
 }
 
 /// [`place_json_for_processors`] 换上原版版本 JSON 之后的守卫。没经 [`keep`](Self::keep) 放下就被 drop 时（安装器、
@@ -123,7 +132,7 @@ impl Drop for PlacedJson {
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 other => other,
             },
-            Restore::WriteBack(bytes) => write_back(&self.path, bytes),
+            Restore::WriteBack(bytes) => write_atomically(&self.path, bytes),
         };
         if let Err(err) = restored {
             tracing::warn!(path = %self.path.display(), %err, "没装成，还原实例的版本 JSON 失败");
@@ -131,9 +140,10 @@ impl Drop for PlacedJson {
     }
 }
 
-/// 同步的原子写（drop 里不能 await）：写回的途中被打断时盘上还是原版那份，不会变成半截文件。临时名的取法与
+/// 同步的原子写，换上原版那份与 drop 里写回原字节共用（drop 里不能 await，换上的那一段不能有让出点，见
+/// [`place_json_for_processors`]）：写的途中被打断时盘上还是写之前那份，不会变成半截文件。临时名的取法与
 /// `petalfall_base::fs::atomic_write` 相同。
-fn write_back(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
 
     let name = path
@@ -147,7 +157,7 @@ fn write_back(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     });
     let replaced = written.and_then(|()| std::fs::rename(&tmp, path));
     if replaced.is_err() {
-        // 要报的是写回本身的错；临时文件删不掉也只是多一个点开头的文件。
+        // 要报的是写本身的错；临时文件删不掉也只是多一个点开头的文件。
         let _ = std::fs::remove_file(&tmp);
     }
     replaced
@@ -264,8 +274,8 @@ mod tests {
 
     /// 处理器开跑前不论实例本来有没有版本 JSON、本来那份能不能给处理器用，盘上都换成只合并了原版的那份；没走完
     /// （drop）时还原成换之前的样子，本来没有的删掉、本来有的逐字节写回；装成（keep）后留着原版那份，等合并结果盖掉。
-    #[tokio::test]
-    async fn the_json_for_processors_replaces_whatever_is_there_until_kept() {
+    #[test]
+    fn the_json_for_processors_replaces_whatever_is_there_until_kept() {
         let id = "老整合包";
         let base = merge_for_instance(id, &vanilla(), None).unwrap();
         let merged = serde_json::to_vec_pretty(
@@ -294,7 +304,7 @@ mod tests {
                     std::fs::write(&path, bytes).unwrap();
                 }
 
-                let placed = place_json_for_processors(&layout, &base).await.unwrap();
+                let placed = place_json_for_processors(&layout, &base).unwrap();
                 assert_eq!(json_at(&path), base, "{case}：处理器跑的时候盘上是原版那份");
 
                 let json_file = vec![format!("{id}.json")];
@@ -332,7 +342,7 @@ mod tests {
 
         let (placed_tx, placed_rx) = tokio::sync::oneshot::channel();
         let install = async {
-            let _placed = place_json_for_processors(&layout, &base).await.unwrap();
+            let _placed = place_json_for_processors(&layout, &base).unwrap();
             placed_tx.send(()).unwrap();
             std::future::pending::<()>().await;
         };
@@ -344,9 +354,43 @@ mod tests {
         assert_eq!(std::fs::read(layout.version_json(id)).unwrap(), before);
     }
 
+    /// 换上原版那份的整段没有让出点：安装的 future 只被 poll 一次就已经换好，这时被丢弃，守卫的还原就是盘上的终局，
+    /// 不会再有晚到的改名把原版那份放回去。不在 tokio 运行时里跑：中间用了异步文件读写的话第一次 poll 就 panic。
+    #[test]
+    fn placing_finishes_within_one_poll_so_a_drop_right_after_restores_the_original() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = GameLayout::new(tmp.path());
+        let id = "模组尝鲜";
+        let before = serde_json::to_vec_pretty(
+            &merge_for_instance(id, &vanilla(), Some(&fabric())).unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(layout.version_dir(id)).unwrap();
+        std::fs::write(layout.version_json(id), &before).unwrap();
+        let base = merge_for_instance(id, &vanilla(), None).unwrap();
+
+        let placed = std::cell::Cell::new(false);
+        let mut install = Box::pin(async {
+            let _placed = place_json_for_processors(&layout, &base).unwrap();
+            placed.set(true);
+            std::future::pending::<()>().await;
+        });
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(install.as_mut().poll(&mut cx).is_pending());
+        assert!(placed.get(), "第一次 poll 就已经换好");
+        assert_eq!(json_at(&layout.version_json(id)), base);
+
+        drop(install);
+        assert_eq!(std::fs::read(layout.version_json(id)).unwrap(), before);
+        assert_eq!(
+            files_in(&layout.version_dir(id)),
+            vec![format!("{id}.json")]
+        );
+    }
+
     /// 读已有那份时出的不是「不存在」（这里那个位置是个目录）：照实报错，什么都不换。
-    #[tokio::test]
-    async fn an_unreadable_instance_json_is_reported_and_left_alone() {
+    #[test]
+    fn an_unreadable_instance_json_is_reported_and_left_alone() {
         let tmp = tempfile::tempdir().unwrap();
         let layout = GameLayout::new(tmp.path());
         let id = "网盘同步的";
@@ -354,7 +398,7 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         let base = merge_for_instance(id, &vanilla(), None).unwrap();
 
-        let err = place_json_for_processors(&layout, &base).await.unwrap_err();
+        let err = place_json_for_processors(&layout, &base).unwrap_err();
 
         assert!(
             matches!(&err, Error::Io { path: at, .. } if *at == path),
