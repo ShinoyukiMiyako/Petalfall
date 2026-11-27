@@ -1067,12 +1067,20 @@ type TaskEffect = "installing" | "moving" | "backing_up" | "modifying" | null;
 type CreationMeta = Extract<TaskMeta, { type: "create" | "modpack" }>;
 
 /**
- * creation：正在新建或导入这个实例的任务的入队上下文。装到一半被重扫扫到的半成品目录还没写版本 JSON，
- * 扫出来既没有版本也没有加载器；这时沿用入队时的内容，与占位项说的一致，不写成「原版 · 版本未知」。
+ * creation：正在新建或导入这个实例的任务的入队上下文。装到一半被重扫扫到的目录里，版本 JSON 说的不是这个实例装好后的样子：
+ * 新建时还没写，扫出来既没有版本也没有加载器；装 Forge、NeoForge 期间盘上是只合并了原版的那份（给安装器的处理器读的），
+ * 扫出来是原版。这期间沿用入队时的内容，与占位项说的一致，不写成「原版 · 版本未知」，也不在装到半路时变成原版。
+ * 补全里照记录重装、重新安装加载器没有入队上下文，沿用未完成标记里记下的这次要装的内容。
  */
 function applyTaskEffect(base: InstanceSummary, pinned: boolean, effect: TaskEffect, creation: CreationMeta | null): InstanceSummary {
   if (effect === "installing") {
-    const facts = creation !== null && base.mcVersion === null ? { mcVersion: creation.mcVersion, loader: creation.loader, loaderVersion: creation.loaderVersion } : {};
+    const spec = base.incomplete !== null && base.incomplete.kind === "install" ? base.incomplete.spec : null;
+    const facts =
+      creation !== null
+        ? { mcVersion: creation.mcVersion, loader: creation.loader, loaderVersion: creation.loaderVersion }
+        : spec !== null
+          ? { mcVersion: spec.mcVersion, loader: spec.loader === null ? ("vanilla" as const) : spec.loader, loaderVersion: spec.loaderVersion }
+          : {};
     return { ...base, ...facts, pinned, status: "installing", brokenReason: null, unrepairableReason: null, unrepairableKind: null, renameTo: null };
   }
   if (effect === null) return { ...base, pinned };

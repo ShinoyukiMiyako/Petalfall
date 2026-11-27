@@ -1803,6 +1803,41 @@ describe("装到一半被重扫扫到半成品目录", () => {
     expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({ status: "ready", mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.11" });
   });
 
+  it("装 Forge 系加载器期间盘上是只合并了原版的版本 JSON：扫出来是原版，照旧显示入队时的加载器", async () => {
+    const install = deferred<{ id: string }>();
+    ipc.overrides.set("install_version", () => install.promise);
+    ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+    stubInstanceSettings();
+    await store.actions.createInstance({ name: "新世界", mcVersion: "1.20.1", loader: "neoforge", loaderVersion: "47.1.106", cover: "grass" });
+    await settle();
+    // 处理器在跑：扫到的是给处理器读的那份原版版本 JSON，带着安装标记
+    const pending = { kind: "install" as const, outcome: "pending" as const, started_at: 1_700_000_000_000, spec: { mc_version: "1.20.1", loader: "neoforge" as const, loader_version: "47.1.106" }, error: null };
+    instances = [...instances, instanceDto("新世界", { mc_version: "1.20.1", loaders: [], activity: "installing", incomplete: pending })];
+    await store.actions.reload("instances");
+    await settle();
+    expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({
+      placeholder: false,
+      status: "installing",
+      mcVersion: "1.20.1",
+      loader: "neoforge",
+      loaderVersion: "47.1.106",
+    });
+    install.resolve({ id: "新世界" });
+    await settle();
+  });
+
+  it("重新安装加载器期间扫出来同样是原版：沿用未完成标记里记下的这次要装的内容", async () => {
+    const repair = deferred<unknown>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    await store.actions.repairInstance("生存");
+    await settle();
+    const pending = { kind: "install" as const, outcome: "pending" as const, started_at: 1_700_000_000_000, spec: { mc_version: "1.20.1", loader: "forge" as const, loader_version: "47.4.29" }, error: null };
+    instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", { mc_version: "1.20.1", loaders: [], activity: "repairing", incomplete: pending }) : i));
+    await store.actions.reload("instances");
+    await settle();
+    expect(store.getState().instances.find((i) => i.id === "生存")).toMatchObject({ status: "installing", mcVersion: "1.20.1", loader: "forge", loaderVersion: "47.4.29" });
+  });
+
   it("补全中的实例扫不出版本时不套用别的任务的内容", async () => {
     const repair = deferred<unknown>();
     ipc.overrides.set("repair_instance", () => repair.promise);
