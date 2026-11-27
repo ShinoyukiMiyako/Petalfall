@@ -2594,12 +2594,11 @@ mod tests {
             assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), attempts);
         }
 
-        /// 外置服务器：校验判失效（扣 `validate_delay`），刷新给出新令牌（扣 `refresh_delay`），档案接口扣
-        /// `profile_delay`。交回以旧令牌存进库的账户。
+        /// 外置服务器：校验判失效，刷新给出新令牌（扣 `refresh_delay`），档案接口扣 `profile_delay`。交回以旧令牌
+        /// 存进库的账户。
         async fn authlib_needing_refresh(
             server: &MockServer,
             petalfall: &Petalfall,
-            validate_delay: Duration,
             refresh_delay: Duration,
             profile_delay: Duration,
         ) -> Account {
@@ -2612,13 +2611,7 @@ mod tests {
                 .await;
             Mock::given(method("POST"))
                 .and(path("/authserver/validate"))
-                .respond_with(
-                    ResponseTemplate::new(403)
-                        .set_body_json(json!({
-                            "error": "ForbiddenOperationException", "errorMessage": "Invalid token."
-                        }))
-                        .set_delay(validate_delay),
-                )
+                .respond_with(token_invalid())
                 .mount(server)
                 .await;
             Mock::given(method("POST"))
@@ -2660,6 +2653,13 @@ mod tests {
                 .unwrap()
         }
 
+        /// 外置服务器的校验判令牌失效时的回答。
+        fn token_invalid() -> ResponseTemplate {
+            ResponseTemplate::new(403).set_body_json(json!({
+                "error": "ForbiddenOperationException", "errorMessage": "Invalid token."
+            }))
+        }
+
         /// 退出前只等外置令牌的轮换：没有在跑的立即返回；外置刷新在跑，时限内没完就放弃，时限够就等到新令牌
         /// 落盘。微软续期不算：中断它不丢账户，退出不该为它多等。删掉轮换登记，第三段会当成没有在跑的；
         /// 把微软续期也算进去，第二段即挂。
@@ -2696,7 +2696,6 @@ mod tests {
             let stale = authlib_needing_refresh(
                 &server,
                 &petalfall,
-                Duration::ZERO,
                 Duration::from_secs(1),
                 Duration::ZERO,
             )
@@ -2733,16 +2732,20 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn a_stopped_gate_refuses_the_refresh_after_a_validation_in_flight() {
             let server = MockServer::start().await;
+            // 第一次校验扣在 mock 里，关闸之后才放回去：校验一定落在关闸之后，不靠响应延迟凑窗口。
+            // 只扣这一次，重新开闸后的那次校验落到下面挂的普通回答上。
+            let (reply, mut validation) = hold(token_invalid());
+            Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .respond_with(reply)
+                .up_to_n_times(1)
+                .with_priority(1)
+                .mount(&server)
+                .await;
             let tmp = tempfile::tempdir().unwrap();
             let petalfall = petalfall_at(tmp.path());
-            let stale = authlib_needing_refresh(
-                &server,
-                &petalfall,
-                Duration::from_millis(500),
-                Duration::ZERO,
-                Duration::ZERO,
-            )
-            .await;
+            let stale =
+                authlib_needing_refresh(&server, &petalfall, Duration::ZERO, Duration::ZERO).await;
             let gate = petalfall.rotation_gate();
 
             let renewal = {
@@ -2750,11 +2753,12 @@ mod tests {
                 let stale = stale.clone();
                 tokio::spawn(async move { petalfall.ensure_account_fresh(&stale).await })
             };
-            until_requested(&server, "/authserver/validate").await;
+            validation.arrived().await;
             assert_eq!(
                 gate.stop(Duration::from_secs(10)).await,
                 SettledRotations::Idle
             );
+            validation.release();
             let refused = renewal.await.unwrap();
             assert!(
                 refused.as_ref().is_err_and(CoreError::is_cancelled),
@@ -2787,7 +2791,6 @@ mod tests {
             let stale = authlib_needing_refresh(
                 &server,
                 &petalfall,
-                Duration::ZERO,
                 Duration::ZERO,
                 Duration::from_secs(30),
             )
