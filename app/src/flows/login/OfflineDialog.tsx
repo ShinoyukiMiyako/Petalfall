@@ -83,6 +83,8 @@ export const OfflineDialog = memo(function OfflineDialog({ report }: { report: R
   // 没有材质源时不取图，按哪一套都一样画人偶
   const skinSet: DefaultSkinSet = useArtStatus().source?.legacySkins === true ? "legacy" : "modern";
   const figureSkin = defaultSkin(figureUuid, skinSet);
+  // 本机读不到这套皮肤时立绘是按 UUID 着色的人偶：同一套皮肤换了名字，人偶的颜色也跟着变
+  const figureFallback = useSkin(figureSkin) === null;
 
   const close = () => void run(() => actions.closeLogin(), LOGIN_ERROR.close);
   const submit = async () => {
@@ -118,8 +120,8 @@ export const OfflineDialog = memo(function OfflineDialog({ report }: { report: R
       <div className={styles.offline}>
         <div className={styles.stage} role="img" aria-label={figureName === "" ? OFFLINE_DIALOG_COPY.previewEmpty : OFFLINE_DIALOG_COPY.preview(figureName)}>
           <BlossomBranch width={150} height={96} dim className={styles.stageBranch} />
-          {/* 换了一套皮肤才换立绘：新旧原地交叉淡化；名字不同但皮肤相同时立绘不动 */}
-          <Swap id={figureName === "" ? "starters" : figureSkin.path} still className={styles.stageSwap} paneClassName={styles.stageSlot}>
+          {/* 换了一套皮肤才换立绘：新旧原地交叉淡化；名字不同但皮肤相同时立绘不动。画人偶时按 UUID 换，颜色变了同样交叉淡化 */}
+          <Swap id={figureName === "" ? "starters" : figureFallback ? `mannequin:${figureUuid}` : figureSkin.path} still className={styles.stageSwap} paneClassName={styles.stageSlot}>
             {figureName === "" ? (
               // 两个并排要缩一档才放得进舞台
               <span className={styles.stagePair}>

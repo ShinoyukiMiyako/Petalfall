@@ -25,7 +25,7 @@ import { NO_ART, setArtStatus } from "../../mc/art";
 import { setBlockCatalog } from "../../mc/catalog";
 import { clearArtCache } from "../../mc/useArt";
 import { getArtDownloadState } from "../../state/art-download";
-import { DEFAULT_SKINS } from "./default-skin";
+import { DEFAULT_SKINS, defaultSkin } from "./default-skin";
 import LoginFlow from "./index";
 import { offlineUuid } from "./offline-uuid";
 import { FIGURE_DEBOUNCE_MS, nameDisplay } from "./OfflineDialog";
@@ -509,6 +509,44 @@ describe("离线账户弹窗", () => {
       // 两位各是自己名字的离线 UUID 色相的人偶，体型照那一套默认皮肤
       expect(figures().map((f) => fallbackDrawn(canvas, f))).toEqual([mannequinFigure(offlineUuid("Steve"), "wide", 4), mannequinFigure(offlineUuid("Alex"), "slim", 4)]);
       expect(fetched).toEqual([]);
+    });
+
+    /** 与 name 落在同一套默认皮肤、离线 UUID 不同的另一个名字。 */
+    const sameSkinAs = (name: string) => {
+      const pathOf = (n: string) => defaultSkin(offlineUuid(n), "modern").path;
+      const twin = Array.from({ length: 200 }, (_, i) => `${name}${i}`).find((n) => pathOf(n) === pathOf(name));
+      if (twin === undefined) throw new Error(`找不到与 ${name} 同一套默认皮肤的名字`);
+      return twin;
+    };
+
+    async function retype(name: string) {
+      typeInto(inputs()[0], name);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(FIGURE_DEBOUNCE_MS);
+        await settle();
+      });
+    }
+
+    it("名字换成落在同一套默认皮肤的另一个：真皮肤时立绘不动，还是同一个节点", async () => {
+      await openWithName("Steve");
+      const before = figure();
+      expect(before.dataset.art).toBe("skin");
+      await retype(sameSkinAs("Steve"));
+      expect(figure()).toBe(before);
+      expect(before.closest("[inert]")).toBeNull();
+    });
+
+    it("本机没有可用的游戏文件：名字换成同一套默认皮肤的另一个，人偶颜色跟着 UUID 变，新旧交叉淡化而不是原地瞬换", async () => {
+      ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+      await openWithName("Steve");
+      const before = figure();
+      expect(before.dataset.art).toBe("mannequin");
+      const twin = sameSkinAs("Steve");
+      await retype(twin);
+      // 旧的那位带 inert 留在原处淡出
+      expect(before.closest("[inert]")).not.toBeNull();
+      expect(figure()).not.toBe(before);
+      expect(fallbackDrawn(canvas, figure())).toBe(mannequinFigure(offlineUuid(twin), defaultSkin(offlineUuid(twin), "modern").model, 5));
     });
 
     it("本机游戏文件里读不到选中的那套默认皮肤：退回人偶", async () => {
