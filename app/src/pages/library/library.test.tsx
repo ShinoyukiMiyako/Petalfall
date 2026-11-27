@@ -83,8 +83,8 @@ const unreadable = (id: string, overrides: Partial<InstanceDto> = {}) =>
 /** 目录里有一份叫 to.json 的版本文件时后端接在原因后面的改名提示，与后端同一个全角分号格式。 */
 const renameHint = (to: string) => `${UNREPAIRABLE}；目录里有一份叫 ${to}.json 的版本文件，把实例改名成 ${to} 就能认出来`;
 /** 缺版本 JSON、又没有安装记录，但改个名就能认出来的损坏实例。 */
-const renamable = (id: string, to: string) =>
-  instanceDto(id, { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: renameHint(to), unrepairable_kind: "no_record", rename_to: to, mc_version: null });
+const renamable = (id: string, to: string, overrides: Partial<InstanceDto> = {}) =>
+  instanceDto(id, { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: renameHint(to), unrepairable_kind: "no_record", rename_to: to, mc_version: null, ...overrides });
 /** 此刻的错误通知：点了被拦住的按钮不该多出一条。 */
 const errorToasts = () => launcher.state.toasts.filter((t) => t.tone === "error");
 
@@ -1511,19 +1511,73 @@ describe("实例库：动作", () => {
     expect(rescan().getAttribute("aria-busy")).toBeNull();
   });
 
-  it("唯一修不好的实例改个名就能认出来：正文照后端原因说改名，按钮位给「改名为「X」」，点了去它的详情页，不改名也不删", async () => {
+  it("唯一修不好的实例改个名就能认出来：正文照后端原因说改名，按钮位给「改名为「X」」，点了就地改名、不跳转也不删；进行中转圈、连点只改一次，改好后横幅淡出", async () => {
     instances = [...instances.filter((i) => i.id !== "坏掉的"), renamable("朋友发来的", "1.20.1-NeoForge")];
+    const renamed = deferred<{ id: string }>();
+    ipc.overrides.set("rename_instance", (args) => {
+      const to = String(args.newName);
+      instances = instances.map((i) => (i.id === args.id ? instanceDto(to) : i));
+      return renamed.promise;
+    });
     await mount();
+    const route = nav.route;
     const banner = document.querySelector<HTMLElement>(`.${bannerStyles.banner}`);
     if (banner === null) throw new Error("没有修复横幅");
     expect(banner.textContent).toBe(`1 个实例补全修不好「朋友发来的」补全修不好：${renameHint("1.20.1-NeoForge")}。改名为「1.20.1-NeoForge」`);
     const rename = byText<HTMLButtonElement>("button", REPAIR_EXIT_COPY.rename("1.20.1-NeoForge"), banner);
     expect([...banner.querySelectorAll("button")]).toEqual([rename]);
+    expect(rename.getAttribute("aria-disabled")).toBeNull();
     click(rename);
-    expect(nav.route).toEqual({ page: "instance", id: "朋友发来的", tab: "overview" });
+    await flush();
+    expect(rename.getAttribute("aria-busy")).toBe("true");
+    click(rename);
+    await flush();
+    expect(callsOf(ipc, "rename_instance")).toEqual([{ id: "朋友发来的", newName: "1.20.1-NeoForge" }]);
+    expect(nav.route).toEqual(route);
+    expect(nav.route).not.toEqual({ page: "instance", id: "朋友发来的", tab: "overview" });
+    await act(async () => {
+      renamed.resolve({ id: "1.20.1-NeoForge" });
+      await settle();
+    });
+    expect(toastTitles()).toContain("success:已重命名为「1.20.1-NeoForge」");
+    expect(errorToasts()).toEqual([]);
+    expect(banner.closest("[inert]")).not.toBeNull();
+    await afterMotion();
+    expect(cardNames()).toContain("1.20.1-NeoForge");
+    expect(cardNames()).not.toContain("朋友发来的");
+    expect(document.querySelector(`.${bannerStyles.banner}`)).toBeNull();
+    expect(nav.route).toEqual(route);
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+  });
+
+  it("「改名为「X」」此刻改不成：被占着时带锁的原因禁用；已有同名实例时带名字校验的原因禁用，两样都在时说名字；点了都不发改名", async () => {
+    instances = [...instances.filter((i) => i.id !== "坏掉的"), renamable("朋友发来的", "1.20.1-NeoForge", { activity: "backing_up" })];
+    await mount();
+    const rename = () => byText<HTMLButtonElement>(`.${bannerStyles.banner} button`, REPAIR_EXIT_COPY.rename("1.20.1-NeoForge"));
+    expect(rename().getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(rename())).toBe("正在备份或恢复这个实例的存档，完成后才能重命名");
+    click(rename());
     await flush();
     expect(callsOf(ipc, "rename_instance")).toEqual([]);
-    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    // 别处已有一个只差大小写的同名实例：实例名不分大小写唯一
+    instances = [...instances, instanceDto("1.20.1-neoforge")];
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+      await settle();
+    });
+    expect(rename().getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(rename())).toBe("已经有同名的实例了，换一个吧");
+    instances = instances.map((i) => (i.id === "朋友发来的" ? { ...i, activity: null } : i));
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+      await settle();
+    });
+    expect(rename().getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(rename())).toBe("已经有同名的实例了，换一个吧");
+    click(rename());
+    await flush();
+    expect(callsOf(ipc, "rename_instance")).toEqual([]);
+    expect(errorToasts()).toEqual([]);
   });
 
   it("同一句带改名提示的原因不合并：两份拷来的副本各自成句，横幅不给按钮", async () => {

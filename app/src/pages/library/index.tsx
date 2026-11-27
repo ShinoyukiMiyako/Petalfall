@@ -10,6 +10,7 @@ import { Icon } from "../../art/Icon";
 import { ACTION_ERROR, GAME_DIR_SWITCH_COPY, gameDirSwitchReason, LOADER_NAME, lockReason, REPAIR_EXIT_COPY, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { locksOf } from "../../domain/instance-locks";
+import { instanceNameError } from "../../domain/rules";
 import { useMounted } from "../../lib/useMounted";
 import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
 import { fade, springs } from "../../lib/motion";
@@ -33,6 +34,7 @@ import { SearchInput } from "../../ui/SearchInput";
 import { SegmentedControl, type SegmentOption } from "../../ui/SegmentedControl";
 import { Select } from "../../ui/Select";
 import { Skeleton } from "../../ui/Skeleton";
+import { HERO_COPY } from "../instance/copy";
 import { useDeleteInstance } from "../instance/delete";
 import { switchSuggestion } from "../shared/switch-suggestion";
 import { useSwitchDirectory } from "../shared/useSwitchDirectory";
@@ -102,6 +104,7 @@ export default function LibraryPage() {
   const mounted = useMounted();
   const { shape, report } = useUiShape();
   const [rescanning, setRescanning] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   // 横幅上的动作回来时页面可能已经离开：卸载之后不再写状态
   const alive = useRef(false);
   useEffect(() => {
@@ -140,6 +143,8 @@ export default function LibraryPage() {
   const counts = useMemo(() => loaderCounts(all), [all]);
   const shown = useMemo(() => visibleInstances(all, view), [all, view]);
   const broken = useMemo(() => brokenInstances(all), [all]);
+  // 改名校验要全部实例名，与状态容器发请求前校验用的是同一张列表
+  const ids = useMemo(() => all.map((inst) => inst.id), [all]);
   // 补全修不好的也进横幅：它们同样启动不了，横幅写明修不好的原因
   const brokenCount = broken.repairable.length + broken.unrepairable.length;
   const filtered = isFiltered(view);
@@ -182,6 +187,14 @@ export default function LibraryPage() {
       {REPAIR_EXIT_COPY.rescan}
     </Button>
   );
+  // 与详情页横幅的改名同一个状态容器动作、同一个失败标题与成功通知。改好后状态容器重读列表，横幅随之更新
+  const rename = (id: string, to: string) => {
+    setRenaming(true);
+    void run(() => actions.renameInstance(id, to), ACTION_ERROR.renameInstance).then((outcome) => {
+      if (outcome.ok) actions.toast("success", HERO_COPY.renamed(outcome.value));
+      if (alive.current) setRenaming(false);
+    });
+  };
   // 只列着一个修不好的实例时，横幅按它剩下的出路给一个按钮；列着多个时删除与改名留在各自卡片的菜单与详情页上，横幅不做批量操作
   const lone = broken.repairable.length === 0 && broken.unrepairable.length === 1 ? broken.unrepairable[0] : null;
   const deleteInstance = useDeleteInstance();
@@ -197,13 +210,17 @@ export default function LibraryPage() {
         );
       case "rescan":
         return rescanButton("secondary");
-      case "rename":
-        // 实例库没有改名入口：带去详情页，那里的横幅给改名按钮，校验与失败的说法都在那一套里
+      case "rename": {
+        // 就地改名，不带去详情页：概览一次只画一条横幅，有启动失败或上次崩溃时画的是那一条，带改名按钮的横幅不在。
+        // 改不成时带原因禁用：名字校验排在锁前面，它是状态容器发请求之前先拒的，锁放开了照样改不成
+        const nameError = instanceNameError(exit.to, ids, inst.id);
+        const reason = nameError !== null ? nameError : lockReason(locksOf(inst, inst.id === sessionInstance).rename, "rename");
         return (
-          <Button key="rename" size="sm" icon="edit" onClick={() => go({ page: "instance", id: inst.id, tab: "overview" })}>
+          <Button key="rename" size="sm" icon="edit" loading={renaming} disabledReason={reason} onClick={() => rename(inst.id, exit.to)}>
             {REPAIR_EXIT_COPY.rename(exit.to)}
           </Button>
         );
+      }
     }
   };
   // 有修得好的给修复，掺着读不出来的时重新扫描作为次一级的按钮跟在旁边；一个都修不好时按出路给，修不好的不止一个时只在
