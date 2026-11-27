@@ -481,8 +481,9 @@ impl Petalfall {
     /// 定补全方案并写下新的未完成标记，返回方案与标记。
     ///
     /// 标记文件读不出来（写坏了、这一版不认识的格式、读盘出错）时不照它定方案：版本 JSON 缺失或损坏时照安装记录重装，
-    /// 连记录也没有才报不可补全；版本 JSON 可用就照它补全，只有安装记录里记着加载器、版本 JSON 里却没有这种加载器时照
-    /// 记录重装：重装加载器途中被打断时盘上是只合并了原版的那份，照它补全会把实例补成原版。
+    /// 连记录也没有才报不可补全；版本 JSON 可用就照它补全，只有版本 JSON 里一个加载器都探不出、安装记录里却记着加载器
+    /// 时照记录重装：重装 Forge、NeoForge 途中被打断时盘上是只合并了原版的那份，照它补全会把实例补成原版；版本 JSON
+    /// 里探得出加载器的不是那种现场，照旧按它补全。
     /// 版本 JSON 读不出来（被占用、没有权限、那个位置是个目录）时，除了整合包没导入完的照旧报重新导入，不论标记与
     /// 安装记录都报不可补全，标记不动。
     ///
@@ -661,8 +662,8 @@ impl Unrepairable {
 /// 列表共用：列表上说的修不好的原因就是真去补全时报的那句，两边不各写一套判断，不会一边说修得好、一边又拒绝。
 ///
 /// `previous` 是读未完成标记的结果。读不出来的标记给不出结论：版本 JSON 用不了时与没有标记一样看安装记录；版本 JSON
-/// 读得出、本来要照它补全时还要对一眼安装记录（见 [`reinstall_over_unreadable_marker`]），没有标记时不看。标记是
-/// install 时也要先探一次版本 JSON：读不出来的话，照标记重装最后也要把版本 JSON 写回那个位置（见
+/// 读得出、里面探不出加载器、本来要照它补全时还要对一眼安装记录（见 [`reinstall_over_unreadable_marker`]），没有
+/// 标记时不看。标记是 install 时也要先探一次版本 JSON：读不出来的话，照标记重装最后也要把版本 JSON 写回那个位置（见
 /// [`unreadable_verdict`]）。
 pub(crate) async fn decide_repair(
     game_dir: &Path,
@@ -729,17 +730,22 @@ impl<'a> PreviousMarker<'a> {
     }
 }
 
-/// 未完成标记读不出来、版本 JSON 读得出时照安装记录重装的内容：记录里记着加载器、版本 JSON 里却探不出这种加载器时
+/// 未完成标记读不出来、版本 JSON 读得出时照安装记录重装的内容：版本 JSON 里一个加载器都探不出、记录里却记着加载器时
 /// 才有，其余为 `None`，照旧按版本 JSON 补全。
 ///
 /// 重装 Forge、NeoForge 途中进程被结束时，盘上是只合并了原版的那份版本 JSON 加 install 标记（处理器要读原版那份，
 /// 见 `place_json_for_processors`）；标记又读不出来的话，照版本 JSON 补全会把加载器实例静默补成原版，这时说得出
-/// 当初装的是什么的只剩安装记录。只比加载器种类、不比版本号：被打断时盘上那份里根本没有加载器。读不出的记录当作
-/// 没有；记录里的加载器认不出来时照它装不回去，同样按版本 JSON 补全，不因此拒掉一个补得了的实例。
+/// 当初装的是什么的只剩安装记录。只认这种现场的样子：原版那份里什么加载器都探不出。探出了任何一种（记录是 Forge
+/// 而版本 JSON 是 Fabric，或是只装着 OptiFine、LiteLoader 这类装不回的外部安装器产物）都不是被打断留下的，多半是
+/// 玩家自己换的文件，照记录重装会把它盖掉，所以不比种类，探出了就按版本 JSON 补全。读不出的记录当作没有；记录里的
+/// 加载器认不出来时照它装不回去，同样按版本 JSON 补全，不因此拒掉一个补得了的实例。
 async fn reinstall_over_unreadable_marker(
     id: &str,
     version: &DiscoveredVersion,
 ) -> Option<InstanceRequest> {
+    if !version.loaders.is_empty() {
+        return None;
+    }
     let spec = match InstallRecordStore::for_version_dir(&version.dir)
         .load()
         .await
@@ -757,18 +763,7 @@ async fn reinstall_over_unreadable_marker(
             return None;
         }
     };
-    let kind = loader_kind(request.loader?);
-    (!version.loaders.iter().any(|loader| loader.kind == kind)).then_some(request)
-}
-
-/// 安装时选的加载器在版本 JSON 的探测结果里是哪一种。
-fn loader_kind(choice: LoaderChoice) -> LoaderKind {
-    match choice {
-        LoaderChoice::Fabric => LoaderKind::Fabric,
-        LoaderChoice::Quilt => LoaderKind::Quilt,
-        LoaderChoice::Forge => LoaderKind::Forge,
-        LoaderChoice::NeoForge => LoaderKind::NeoForge,
-    }
+    request.loader.is_some().then_some(request)
 }
 
 /// 未完成标记自己就定得下的结论：照安装标记里记下的内容重装，或整合包没导入完修不好。标记是 repair 或没有标记时
@@ -3060,11 +3055,11 @@ mod tests {
     }
 
     /// 重装 Forge 途中被打断，盘上是只合并了原版的那份版本 JSON，未完成标记又读不出来（写坏了，或是这一版不认识的
-    /// 格式）：安装记录里记着 Forge、版本 JSON 里没有，照安装记录重装，不照原版那份补全把实例补成原版。标记读不出来时
-    /// 版本 JSON 里有记录里的加载器、没有记录、记录读不出或记录里的加载器认不出来，都照旧补全；没有标记时不看安装记录，
-    /// 记录与版本 JSON 对不上也照旧补全。
+    /// 格式）：安装记录里记着 Forge、版本 JSON 里一个加载器都探不出，照安装记录重装，不照原版那份补全把实例补成原版。
+    /// 标记读不出来时版本 JSON 里探得出加载器（记录里那一种、玩家换上的 Fabric、只装着的 OptiFine）、没有记录、记录读不出
+    /// 或记录里的加载器认不出来，都照旧补全；没有标记时不看安装记录，记录与版本 JSON 对不上也照旧补全。
     #[tokio::test]
-    async fn an_unreadable_marker_reinstalls_from_the_record_only_when_its_loader_is_gone() {
+    async fn an_unreadable_marker_reinstalls_from_the_record_only_when_the_json_has_no_loader() {
         let tmp = tempfile::tempdir().unwrap();
         let petalfall = petalfall_at(tmp.path());
         let game = petalfall.game_dir().to_path_buf();
@@ -3120,6 +3115,28 @@ mod tests {
             .save(&recorded.spec())
             .await
             .unwrap();
+        let fabric_swapped = write_version(
+            &game,
+            "换成了 Fabric",
+            &fabric_instance_json("换成了 Fabric", "0.16.10"),
+        );
+        put_marker(&fabric_swapped, unreadable[0]);
+        InstallRecordStore::for_version_dir(&fabric_swapped)
+            .save(&recorded.spec())
+            .await
+            .unwrap();
+        // 只装着 OptiFine 也算探出了加载器：被打断的现场探不出它，照记录重装会把玩家装的它盖掉。
+        let optifine_only = write_version(
+            &game,
+            "只装着 OptiFine",
+            r#"{"id":"只装着 OptiFine","type":"release","clientVersion":"1.20.1","mainClass":"M",
+                "libraries":[{"name":"optifine:OptiFine:1.20.1_HD_U_I6"}]}"#,
+        );
+        put_marker(&optifine_only, unreadable[0]);
+        InstallRecordStore::for_version_dir(&optifine_only)
+            .save(&recorded.spec())
+            .await
+            .unwrap();
         let no_record = write_version(&game, "没有记录", &vanilla_only("没有记录"));
         put_marker(&no_record, unreadable[0]);
         let bad_record = write_version(&game, "记录写坏了", &vanilla_only("记录写坏了"));
@@ -3155,6 +3172,8 @@ mod tests {
 
         for (id, dir) in [
             ("Forge 还在", forge_kept),
+            ("换成了 Fabric", fabric_swapped),
+            ("只装着 OptiFine", optifine_only),
             ("没有记录", no_record),
             ("记录写坏了", bad_record),
             ("记录认不出", unknown),
