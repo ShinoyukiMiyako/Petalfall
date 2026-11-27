@@ -1812,7 +1812,8 @@ async fn reshow_after_failed_install(app: &AppHandle) {
 
 /// 先做退出收尾里的落盘（[`crate::exit::persist_before_exit`]：关闸并等进行中的外置令牌轮换、补写游玩记录）
 /// 再安装：Windows 上更新插件拉起安装程序后直接结束进程，不经过 `RunEvent::Exit`，退出收尾赶不上。等不到或
-/// 补写失败都只记日志、照样安装，与正常退出时一致。安装程序没拉起来时进程接着跑，重新开闸，外置令牌照常刷新。
+/// 补写失败都只记日志、照样安装，与正常退出时一致。安装程序没拉起来时进程接着跑，只撤销这里关的那一次闸：
+/// 别处没关过闸时外置令牌照常刷新，正常退出已经关上的闸仍关着。
 ///
 /// 插件拉起安装程序之前已经把窗口藏了，没拉起来时不重新显示，用户就看不到报错、以为落樱自己退出了。
 /// 所以失败时先等 `reshow` 跑完再返回错误；`reshow` 只在失败时才被 await，拉起成功时进程随即退出，不必显示。
@@ -2358,6 +2359,47 @@ mod tests {
 
         account.renew().await.unwrap();
         assert_eq!(account.stored_token(), "rotated");
+    }
+
+    /// 正常退出已经关上闸时「立即安装」没拉起安装程序：只撤销自己关的那一次，退出关上的闸仍关着，退出走完之前
+    /// 续期发不出刷新，旧令牌原样留着。撤销时直接开闸的话刷新照样发出，旧令牌作废，新令牌赶不上进程退出。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_install_keeps_the_gate_an_exit_already_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = crate::exit::tests::stale_authlib_account(
+            dir.path(),
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        )
+        .await;
+        crate::exit::persist_before_exit(&account.facade).await;
+
+        let failed = install_after_persisting(
+            &account.facade,
+            || {
+                Err(CommandError::new(
+                    code::UPDATE_INSTALL_FAILED,
+                    "启动更新安装失败",
+                ))
+            },
+            async {},
+        )
+        .await;
+        assert_eq!(failed.unwrap_err().code, code::UPDATE_INSTALL_FAILED);
+
+        let refused = account.renew().await;
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(petalfall_core::CoreError::is_cancelled),
+            "{refused:?}"
+        );
+        assert!(
+            !account.requested("/authserver/refresh").await,
+            "退出关上的闸不该被安装失败打开"
+        );
+        assert_eq!(account.stored_token(), "stale");
     }
 
     /// 插件拉起安装程序之前已经把窗口藏了：没拉起来时先把窗口重新显示出来再报错，否则用户看不到报错、

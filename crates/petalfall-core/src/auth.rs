@@ -149,13 +149,17 @@ pub enum SettledRotations {
 /// 关闸与登记在同一把锁里改：一次轮换要么在关闸前登记、退出等它落盘，要么在关闸后被拒、根本不发刷新请求。
 /// 只计数不关闸的话，还在校验令牌的那一程没有计数，退出读到 0 就往下走，随后发出的刷新让旧令牌作废，
 /// 新令牌赶不上落盘。
+///
+/// 关闸按次数记：自更新拉起安装程序之前关一次，没拉起来时 [`RotationGate::resume`] 只撤销自己那一次。
+/// 只记关没关的话，正常退出这时已经关上的闸会被它打开，退出还没走完就又能发刷新，新令牌赶不上进程退出。
 #[derive(Clone)]
 pub struct RotationGate(Arc<tokio::sync::watch::Sender<Rotations>>);
 
 #[derive(Default)]
 struct Rotations {
     running: usize,
-    stopped: bool,
+    /// 还没撤销的关闸次数，大于 0 就是关着。
+    stops: usize,
 }
 
 impl Default for RotationGate {
@@ -170,7 +174,7 @@ impl RotationGate {
     /// 登记一次轮换；闸已关就不登记，交回 `None`。
     fn try_begin(&self) -> Option<RotationInFlight> {
         let begun = self.0.send_if_modified(|rotations| {
-            if rotations.stopped {
+            if rotations.stops > 0 {
                 return false;
             }
             rotations.running += 1;
@@ -186,7 +190,7 @@ impl RotationGate {
         let mut idle = self.0.subscribe();
         let mut running = 0;
         self.0.send_modify(|rotations| {
-            rotations.stopped = true;
+            rotations.stops += 1;
             running = rotations.running;
         });
         if running == 0 {
@@ -203,9 +207,19 @@ impl RotationGate {
         }
     }
 
-    /// 重新开闸：关闸之后没有退成（拉起安装程序失败，进程接着跑）时调。
+    /// 撤销自己先前的一次 [`RotationGate::stop`]：关闸之后没有退成（拉起安装程序失败，进程接着跑）时调。
+    /// 每次关闸都撤销了才重新开闸，别处（正常退出）关上的闸仍关着。没有可撤销的关闸是调用方配错了对，直接 panic。
     pub fn resume(&self) {
-        self.0.send_modify(|rotations| rotations.stopped = false);
+        let mut unpaired = false;
+        self.0
+            .send_modify(|rotations| match rotations.stops.checked_sub(1) {
+                Some(left) => rotations.stops = left,
+                None => unpaired = true,
+            });
+        assert!(
+            !unpaired,
+            "重新开闸之前没有关过闸：resume 要与先前的一次 stop 成对"
+        );
     }
 }
 
@@ -2792,6 +2806,35 @@ mod tests {
                 SettledRotations::Idle
             );
             renewal.abort();
+        }
+
+        /// 正常退出关了闸，自更新也关了一次、没拉起安装程序就撤销自己那一次：闸仍关着，新的轮换照样被拒；
+        /// 两次都撤销才重新开闸，之后登记的轮换照常计数。只记关没关的话，第一次撤销就开了闸。
+        #[tokio::test]
+        async fn a_resume_undoes_only_its_own_stop() {
+            let gate = RotationGate::default();
+            let exit = gate.clone();
+            assert_eq!(exit.stop(Duration::ZERO).await, SettledRotations::Idle);
+            assert_eq!(gate.stop(Duration::ZERO).await, SettledRotations::Idle);
+
+            gate.resume();
+            assert!(gate.try_begin().is_none(), "正常退出关上的闸被打开了");
+            assert!(exit.try_begin().is_none(), "正常退出关上的闸被打开了");
+
+            gate.resume();
+            let rotating = gate.try_begin().expect("每次关闸都撤销了，应当重新开闸");
+            assert_eq!(
+                exit.stop(Duration::from_millis(20)).await,
+                SettledRotations::TimedOut
+            );
+            drop(rotating);
+            assert_eq!(exit.stop(Duration::ZERO).await, SettledRotations::Idle);
+        }
+
+        #[test]
+        #[should_panic(expected = "重新开闸之前没有关过闸")]
+        fn a_resume_without_a_stop_is_a_bug() {
+            RotationGate::default().resume();
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
