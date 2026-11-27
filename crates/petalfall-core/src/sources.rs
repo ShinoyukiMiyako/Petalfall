@@ -118,7 +118,7 @@ pub(crate) mod tests {
             .await;
     }
 
-    async fn probe_count(server: &MockServer) -> usize {
+    pub(crate) async fn probe_count(server: &MockServer) -> usize {
         server
             .received_requests()
             .await

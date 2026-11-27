@@ -2946,15 +2946,7 @@ mod tests {
     /// 停下，不报成功，也不进任何下载步骤，连测速探针都不发；文件放回去后同一个方案照常补全，这时才测速。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn repair_stops_when_a_processor_output_of_the_loader_is_missing() {
-        async fn probes(server: &MockServer) -> usize {
-            server
-                .received_requests()
-                .await
-                .expect("mock 应记录请求")
-                .iter()
-                .filter(|request| request.url.path() == "/mc/game/version_manifest_v2.json")
-                .count()
-        }
+        use crate::sources::tests::probe_count;
         // 测速的两个源钉到两台本地 mock 上，探针发没发出去看得见。
         let official = MockServer::start().await;
         let mirror = MockServer::start().await;
@@ -3016,7 +3008,10 @@ mod tests {
             .unwrap();
         assert!(!outcome.reinstalled);
         // 核对过了才测速：两个源各收到一个探针，上面的 0 不是因为测速根本没接到这两台 mock 上。
-        assert_eq!((probes(&official).await, probes(&mirror).await), (1, 1));
+        assert_eq!(
+            (probe_count(&official).await, probe_count(&mirror).await),
+            (1, 1)
+        );
     }
 
     #[tokio::test]
