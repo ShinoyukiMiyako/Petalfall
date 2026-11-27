@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use petalfall_version::{VersionJson, resolve};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, io_err};
 use crate::layout::GameLayout;
 
 /// 把原版 JSON 与可选的加载器 JSON（`inheritsFrom` 指向该原版）合并成实例 `instance_id` 的版本 JSON。
@@ -47,6 +47,34 @@ pub async fn write_instance_json(layout: &GameLayout, version: &VersionJson) -> 
     })?;
     petalfall_base::fs::atomic_write(layout.version_json(&version.id), &bytes).await?;
     Ok(())
+}
+
+/// 加载器安装器的处理器开跑之前，给实例目录里的客户端 jar 配上一份版本 JSON：实例的版本 JSON 还不在时写下
+/// `version`（装加载器之前、只合并了原版的那份），已经在就不动。返回这次写没写。
+///
+/// 官方启动器的布局里客户端 jar 旁边一直有原版的版本 JSON，有的 Forge 安装器处理器（1.14.3 的 DEOBF_REALMS）
+/// 就按客户端 jar 的路径找到它、从里面读原版的库清单，读不到直接失败。按实例安装时实例的版本 JSON 要到加载器
+/// 装完才合并落盘，处理器那会儿它还不在。
+pub async fn place_json_for_processors(layout: &GameLayout, version: &VersionJson) -> Result<bool> {
+    let path = layout.version_json(&version.id);
+    match tokio::fs::metadata(&path).await {
+        Ok(_) => return Ok(false),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => return Err(io_err(&path, source)),
+    }
+    write_instance_json(layout, version).await?;
+    Ok(true)
+}
+
+/// 加载器没装成时撤掉 [`place_json_for_processors`] 写下的那份：留着的话，一个没装成的实例目录里摆着一份看上去
+/// 完好的原版版本 JSON。文件已经不在不算错。
+pub async fn remove_placed_json(layout: &GameLayout, id: &str) -> Result<()> {
+    let path = layout.version_json(id);
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(io_err(&path, source)),
+    }
 }
 
 #[cfg(test)]
@@ -142,5 +170,41 @@ mod tests {
             .join("周末生存.json");
         let back = VersionJson::from_json_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(back, merged);
+    }
+
+    /// 处理器开跑前配的那份版本 JSON：实例的还不在才写，写下的就是只合并了原版的那份；没装成时撤得掉。
+    #[tokio::test]
+    async fn the_json_for_processors_is_placed_only_when_the_instance_has_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = GameLayout::new(tmp.path());
+        let base = merge_for_instance("老整合包", &vanilla(), None).unwrap();
+        let path = layout.version_json("老整合包");
+
+        assert!(place_json_for_processors(&layout, &base).await.unwrap());
+        let placed = VersionJson::from_json_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(placed, base);
+        assert_eq!(placed.libraries[0].name, "org.lwjgl:lwjgl:3.3.3");
+
+        remove_placed_json(&layout, "老整合包").await.unwrap();
+        assert!(!path.exists());
+        // 已经不在时再撤一次不算错。
+        remove_placed_json(&layout, "老整合包").await.unwrap();
+    }
+
+    /// 重装加载器时实例已有带着加载器的版本 JSON：不拿原版那份盖掉它，装不成时实例还是原来的样子。
+    #[tokio::test]
+    async fn an_existing_instance_json_is_left_alone_for_processors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = GameLayout::new(tmp.path());
+        let with_loader = merge_for_instance("模组尝鲜", &vanilla(), Some(&fabric())).unwrap();
+        write_instance_json(&layout, &with_loader).await.unwrap();
+        let before = std::fs::read(layout.version_json("模组尝鲜")).unwrap();
+
+        let base = merge_for_instance("模组尝鲜", &vanilla(), None).unwrap();
+        assert!(!place_json_for_processors(&layout, &base).await.unwrap());
+        assert_eq!(
+            std::fs::read(layout.version_json("模组尝鲜")).unwrap(),
+            before
+        );
     }
 }

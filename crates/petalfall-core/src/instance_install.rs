@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use petalfall_base::error_with_causes;
+use petalfall_install::instance::{place_json_for_processors, remove_placed_json};
 use petalfall_install::{
     LoaderFlavor, LoaderInstaller, VanillaInstaller, ensure_complete, forge_installer_url,
     merge_for_instance, neoforge_installer_url, write_instance_json,
@@ -295,7 +296,8 @@ impl Petalfall {
                     .expect("validate 已保证 Forge / NeoForge 带版本号");
                 // 处理器要读实例目录里的客户端 jar 与原版库，先把原版补齐。
                 emit(events, CoreEvent::stage(format!("补全原版 {mc} 的文件")));
-                ensure_complete(cx, &merge_for_instance(id, &vanilla, None)?, id).await?;
+                let base = merge_for_instance(id, &vanilla, None)?;
+                ensure_complete(cx, &base, id).await?;
                 let major = vanilla
                     .java_version
                     .as_ref()
@@ -313,12 +315,25 @@ impl Petalfall {
                         choice.display_name()
                     )),
                 );
+                // 有的老安装器处理器要读客户端 jar 旁边的版本 JSON，实例自己的要到装完才合并落盘：还没有时先放一份
+                // 原版的，装成了下面的合并结果盖掉它，没装成就撤掉。
+                let placed = place_json_for_processors(&layout, &base).await?;
                 // 处理器不看下载池的令牌，取消看的是上下文上挂的那个（make_context 已挂上）：
                 // 取消时正在跑的处理器要被结束，不能等宽限期满被丢下。
-                let (embedded, summary) = self
+                let installed = self
                     .forge_installer(cx, major, java, events)
                     .install_for_instance(&url, id)
-                    .await?;
+                    .await;
+                let (embedded, summary) = match installed {
+                    Ok(done) => done,
+                    Err(err) => {
+                        if placed && let Err(cleanup) = remove_placed_json(&layout, id).await {
+                            // 要报的是安装本身的失败；这份文件留着也只是一份原版的版本 JSON，下次重装会盖掉。
+                            tracing::warn!(id, error = %cleanup, "撤掉给处理器配的版本 JSON 失败");
+                        }
+                        return Err(err.into());
+                    }
+                };
                 emit(
                     events,
                     CoreEvent::stage(format!(
