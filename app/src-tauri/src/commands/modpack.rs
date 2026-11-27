@@ -2138,13 +2138,11 @@ mod tests {
         assert_eq!(locks.activity("导入中"), None);
     }
 
-    /// 半成品里有文件被别的进程占着、删不掉：导入照样以取消返回、放开实例名，未完成标记落成「已取消」
+    /// 半成品里有删不掉的文件（见 [`Undeletable`]）：导入照样以取消返回、放开实例名，未完成标记落成「已取消」
     /// 而不是一直停在进行中；它还列在实例库里，配置里对它的固定也留着；占用解除后能正常删除。
-    #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn undeletable_half_import_is_settled_instead_of_left_pending() {
         use crate::commands::instances::{delete_instance_with, list_instances_with};
-        use std::os::windows::fs::OpenOptionsExt;
 
         let server = MockServer::start().await;
         let base = server.uri();
@@ -2216,14 +2214,7 @@ mod tests {
             assert!(Instant::now() < deadline, "导入没有建出实例目录");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        // 不允许别人删除的打开方式：remove_dir_all 删不掉这个文件。
-        let held = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .share_mode(0)
-            .open(instance.join("占着.log"))
-            .unwrap();
+        let held = Undeletable::plant(&instance);
 
         assert!(registry.cancel("mp-locked"));
         let err = install.await.unwrap().unwrap_err();
@@ -2244,7 +2235,7 @@ mod tests {
         assert_eq!(facade.read().await.config().sidebar_pins, ["删不掉"]);
         assert!(saved_config(dir.path()).await.is_none());
 
-        drop(held);
+        held.release();
         let deleted = delete_instance_with(&facade, &locks, "删不掉", RemoveDir)
             .await
             .unwrap();
@@ -2252,13 +2243,11 @@ mod tests {
         assert!(!instance.exists());
     }
 
-    /// 导入自己没删掉半成品（取消后清理时文件被占着），占用随后解除：这里接着删掉半成品，并去掉配置里对这个名字的
+    /// 导入自己没删掉半成品（取消后清理时有文件删不掉），随后又删得掉了：这里接着删掉半成品，并去掉配置里对这个名字的
     /// 固定、当前选中与固定服务器记住的实例。导入的清理失败时 core 记一条错误日志，借它在这里动手之前放开占用，
     /// 不靠等时间凑先后。
-    #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn half_import_the_import_left_behind_is_deleted_here_and_forgotten() {
-        use std::os::windows::fs::OpenOptionsExt;
         use tracing::instrument::WithSubscriber;
         use tracing_subscriber::layer::SubscriberExt;
 
@@ -2315,16 +2304,7 @@ mod tests {
             assert!(Instant::now() < deadline, "导入没有建出实例目录");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        // 不允许别人删除的打开方式：导入自己的 remove_dir_all 删不掉这个文件。
-        release.hold(
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .share_mode(0)
-                .open(instance.join("占着.log"))
-                .unwrap(),
-        );
+        release.hold(Undeletable::plant(&instance));
 
         assert!(registry.cancel("mp-late"));
         let err = install.await.unwrap().unwrap_err();
@@ -2346,16 +2326,14 @@ mod tests {
         assert_eq!(saved.pinned_servers[0].instance, None);
     }
 
-    /// 导入自己清理半成品失败时（core 记的那条错误日志）放开测试占着的文件，并记下半成品那一刻还在不在。
-    #[cfg(windows)]
+    /// 导入自己清理半成品失败时（core 记的那条错误日志）放开测试造的删不掉的文件，并记下半成品那一刻还在不在。
     #[derive(Clone)]
     struct ReleaseOnCleanupError {
         dir: PathBuf,
-        held: std::sync::Arc<Mutex<Option<std::fs::File>>>,
+        held: std::sync::Arc<Mutex<Option<Undeletable>>>,
         dir_at_release: std::sync::Arc<Mutex<Option<bool>>>,
     }
 
-    #[cfg(windows)]
     impl ReleaseOnCleanupError {
         fn new(dir: &Path) -> Self {
             Self {
@@ -2365,8 +2343,8 @@ mod tests {
             }
         }
 
-        fn hold(&self, file: std::fs::File) {
-            *self.held.lock().unwrap() = Some(file);
+        fn hold(&self, held: Undeletable) {
+            *self.held.lock().unwrap() = Some(held);
         }
 
         fn dir_at_release(&self) -> Option<bool> {
@@ -2374,7 +2352,6 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ReleaseOnCleanupError {
         fn on_event(
             &self,
@@ -2386,10 +2363,60 @@ mod tests {
             {
                 return;
             }
-            if let Some(file) = self.held.lock().unwrap().take() {
-                drop(file);
+            if let Some(held) = self.held.lock().unwrap().take() {
+                held.release();
                 *self.dir_at_release.lock().unwrap() = Some(self.dir.is_dir());
             }
+        }
+    }
+
+    /// 实例目录里一个删不掉的文件，[`Undeletable::release`] 之后才删得掉。Windows 上用不许别人删除的打开方式占着它；
+    /// Unix 上打开着的文件挡不住删除，改把它放进去掉了写权限的子目录。
+    struct Undeletable {
+        #[cfg(windows)]
+        file: std::fs::File,
+        #[cfg(unix)]
+        dir: PathBuf,
+    }
+
+    impl Undeletable {
+        #[cfg(windows)]
+        fn plant(instance: &Path) -> Self {
+            use std::os::windows::fs::OpenOptionsExt;
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .share_mode(0)
+                .open(instance.join("占着.log"))
+                .unwrap();
+            Self { file }
+        }
+
+        #[cfg(unix)]
+        fn plant(instance: &Path) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = instance.join("占着");
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("占着.log"), b"").unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            // root 不受目录权限约束，这样造不出删不掉的文件，用例的前提就不成立。
+            assert!(
+                std::fs::write(dir.join("探测"), b"").is_err(),
+                "去掉写权限的目录里仍能建文件（以 root 运行？），造不出删不掉的半成品"
+            );
+            Self { dir }
+        }
+
+        #[cfg(windows)]
+        fn release(self) {
+            drop(self.file);
+        }
+
+        #[cfg(unix)]
+        fn release(self) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
 
