@@ -2734,13 +2734,17 @@ mod tests {
     /// 不能靠子命令拖时间：结束的只是脚本本身，还活着的子命令占着管道，Windows 上读管道在阻塞线程
     /// 里，测试运行时收尾时要等它退出。
     fn hanging_java(dir: &Path, started: &Path) -> PathBuf {
-        let started = started.display();
         #[cfg(windows)]
         {
+            // cmd 按控制台代码页读批处理，绝对路径里的中文会读成乱码；%~dp0 由 cmd 从 Unicode 的命令行得出，不受影响。
+            let started = started
+                .strip_prefix(dir)
+                .expect("标记文件在脚本所在目录下")
+                .display();
             let path = dir.join("hanging-java.cmd");
             std::fs::write(
                 &path,
-                format!("@echo off\r\necho up> \"{started}\"\r\n:spin\r\ngoto spin\r\n"),
+                format!("@echo off\r\necho up> \"%~dp0{started}\"\r\n:spin\r\ngoto spin\r\n"),
             )
             .unwrap();
             path
@@ -2748,6 +2752,7 @@ mod tests {
         #[cfg(not(windows))]
         {
             use std::os::unix::fs::PermissionsExt;
+            let started = started.display();
             let path = dir.join("hanging-java");
             std::fs::write(
                 &path,
@@ -3312,11 +3317,21 @@ mod tests {
         });
         #[cfg(windows)]
         {
+            // cmd 按控制台代码页读批处理，绝对路径里的中文（系统临时目录在中文用户名下）会读成乱码。脚本与它用到的
+            // 文件都在夹具根目录下，写成 `%~dp0` 加相对路径：%~dp0 由 cmd 从 Unicode 的命令行得出，不受代码页影响。
+            let here = |path: &Path| {
+                format!(
+                    "%~dp0{}",
+                    path.strip_prefix(&f.root)
+                        .expect("假 java 用到的文件都在夹具根目录下")
+                        .display()
+                )
+            };
             let copy = |(source, dest): &(PathBuf, PathBuf)| {
                 format!(
                     "    if not exist \"{dest}\" copy /y \"{source}\" \"{dest}\" >nul\r\n",
-                    dest = dest.display(),
-                    source = source.display()
+                    dest = here(dest),
+                    source = here(source)
                 )
             };
             let path = f.root.join(format!("{name}.cmd"));
@@ -3327,7 +3342,7 @@ mod tests {
                     copy(&a),
                     copy(&b),
                     copy(&c),
-                    log = log.display()
+                    log = here(log)
                 ),
             )
             .unwrap();
