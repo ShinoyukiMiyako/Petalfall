@@ -18,6 +18,9 @@ export const MOCK_MICROSOFT_LOGIN_MS = 4000;
 /** 约定的魔法主机：用来在浏览器里看到外置登录的两种失败态。 */
 export const MOCK_UNREACHABLE_HOST_SUFFIX = ".invalid";
 export const MOCK_NOT_YGGDRASIL_HOST_PREFIX = "not-ygg.";
+/** 约定的魔法用户名片段：探测过了、登录这一步才连不上或撞上服务故障（5xx、限流），用来在浏览器里看到登录弹窗的这两种失败态。 */
+export const MOCK_LOGIN_UNREACHABLE_USER = "unreachable";
+export const MOCK_LOGIN_OUTAGE_USER = "outage";
 
 // 与后端一致分两库：凭据账户（微软/外置）与离线账户各有自己的选中项，离线选中项优先。
 interface Store {
@@ -245,6 +248,13 @@ export const handlers: MockHandlers = {
     const server = probe(normalizeServerUrl(stringArg(args, "serverUrl", "authlib_login")));
     const username = stringArg(args, "username", "authlib_login");
     const password = stringArg(args, "password", "authlib_login");
+    // 与后端一样，认证请求没送到、或服务器自己出了故障时还轮不到判断账号密码，排在凭据错误之前
+    if (username.includes(MOCK_LOGIN_UNREACHABLE_USER)) {
+      throw new IpcError("Http", "HTTP 请求失败（Yggdrasil 认证）", { network: "connect", causes: [`无法连接到 ${server.host}`] });
+    }
+    if (username.includes(MOCK_LOGIN_OUTAGE_USER)) {
+      throw new IpcError("ServiceUnavailable", "登录服务暂时不可用（Yggdrasil 认证：HTTP 503）", { step: "Yggdrasil 认证", status: 503 });
+    }
     if (password === "" || password === "wrong") {
       throw new IpcError("Yggdrasil", "第三方认证失败: ForbiddenOperationException - Invalid credentials. Invalid username or password.", {
         error: "ForbiddenOperationException",

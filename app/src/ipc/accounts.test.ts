@@ -209,6 +209,14 @@ describe("账户 mock：外置登录", () => {
     expect(await listAccounts()).toHaveLength(2);
   });
 
+  it("登录这一步连不上报 Http（带 network），服务器故障报 ServiceUnavailable（带步骤与状态码）；都排在密码判断之前，不落账户", async () => {
+    const unreachable = await rejection(authlibLogin("skin.example", "unreachable@example.com", "wrong"));
+    expect([unreachable.code, unreachable.message, unreachable.detail]).toEqual(["Http", "HTTP 请求失败（Yggdrasil 认证）", { network: "connect", causes: ["无法连接到 skin.example"] }]);
+    const outage = await rejection(authlibLogin("skin.example", "outage@example.com", "wrong"));
+    expect([outage.code, outage.message, outage.detail]).toEqual(["ServiceUnavailable", "登录服务暂时不可用（Yggdrasil 认证：HTTP 503）", { step: "Yggdrasil 认证", status: 503 }]);
+    expect(await listAccounts()).toHaveLength(2);
+  });
+
   it("单角色直接登录并成为当前账户，带验证服务器名", async () => {
     const result = await authlibLogin("skin.example", "alice@example.com", "pw");
     if (result.status !== "logged_in") throw new Error(`应直接登录，实为 ${result.status}`);
