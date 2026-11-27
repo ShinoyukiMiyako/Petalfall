@@ -2239,6 +2239,57 @@ mod tests {
         assert_eq!(names, vec![("othermod.jar", "202")]);
     }
 
+    /// 文件名里不写 Mod 版本号、只差加载器字样的两个 CurseForge 文件认不出是不是同一发布，不当孪生：晚发的那份
+    /// 照常报更新，不被当成「换过去什么都没更新」挡掉。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_files_without_a_mod_version_are_compared_by_date() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "my-pack", NEOFORGE_1_20_1_JSON).await;
+        put_mod(mc, "my-pack", "examplemod.jar", b"examplemod").await;
+
+        let server = MockServer::start().await;
+        let files = vec![
+            cf_file(
+                201,
+                300_001,
+                "examplemod-1.20.1-forge.jar",
+                "2026-03-01T00:00:00Z",
+                "Forge",
+            ),
+            cf_file(
+                100,
+                300_001,
+                "examplemod-1.20.1-neoforge.jar",
+                "2026-01-01T00:00:00Z",
+                "NeoForge",
+            ),
+        ];
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/300001/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": files })),
+            )
+            .mount(&server)
+            .await;
+        let petalfall = petalfall_at(mc, &server.uri()).with_curseforge_key("test-key");
+        save_ledger(
+            &petalfall,
+            "my-pack",
+            vec![LedgerEntry {
+                platform: Platform::CurseForge,
+                ..ledger_entry("examplemod.jar", "300001", "100", None)
+            }],
+        )
+        .await;
+
+        let found = petalfall.check_updates("my-pack").await.unwrap();
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].current_version_id, "100");
+        assert_eq!(found[0].latest.version_id, "201");
+    }
+
     /// 走版本列表的工程在平台上没了（CurseForge 来源、锁定了版本的 Modrinth 来源）：这一项没有更新可报，
     /// 别的 Mod 查到的更新照常给出。一个下架的 Mod 不能让整个实例查不了更新。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

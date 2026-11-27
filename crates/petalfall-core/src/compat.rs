@@ -172,6 +172,11 @@ impl BorrowedLoader {
     ///
     /// CurseForge 的版本号取的是文件名，字样写在末尾时最后一段连着扩展名（`2.1.0-forge.jar`），不先去掉就
     /// 认不出。只去 `.jar`：会成对比较的是 Quilt 与 Fabric、1.20.1 的 NeoForge 与 Forge 的 Mod 构建，文件都是 jar。
+    ///
+    /// 各段相同还不够认同一发布，剩下的段里要有一段像 Mod 自己的版本号（见 [`names_mod_version`]）：有的作者不在
+    /// 文件名里写 Mod 版本号（`examplemod-1.20.1-neoforge.jar`），每个发布去掉字样后都是同样几段，两个发布会被认成
+    /// 一个，真更新被当成「换过去什么都没更新」挡掉。认不出 Mod 版本号时不认同一发布，按发布时间照常比：最坏是
+    /// 同一发布晚传的另一份被当成一次更新，好过把真更新挡掉。
     fn release_parts(self, version: &ModVersionInfo) -> Vec<String> {
         let names = [self.own.modrinth_facet(), self.borrowed.modrinth_facet()];
         let number = version.version_number.to_ascii_lowercase();
@@ -184,13 +189,60 @@ impl BorrowedLoader {
             .collect()
     }
 
+    /// 这份构建在这一对里站哪一边：只标被借那一家的、标着实例那一家的，或两边都不是。
+    fn side(self, version: &ModVersionInfo) -> Option<Side> {
+        if version.loaders.contains(&self.own) {
+            Some(Side::Own)
+        } else if version.loaders.contains(&self.borrowed) {
+            Some(Side::Borrowed)
+        } else {
+            None
+        }
+    }
+
     /// `other` 是不是 `own_build` 这份构建在同一发布里给被借那一家传的构建。
     fn is_twin(self, other: &ModVersionInfo, own_build: &ModVersionInfo) -> bool {
-        other.loaders.contains(&self.borrowed)
-            && !other.loaders.contains(&self.own)
-            && own_build.loaders.contains(&self.own)
-            && self.release_parts(other) == self.release_parts(own_build)
+        if self.side(other) != Some(Side::Borrowed) || self.side(own_build) != Some(Side::Own) {
+            return false;
+        }
+        let parts = self.release_parts(other);
+        parts == self.release_parts(own_build) && names_a_release(&parts, other, own_build)
     }
+}
+
+/// 一份构建在一对借用关系里的哪一边，见 [`BorrowedLoader::side`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Own,
+    Borrowed,
+}
+
+/// 去掉字样后各段同为 `parts` 的两份构建 `a`、`b` 能不能认成同一发布：各段里要有 Mod 自己的版本号。
+fn names_a_release(parts: &[String], a: &ModVersionInfo, b: &ModVersionInfo) -> bool {
+    parts.iter().any(|part| names_mod_version(part, a, b))
+}
+
+/// 版本号里的这一段像不像 Mod 自己的版本号：以数字开头（前面可带一个 `v`）、含点号，且不是两份构建声明的
+/// MC 版本，也不是哪个声明的 MC 版本按点号截出的前缀（`1.20`、`1.20.x` 之于 `1.20.1`）。文件名里的 MC 版本每个
+/// 发布都一样，拿它当发布的标识会把不同发布认成一个。
+fn names_mod_version(part: &str, a: &ModVersionInfo, b: &ModVersionInfo) -> bool {
+    let number = part.strip_prefix('v').unwrap_or(part);
+    number.starts_with(|c: char| c.is_ascii_digit())
+        && number.contains('.')
+        && !a
+            .game_versions
+            .iter()
+            .chain(&b.game_versions)
+            .any(|game| names_game_version(number, game))
+}
+
+/// `part` 说的是不是 MC 版本 `game`，或它按点号截出的前缀（可带 `.x`）。
+fn names_game_version(part: &str, game: &str) -> bool {
+    let stem = part.strip_suffix(".x").unwrap_or(part);
+    stem.eq_ignore_ascii_case(game)
+        || game
+            .match_indices('.')
+            .any(|(at, _)| stem.eq_ignore_ascii_case(&game[..at]))
 }
 
 /// 实例能跑哪些加载器的 Mod。
@@ -1515,6 +1567,94 @@ mod tests {
             &names(&["forge", "neoforge"]),
         );
         assert_eq!(best.unwrap().version_id, "forge");
+    }
+
+    /// 认同一发布要去掉字样后各段相同，且其中有一段像 Mod 自己的版本号：只剩 MC 版本、或什么都不剩的不算，
+    /// 那是每个发布都一样的几段。
+    #[test]
+    fn twins_need_a_mod_version_besides_the_game_version() {
+        use ModLoader::{Fabric, Forge, NeoForge, Quilt};
+        let build = |loader: ModLoader, number: &str, mc: &[&str]| ModVersionInfo {
+            version_number: number.to_owned(),
+            ..version(&[loader], mc)
+        };
+        let mc = ["1.20.1"];
+        for (borrowed, own, twin) in [
+            ((Fabric, "1.4.0-fabric"), (Quilt, "1.4.0-quilt"), true),
+            ((Fabric, "fabric-1.4.0"), (Quilt, "quilt-1.4.0"), true),
+            ((Fabric, "1.4.0"), (Quilt, "1.4.0+quilt"), true),
+            ((Fabric, "1.16.1_fabric"), (Quilt, "1.16.1_quilt"), true),
+            ((Forge, "1.4.0-forge"), (NeoForge, "1.4.0-neoforge"), true),
+            ((Forge, "v1.4.0-forge"), (NeoForge, "v1.4.0-neoforge"), true),
+            (
+                (Forge, "examplemod-2.1.0-forge.jar"),
+                (NeoForge, "examplemod-2.1.0-neoforge.jar"),
+                true,
+            ),
+            (
+                (Forge, "examplemod-1.20.1-2.1.0-forge.jar"),
+                (NeoForge, "examplemod-1.20.1-2.1.0-neoforge.jar"),
+                true,
+            ),
+            (
+                (Forge, "examplemod-1.20.1-forge.jar"),
+                (NeoForge, "examplemod-1.20.1-neoforge.jar"),
+                false,
+            ),
+            (
+                (Fabric, "examplemod-1.20.1-fabric.jar"),
+                (Quilt, "examplemod-1.20.1-quilt.jar"),
+                false,
+            ),
+            (
+                (Forge, "examplemod-1.20-forge.jar"),
+                (NeoForge, "examplemod-1.20-neoforge.jar"),
+                false,
+            ),
+            (
+                (Forge, "examplemod-1.20.x-forge.jar"),
+                (NeoForge, "examplemod-1.20.X-neoforge.jar"),
+                false,
+            ),
+            (
+                (Forge, "examplemod-mc1.20.1-forge.jar"),
+                (NeoForge, "examplemod-mc1.20.1-neoforge.jar"),
+                false,
+            ),
+            (
+                (Forge, "examplemod-forge.jar"),
+                (NeoForge, "examplemod-neoforge.jar"),
+                false,
+            ),
+            (
+                (Forge, "examplemod-7-forge.jar"),
+                (NeoForge, "examplemod-7-neoforge.jar"),
+                false,
+            ),
+            ((Forge, "1.4.0-forge"), (NeoForge, "1.5.0-neoforge"), false),
+        ] {
+            let (other, own_build) = (build(borrowed.0, borrowed.1, &mc), build(own.0, own.1, &mc));
+            assert_eq!(
+                is_borrowed_twin(&other, &own_build),
+                twin,
+                "{} 与 {}",
+                borrowed.1,
+                own.1
+            );
+            assert!(
+                !is_borrowed_twin(&own_build, &other),
+                "{} 不是给被借那一家传的",
+                own.1
+            );
+        }
+
+        // 只有其中一份声明了的 MC 版本同样不算 Mod 版本号；两份都没声明时它就是 Mod 版本号。
+        let wider = |loader: ModLoader, number: &str| build(loader, number, &["1.20.1", "1.20.2"]);
+        let fabric = build(Fabric, "1.20.2-fabric", &mc);
+        let quilt = build(Quilt, "1.20.2-quilt", &mc);
+        assert!(!is_borrowed_twin(&wider(Fabric, "1.20.2-fabric"), &quilt));
+        assert!(!is_borrowed_twin(&fabric, &wider(Quilt, "1.20.2-quilt")));
+        assert!(is_borrowed_twin(&fabric, &quilt));
     }
 
     /// 工程压根没有这个 MC 版本的文件时，说「需要 NeoForge」等于让玩家去换加载器，换了也没得装。
