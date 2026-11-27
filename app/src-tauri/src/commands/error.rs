@@ -214,7 +214,7 @@ pub mod code {
     /// 要改的服务器不在固定列表里。detail：`{ address }`。
     pub const SERVER_NOT_PINNED: &str = "server_not_pinned";
     /// 实例移不了：执行前重新预检遇到的第一个问题。detail：`{ id, blocker }`，blocker 的形状同预检结果里的
-    /// 一项（[`move_blocker_json`]）。
+    /// 一项（[`move_blocker_json`](super::move_blocker_json)）。
     pub const INSTANCE_MOVE_BLOCKED: &str = "instance_move_blocked";
     /// 跨盘移动时复制出的文件读回比对不上，整次移动已回滚，原件没动。detail：`{ path }`，为对不上的副本。
     pub const INSTANCE_MOVE_VERIFY_FAILED: &str = "instance_move_verify_failed";
