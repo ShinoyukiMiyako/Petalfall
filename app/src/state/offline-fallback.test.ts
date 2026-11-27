@@ -269,4 +269,21 @@ describe("以离线方式进单人：状态容器", () => {
     await expect(target.run()).rejects.toMatchObject({ message });
     expect(launchArgs()).toEqual([{ accountUuid: MOCK_PLAYER, offlineFallback: false }]);
   });
+
+  it("实例在失败之后开始补全：不发起启动，按启动失败的标题报实例还在安装", async () => {
+    await loginMockPlayer();
+    const store = await storeWith(MOCK_PLAYER, "Mock_Player");
+    failNextMockLaunch("account_service_down", { account: "Mock_Player", status: 503 });
+    await store.actions.launch("生存");
+    // 补全一直不返回：实例停在安装中，失败会话与通知都还留着
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await store.actions.repairInstance("生存");
+    expect(store.getState().instances.find((i) => i.id === "生存")?.status).toBe("installing");
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed" });
+
+    const target = runnable(store.actions.failureFix("launch_offline_once"));
+    expect(target.errorTitle).toBe(ACTION_ERROR.launch("生存"));
+    await expect(target.run()).rejects.toMatchObject({ message: "实例还在安装" });
+    expect(launchArgs()).toEqual([{ accountUuid: MOCK_PLAYER, offlineFallback: false }]);
+  });
 });
