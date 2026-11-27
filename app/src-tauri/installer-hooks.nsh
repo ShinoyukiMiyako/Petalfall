@@ -34,6 +34,36 @@ Function PetalfallRestoreLegacyDir
   ${EndIf}
   Pop $1
   Pop $0
+  ; 放在抄老键之后：比对的得是抄完的新键
+  Call PetalfallPreferInstallLocation
+FunctionEnd
+
+; 引导程序认现有安装、修复和事后核验都以卸载项的 InstallLocation 为准，模板的 .onInit 却只从新键还原目录。
+; 新键被清理工具删掉或和卸载项记的不一样时，向导默认装进另一个目录，另装一份并把登记改指过去；
+; 重装页选先卸载时，卸载程序是卸载项里那份，交给它的 _?= 却取自新键，卸的不是同一个目录。
+; 所以两者不一致时把新键改成卸载项的目录，$INSTDIR 也只替换模板自己推出来的默认目录或新键里的目录。
+; 卸载项的键同样用不了模板常量，只能写死，由安装后钩子在编译期核对。
+!define PETALFALL_UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Petalfall"
+Function PetalfallPreferInstallLocation
+  Push $0
+  Push $1
+  ReadRegStr $0 HKCU "${PETALFALL_UNINSTALL_KEY}" "InstallLocation"
+  ; 模板写入时两头加了引号
+  StrCpy $1 $0 1
+  ${If} $1 == '"'
+    StrCpy $0 $0 -1 1
+  ${EndIf}
+  ReadRegStr $1 HKCU "${PETALFALL_DIR_KEY}" ""
+  ${If} $0 != ""
+  ${AndIf} $0 != $1
+    WriteRegStr HKCU "${PETALFALL_DIR_KEY}" "" $0
+    ${If} $INSTDIR == "$LOCALAPPDATA\Petalfall"
+    ${OrIf} $INSTDIR == $1
+      StrCpy $INSTDIR $0
+    ${EndIf}
+  ${EndIf}
+  Pop $1
+  Pop $0
 FunctionEnd
 
 ; 更新器启动安装包从不带 /D=，老安装的目录只在老键里，.onInit 读不到就落回默认目录，
@@ -82,6 +112,9 @@ FunctionEnd
   ; 两个键一旦相同，下面删老键就是删模板刚写的目录
   !if "${MANUPRODUCTKEY}" == "${PETALFALL_LEGACY_DIR_KEY}"
     !error "模板的目录键就是老键 ${PETALFALL_LEGACY_DIR_KEY}"
+  !endif
+  !if "${UNINSTKEY}" != "${PETALFALL_UNINSTALL_KEY}"
+    !error "模板的卸载项 ${UNINSTKEY} 和 PETALFALL_UNINSTALL_KEY 对不上，改产品名要同步"
   !endif
   DeleteRegKey HKCU "${PETALFALL_LEGACY_DIR_KEY}"
   ; 老发布者的键下还有别的东西就留着

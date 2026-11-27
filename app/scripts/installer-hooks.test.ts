@@ -269,6 +269,65 @@ describe("老安装第一次被新包交互或被动安装", () => {
   });
 });
 
+describe("卸载项的目录和新键不一致时以卸载项为准", () => {
+  const guiInit = instructions(functionBody(fileDefine("MUI_CUSTOMFUNCTION_GUIINIT")));
+  const code = instructions(functionBody("PetalfallPreferInstallLocation"));
+
+  it("抄完老键之后才比对", () => {
+    expect(guiInit.at(-1)).toBe("Call PetalfallPreferInstallLocation");
+    expect(guiInit.indexOf('WriteRegStr HKCU "${PETALFALL_DIR_KEY}" "" $1')).toBeGreaterThan(0);
+    expect(guiInit.filter((line) => line.startsWith("Call "))).toHaveLength(1);
+  });
+
+  it("写死的卸载项就是模板按产品名拼的、引导程序读的那个键", () => {
+    const setupKey = /const UNINSTALL_KEY: &str = r"([^"]+)";/.exec(
+      readSource("app/src-tauri-setup/src/existing.rs"),
+    )?.[1];
+    expect(fileDefine("PETALFALL_UNINSTALL_KEY")).toBe(
+      `Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${conf.productName}`,
+    );
+    expect(setupKey).toBe(fileDefine("PETALFALL_UNINSTALL_KEY"));
+  });
+
+  it("目录取自卸载项的 InstallLocation，去掉模板加的引号", () => {
+    expect(code.slice(2, 7)).toEqual([
+      'ReadRegStr $0 HKCU "${PETALFALL_UNINSTALL_KEY}" "InstallLocation"',
+      "StrCpy $1 $0 1",
+      `\${If} $1 == '"'`,
+      "StrCpy $0 $0 -1 1",
+      "${EndIf}",
+    ]);
+  });
+
+  it("两键不同且卸载项有值时把新键改成卸载项的目录", () => {
+    const write = code.indexOf('WriteRegStr HKCU "${PETALFALL_DIR_KEY}" "" $0');
+    expect(write).toBeGreaterThan(2);
+    expect(code.slice(write - 3, write)).toEqual([
+      'ReadRegStr $1 HKCU "${PETALFALL_DIR_KEY}" ""',
+      '${If} $0 != ""',
+      "${AndIf} $0 != $1",
+    ]);
+    expect(code.filter((line) => line.startsWith("WriteRegStr "))).toHaveLength(1);
+  });
+
+  it("只替换模板自己推出来的默认目录或新键里的目录，命令行带 /D= 的不动", () => {
+    expect(code.filter((line) => line.startsWith("StrCpy $INSTDIR "))).toEqual(["StrCpy $INSTDIR $0"]);
+    const replace = code.indexOf("StrCpy $INSTDIR $0");
+    expect(code.slice(replace - 3, replace + 3)).toEqual([
+      'WriteRegStr HKCU "${PETALFALL_DIR_KEY}" "" $0',
+      `\${If} $INSTDIR == "$LOCALAPPDATA\\${conf.productName}"`,
+      "${OrIf} $INSTDIR == $1",
+      "StrCpy $INSTDIR $0",
+      "${EndIf}",
+      "${EndIf}",
+    ]);
+  });
+
+  it("用到的寄存器原样还回去", () => {
+    expectRegistersRestored(code);
+  });
+});
+
 describe("更新器静默更新老安装", () => {
   const code = instructions(macroBody("NSIS_HOOK_PREINSTALL"));
   const runtime = code.slice(3);
@@ -331,12 +390,15 @@ describe("更新器静默更新老安装", () => {
 describe("安装完成后清掉老键", () => {
   const code = instructions(macroBody("NSIS_HOOK_POSTINSTALL"));
 
-  it("编译期核对新键就是模板的 MANUPRODUCTKEY，且和老键不同", () => {
-    expect(code.slice(0, 6)).toEqual([
+  it("编译期核对新键就是模板的 MANUPRODUCTKEY，且和老键不同；写死的卸载项就是模板的 UNINSTKEY", () => {
+    expect(code.slice(0, 9)).toEqual([
       '!if "${MANUPRODUCTKEY}" != "${PETALFALL_DIR_KEY}"',
       expect.stringMatching(/^!error "/),
       "!endif",
       '!if "${MANUPRODUCTKEY}" == "${PETALFALL_LEGACY_DIR_KEY}"',
+      expect.stringMatching(/^!error "/),
+      "!endif",
+      '!if "${UNINSTKEY}" != "${PETALFALL_UNINSTALL_KEY}"',
       expect.stringMatching(/^!error "/),
       "!endif",
     ]);
@@ -344,7 +406,7 @@ describe("安装完成后清掉老键", () => {
 
   it("只删老键和空了的老发布者键", () => {
     const legacy = fileDefine("PETALFALL_LEGACY_DIR_KEY");
-    expect(code.slice(6)).toEqual([
+    expect(code.slice(9)).toEqual([
       'DeleteRegKey HKCU "${PETALFALL_LEGACY_DIR_KEY}"',
       `DeleteRegKey /ifempty HKCU "${legacy.slice(0, legacy.lastIndexOf("\\"))}"`,
     ]);
