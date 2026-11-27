@@ -2160,14 +2160,34 @@ describe("实例详情：补全修不好的损坏实例", () => {
     };
     const errorToasts = () => launcher.state.toasts.filter((t) => t.tone === "error").map((t) => [t.title, t.body]);
 
-    it("版本 JSON 读不出来：标题说暂时无法启动、不说文件不完整，正文是后端原因接上重新扫描的提示，只给「重新扫描」", async () => {
-      instances = instances.map((i) => (i.id === ID ? unreadable() : i));
+    // 扫描只重读版本 JSON、不动未完成标记：带着标记的读得出来以后照样判成要修复，提示不能说扫描就恢复
+    it.each<[string, InstanceDto["incomplete"], string]>([
+      ["没有未完成标记：扫描就能恢复", null, "关掉占用它的程序或修好读取权限后，重新扫描就能恢复。"],
+      ["带着新建的未完成标记：扫描后还要再修复一次", INSTALL_RECORD, "关掉占用它的程序或修好读取权限后重新扫描，扫描后还要再修复一次。"],
+      [
+        "带着补全的未完成标记：同样要再修复一次",
+        { kind: "repair", outcome: "failed", started_at: NOW - DAY, spec: null, error: { code: "network_failed", message: "下载失败" } },
+        "关掉占用它的程序或修好读取权限后重新扫描，扫描后还要再修复一次。",
+      ],
+    ])("版本 JSON 读不出来、%s：标题说暂时无法启动、不说文件不完整，正文是后端原因接上这句提示，只给「重新扫描」", async (_name, incomplete, hint) => {
+      instances = instances.map((i) => (i.id === ID ? unreadable({ incomplete }) : i));
       await open("overview");
-      expect(titleOf("版本 JSON 读不出来，暂时无法启动").nextElementSibling?.textContent).toBe(`${UNREADABLE}。关掉占用它的程序或修好读取权限后，重新扫描就能恢复。`);
+      expect(titleOf("版本 JSON 读不出来，暂时无法启动").nextElementSibling?.textContent).toBe(`${UNREADABLE}。${hint}`);
       expect([...bannerOf("版本 JSON 读不出来，暂时无法启动").querySelectorAll("button")].map(textOf)).toEqual(["重新扫描"]);
       expect(text()).not.toContain("实例文件不完整");
       expect(text()).not.toContain("补全修不好");
       expect(() => button("修复实例")).toThrow("找不到按钮");
+    });
+
+    it("带着未完成标记的「重新扫描」：版本 JSON 读得出来了，标记还在，横幅换成要修复的那条，给「修复实例」", async () => {
+      instances = instances.map((i) => (i.id === ID ? unreadable() : i));
+      await open("overview");
+      instances = instances.map((i) => (i.id === ID ? instanceDto(ID, { incomplete: INSTALL_RECORD }) : i));
+      click(button("重新扫描", bannerOf("版本 JSON 读不出来，暂时无法启动")));
+      await flush();
+      expect(() => titleOf("版本 JSON 读不出来，暂时无法启动")).toThrow("没有标题为");
+      expect(launcher.state.instances.find((i) => i.id === ID)?.status).toBe("broken");
+      expect(button("修复实例", bannerOf("实例文件不完整，暂时无法启动")).getAttribute("aria-disabled")).toBeNull();
     });
 
     it("头图的损坏标签：读不出来的写「版本 JSON 读不出来」，不写文件不完整；带改名目标的照旧写文件不完整", async () => {

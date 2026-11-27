@@ -18,6 +18,7 @@ import {
   REPAIR_EXIT_COPY,
   sentence,
   taskPhaseText,
+  unreadableHint,
 } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed } from "../../domain/format";
@@ -230,7 +231,8 @@ function BrokenBanner({ inst, reason, exit, ops }: { inst: InstanceSummary; reas
     const refusal = repairRefusal(inst);
     if (refusal === null) throw new Error(`实例 ${inst.id} 补全修不好，却没有被拒的原因`);
     if (exit.kind === "rescan") {
-      // 版本 JSON 读不出来时文件可能完好：放开占用或修好权限后重读列表就恢复，不在这里引人删除（删除照旧在头图菜单与设置页）
+      // 版本 JSON 读不出来时文件可能完好：放开占用或修好权限后重读列表就读得出来，不在这里引人删除（删除照旧在头图菜单与设置页）。
+      // 还带着未完成标记的，重读不动标记，读得出来以后照样判成要修复，提示不能说扫描就恢复
       const rescan = () => {
         setRescanning(true);
         void run(() => actions.refreshInstances(), ACTION_ERROR.refreshInstances).then(() => setRescanning(false));
@@ -246,7 +248,7 @@ function BrokenBanner({ inst, reason, exit, ops }: { inst: InstanceSummary; reas
             </Button>
           }
         >
-          {`${sentence(refusal)}${REPAIR_EXIT_COPY.unreadableHint}`}
+          {`${sentence(refusal)}${unreadableHint(inst.incomplete !== null)}`}
         </Banner>
       );
     }

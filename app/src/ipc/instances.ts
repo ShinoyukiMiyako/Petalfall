@@ -80,8 +80,9 @@ export interface InstanceDto {
   unrepairable_reason: string | null;
   /**
    * 补全为什么修不好；unrepairable_reason 非空时非空，否则为 null。unreadable：版本 JSON 读盘出错（被占用、没有权限、那个位置是个目录），
-   * 文件可能完好，放开占用或修好权限后重新扫描就恢复，这时不论有没有安装记录、未完成标记是不是 install 都修不好；no_record：版本 JSON
-   * 缺失或损坏，又没有安装记录可照着重装；modpack：整合包没有导入完（未完成标记是 modpack）。
+   * 文件可能完好，这时不论有没有安装记录、未完成标记是不是 install 都修不好；放开占用或修好权限后重新扫描，没有未完成标记的就恢复，
+   * 带着标记的扫描不动标记，版本 JSON 读得出来以后还要再修复一次；no_record：版本 JSON 缺失或损坏，又没有安装记录可照着重装；
+   * modpack：整合包没有导入完（未完成标记是 modpack）。
    */
   unrepairable_kind: "unreadable" | "no_record" | "modpack" | null;
   /**
