@@ -457,7 +457,7 @@ fn required_text(document: &'static str, field: &str, value: &str) -> Result<Str
 /// 游戏版本号会原样拼成版本目录与版本 JSON 的路径（`versions/<版本号>/<版本号>.json`），导入的准备阶段就按
 /// 它去读盘，必须是单个安全的路径段：绝对路径拼上去会把前面的游戏目录整个换掉，写成网络路径的读一下就连
 /// 到别人的机器上了。
-fn game_version(document: &'static str, field: &str, value: &str) -> Result<String> {
+pub(crate) fn game_version(document: &'static str, field: &str, value: &str) -> Result<String> {
     let version = required_text(document, field, value)?;
     petalfall_version::check_path_segment(&version).map_err(|problem| {
         Error::invalid(
@@ -469,7 +469,7 @@ fn game_version(document: &'static str, field: &str, value: &str) -> Result<Stri
 }
 
 /// 加载器版本号会原样拼进安装器的下载地址、缓存文件名与版本 id，必须是单个安全的路径段。
-fn loader_version(document: &'static str, field: &str, value: &str) -> Result<String> {
+pub(crate) fn loader_version(document: &'static str, field: &str, value: &str) -> Result<String> {
     let version = required_text(document, field, value)?;
     petalfall_version::check_path_segment(&version).map_err(|problem| {
         Error::invalid(

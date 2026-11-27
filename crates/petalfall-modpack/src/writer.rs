@@ -20,7 +20,7 @@ use crate::archive::read_pack;
 use crate::error::{Error, Result};
 use crate::manifest::{
     MODRINTH_DOCUMENT, MODRINTH_PLATFORM_HOSTS, PackFormat, PackLoader, RemoteFiles,
-    check_download_url, loader_dependency_key,
+    check_download_url, game_version, loader_dependency_key, loader_version,
 };
 use crate::path::SafeRelativePath;
 
@@ -180,17 +180,23 @@ fn remove_failed(dest: &Path) {
     }
 }
 
-/// 写前校验，产出要写的清单 JSON。
+/// 写前校验，产出要写的清单 JSON。游戏版本号与加载器版本号按读包的同一套规则查：读包拒收的版本号要在写包前
+/// 就报出是哪个字段、为什么不行，而不是整包写完才在回读时笼统地报没通过校验。
 fn validate(pack: &ExportPack) -> Result<Vec<u8>> {
     let name = required(&pack.name, "name")?;
     let version_id = required(&pack.version_id, "versionId")?;
-    let minecraft = required(&pack.minecraft, "dependencies.minecraft")?;
+    let minecraft = game_version(MODRINTH_DOCUMENT, "dependencies.minecraft", &pack.minecraft)?;
     let loader = pack
         .loader
         .as_ref()
         .map(|loader| {
-            required(&loader.version, loader_dependency_key(loader.kind))
-                .map(|version| (loader_dependency_key(loader.kind), version))
+            let key = loader_dependency_key(loader.kind);
+            loader_version(
+                MODRINTH_DOCUMENT,
+                &format!("dependencies.{key}"),
+                &loader.version,
+            )
+            .map(|version| (key, version))
         })
         .transpose()?;
 
@@ -232,7 +238,12 @@ fn validate(pack: &ExportPack) -> Result<Vec<u8>> {
         name,
         summary: pack.summary.as_deref(),
         files: entries,
-        dependencies: Dependencies { minecraft, loader },
+        dependencies: Dependencies {
+            minecraft: &minecraft,
+            loader: loader
+                .as_ref()
+                .map(|(key, version)| (*key, version.as_str())),
+        },
     };
     serde_json::to_vec(&document).map_err(|err| Error::invalid(MODRINTH_DOCUMENT, err.to_string()))
 }
@@ -847,6 +858,87 @@ mod tests {
             );
             assert!(!dest.exists(), "{label}");
         }
+    }
+
+    /// 读包拒收的游戏版本号与加载器版本号，写包前就拒绝：报出字段与原因，不建文件。分隔符、反斜杠与冒号插在
+    /// 随机位置也一样拒；前后的空白照旧去掉，写进清单的是去掉之后的。
+    #[test]
+    fn unusable_version_numbers_are_refused_before_creating_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("bad.mrpack");
+        let seed = time_seed();
+        let mut rng = Rng(seed);
+        let mut spliced = |base: &str, bad: char| {
+            let at = (rng.next() % (base.len() as u64 + 1)) as usize;
+            format!("{}{bad}{}", &base[..at], &base[at..])
+        };
+        let loader = |kind, version: String| pack(Some(PackLoader { kind, version }));
+        let minecraft = |version: String| ExportPack {
+            minecraft: version,
+            ..pack(None)
+        };
+        let cases: Vec<(ExportPack, String)> = vec![
+            {
+                let v = spliced("1.21.1", '/');
+                let reason =
+                    format!("dependencies.minecraft 的游戏版本号「{v}」不能用：含路径分隔符");
+                (minecraft(v), reason)
+            },
+            {
+                let v = spliced("1.21.1", ':');
+                let reason = format!(
+                    "dependencies.minecraft 的游戏版本号「{v}」不能用：含冒号（盘符或备用数据流）"
+                );
+                (minecraft(v), reason)
+            },
+            (
+                minecraft("1.21.1.".into()),
+                "dependencies.minecraft 的游戏版本号「1.21.1.」不能用：有段以点或空格结尾".into(),
+            ),
+            (
+                minecraft("..".into()),
+                "dependencies.minecraft 的游戏版本号「..」不能用：含 . 或 .. 段".into(),
+            ),
+            {
+                let v = spliced("47.3.0", '\\');
+                let reason = format!("dependencies.forge 的加载器版本号「{v}」不能用：含反斜杠");
+                (loader(PackLoaderKind::Forge, v), reason)
+            },
+            {
+                let v = spliced("21.1.77", '/');
+                let reason =
+                    format!("dependencies.neoforge 的加载器版本号「{v}」不能用：含路径分隔符");
+                (loader(PackLoaderKind::NeoForge, v), reason)
+            },
+            (
+                loader(PackLoaderKind::Fabric, "0.16.9.".into()),
+                "dependencies.fabric-loader 的加载器版本号「0.16.9.」不能用：有段以点或空格结尾"
+                    .into(),
+            ),
+        ];
+        for (bad, expected) in cases {
+            let err = write(&bad, &dest).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    Error::ManifestInvalid {
+                        document: "modrinth.index.json",
+                        reason,
+                    } if *reason == expected
+                ),
+                "seed {seed}：{expected}：{err:?}"
+            );
+            assert!(!dest.exists(), "seed {seed}：{expected}");
+        }
+
+        let padded = ExportPack {
+            minecraft: " 1.21.1 ".into(),
+            ..loader(PackLoaderKind::Quilt, "\t0.27.1 ".into())
+        };
+        write(&padded, &dest).unwrap();
+        let dependencies = &index_json(&dest)["dependencies"];
+        assert_eq!(dependencies["minecraft"], "1.21.1");
+        assert_eq!(dependencies["quilt-loader"], "0.27.1");
     }
 
     #[test]
