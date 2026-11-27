@@ -59,7 +59,11 @@ export interface PopoverProps {
    * window 只给内容长度本身有上限的面板（选项是有长度上限的用户名称）：内容不设限时面板会铺满窗口。
    */
   maxWidth?: "default" | "window";
-  /** 打开即把焦点移进面板（面板容器本身），在面板定位完、可见之后。 */
+  /**
+   * 打开即把焦点移进面板（面板容器本身），在面板定位完、可见之后。不传时按角色定：dialog 面板默认开，焦点不进面板的话
+   * 键盘到不了里面的控件；presentation 面板的内容（菜单、下拉）按自己的键盘模式处理，默认不开。
+   * 内容经 usePopoverInitialFocus 已把焦点放进面板时，不再拽回面板容器。
+   */
   autoFocus?: boolean;
   /** 面板的角色：默认 dialog；内容自带 menu / listbox 时传 presentation，由内容承担角色。 */
   role?: "dialog" | "presentation";
@@ -202,7 +206,7 @@ export function Popover({
   offset = 8,
   matchWidth = false,
   maxWidth = "default",
-  autoFocus = false,
+  autoFocus,
   role = "dialog",
   id,
   className,
@@ -250,7 +254,7 @@ export function Popover({
                 offset={offset}
                 matchWidth={matchWidth}
                 maxWidth={maxWidth}
-                autoFocus={autoFocus}
+                autoFocus={autoFocus ?? role === "dialog"}
                 role={role}
                 id={id}
                 aria={aria}
@@ -409,6 +413,8 @@ function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidt
     if (!autoFocus) return;
     const el = panelRef.current;
     if (el === null) throw new Error("浮层面板没有挂上");
+    // 内容的初始聚焦是子级的布局副作用，先于这里执行：焦点已经在面板里，就是内容自己定的落点
+    if (el.contains(document.activeElement)) return;
     el.focus();
   });
 

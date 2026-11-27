@@ -245,7 +245,8 @@ describe("初始聚焦", () => {
     );
   }
 
-  function FocusHost({ autoFocus = false, children }: { autoFocus?: boolean; children: ReactNode }) {
+  /** autoFocus 与 role 原样转交，不传就是 Popover 自己的默认。 */
+  function FocusHost({ autoFocus, role, children }: { autoFocus?: boolean; role?: "dialog" | "presentation"; children: ReactNode }) {
     const [anchor, setAnchor] = useState<HTMLElement | null>(null);
     const [open, setOpen] = useState(false);
     return (
@@ -253,7 +254,7 @@ describe("初始聚焦", () => {
         <button ref={setAnchor} onClick={() => setOpen(true)}>
           筛选
         </button>
-        <Popover open={open} anchor={anchor} onClose={() => setOpen(false)} autoFocus={autoFocus} aria-label="筛选">
+        <Popover open={open} anchor={anchor} onClose={() => setOpen(false)} autoFocus={autoFocus} role={role} aria-label="筛选">
           {children}
         </Popover>
       </>
@@ -288,6 +289,37 @@ describe("初始聚焦", () => {
     expect(document.activeElement).toBe(anchor);
   });
 
+  it("dialog 面板不传 autoFocus：照样在面板可见之后把焦点移进面板容器", () => {
+    const { calls } = openFrom(
+      <FocusHost>
+        <p>主体</p>
+      </FocusHost>,
+    );
+    expect(calls.map((c) => [c.target, c.hidden])).toEqual([[panel(), false]]);
+    expect(document.activeElement).toBe(panel());
+  });
+
+  it("presentation 面板不传 autoFocus：不动焦点，留在锚点上，由内容按自己的键盘模式处理", () => {
+    const { anchor, calls } = openFrom(
+      <FocusHost role="presentation">
+        <p>主体</p>
+      </FocusHost>,
+    );
+    expect(calls).toEqual([]);
+    expect(document.activeElement).toBe(anchor);
+  });
+
+  it("dialog 面板显式关掉 autoFocus：打开时焦点留在锚点上", () => {
+    const { anchor, calls } = openFrom(
+      <FocusHost autoFocus={false}>
+        <p>主体</p>
+      </FocusHost>,
+    );
+    expect(calls).toEqual([]);
+    expect(document.activeElement).toBe(anchor);
+  });
+
+  // 不传 autoFocus 的 dialog 面板默认要聚焦容器：内容先把焦点放好了，面板不再把它拽回容器
   it("内容经 usePopoverInitialFocus 聚焦：在面板可见的那次提交里执行一次，落在内容指定的元素上", () => {
     const { calls } = openFrom(
       <FocusHost>
