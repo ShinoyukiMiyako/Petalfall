@@ -779,6 +779,7 @@ impl Petalfall {
         }
         self.commit(&inspection, &journal).await?;
         tracing::info!(id = %journal.id, token = %journal.token, "实例移动已提交");
+        flush_committed_target(&journal, env).await;
         journal.stage = MoveStage::Committed;
         if let Err(err) = move_journal::write(self.data_dir(), &journal).await {
             // 实例已经在目标里，不能再报失败。日志停在「提交中」，启动收尾看盘面认得出已经提交。
@@ -1235,6 +1236,25 @@ async fn settle_backups(
     }
     remove_leftover(id, original, follow_ups).await;
     true
+}
+
+/// 写「已提交」之前把目标里的实例目录与它所在的 `versions` 刷到盘上。日志在数据目录里，与目标不一定在一个卷上：
+/// 日志先落了盘、目标里的改名还在系统缓存里时断电，同卷的收尾看到原位置有、目标里没有，分不清只能不动；跨卷的要
+/// 靠暂存副本往前补。刷不下去（有的文件系统不支持刷目录）只记日志、照旧往下走，由启动收尾按上面的办法兜底，
+/// 与删原件前刷不下去时一样不让移动失败：实例已经在目标里了。
+async fn flush_committed_target(journal: &MoveJournal, env: &MoveEnv) {
+    let versions = journal.target_game_dir.join(VERSIONS_DIR);
+    let dest = versions.join(&journal.id);
+    let env = env.clone();
+    let flushed = blocking(move || {
+        env.flush_dir(&dest)?;
+        env.flush_dir(&versions)
+    })
+    .await;
+    if let Err(err) = flushed {
+        let error = error_with_causes(&err);
+        tracing::warn!(id = %journal.id, %error, "提交后目标没能刷到盘上，照旧记已提交，断电时由启动收尾兜底");
+    }
 }
 
 /// 删旧目录与暂存里能删的，返回还有没有残留。原件（旧目录里的 `instance/`）要等目标里的实例刷到盘上才删：两边不在
@@ -4165,6 +4185,59 @@ mod tests {
         assert_eq!(snapshot(&dirs.backups_in(&dirs.source)), newcomer_backups);
         assert_eq!(minutes(&dirs, &dirs.source).await, Some(30));
         assert_eq!(minutes(&dirs, &dirs.target).await, Some(60));
+    }
+
+    /// 数据目录里唯一那份移动日志此刻在盘上记的进度。
+    fn stage_on_disk(data: &Path) -> MoveStage {
+        let files: Vec<PathBuf> = std::fs::read_dir(data.join("moves"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        let [file] = &files[..] else {
+            panic!("应当正好一份日志：{files:?}");
+        };
+        serde_json::from_slice::<MoveJournal>(&std::fs::read(file).unwrap())
+            .unwrap()
+            .stage
+    }
+
+    /// 同卷、跨卷提交之后，头两次刷盘都是目标里的实例目录与 versions，那时盘上的日志还停在提交中：「已提交」写在
+    /// 目标里的改名落盘之后。
+    #[tokio::test]
+    async fn the_target_is_flushed_before_the_journal_says_committed() {
+        for (label, env) in [("同卷", MoveEnv::default()), ("跨卷", cross_volume())] {
+            let dirs = Dirs::new();
+            build_instance(&dirs).await;
+            let flushed: Arc<Mutex<Vec<(PathBuf, MoveStage)>>> = Arc::default();
+            let (log, data) = (flushed.clone(), dirs.data.clone());
+            let env = MoveEnv {
+                flush_fault: Some(Arc::new(move |path: &Path| {
+                    let stage = stage_on_disk(&data);
+                    log.lock().unwrap().push((path.to_path_buf(), stage));
+                    Ok(())
+                })),
+                ..env
+            };
+
+            let moved = dirs
+                .petalfall()
+                .move_instance_files_with(&dirs.request(), None, &env)
+                .await
+                .unwrap();
+
+            assert_eq!(moved, outcome(&dirs, &moved.token), "{label}");
+            let flushed = flushed.lock().unwrap();
+            assert_eq!(
+                flushed.get(..2),
+                Some(
+                    &[
+                        (dirs.instance_in(&dirs.target), MoveStage::Committing),
+                        (dirs.target.join(VERSIONS_DIR), MoveStage::Committing),
+                    ][..]
+                ),
+                "{label}：{flushed:?}"
+            );
+        }
     }
 
     /// 回滚时，要带的基底版本里只复制了 jar、还没有版本 JSON 的目录整个删掉、记录收回；JSON 已经落下的留着。
