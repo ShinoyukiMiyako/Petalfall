@@ -1357,16 +1357,40 @@ describe("实例库：动作", () => {
     expect(callsOf(ipc, "set_ui_shape")).toEqual([{ patch: { repair_banner: true } }]);
   });
 
-  it("唯一修不好的实例：横幅上的「删除实例」走删除确认，先问后端删除预览，不排补全", async () => {
+  it("唯一修不好的实例：横幅上的「删除实例」走删除确认，先问后端删除预览，不排补全；确认后删掉的是它，横幅淡出，记下这次没有横幅", async () => {
+    shape = { recentCards: 0, repairBanner: true };
     instances = instances.map((i) => (i.id === "坏掉的" ? unrepairable("坏掉的") : i));
     ipc.overrides.set("preview_instance_deletion", (args) => ({ id: args.id, worlds: [], size_bytes: 0, file_count: 0, dependents: [], activity: null }));
+    ipc.overrides.set("delete_instance", (args) => {
+      instances = instances.filter((i) => i.id !== args.id);
+      return { existed: true };
+    });
     await mount();
     const remove = byText<HTMLButtonElement>(`.${bannerStyles.banner} button`, LIBRARY_COPY.menu.remove);
+    const banner = remove.closest(`.${bannerStyles.banner}`);
+    if (banner === null) throw new Error("没有修复横幅");
     expect(remove.getAttribute("aria-disabled")).toBeNull();
     click(remove);
     await flush();
     expect(callsOf(ipc, "preview_instance_deletion")).toEqual([{ id: "坏掉的" }]);
     expect(document.querySelector('[role="dialog"] h2')?.textContent).toBe(DELETE_INSTANCE_COPY.title("坏掉的"));
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    // 预览落定后确认键才可按
+    await afterMotion();
+    const confirm = dialogButton("删除实例");
+    expect(confirm.getAttribute("aria-disabled")).toBeNull();
+    click(confirm);
+    await flush();
+    expect(callsOf(ipc, "delete_instance")).toEqual([{ id: "坏掉的" }]);
+    expect(banner.closest("[inert]")).not.toBeNull();
+    await afterMotion();
+    expect(cardNames()).toEqual(["樱花生存", "原版", "机械动力"]);
+    expect(banner.isConnected).toBe(false);
+    expect(document.querySelector(`.${bannerStyles.banner}`)).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UI_SHAPE_WRITE_DELAY_MS);
+    });
+    expect(callsOf(ipc, "set_ui_shape")).toEqual([{ patch: { repair_banner: false } }]);
     expect(callsOf(ipc, "repair_instance")).toEqual([]);
   });
 
@@ -1480,6 +1504,8 @@ describe("实例库：动作", () => {
   it("补全修不好的卡片：底栏「修复并启动」以后端给的原因禁用，点了不排补全；被当作基底时也先说修不好", async () => {
     instances = [...instances.filter((i) => i.id !== "坏掉的"), unrepairable("旧电脑拷来的"), unrepairable("坏掉的", { activity: "inherited", used_by: "Fabric 整合" })];
     await mount();
+    // 点击漏进启动流程时，状态容器对修不好的实例先抛修不好的原因：既不排补全也不启动，只多一条错误通知
+    const errorsBefore = errorToasts();
     for (const id of ["旧电脑拷来的", "坏掉的"]) {
       const card = byText<HTMLButtonElement>("article button", id).closest("article");
       if (card === null) throw new Error("找不到卡片");
@@ -1488,6 +1514,7 @@ describe("实例库：动作", () => {
       expect(await reasonOf(repair)).toBe(UNREPAIRABLE);
       click(repair);
       await flush();
+      expect(errorToasts()).toEqual(errorsBefore);
     }
     expect(callsOf(ipc, "repair_instance")).toEqual([]);
     expect(callsOf(ipc, "launch_game")).toEqual([]);
