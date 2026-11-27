@@ -625,7 +625,9 @@ pub struct Unrepairable {
 /// 补全为什么修不好。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnrepairableKind {
-    /// 版本 JSON 读盘出错（被占用、没有权限、那个位置是个目录）：文件可能完好，放开占用或修好权限后重新扫描就恢复。
+    /// 版本 JSON 读盘出错（被占用、没有权限、那个位置是个目录）：文件可能完好，放开占用或修好权限后重新扫描就读得
+    /// 出来。不带未完成标记的到这里就恢复了；带着 install 或 repair 标记的扫完还得再修复一次，扫描只重读版本 JSON，
+    /// 不动标记。
     Unreadable,
     /// 版本 JSON 缺失或损坏，又没有安装记录可照着重装（记录里的加载器认不出来也算：照它装不回去）。
     NoRecord {

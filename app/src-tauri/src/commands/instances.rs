@@ -606,7 +606,8 @@ pub struct InstanceDto {
     /// 补全时再读一次，系统给的原因可能与列表那一次不同，两边只在这一段可能差开。
     pub unrepairable_reason: Option<String>,
     /// 补全为什么修不好，与 unrepairable_reason 同有同无：unreadable（版本 JSON 读盘出错，文件可能完好，放开占用或
-    /// 修好权限后重新扫描就恢复）/ no_record（版本 JSON 缺失或损坏，又没有安装记录可照着重装）/ modpack（整合包
+    /// 修好权限后重新扫描就读得出来；没有未完成标记的就此恢复，带着 install 或 repair 标记的扫完还要再修复一次）/
+    /// no_record（版本 JSON 缺失或损坏，又没有安装记录可照着重装）/ modpack（整合包
     /// 没有导入完）。界面按它分支，不解析原因的文字。
     pub unrepairable_kind: Option<&'static str>,
     /// 原因里点出的改名目标：只在 unrepairable_kind 为 no_record、实例目录里恰有一份名字对不上的版本 JSON、实例又
