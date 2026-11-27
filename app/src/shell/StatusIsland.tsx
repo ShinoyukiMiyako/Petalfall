@@ -205,7 +205,8 @@ function Island({ session }: { session: SessionState }) {
   if (loading && loadedTask !== session.taskId) setLoadedTask(session.taskId);
   const finishing = useFinishing(loadingFinished(session, loadedTask), useCompletionHold()).has(session.taskId);
   const progressShown = loading || finishing;
-  // 底边进度条的平滑放在不随阶段换行的这一层，胶囊上的百分数直接读它：字与条是同一个值，按构造同数，换行时新行不另起弹簧。
+  // 底边进度条的平滑放在不随阶段换行的这一层，胶囊上的百分数直接读它，换行时新行不另起弹簧。字与条读的是同一条平滑，
+  // 只是进度刚离开 0 时条不短于 MIN_VISIBLE_PROGRESS、字照真实进度写，平滑过了这个下限之后两者才同数（见 useIslandProgress）。
   // 换了一局时平滑直接跳到新一局的进度，字与条一起跳，不从上一局停下的位置往回走
   const bar = useIslandProgress(session.progress, session.taskId);
   // 详情在加载期间开着：加载结束（进入运行、失败、取消）后阶段清单留到浮层关闭，停在最终状态。
