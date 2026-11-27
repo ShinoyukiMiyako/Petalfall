@@ -2170,6 +2170,17 @@ describe("实例详情：补全修不好的损坏实例", () => {
       expect(() => button("修复实例")).toThrow("找不到按钮");
     });
 
+    it("头图的损坏标签：读不出来的写「版本 JSON 读不出来」，不写文件不完整；带改名目标的照旧写文件不完整", async () => {
+      const heroChips = () => [...document.querySelectorAll<HTMLElement>('section [class*="_heroChip_"]')].filter(live).map(textOf);
+      instances = instances.map((i) => (i.id === ID ? unreadable() : i));
+      await open("overview");
+      expect(heroChips()).toEqual(["版本 JSON 读不出来"]);
+      view?.unmount();
+      instances = instances.map((i) => (i.id === ID ? renamable() : i));
+      await open("overview");
+      expect(heroChips()).toEqual(["文件不完整"]);
+    });
+
     it("「重新扫描」重读实例列表：占用放开后读得出来了，横幅撤下，不报错", async () => {
       instances = instances.map((i) => (i.id === ID ? unreadable() : i));
       await open("overview");

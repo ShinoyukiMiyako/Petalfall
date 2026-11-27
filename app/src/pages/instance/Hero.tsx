@@ -9,7 +9,7 @@ import { InstanceBlock } from "../../art/iso/InstanceBlock";
 import { EXTRA_LOADER_NAME, lockReason, MODPACK_REIMPORT_COPY, modpackLabel, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { percent } from "../../domain/format";
-import { needsReimport } from "../../domain/rules";
+import { needsReimport, repairExit } from "../../domain/rules";
 import { fade, popMark } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
 import { isImeComposing } from "../../lib/util";
@@ -85,6 +85,9 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   // 侧栏满了：点了由状态层弹上限提示，所以图钉只标 aria-disabled、名称换成上限那一句
   const pinLabel = pinBlocked ? TOAST_COPY.pinLimit : inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin;
   const pinReason = pinBlocked ? TOAST_COPY.pinLimit : undefined;
+  // 版本 JSON 读不出来时文件可能完好，放开占用或修好权限后重新扫描就恢复：损坏标签照实说读不出来
+  const exit = repairExit(inst);
+  const brokenLabel = exit !== null && exit.kind === "rescan" ? HERO_COPY.brokenUnreadable : HERO_COPY.broken;
   // 禁用原因走菜单项的悬停提示气泡，不放右侧提示位：那一位与标签同一行、不折行，长原因会把标签挤成省略号
   const menu: MenuEntry[] = [
     { label: HERO_COPY.rename, icon: "edit", disabled: renameReason !== undefined, disabledReason: renameReason, onSelect: () => onRenamingChange(true) },
@@ -151,7 +154,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
                   {view.kind === "broken" && (
                     <StatusChip key="broken" appear={mounted.current}>
                       <Tag tone="warn" icon="alert">
-                        {HERO_COPY.broken}
+                        {brokenLabel}
                       </Tag>
                     </StatusChip>
                   )}

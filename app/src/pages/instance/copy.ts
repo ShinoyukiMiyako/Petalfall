@@ -30,6 +30,8 @@ export const HERO_COPY = {
   renamed: (name: string) => `已重命名为「${name}」`,
   versionUnknown: "版本未知",
   broken: "文件不完整",
+  /** 补全修不好是因为版本 JSON 读不出来（被占用、没有权限）：文件可能完好，标签不说文件不完整。 */
+  brokenUnreadable: "版本 JSON 读不出来",
   installing: (pct: string) => `安装中 ${pct}`,
   installingQueued: "等待安装",
   /** 后端报告实例在备份、恢复或导出存档（游戏退出后的自动备份也算）。 */
