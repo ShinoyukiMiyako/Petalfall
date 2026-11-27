@@ -117,6 +117,7 @@
   color: var(--sk-text-2);
   cursor: pointer;
   transition:
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap),
     background-color var(--sk-dur-hover) var(--sk-ease),
     color var(--sk-dur-hover) var(--sk-ease);
 }
@@ -130,9 +131,23 @@
   color: var(--sk-text);
 }
 
+/*
+ * 按压与标题栏的方形图标入口同一档，缩到 0.94。写独立的 scale 属性：弹入弹出由 framer 写在行内的 transform 上，
+ * 两者叠加，互不覆盖
+ */
 .clear:active {
   background: var(--sk-fill-press);
   color: var(--sk-text);
+  scale: 0.94;
+}
+
+/* 减少动画：不缩放，按下时图标瞬时降到 0.85 不透明度（键自身的透明度被弹入写在内联样式上，样式表盖不过） */
+:global([data-sk-reduced]) .clear:active {
+  scale: none;
+}
+
+:global([data-sk-reduced]) .clear:active > svg {
+  opacity: 0.85;
 }
 
 .suffix {

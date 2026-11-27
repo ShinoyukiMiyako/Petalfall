@@ -214,6 +214,15 @@ describe("TextInput", () => {
     expect(rule(".prefix")).toContain("transition: color var(--sk-dur-hover) var(--sk-ease);");
   });
 
+  it("清空键按下缩到 0.94，走独立的 scale 与按压弹簧，不碰弹入用的 transform；减少动画改降图标透明度", () => {
+    const css = readFileSync(resolve(__dirname, "TextInput.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(css).toMatch(/\n\.clear\s*\{[^}]*transition:\s*scale var\(--sk-spring-tap-dur\) var\(--sk-spring-tap\),/);
+    expect(css).toMatch(/\n\.clear:active\s*\{[^}]*scale:\s*0\.94;/);
+    expect(css).not.toMatch(/\n\.clear[^{]*\{[^}]*transform/);
+    expect(css).toMatch(/:global\(\[data-sk-reduced\]\) \.clear:active\s*\{\s*scale:\s*none;\s*\}/);
+    expect(css).toMatch(/:global\(\[data-sk-reduced\]\) \.clear:active > svg\s*\{\s*opacity:\s*0\.85;\s*\}/);
+  });
+
   it("只读与禁用时不出现清空按钮", () => {
     mount(
       <>
