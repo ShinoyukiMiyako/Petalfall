@@ -477,7 +477,7 @@ export const templateInfo = (): Promise<TemplateInfoDto> => invoke<TemplateInfoD
 
 /**
  * 把实例工作目录里的白名单文件整份存为默认设置（实例没有的文件，新模板里也没有），返回存完之后的状态。
- * 实例正在安装、补全、改名或删除时以 instance_busy 拒绝；游戏运行中可以保存。工作目录里一个白名单文件都没有时
+ * 实例正在安装、补全、改名、删除或移到别的游戏目录时以 instance_busy 拒绝；游戏运行中可以保存。工作目录里一个白名单文件都没有时
  * 以 TEMPLATE_SOURCE_EMPTY_ERROR_CODE 拒绝，原来的默认设置不动。
  */
 export const saveInstanceAsTemplate = (id: string): Promise<TemplateInfoDto> => invoke<TemplateInfoDto>("save_instance_as_template", { id });
