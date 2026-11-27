@@ -36,6 +36,13 @@ impl SafeRelativePath {
             .fold(root.to_path_buf(), |path, part| path.join(part))
     }
 
+    /// 路径的第一段：落在实例目录这一层的那个名字。
+    pub fn top_level(&self) -> &str {
+        self.0
+            .split_once('/')
+            .map_or(self.0.as_str(), |(top, _)| top)
+    }
+
     /// Windows 文件系统比较键，用于拒绝仅大小写不同的别名路径。
     pub(crate) fn comparison_key(&self) -> String {
         self.0.to_lowercase()

@@ -3,7 +3,8 @@
 //! 来源有两种：平台上某整合包的一个版本（先下载到缓存目录），或用户选的本地 `.mrpack` / `.zip`。
 //! 导入总是新建一个实例目录 `versions/<实例名>/`，按顺序：
 //!
-//! 1. 读清单、去掉用户选择跳过的可选文件、校验实例名并查重；CurseForge 包先把全部文件 id 换成下载
+//! 1. 读清单、去掉用户选择跳过的可选文件、校验实例名并查重、确认包里没有文件落在实例自己的版本文件上
+//!    （`ensure_pack_spares_instance_files`）；CurseForge 包先把全部文件 id 换成下载
 //!    地址——有作者禁止第三方分发、（设置打开时）拼出的地址也下不了、用户也还没手动下载认领的文件就在这
 //!    一步整体报错，不先装几百 MB 游戏再告诉用户装不完。这一步不动游戏目录（[`Petalfall::prepare_modpack`]），调用方可以在这之后占住实例名再往下走。
 //! 2. 核对游戏目录的数据格式记号，原子地建目录（同名即报错），写下带任务 id 的未完成标记
@@ -30,13 +31,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use petalfall_download::{CredentialScope, DownloadCredential, DownloadTask};
+use petalfall_install::GameLayout;
 use petalfall_instance::{
     IncompleteKind, IncompleteMarker, IsolationOverride, MarkerStore, NameViolation,
     PETALFALL_META_DIR, VERSIONS_DIR, VersionSettings, VersionSettingsStore, check_name_format,
 };
 use petalfall_modpack::{
     CurseForgeFileRef, ModrinthFile, PackArchive, PackFormat, PackLoader, PackLoaderKind,
-    PackManifest, RemoteFiles,
+    PackManifest, RemoteFiles, SafeRelativePath,
 };
 use petalfall_modplatform::{CurseForgeClient, CurseForgeFile, CurseForgeMod, Platform};
 use serde::{Deserialize, Serialize};
@@ -662,6 +664,7 @@ impl Petalfall {
             return Err(name_error(&name, NameViolation::Duplicate));
         }
         self.ensure_modpack_name_free(&name).await?;
+        ensure_pack_spares_instance_files(&self.layout(), &name, &archive)?;
         let version_dir = self.game_dir().join(VERSIONS_DIR).join(&name);
 
         emit(
@@ -1513,6 +1516,66 @@ fn override_landings(archive: &PackArchive) -> HashSet<String> {
         .iter()
         .map(|entry| entry.path.as_str().to_lowercase())
         .collect()
+}
+
+/// 整合包的落点不许撞上实例自己的版本文件：实例目录里与实例同名的版本 JSON、主 jar 与 natives 目录。
+///
+/// 导入先写版本 JSON，再下清单文件、解覆盖文件，落在同一个名字上的那份会把它盖掉，实例从此按包里那份 JSON
+/// 启动。主 jar 与 natives 目录这次导入不写，名下的位置却归日后的补全与改装用，一并不让占。撞上就整包拒收，
+/// 不悄悄跳过那一个文件：包里放了它，说明作者以为它会生效。实例名是导入时才定的，换一个名字同一个包就能装。
+///
+/// 只看落点的第一段，路径校验（[`SafeRelativePath`]）已经挡掉了 `..`、短文件名与结尾的点和空格这些别名写法。
+/// CurseForge 清单里的文件落在按类型定的子目录里，到不了实例目录这一层，不用查。
+///
+/// 比较不分大小写，而且逐个字符先转大写再转小写，不用整串的 `to_lowercase`：文件系统折叠大小写不看上下文，
+/// 整串转小写却会把词尾的「Σ」写成「ς」，实例名里有以「Σ」收尾的词、后面跟着空格或连字符时（natives 目录
+/// 就是名字后面接连字符），包里写成「σ」的同一个文件就比不上了。各个卷的折叠表不一样（格式化时写下的，文件
+/// 系统之间也不同），所以往宽里折：多认了只是让人换个实例名，少认了丢的是版本 JSON。「ς」与「Σ」、「ſ」与
+/// 「s」这类有的卷认、有的卷不认的一律当成同名；「ß」与「ss」这类没有哪个卷认的也跟着多认了。
+fn ensure_pack_spares_instance_files(
+    layout: &GameLayout,
+    name: &str,
+    archive: &PackArchive,
+) -> Result<()> {
+    let key = |path: PathBuf| -> String {
+        let path = path.to_string_lossy();
+        path.chars()
+            .flat_map(char::to_uppercase)
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let version_dir = layout.version_dir(name);
+    let owned = [
+        layout.version_json(name),
+        layout.version_jar(name),
+        layout.natives_dir(name),
+    ]
+    .map(key);
+    let lands_on_owned =
+        |path: &SafeRelativePath| owned.contains(&key(version_dir.join(path.top_level())));
+    let remote = match &archive.manifest.remote {
+        RemoteFiles::Modrinth(files) => files.as_slice(),
+        RemoteFiles::CurseForge(_) => &[],
+    };
+    let collision = remote
+        .iter()
+        .find(|file| lands_on_owned(&file.path))
+        .map(|file| file.path.as_str())
+        .or_else(|| {
+            archive
+                .overrides
+                .iter()
+                .find(|entry| lands_on_owned(&entry.path))
+                .map(|entry| entry.entry_name.as_str())
+        });
+    match collision {
+        Some(path) => Err(petalfall_modpack::Error::InstanceFileCollision {
+            path: path.to_owned(),
+            instance: name.to_owned(),
+        }
+        .into()),
+        None => Ok(()),
+    }
 }
 
 fn file_name_of(path: &str) -> String {
@@ -3439,6 +3502,188 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    const PLANTED_JSON: &[u8] = br#"{"id":"planted","mainClass":"planted.Main"}"#;
+
+    /// 清单里一个落在 `file_path` 上的远程文件，内容是 [`PLANTED_JSON`]。
+    fn planted_remote(file_path: &str, optional: bool) -> serde_json::Value {
+        let mut entry = serde_json::json!({
+            "path": file_path, "hashes": { "sha1": sha1_hex(PLANTED_JSON) },
+            "downloads": ["https://cdn.modrinth.com/data/x/planted.bin"],
+            "fileSize": PLANTED_JSON.len()
+        });
+        if optional {
+            entry["env"] = serde_json::json!({"client": "optional", "server": "optional"});
+        }
+        entry
+    }
+
+    /// 包里与实例同名的版本 JSON、主 jar、natives 目录不许落进实例：导入先写版本 JSON、后下清单文件并解覆盖
+    /// 文件，放行的话实例从此按包里那份 JSON 启动。覆盖文件（两层都算）与清单文件都查，名字不分大小写；撞上时
+    /// 报出撞上的那一条与实例名，游戏目录里什么都不建。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pack_files_landing_on_the_instances_own_version_files_are_refused() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall(tmp.path(), &server);
+
+        let overrides = [
+            "overrides/weekend.JSON",
+            "overrides/Weekend.jar",
+            "overrides/WEEKEND-natives/lwjgl.dll",
+            "client-overrides/Weekend.json",
+        ];
+        let remotes = ["Weekend.json", "weekend.JAR", "weekend-natives/planted.dll"];
+        let cases = overrides
+            .iter()
+            .map(|entry| (*entry, None))
+            .chain(remotes.iter().map(|file| (*file, Some(*file))));
+        for (reported, remote) in cases {
+            let mut manifest = index(serde_json::json!({"minecraft": "test"}));
+            let entries: Vec<(&str, &[u8])> = match remote {
+                Some(file) => {
+                    manifest["files"] = serde_json::json!([planted_remote(file, false)]);
+                    vec![("overrides/config/keep.txt", b"keep".as_slice())]
+                }
+                None => vec![(reported, PLANTED_JSON)],
+            };
+            let pack = tmp.path().join("planted.mrpack");
+            write_pack(&pack, &manifest, &entries);
+
+            let err = import_as(&petalfall, pack, "Weekend").await.unwrap_err();
+
+            assert!(
+                matches!(
+                    &err,
+                    CoreError::Modpack(petalfall_modpack::Error::InstanceFileCollision { path, instance })
+                        if path == reported && instance == "Weekend"
+                ),
+                "{reported}: {err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "整合包里的 {reported} 落在实例「Weekend」自己的版本文件（版本 JSON、主 jar 或 natives 目录）上，换一个实例名再导入"
+                )
+            );
+            assert!(
+                !petalfall.game_dir().exists(),
+                "{reported}: 拒收发生在动游戏目录之前"
+            );
+        }
+    }
+
+    /// 名字撞没撞上不能比文件系统认得少：它折叠大小写不看上下文，「Σ」与「σ」是同一个名字。整串转小写却会把
+    /// 词尾的「Σ」写成「ς」，与包里写的「σ」对不上；这样的落点在磁盘上仍是实例自己的那个文件，一样拒收。「ς」
+    /// 与「Σ」、长 s 与「s」是不是同一个名字各个卷不一样，往宽里算，也拒收；字母不同的名字照常导入。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pack_files_matching_the_version_files_up_to_case_folding_are_refused() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall(tmp.path(), &server);
+
+        for (name, entry) in [
+            ("ΑΣ 1", "overrides/Ασ 1.json"),
+            ("ΚΟΣΜΟΣ", "overrides/ΚΟΣΜΟσ-natives/lwjgl.dll"),
+            ("ΑΣ 1", "overrides/Ας 1.json"),
+            ("Masse", "overrides/Maſſe.jar"),
+        ] {
+            let pack = tmp.path().join("sigma.mrpack");
+            write_pack(
+                &pack,
+                &index(serde_json::json!({"minecraft": "test"})),
+                &[(entry, PLANTED_JSON)],
+            );
+
+            let err = import_as(&petalfall, pack, name).await.unwrap_err();
+
+            assert!(
+                matches!(
+                    &err,
+                    CoreError::Modpack(petalfall_modpack::Error::InstanceFileCollision { path, instance })
+                        if path == entry && instance == name
+                ),
+                "{entry}: {err:?}"
+            );
+            assert!(
+                !petalfall.game_dir().exists(),
+                "{entry}: 拒收发生在动游戏目录之前"
+            );
+        }
+
+        let pack = tmp.path().join("other-letter.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/ΑΤ 1.json", PLANTED_JSON)],
+        );
+        let outcome = import_as(&petalfall, pack, "ΑΣ 1").await.unwrap();
+        assert_eq!(
+            std::fs::read(outcome.version_dir.join("ΑΤ 1.json")).unwrap(),
+            PLANTED_JSON
+        );
+        let own: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(outcome.version_dir.join("ΑΣ 1.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            own,
+            serde_json::json!({"id": "ΑΣ 1", "inheritsFrom": "test", "type": "release"})
+        );
+    }
+
+    /// 只有落在实例目录这一层、名字正好是那三个的才拒收。同一个包换个实例名照常导入：那份文件成了普通文件，
+    /// 实例的版本 JSON 是启动器写的那份。子目录里的同名文件、名字只是相像的文件照样解出来；选择跳过的可选文件
+    /// 不落盘，名字撞上也不拦。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pack_files_that_only_resemble_the_version_files_are_imported_as_ordinary_files() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall(tmp.path(), &server);
+        let mut manifest = index(serde_json::json!({"minecraft": "test"}));
+        manifest["files"] = serde_json::json!([planted_remote("Other.jar", true)]);
+        let pack = tmp.path().join("planted.mrpack");
+        write_pack(
+            &pack,
+            &manifest,
+            &[
+                ("overrides/Weekend.json", PLANTED_JSON),
+                ("overrides/config/Other.json", b"nested"),
+                ("overrides/Other.json.bak", b"bak"),
+                ("overrides/Other-natives.txt", b"txt"),
+                ("overrides/Others.json", b"longer"),
+            ],
+        );
+
+        let outcome = petalfall
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("Other"),
+                &ImportSelection {
+                    excluded_optional: vec!["Other.jar".into()],
+                },
+                "task-resemble",
+                None,
+            )
+            .await
+            .unwrap();
+
+        let dir = outcome.version_dir;
+        let read = |relative: &str| std::fs::read(dir.join(relative)).unwrap();
+        assert_eq!(read("Weekend.json"), PLANTED_JSON);
+        assert_eq!(read("config/Other.json"), b"nested");
+        assert_eq!(read("Other.json.bak"), b"bak");
+        assert_eq!(read("Other-natives.txt"), b"txt");
+        assert_eq!(read("Others.json"), b"longer");
+        assert!(!dir.join("Other.jar").exists());
+        let own: serde_json::Value = serde_json::from_slice(&read("Other.json")).unwrap();
+        assert_eq!(
+            own,
+            serde_json::json!({"id": "Other", "inheritsFrom": "test", "type": "release"})
+        );
     }
 
     /// 按名字删半成品：标记读不出来、还没写下标记的都删得掉；名下没有目录时什么都不做；

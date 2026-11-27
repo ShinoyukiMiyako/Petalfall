@@ -109,7 +109,7 @@ pub mod code {
     pub const MODPACK_CORRUPT: &str = "modpack_corrupt";
     /// 整合包里有条目用了不支持的压缩方式（detail.path、entry、method）。
     pub const MODPACK_UNSUPPORTED_COMPRESSION: &str = "modpack_unsupported_compression";
-    /// 整合包里有越出实例目录、写进启动器元数据目录或符号链接的条目（detail.path）。
+    /// 整合包里有越出实例目录、写进启动器元数据目录、落在实例自己的版本文件上或符号链接的条目（detail.path）。
     pub const MODPACK_UNSAFE_PATH: &str = "modpack_unsafe_path";
     /// 新实例名不可用（detail.name、rule：empty / too_long / illegal_char / reserved / leading_dot /
     /// duplicate）。
@@ -504,9 +504,9 @@ fn modpack_code(err: &ModpackError) -> &'static str {
         ModpackError::Corrupt { .. } => code::MODPACK_CORRUPT,
         ModpackError::UnsupportedCompression { .. } => code::MODPACK_UNSUPPORTED_COMPRESSION,
         ModpackError::NotOptional { .. } => code::INVALID_ARGUMENT,
-        ModpackError::UnsafePath { .. } | ModpackError::SymlinkEntry { .. } => {
-            code::MODPACK_UNSAFE_PATH
-        }
+        ModpackError::UnsafePath { .. }
+        | ModpackError::InstanceFileCollision { .. }
+        | ModpackError::SymlinkEntry { .. } => code::MODPACK_UNSAFE_PATH,
         ModpackError::Io { .. } => code::IO,
         ModpackError::Cancelled => code::CANCELLED,
         ModpackError::ExportCheckFailed { .. } => code::MODPACK_EXPORT_CHECK_FAILED,
@@ -782,6 +782,7 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
                 detail.insert("reason".to_owned(), json!(reason));
             }
             ModpackError::UnsafePath { path, .. }
+            | ModpackError::InstanceFileCollision { path, .. }
             | ModpackError::SymlinkEntry { path }
             | ModpackError::DuplicatePath { path }
             | ModpackError::NotOptional { path } => {
@@ -1181,6 +1182,22 @@ mod tests {
         let detail = unsafe_path.detail.unwrap();
         assert_eq!(detail["path"], json!("overrides/../evil.txt"));
         assert_eq!(detail["causes"], json!(["路径含父目录组件 '..'"]));
+
+        // 前端对这个错误码没有统一说法，界面上显示的就是这句原文：出路要写在里面。
+        let collision: CommandError = CoreError::from(ModpackError::InstanceFileCollision {
+            path: "overrides/周末包.json".into(),
+            instance: "周末包".into(),
+        })
+        .into();
+        assert_eq!(collision.code, code::MODPACK_UNSAFE_PATH);
+        assert_eq!(
+            collision.message,
+            "整合包里的 overrides/周末包.json 落在实例「周末包」自己的版本文件（版本 JSON、主 jar 或 natives 目录）上，换一个实例名再导入"
+        );
+        assert_eq!(
+            collision.detail.unwrap()["path"],
+            json!("overrides/周末包.json")
+        );
 
         let invalid: CommandError = CoreError::from(ModpackError::ManifestInvalid {
             document: "manifest.json",

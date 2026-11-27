@@ -45,6 +45,11 @@ describe("taskFailureReason", () => {
     );
   });
 
+  it("整合包里的文件撞上实例自己的版本文件：照后端原文，出路（换一个实例名）写在原文里", () => {
+    const message = "整合包里的 overrides/周末包.json 落在实例「周末包」自己的版本文件（版本 JSON、主 jar 或 natives 目录）上，换一个实例名再导入";
+    expect(taskFailureReason({ code: "modpack_unsafe_path", message })).toBe(message);
+  });
+
   it("其余照后端原文", () => {
     expect(taskFailureReason({ code: "download_failed", message: "跳转次数过多：https://x/a.jar" })).toBe("跳转次数过多：https://x/a.jar");
   });
