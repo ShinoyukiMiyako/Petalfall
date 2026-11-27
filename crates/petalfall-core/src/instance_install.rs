@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use petalfall_base::error_with_causes;
-use petalfall_install::instance::{place_json_for_processors, remove_placed_json};
+use petalfall_install::instance::place_json_for_processors;
 use petalfall_install::{
     LoaderFlavor, LoaderInstaller, VanillaInstaller, ensure_complete, forge_installer_url,
     merge_for_instance, neoforge_installer_url, write_instance_json,
@@ -275,8 +275,8 @@ impl Petalfall {
             .download_version_json(&entry, &staged)
             .await?;
 
-        let (merged, loader) = match request.loader {
-            None => (merge_for_instance(id, &vanilla, None)?, None),
+        let (merged, loader, placed) = match request.loader {
+            None => (merge_for_instance(id, &vanilla, None)?, None, None),
             Some(choice @ (LoaderChoice::Fabric | LoaderChoice::Quilt)) => {
                 let (flavor, base) = match choice {
                     LoaderChoice::Fabric => (LoaderFlavor::Fabric, self.fabric_base()),
@@ -295,6 +295,7 @@ impl Petalfall {
                 (
                     merge_for_instance(id, &vanilla, Some(&profile))?,
                     Some(InstalledLoader { choice, version }),
+                    None,
                 )
             }
             Some(choice) => {
@@ -323,26 +324,18 @@ impl Petalfall {
                         choice.display_name()
                     )),
                 );
-                // 有的老安装器处理器要读客户端 jar 旁边的版本 JSON，实例自己的要到装完才合并落盘：还没有时先放一份
-                // 原版的，装成了下面的合并结果盖掉它，没装成就撤掉。
+                // 有的老安装器处理器要从客户端 jar 旁边的版本 JSON 里读原版的库清单，实例自己的那份要到装完才合并
+                // 落盘，在的话也给不了处理器：先换成原版的。守卫活到下面写好合并结果才放下，中途失败、任务被丢弃
+                // 或 panic 都会还原。进程被硬杀时留下原版那份，未完成标记里记着这次要装的内容（新建由
+                // create_instance_dir、重装由 begin_repair / begin_loader_reinstall 在这之前写下），补全照它重装。
                 let placed = place_json_for_processors(&layout, &base).await?;
                 // 处理器不看下载池的令牌，取消看的是上下文上挂的那个（make_context 已挂上）：
                 // 取消时正在跑的处理器要被结束，不能等宽限期满被丢下。
                 let java_major = found.first().map(|picked| picked.version.major);
-                let installed = self
+                let (embedded, summary) = self
                     .forge_installer(cx, major, java, java_major, events)
                     .install_for_instance(&url, id)
-                    .await;
-                let (embedded, summary) = match installed {
-                    Ok(done) => done,
-                    Err(err) => {
-                        if placed && let Err(cleanup) = remove_placed_json(&layout, id).await {
-                            // 要报的是安装本身的失败；这份文件留着也只是一份原版的版本 JSON，下次重装会盖掉。
-                            tracing::warn!(id, error = %cleanup, "撤掉给处理器配的版本 JSON 失败");
-                        }
-                        return Err(err.into());
-                    }
-                };
+                    .await?;
                 emit(
                     events,
                     CoreEvent::stage(format!(
@@ -355,11 +348,16 @@ impl Petalfall {
                 (
                     merge_for_instance(id, &vanilla, Some(&embedded))?,
                     Some(InstalledLoader { choice, version }),
+                    Some(placed),
                 )
             }
         };
 
         write_instance_json(&layout, &merged).await?;
+        if let Some(placed) = placed {
+            // 合并结果已经盖掉了给处理器换上的那份。
+            placed.keep();
+        }
         // 记实际装上的版本：Fabric / Quilt 没指定版本时装的是当时的推荐版，日后修复时推荐版可能已经变了。
         // 默认设置不记：重装时实例里已经有玩家自己的设置。
         InstallRecordStore::for_version_dir(&dir)
@@ -3492,6 +3490,380 @@ mod tests {
                 0,
                 "{entry}"
             );
+        }
+    }
+
+    /// 装 Forge 系加载器时处理器开跑前换上原版版本 JSON 的接线：假的 Forge 安装器加假 java 批处理，走真正的
+    /// create_instance_dir 与 install_instance。
+    ///
+    /// 假处理器只有一个参数 `{MINECRAFT_JAR}`，按它找客户端 jar 旁边的版本 JSON（官方启动器布局里那个位置的原版
+    /// 版本 JSON），找不到就非零退出；找到了照抄一份到 java 旁边的 seen.json，用例据此看它读到的是哪一份。java 旁边
+    /// 放着 fail.flag 时抄完再非零退出，当作处理器失败。批处理里只写相对脚本所在目录的路径（%~dp0、%~dpn4），临时
+    /// 目录在中文用户名下时脚本文字不会读成乱码。
+    #[cfg(windows)]
+    mod processor_json {
+        use super::*;
+        use crate::config::PetalfallConfig;
+        use crate::java::JavaEnv;
+        use std::io::Write;
+        use std::path::PathBuf;
+
+        /// 这个版本的安装器内嵌的版本 JSON 继承原版，合并得成。
+        const MERGEABLE: &str = "1.0";
+        /// 这个版本的安装器内嵌的版本 JSON 继承的是别的游戏版本：处理器跑完之后合并失败。
+        const UNMERGEABLE: &str = "2.0";
+        const FORGE_MAIN: &str = "net.minecraftforge.bootstrap.ForgeBootstrap";
+
+        struct Fixture {
+            _tmp: tempfile::TempDir,
+            _server: MockServer,
+            petalfall: Petalfall,
+            bin: PathBuf,
+            vanilla: VersionJson,
+        }
+
+        impl Fixture {
+            fn request(&self, forge: &str) -> InstanceRequest {
+                request("test", Some(LoaderChoice::Forge), Some(forge))
+            }
+
+            fn json_path(&self, id: &str) -> PathBuf {
+                self.petalfall
+                    .game_dir()
+                    .join("versions")
+                    .join(id)
+                    .join(format!("{id}.json"))
+            }
+
+            /// 实例 `id` 装加载器之前、只合并了原版的那份。
+            fn base(&self, id: &str) -> VersionJson {
+                merge_for_instance(id, &self.vanilla, None).unwrap()
+            }
+
+            fn fail_processors(&self, fail: bool) {
+                let flag = self.bin.join("fail.flag");
+                if fail {
+                    std::fs::write(flag, b"").unwrap();
+                } else if flag.exists() {
+                    std::fs::remove_file(flag).unwrap();
+                }
+            }
+
+            /// 跑一次安装，交回结果与处理器这一次读到的版本 JSON（没跑到处理器或读不到时为 `None`）。
+            async fn install(
+                &self,
+                id: &str,
+                forge: &str,
+            ) -> (Result<InstanceInstallOutcome>, Option<VersionJson>) {
+                let seen = self.bin.join("seen.json");
+                if seen.exists() {
+                    std::fs::remove_file(&seen).unwrap();
+                }
+                let outcome = self
+                    .petalfall
+                    .install_instance(id, &self.request(forge), None)
+                    .await;
+                let read = seen.exists().then(|| {
+                    VersionJson::from_json_str(&std::fs::read_to_string(&seen).unwrap()).unwrap()
+                });
+                (outcome, read)
+            }
+        }
+
+        async fn fixture() -> Fixture {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().to_path_buf();
+            let game = root.join("game");
+            let stored = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+
+            // 处理器 jar 只要 MANIFEST.MF 里有 Main-Class，真正执行的是假 java。
+            let processor = game.join(r"libraries\test\proc\1\proc-1.jar");
+            std::fs::create_dir_all(processor.parent().unwrap()).unwrap();
+            let mut jar = zip::ZipWriter::new(std::fs::File::create(&processor).unwrap());
+            jar.start_file("META-INF/MANIFEST.MF", stored).unwrap();
+            jar.write_all(b"Manifest-Version: 1.0\r\nMain-Class: test.Processor\r\n\r\n")
+                .unwrap();
+            jar.finish().unwrap();
+
+            let home = root.join("jdk-17");
+            for file in [home.join("release"), home.join(r"lib\modules")] {
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, b"stub").unwrap();
+            }
+            let bin = home.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let java = bin.join("java-17.cmd");
+            // 参数依次是 -cp、classpath、Main-Class、处理器自己的参数，所以客户端 jar 是 %4。
+            std::fs::write(
+                &java,
+                "@echo off\r\n\
+                 if not exist \"%~dpn4.json\" exit /b 2\r\n\
+                 copy /y \"%~dpn4.json\" \"%~dp0seen.json\" >nul\r\n\
+                 if exist \"%~dp0fail.flag\" exit /b 1\r\n\
+                 exit /b 0\r\n",
+            )
+            .unwrap();
+
+            let libs = [
+                format!("com.mojang:realms:1.{}", fastrand::u16(..)),
+                format!("org.lwjgl:lwjgl:3.{}", fastrand::u16(..)),
+            ];
+            let vanilla = serde_json::json!({
+                "id": "test", "type": "release", "mainClass": "net.minecraft.client.main.Main",
+                "javaVersion": { "component": "java-runtime-gamma", "majorVersion": 17 },
+                "libraries": libs.iter().map(|name| serde_json::json!({
+                    "name": name, "url": "https://libraries.minecraft.net/"
+                })).collect::<Vec<_>>(),
+            })
+            .to_string();
+
+            // 官方地址用解析不了的域名，经源计划落到 mock：接线断了也连不到真实网络。
+            let server = MockServer::start().await;
+            let base = "https://meta.invalid";
+            let mut routes = vec![
+                (
+                    "/manifest.json".to_owned(),
+                    format!(
+                        r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                            "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
+                            "time":"t","releaseTime":"t"}}]}}"#
+                    )
+                    .into_bytes(),
+                ),
+                ("/test.json".to_owned(), vanilla.clone().into_bytes()),
+            ];
+            for name in &libs {
+                let parts: Vec<&str> = name.split(':').collect();
+                let [group, artifact, version] = parts[..] else {
+                    unreachable!("坐标是三段")
+                };
+                routes.push((
+                    format!(
+                        "/{}/{artifact}/{version}/{artifact}-{version}.jar",
+                        group.replace('.', "/")
+                    ),
+                    format!("{name} 的字节").into_bytes(),
+                ));
+            }
+            for (forge, inherits) in [(MERGEABLE, "test"), (UNMERGEABLE, "其他版本")] {
+                let profile = serde_json::json!({
+                    "version": format!("test-forge-{forge}"),
+                    "minecraft": "test",
+                    "json": "/version.json",
+                    "processors": [{ "jar": "test:proc:1", "args": ["{MINECRAFT_JAR}"] }],
+                });
+                let embedded = serde_json::json!({
+                    "id": format!("test-forge-{forge}"), "inheritsFrom": inherits,
+                    "mainClass": FORGE_MAIN, "libraries": []
+                });
+                let mut installer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+                for (name, body) in [
+                    ("install_profile.json", profile),
+                    ("version.json", embedded),
+                ] {
+                    installer.start_file(name, stored).unwrap();
+                    installer.write_all(body.to_string().as_bytes()).unwrap();
+                }
+                routes.push((
+                    format!(
+                        "/net/minecraftforge/forge/test-{forge}/forge-test-{forge}-installer.jar"
+                    ),
+                    installer.finish().unwrap().into_inner(),
+                ));
+            }
+            for (route, body) in routes {
+                Mock::given(method("GET"))
+                    .and(path(route))
+                    .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+                    .mount(&server)
+                    .await;
+            }
+
+            let config = PetalfallConfig {
+                default_java: Some(java.clone()),
+                extra_java_paths: vec![java],
+                auto_download_java: false,
+                ..PetalfallConfig::default()
+            };
+            let petalfall = Petalfall::for_test(config, root.clone(), game)
+                .with_manifest_url(format!("{base}/manifest.json"))
+                .with_source_routes(
+                    std::sync::Arc::new(crate::sources::tests::Routes {
+                        official: server.uri(),
+                        mirror: server.uri(),
+                    }),
+                    std::time::Duration::from_secs(600),
+                    std::time::Duration::from_secs(2),
+                );
+            // 识别结果预先记进识别缓存：安装取 Java 时命中缓存，不拉起假 java，也不扫测试机上真装着的 Java。
+            let seeded = petalfall
+                .detect_java_with(&JavaEnv::for_test(
+                    |exe: &Path| {
+                        let home = exe.parent().and_then(Path::parent).and_then(Path::file_name);
+                        assert_eq!(home, Some(std::ffi::OsStr::new("jdk-17")), "夹具里没有 {}", exe.display());
+                        Ok("openjdk version \"17.0.8\" 2023-07-18\nOpenJDK 64-Bit Server VM (build 17.0.8+7-LTS, mixed mode)\n".to_owned())
+                    },
+                    String::new(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                seeded
+                    .iter()
+                    .map(|java| (java.version.major, java.is_complete()))
+                    .collect::<Vec<_>>(),
+                vec![(17, true)]
+            );
+
+            Fixture {
+                _tmp: tmp,
+                _server: server,
+                petalfall,
+                bin,
+                vanilla: VersionJson::from_json_str(&vanilla).unwrap(),
+            }
+        }
+
+        fn library_names(json: &VersionJson) -> Vec<&str> {
+            json.libraries.iter().map(|lib| lib.name.as_str()).collect()
+        }
+
+        /// 新建：处理器从客户端 jar 旁边读到的是只合并了原版的那份（原版的库清单），装成后那里是合并结果。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_new_forge_instance_hands_processors_the_vanilla_json_and_keeps_the_merged_one() {
+            let f = fixture().await;
+            let id = "旧版铁砧";
+            f.petalfall
+                .create_instance_dir(id, &f.request(MERGEABLE))
+                .await
+                .unwrap();
+
+            let (outcome, seen) = f.install(id, MERGEABLE).await;
+
+            outcome.unwrap();
+            let seen = seen.expect("处理器应读到客户端 jar 旁边的版本 JSON");
+            assert_eq!(seen, f.base(id));
+            assert_eq!(library_names(&seen), library_names(&f.vanilla));
+            let installed =
+                VersionJson::from_json_str(&std::fs::read_to_string(f.json_path(id)).unwrap())
+                    .unwrap();
+            assert_eq!(installed.id, id);
+            assert_eq!(installed.main_class.as_deref(), Some(FORGE_MAIN));
+            assert_eq!(installed.inherits_from, None);
+        }
+
+        /// 新建没装成（处理器失败，或处理器跑完了合并不成）：实例目录里不留那份原版的版本 JSON。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_failed_new_forge_instance_leaves_no_version_json() {
+            let f = fixture().await;
+
+            let id = "处理器失败";
+            f.petalfall
+                .create_instance_dir(id, &f.request(MERGEABLE))
+                .await
+                .unwrap();
+            f.fail_processors(true);
+            let (outcome, seen) = f.install(id, MERGEABLE).await;
+            let err = outcome.unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    CoreError::Install(petalfall_install::Error::ProcessorFailed {
+                        status: Some(1),
+                        ..
+                    })
+                ),
+                "{err:?}"
+            );
+            assert_eq!(seen, Some(f.base(id)), "处理器跑的时候读得到原版那份");
+            assert!(!f.json_path(id).exists());
+
+            let id = "合并不成";
+            f.petalfall
+                .create_instance_dir(id, &f.request(UNMERGEABLE))
+                .await
+                .unwrap();
+            f.fail_processors(false);
+            let (outcome, seen) = f.install(id, UNMERGEABLE).await;
+            let err = outcome.unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    CoreError::Install(petalfall_install::Error::UnsupportedInstallProfile { .. })
+                ),
+                "{err:?}"
+            );
+            assert_eq!(seen, Some(f.base(id)), "处理器已经跑完");
+            assert!(!f.json_path(id).exists());
+        }
+
+        /// 重新安装加载器、实例里是装好的合并结果（Forge 自己的库下载地址是空串，处理器读它会抛错）：处理器读到的是
+        /// 原版那份；装不成时合并结果逐字节回来，再装一次装成了就换成新的合并结果。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn reinstalling_over_a_merged_json_hands_processors_the_vanilla_one() {
+            let f = fixture().await;
+            let id = "老整合包";
+            f.petalfall
+                .create_instance_dir(id, &f.request(MERGEABLE))
+                .await
+                .unwrap();
+            let forge = VersionJson::from_json_str(&format!(
+                r#"{{"id":"test-forge-{MERGEABLE}","inheritsFrom":"test","mainClass":"{FORGE_MAIN}",
+                    "libraries":[{{"name":"net.minecraftforge:forge:test-{MERGEABLE}:client",
+                    "downloads":{{"artifact":{{"path":"net/minecraftforge/forge/test-{MERGEABLE}/forge-test-{MERGEABLE}-client.jar",
+                    "url":"","sha1":"{}","size":{}}}}}}}]}}"#,
+                "0".repeat(40),
+                fastrand::u32(1..),
+            ))
+            .unwrap();
+            let merged = merge_for_instance(id, &f.vanilla, Some(&forge)).unwrap();
+            let before = serde_json::to_vec_pretty(&merged).unwrap();
+            assert!(
+                String::from_utf8_lossy(&before).contains(r#""url": """#),
+                "夹具要带着下载地址为空串的库"
+            );
+            std::fs::write(f.json_path(id), &before).unwrap();
+
+            f.fail_processors(true);
+            let (outcome, seen) = f.install(id, MERGEABLE).await;
+            assert!(outcome.is_err());
+            let seen = seen.expect("处理器应读到客户端 jar 旁边的版本 JSON");
+            assert_eq!(seen, f.base(id), "读到的不是实例原来的合并结果");
+            assert_eq!(library_names(&seen), library_names(&f.vanilla));
+            assert_eq!(std::fs::read(f.json_path(id)).unwrap(), before);
+
+            f.fail_processors(false);
+            let (outcome, seen) = f.install(id, MERGEABLE).await;
+            outcome.unwrap();
+            assert_eq!(seen, Some(f.base(id)));
+            let installed =
+                VersionJson::from_json_str(&std::fs::read_to_string(f.json_path(id)).unwrap())
+                    .unwrap();
+            assert_eq!(installed.main_class.as_deref(), Some(FORGE_MAIN));
+            assert_eq!(library_names(&installed), library_names(&f.vanilla));
+        }
+
+        /// 实例的版本 JSON 写坏了、照记下的内容重装：处理器读到的是原版那份，装不成时写坏的原字节逐字节回来。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn reinstalling_over_a_corrupt_json_restores_its_bytes_on_failure() {
+            let f = fixture().await;
+            let id = "写坏了";
+            f.petalfall
+                .create_instance_dir(id, &f.request(MERGEABLE))
+                .await
+                .unwrap();
+            let corrupt: Vec<u8> = (0..fastrand::usize(1..4096))
+                .map(|_| fastrand::u8(..))
+                .collect();
+            std::fs::write(f.json_path(id), &corrupt).unwrap();
+
+            f.fail_processors(true);
+            let (outcome, seen) = f.install(id, MERGEABLE).await;
+
+            assert!(outcome.is_err());
+            assert_eq!(seen, Some(f.base(id)));
+            assert_eq!(std::fs::read(f.json_path(id)).unwrap(), corrupt);
         }
     }
 }

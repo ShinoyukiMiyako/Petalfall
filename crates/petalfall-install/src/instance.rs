@@ -6,6 +6,7 @@
 //! `assets/` 下。合并后的 JSON 里记下 `clientVersion`，实例改了名也认得出原版版本号。
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use petalfall_version::{VersionJson, resolve};
 
@@ -49,32 +50,107 @@ pub async fn write_instance_json(layout: &GameLayout, version: &VersionJson) -> 
     Ok(())
 }
 
-/// 加载器安装器的处理器开跑之前，给实例目录里的客户端 jar 配上一份版本 JSON：实例的版本 JSON 还不在时写下
-/// `version`（装加载器之前、只合并了原版的那份），已经在就不动。返回这次写没写。
+/// 加载器安装器的处理器开跑之前，把实例的版本 JSON 换成 `version`（装加载器之前、只合并了原版的那份），交回守卫：
+/// 装成、合并结果写好之后调 [`PlacedJson::keep`]，没走完时守卫在 drop 里把它还原成换之前的样子。
 ///
-/// 官方启动器的布局里客户端 jar 旁边一直有原版的版本 JSON，有的 Forge 安装器处理器（1.14.3 的 DEOBF_REALMS）
-/// 就按客户端 jar 的路径找到它、从里面读原版的库清单，读不到直接失败。按实例安装时实例的版本 JSON 要到加载器
-/// 装完才合并落盘，处理器那会儿它还不在。
-pub async fn place_json_for_processors(layout: &GameLayout, version: &VersionJson) -> Result<bool> {
+/// 官方启动器的布局里客户端 jar 旁边一直是纯原版的版本 JSON，有的 Forge 安装器处理器（1.14.3 的 DEOBF_REALMS）
+/// 就按客户端 jar 的路径找到它、从里面读原版的库清单。按实例安装时实例的版本 JSON 要到加载器装完才合并落盘：新建时
+/// 处理器那会儿它还不在；重装时在的那份也给不了处理器：写坏的解析不出来，传统布局的带 `inheritsFrom`、库清单里只有
+/// 加载器自己的库，装好的合并结果里 Forge 自己的库下载地址是空串，处理器把空串当网址解析，直接抛错。所以不论已有的
+/// 那份是什么样，一律先换成原版的。
+///
+/// 读已有的那份时出了「不存在」以外的错（被占用、没有权限、那个位置是个目录）照实报错，什么都不换。
+pub async fn place_json_for_processors(
+    layout: &GameLayout,
+    version: &VersionJson,
+) -> Result<PlacedJson> {
     let path = layout.version_json(&version.id);
-    match tokio::fs::metadata(&path).await {
-        Ok(_) => return Ok(false),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+    let restore = match tokio::fs::read(&path).await {
+        Ok(bytes) => Restore::WriteBack(bytes),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Restore::Remove,
         Err(source) => return Err(io_err(&path, source)),
+    };
+    // 守卫先于写立起来：写的途中安装的 future 被丢弃时，原版那份可能已经换上了，drop 照样还原。
+    let placed = PlacedJson {
+        path,
+        restore: Some(restore),
+    };
+    if let Err(err) = write_instance_json(layout, version).await {
+        // 原子写失败时目标没被换掉，盘上还是原来那份，不用还原。
+        placed.keep();
+        return Err(err);
     }
-    write_instance_json(layout, version).await?;
-    Ok(true)
+    Ok(placed)
 }
 
-/// 加载器没装成时撤掉 [`place_json_for_processors`] 写下的那份：留着的话，一个没装成的实例目录里摆着一份看上去
-/// 完好的原版版本 JSON。文件已经不在不算错。
-pub async fn remove_placed_json(layout: &GameLayout, id: &str) -> Result<()> {
-    let path = layout.version_json(id);
-    match tokio::fs::remove_file(&path).await {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(io_err(&path, source)),
+/// [`place_json_for_processors`] 换上原版版本 JSON 之后的守卫。没经 [`keep`](Self::keep) 放下就被 drop 时（安装器、
+/// 合并或最后写版本 JSON 失败，安装的 future 被丢弃，panic）同步地把实例的版本 JSON 还原成换之前的样子：本来没有的
+/// 删掉，本来有的写回原来的字节。还原失败只记日志：drop 里交不回错误，要报的是让安装没走完的那个错。
+///
+/// 进程被硬杀时什么都来不及还原，盘上留下原版那份。这一处兜不住，靠调用方：换掉版本 JSON 之前要已经记下这次要装的
+/// 内容（落樱在新建与重装动手之前写下带安装内容的未完成标记），下一次补全照记下的内容把加载器装回来，不从版本 JSON
+/// 里读加载器。原来的字节只留在内存里、不另存成备份文件，也是为了这种时候：硬杀之后不多出一份要另行清理的备份。
+#[must_use = "drop 即还原：合并结果写好之后要调 keep"]
+#[derive(Debug)]
+pub struct PlacedJson {
+    path: PathBuf,
+    /// `None`：已经放下，不再还原。
+    restore: Option<Restore>,
+}
+
+#[derive(Debug)]
+enum Restore {
+    /// 实例本来没有版本 JSON。
+    Remove,
+    /// 实例本来那份版本 JSON 的原字节。
+    WriteBack(Vec<u8>),
+}
+
+impl PlacedJson {
+    /// 实例的版本 JSON 已经由合并结果盖掉，不再还原。
+    pub fn keep(mut self) {
+        self.restore = None;
     }
+}
+
+impl Drop for PlacedJson {
+    fn drop(&mut self) {
+        let Some(restore) = self.restore.take() else {
+            return;
+        };
+        let restored = match &restore {
+            Restore::Remove => match std::fs::remove_file(&self.path) {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            },
+            Restore::WriteBack(bytes) => write_back(&self.path, bytes),
+        };
+        if let Err(err) = restored {
+            tracing::warn!(path = %self.path.display(), %err, "没装成，还原实例的版本 JSON 失败");
+        }
+    }
+}
+
+/// 同步的原子写（drop 里不能 await）：写回的途中被打断时盘上还是原版那份，不会变成半截文件。临时名的取法与
+/// `petalfall_base::fs::atomic_write` 相同。
+fn write_back(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or_else(|| std::io::Error::other("版本 JSON 的路径没有文件名"))?;
+    let tmp = path.with_file_name(format!(".{name}.{:016x}.tmp", fastrand::u64(..)));
+    let written = std::fs::File::create(&tmp).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    });
+    let replaced = written.and_then(|()| std::fs::rename(&tmp, path));
+    if replaced.is_err() {
+        // 要报的是写回本身的错；临时文件删不掉也只是多一个点开头的文件。
+        let _ = std::fs::remove_file(&tmp);
+    }
+    replaced
 }
 
 #[cfg(test)]
@@ -172,39 +248,122 @@ mod tests {
         assert_eq!(back, merged);
     }
 
-    /// 处理器开跑前配的那份版本 JSON：实例的还不在才写，写下的就是只合并了原版的那份；没装成时撤得掉。
-    #[tokio::test]
-    async fn the_json_for_processors_is_placed_only_when_the_instance_has_none() {
-        let tmp = tempfile::tempdir().unwrap();
-        let layout = GameLayout::new(tmp.path());
-        let base = merge_for_instance("老整合包", &vanilla(), None).unwrap();
-        let path = layout.version_json("老整合包");
-
-        assert!(place_json_for_processors(&layout, &base).await.unwrap());
-        let placed = VersionJson::from_json_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(placed, base);
-        assert_eq!(placed.libraries[0].name, "org.lwjgl:lwjgl:3.3.3");
-
-        remove_placed_json(&layout, "老整合包").await.unwrap();
-        assert!(!path.exists());
-        // 已经不在时再撤一次不算错。
-        remove_placed_json(&layout, "老整合包").await.unwrap();
+    /// 实例目录里的文件名，排好序。还原用的临时文件留下了也会列出来。
+    fn files_in(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
     }
 
-    /// 重装加载器时实例已有带着加载器的版本 JSON：不拿原版那份盖掉它，装不成时实例还是原来的样子。
+    fn json_at(path: &std::path::Path) -> VersionJson {
+        VersionJson::from_json_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// 处理器开跑前不论实例本来有没有版本 JSON、本来那份能不能给处理器用，盘上都换成只合并了原版的那份；没走完
+    /// （drop）时还原成换之前的样子，本来没有的删掉、本来有的逐字节写回；装成（keep）后留着原版那份，等合并结果盖掉。
     #[tokio::test]
-    async fn an_existing_instance_json_is_left_alone_for_processors() {
+    async fn the_json_for_processors_replaces_whatever_is_there_until_kept() {
+        let id = "老整合包";
+        let base = merge_for_instance(id, &vanilla(), None).unwrap();
+        let merged = serde_json::to_vec_pretty(
+            &merge_for_instance(id, &vanilla(), Some(&fabric())).unwrap(),
+        )
+        .unwrap();
+        let traditional = serde_json::to_vec_pretty(&fabric()).unwrap();
+        let garbage: Vec<u8> = (0..fastrand::usize(1..4096))
+            .map(|_| fastrand::u8(..))
+            .collect();
+        let cases: [(&str, Option<Vec<u8>>); 6] = [
+            ("本来没有", None),
+            ("空文件", Some(Vec::new())),
+            ("装好的合并结果", Some(merged)),
+            ("传统布局、带 inheritsFrom", Some(traditional)),
+            ("不是 UTF-8", Some(b"\xff\xfe{\"id\":".to_vec())),
+            ("写坏的", Some(garbage)),
+        ];
+        for (case, before) in cases {
+            for keep in [false, true] {
+                let tmp = tempfile::tempdir().unwrap();
+                let layout = GameLayout::new(tmp.path());
+                let path = layout.version_json(id);
+                if let Some(bytes) = &before {
+                    std::fs::create_dir_all(layout.version_dir(id)).unwrap();
+                    std::fs::write(&path, bytes).unwrap();
+                }
+
+                let placed = place_json_for_processors(&layout, &base).await.unwrap();
+                assert_eq!(json_at(&path), base, "{case}：处理器跑的时候盘上是原版那份");
+
+                let json_file = vec![format!("{id}.json")];
+                if keep {
+                    placed.keep();
+                    assert_eq!(json_at(&path), base, "{case}：keep 之后留着原版那份");
+                    assert_eq!(files_in(&layout.version_dir(id)), json_file, "{case}");
+                } else {
+                    drop(placed);
+                    match &before {
+                        None => {
+                            assert!(!path.exists(), "{case}：本来没有的删掉");
+                            assert!(files_in(&layout.version_dir(id)).is_empty(), "{case}");
+                        }
+                        Some(bytes) => {
+                            assert_eq!(&std::fs::read(&path).unwrap(), bytes, "{case}：原字节写回");
+                            assert_eq!(files_in(&layout.version_dir(id)), json_file, "{case}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 安装的 future 在处理器跑着时被丢弃（取消后宽限期满）：守卫跟着被 drop，本来的那份照样写回。
+    #[tokio::test]
+    async fn a_dropped_install_restores_the_instance_json() {
         let tmp = tempfile::tempdir().unwrap();
         let layout = GameLayout::new(tmp.path());
-        let with_loader = merge_for_instance("模组尝鲜", &vanilla(), Some(&fabric())).unwrap();
+        let id = "模组尝鲜";
+        let with_loader = merge_for_instance(id, &vanilla(), Some(&fabric())).unwrap();
         write_instance_json(&layout, &with_loader).await.unwrap();
-        let before = std::fs::read(layout.version_json("模组尝鲜")).unwrap();
+        let before = std::fs::read(layout.version_json(id)).unwrap();
+        let base = merge_for_instance(id, &vanilla(), None).unwrap();
 
-        let base = merge_for_instance("模组尝鲜", &vanilla(), None).unwrap();
-        assert!(!place_json_for_processors(&layout, &base).await.unwrap());
+        let (placed_tx, placed_rx) = tokio::sync::oneshot::channel();
+        let install = async {
+            let _placed = place_json_for_processors(&layout, &base).await.unwrap();
+            placed_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        };
+        tokio::select! {
+            () = install => unreachable!("安装不会自己结束"),
+            placed = placed_rx => placed.unwrap(),
+        }
+
+        assert_eq!(std::fs::read(layout.version_json(id)).unwrap(), before);
+    }
+
+    /// 读已有那份时出的不是「不存在」（这里那个位置是个目录）：照实报错，什么都不换。
+    #[tokio::test]
+    async fn an_unreadable_instance_json_is_reported_and_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = GameLayout::new(tmp.path());
+        let id = "网盘同步的";
+        let path = layout.version_json(id);
+        std::fs::create_dir_all(&path).unwrap();
+        let base = merge_for_instance(id, &vanilla(), None).unwrap();
+
+        let err = place_json_for_processors(&layout, &base).await.unwrap_err();
+
+        assert!(
+            matches!(&err, Error::Io { path: at, .. } if *at == path),
+            "{err:?}"
+        );
+        assert!(path.is_dir());
         assert_eq!(
-            std::fs::read(layout.version_json("模组尝鲜")).unwrap(),
-            before
+            files_in(&layout.version_dir(id)),
+            vec![format!("{id}.json")]
         );
     }
 }
