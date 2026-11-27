@@ -19,14 +19,22 @@ use petalfall_version::VersionJson;
 use crate::error::Result;
 use crate::event::{CoreEvent, EventSink, InstallPhase, emit};
 use crate::facade::{Petalfall, make_context};
+use crate::java::JavaEnv;
 
-/// Forge / NeoForge 处理器产物校验不过时换用的 Java 主版本；游戏要求的 Java 低于它时才换。
+/// Forge / NeoForge 处理器产物校验不过时换用的 Java 主版本；游戏要求的 Java 低于它时才换，本机没有可用的备用
+/// Java 时下载的也是它。
 ///
 /// 依据是实测：Forge 1.13.2（25.0.223）的 jarsplitter 1.1.0 在 Mojang 运行时自带的 Windows 版 1.8.0_51 上拆出的
 /// slim、extra 两个 jar 与安装器声明的 sha1 都对不上（同样的输入，与时区无关），换 Java 16、17、21 就完全一致；
 /// 整条处理器链（jarsplitter 1.1.0、SpecialSource 1.8.3、binarypatcher 1.1.1）在这几个版本上都跑得完，产物全部
 /// 对得上。取 17 是因为它是 Mojang 运行时里最通用的一档，本机常有，没有时也能下载。
 pub(crate) const PROCESSOR_FALLBACK_JAVA_MAJOR: u32 = 17;
+
+/// 本机已有时可以拿来当备用 Java 的主版本，按先后取：有 17 用 17，没有 17 有 21 用 21，都没有才下载
+/// [`PROCESSOR_FALLBACK_JAVA_MAJOR`]。依据同样是上面的实测，21 跑完整条处理器链、产物全部对得上，本机有它就不必在
+/// 持有 Forge 安装锁时再下一整套运行时。16 也实测可行但不列进来：它只是 1.17 那一代的过渡版本，本机有它的玩家
+/// 几乎也有 17 或 21。
+pub(crate) const PROCESSOR_FALLBACK_LOCAL_MAJORS: [u32; 2] = [PROCESSOR_FALLBACK_JAVA_MAJOR, 21];
 
 /// 可安装的 Mod 加载器选择。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,7 +310,7 @@ impl Petalfall {
         java_major: Option<u32>,
         events: Option<&'a EventSink>,
     ) -> ForgeInstaller<'a> {
-        let fallback = self.processor_fallback_java(required_major, &java, events);
+        let fallback = self.processor_fallback_java(required_major, &java, events, self.java_env());
         ForgeInstaller::new(cx, java)
             .with_java_major(java_major)
             .with_sources(self.source_plan(self.config().download_source))
@@ -310,43 +318,51 @@ impl Petalfall {
     }
 
     /// 处理器产物校验不过时去取的备用 Java；游戏要求的 Java 已经不低于 [`PROCESSOR_FALLBACK_JAVA_MAJOR`] 时不提供。
-    /// `primary` 是处理器先用的那个 Java。
+    /// `primary` 是处理器先用的那个 Java，`env` 是取 Java 时的探测环境。
     fn processor_fallback_java<'a>(
         &'a self,
         required_major: u32,
         primary: &Path,
         events: Option<&'a EventSink>,
+        env: JavaEnv,
     ) -> Option<FallbackJava<'a>> {
         if required_major >= PROCESSOR_FALLBACK_JAVA_MAJOR {
             return None;
         }
         let primary = primary.to_path_buf();
         Some(Box::new(move || {
-            Box::pin(self.fetch_processor_fallback_java(primary.clone(), events))
+            Box::pin(self.fetch_processor_fallback_java(primary.clone(), events, env.clone()))
         }))
     }
 
-    /// 经 [`Petalfall::resolve_java`] 取 Java [`PROCESSOR_FALLBACK_JAVA_MAJOR`]：本机有就用，没有且开着自动下载就下
-    /// Mojang 的运行时。不报步骤：这时已经在处理器那一步，Java 那一步早报过了，再报会让步骤倒退；下载运行时的进度
-    /// 算进处理器这一步，与校验一步里补下载的做法一样。
+    /// 经 [`Petalfall::resolve_tool_java_with`] 取备用 Java：不看设置里固定的 Java（处理器只是安装期的工具），本机按
+    /// [`PROCESSOR_FALLBACK_LOCAL_MAJORS`] 的先后找，都没有且开着自动下载才下 Mojang 的 Java
+    /// [`PROCESSOR_FALLBACK_JAVA_MAJOR`]。不报步骤：这时已经在处理器那一步，Java 那一步早报过了，再报会让步骤倒退；
+    /// 下载运行时的进度算进处理器这一步，与校验一步里补下载的做法一样。
     async fn fetch_processor_fallback_java(
         &self,
         primary: PathBuf,
         events: Option<&EventSink>,
+        env: JavaEnv,
     ) -> std::result::Result<JavaExecutable, FallbackJavaError> {
+        // 先说为什么：取 Java 可能要下载几分钟，玩家不该先看到无缘无故地找 Java、下 Java。
+        emit(
+            events,
+            CoreEvent::stage("安装器生成的文件与它声明的不符，换一个 Java 重跑"),
+        );
         let resolved = self
-            .resolve_java(PROCESSOR_FALLBACK_JAVA_MAJOR, events)
+            .resolve_tool_java_with(
+                &PROCESSOR_FALLBACK_LOCAL_MAJORS,
+                PROCESSOR_FALLBACK_JAVA_MAJOR,
+                events,
+                &env,
+            )
             .await;
         let fallback = fallback_outcome(resolved)?;
-        // 设置里固定了 Java 时取回的就是先用的那个，安装器认出是同一个、不重跑，这里也不说要换。
+        // 取回的就是先用的那个时安装器认出是同一个、不重跑，这里也不说改用它。取回的总带主版本，写出来是以全角
+        // 括号收尾的「Java 17（路径）」，后面直接接中文。
         if fallback.path != primary {
-            emit(
-                events,
-                CoreEvent::stage(format!(
-                    "安装器生成的文件与它声明的不符，改用 Java {PROCESSOR_FALLBACK_JAVA_MAJOR} 重跑：{}",
-                    fallback.path.display()
-                )),
-            );
+            emit(events, CoreEvent::stage(format!("改用 {fallback}重跑")));
         }
         Ok(fallback)
     }
@@ -354,12 +370,12 @@ impl Petalfall {
 
 /// 取备用 Java 的结果交给安装器：取消照常以取消结束；别的失败记一条 warn，原因原样交给安装器写进报错。
 fn fallback_outcome(
-    resolved: Result<(Vec<JavaInstallation>, PathBuf)>,
+    resolved: Result<JavaInstallation>,
 ) -> std::result::Result<JavaExecutable, FallbackJavaError> {
     match resolved {
-        Ok((found, path)) => Ok(JavaExecutable {
-            major: found.first().map(|picked| picked.version.major),
-            path,
+        Ok(java) => Ok(JavaExecutable {
+            major: Some(java.version.major),
+            path: java.path,
         }),
         Err(err) if err.is_cancelled() => Err(FallbackJavaError::Cancelled),
         Err(err) => {
@@ -1230,7 +1246,7 @@ mod tests {
         for (major, offered) in [(8, true), (16, true), (17, false), (21, false), (25, false)] {
             assert_eq!(
                 petalfall
-                    .processor_fallback_java(major, &primary, None)
+                    .processor_fallback_java(major, &primary, None, petalfall.java_env())
                     .is_some(),
                 offered,
                 "游戏要求 Java {major}"
@@ -1262,33 +1278,80 @@ mod tests {
                 "取消应照常以取消结束"
             );
         }
-        let picked = PathBuf::from(r"D:\data\runtime\17\bin\java.exe");
+        let picked = PathBuf::from(r"D:\data\runtime\21\bin\java.exe");
+        let found = JavaInstallation {
+            path: picked.clone(),
+            version: petalfall_java::JavaVersion::parse("21.0.3").unwrap(),
+            is_64bit: true,
+            vendor: "Microsoft".to_owned(),
+            source: petalfall_java::DetectSource::Managed,
+            missing_files: Vec::new(),
+        };
         assert_eq!(
-            fallback_outcome(Ok((Vec::new(), picked.clone()))).unwrap(),
+            fallback_outcome(Ok(found)).unwrap(),
             JavaExecutable {
                 path: picked,
-                major: None
+                major: Some(21)
             }
         );
     }
 
-    /// 经 resolve_java 取备用 Java 失败（这里是设置里固定的 Java 不见了）：交回取不到，原因是 resolve_java 报错的原文。
+    /// 在 `home` 下摆一个完整的 Java 根目录（bin 里的 java、release、lib/modules），返回 java 可执行文件。
+    fn complete_java_home(home: &Path) -> PathBuf {
+        let exe = petalfall_java::java_exe_in_home(home);
+        for file in [
+            exe.clone(),
+            home.join("release"),
+            home.join("lib").join("modules"),
+        ] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"stub").unwrap();
+        }
+        exe
+    }
+
+    /// 只认名为 `21` 的 Java 根目录（托管目录里的 Java 21）的探测环境；识别到别的 Java 就是取法错了。
+    fn only_managed_21_env() -> JavaEnv {
+        JavaEnv::for_test(
+            |path: &Path| {
+                let home = path.parent().and_then(Path::parent).map(Path::to_path_buf);
+                assert_eq!(
+                    home.as_deref().and_then(Path::file_name),
+                    Some(std::ffi::OsStr::new("21")),
+                    "不该识别 {}",
+                    path.display()
+                );
+                Ok("openjdk version \"21.0.3\" 2024-04-16\nOpenJDK 64-Bit Server VM (build 21.0.3+9-LTS, mixed mode)\n".to_owned())
+            },
+            String::new(),
+        )
+    }
+
+    fn stage_texts(rx: &mut tokio::sync::mpsc::UnboundedReceiver<CoreEvent>) -> Vec<String> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                CoreEvent::Stage(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 本机没有 17 也没有 21、关着自动下载：交回取不到，原因是找不到 Java 17 的原文。设置里固定的是一个完整的
+    /// Java 17 也不用它（处理器不受「游戏用哪个 Java」约束），也不去识别它；说明原因的那一句照样先发了。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_fallback_java_that_cannot_be_resolved_is_unavailable_with_its_reason() {
+    async fn a_fallback_java_that_cannot_be_found_is_unavailable_with_its_reason() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
-        let missing = root
-            .join("jdk-8")
-            .join("bin")
-            .join(petalfall_java::JAVA_EXE);
+        let fixed = complete_java_home(&root.join("jdk-17"));
         let config = PetalfallConfig {
-            default_java: Some(missing.clone()),
+            default_java: Some(fixed.clone()),
             auto_download_java: false,
             ..PetalfallConfig::default()
         };
         let petalfall = Petalfall::for_test(config, root.clone(), root.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let fetch = petalfall
-            .processor_fallback_java(8, &missing, None)
+            .processor_fallback_java(8, &fixed, Some(&tx), only_managed_21_env())
             .expect("游戏要求 Java 8 时应带备用来源");
 
         let reason = match fetch().await {
@@ -1298,23 +1361,22 @@ mod tests {
 
         assert_eq!(
             reason.to_string(),
-            format!("执行 java 可执行文件失败：{}", missing.display())
+            "未找到匹配 Java 17 的运行时，且自动下载已关闭（开启 auto_download_java 或手动安装对应 Java）"
+        );
+        assert_eq!(
+            stage_texts(&mut rx),
+            vec!["安装器生成的文件与它声明的不符，换一个 Java 重跑"]
         );
     }
 
-    /// 取回的备用 Java 与先用的不是同一个时才发「改用 Java 17 重跑」的阶段事件；设置里固定了 Java、取回的还是先用的
-    /// 那个时不说要换。
-    #[cfg(windows)]
+    /// 去取之前先说为什么要换，取到之后再说换成了哪个 Java（版本与路径都是实际取到的，这里本机只有 21）；设置里
+    /// 固定的 Java 不看，不多出「使用设置里指定的 Java」那一句。取回的就是先用的那个时不说改用它。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn switching_java_is_announced_only_for_another_java() {
+    async fn the_reason_is_announced_before_fetching_and_the_java_after() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
-        let fixed = root.join("fake-java-17.cmd");
-        std::fs::write(
-            &fixed,
-            "@echo off\r\n>&2 echo openjdk version \"17.0.8\" 2023-07-18\r\nexit /b 0\r\n",
-        )
-        .unwrap();
+        let managed_21 = complete_java_home(&root.join("runtime").join("21"));
+        let fixed = complete_java_home(&root.join("jdk-8"));
         let config = PetalfallConfig {
             default_java: Some(fixed.clone()),
             auto_download_java: false,
@@ -1322,40 +1384,310 @@ mod tests {
         };
         let petalfall = Petalfall::for_test(config, root.clone(), root.clone());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let other = root
-            .join("jdk-8")
-            .join("bin")
-            .join(petalfall_java::JAVA_EXE);
-        {
-            let picked = JavaExecutable {
-                path: fixed.clone(),
-                major: Some(17),
-            };
-            let same = petalfall
-                .processor_fallback_java(8, &fixed, Some(&tx))
-                .unwrap();
-            assert_eq!(same().await.unwrap(), picked);
-            let switched = petalfall
-                .processor_fallback_java(8, &other, Some(&tx))
-                .unwrap();
-            assert_eq!(switched().await.unwrap(), picked);
+        let picked = JavaExecutable {
+            path: managed_21.clone(),
+            major: Some(21),
+        };
+        let reason = "安装器生成的文件与它声明的不符，换一个 Java 重跑";
+
+        let switched = petalfall
+            .processor_fallback_java(8, &fixed, Some(&tx), only_managed_21_env())
+            .unwrap();
+        assert_eq!(switched().await.unwrap(), picked);
+        assert_eq!(
+            stage_texts(&mut rx),
+            vec![
+                reason.to_owned(),
+                format!("改用 Java 21（{}）重跑", managed_21.display())
+            ]
+        );
+
+        let same = petalfall
+            .processor_fallback_java(8, &managed_21, Some(&tx), only_managed_21_env())
+            .unwrap();
+        assert_eq!(same().await.unwrap(), picked);
+        assert_eq!(stage_texts(&mut rx), vec![reason.to_owned()]);
+    }
+
+    /// 处理器产物对不上时换 Java 重跑的端到端夹具。游戏要求 Java 8，设置里固定的是一个 Java 8，处理器先用它跑；
+    /// 本机另有一个完整的 Java 17。两个假 java 都只把各自的那份字节写到产物处：Java 8 写的与安装器声明的不符，
+    /// Java 17 写的对得上。两个 Java 的识别结果预先记进识别缓存：取 Java 走的是生产的探测环境，命中缓存就不拉起
+    /// 进程，也不去扫测试机上真装着的 Java。
+    #[cfg(windows)]
+    struct RerunFixture {
+        _tmp: tempfile::TempDir,
+        _server: MockServer,
+        root: PathBuf,
+        java17: PathBuf,
+        output: PathBuf,
+        good: Vec<u8>,
+    }
+
+    #[cfg(windows)]
+    const RERUN_FORGE: &str = "1.0";
+
+    #[cfg(windows)]
+    async fn rerun_fixture() -> (RerunFixture, Petalfall) {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let game = root.join("game");
+        let libraries = game.join("libraries");
+        let output = libraries.join(r"test\out\1\out-1.jar");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+
+        // 处理器 jar 只要 MANIFEST.MF 里有 Main-Class，真正执行的是假 java。
+        let processor = libraries.join(r"test\proc\1\proc-1.jar");
+        std::fs::create_dir_all(processor.parent().unwrap()).unwrap();
+        let mut jar = zip::ZipWriter::new(std::fs::File::create(&processor).unwrap());
+        jar.start_file("META-INF/MANIFEST.MF", stored).unwrap();
+        jar.write_all(b"Manifest-Version: 1.0\r\nMain-Class: test.Processor\r\n\r\n")
+            .unwrap();
+        jar.finish().unwrap();
+
+        // cmd 按控制台代码页读批处理，临时目录在中文用户名下时绝对路径会读成乱码：脚本里一律写成相对脚本所在
+        // 目录（<根>\jdk-*\bin）的 %~dp0 路径。
+        let from_script = |path: &Path| {
+            format!(
+                r"%~dp0..\..\{}",
+                path.strip_prefix(&root).unwrap().display()
+            )
+        };
+        let log = root.join("java-runs.log");
+        let fake_java = |name: &str, made: &[u8], core: &[&str]| {
+            let home = root.join(format!("jdk-{name}"));
+            for file in [
+                home.join("release"),
+                core.iter().fold(home.clone(), |p, s| p.join(s)),
+            ] {
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, b"stub").unwrap();
+            }
+            let bin = home.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("made.bin"), made).unwrap();
+            let exe = bin.join(format!("java-{name}.cmd"));
+            std::fs::write(
+                &exe,
+                format!(
+                    "@echo off\r\n>>\"{log}\" echo java-{name}\r\nif not exist \"{out}\" copy /y \"%~dp0made.bin\" \"{out}\" >nul\r\nexit /b 0\r\n",
+                    log = from_script(&log),
+                    out = from_script(&output)
+                ),
+            )
+            .unwrap();
+            exe
+        };
+        let good = b"out made by a newer java".to_vec();
+        let java8 = fake_java("8", b"out made by java 8", &["lib", "rt.jar"]);
+        let java17 = fake_java("17", &good, &["lib", "modules"]);
+
+        let declared = petalfall_base::fs::sha1_hex(&root.join(r"jdk-17\bin\made.bin"))
+            .await
+            .unwrap();
+        let sided = serde_json::json!({ "client": format!("'{declared}'"), "server": format!("'{declared}'") });
+        let profile = serde_json::json!({
+            "version": "test-forge-1.0",
+            "minecraft": "test",
+            "json": "/version.json",
+            "data": { "OUT_SHA": sided },
+            "processors": [{
+                "jar": "test:proc:1",
+                "classpath": [],
+                "args": [],
+                "outputs": { "[test:out:1]": "{OUT_SHA}" },
+            }],
+            "libraries": []
+        });
+        let version = serde_json::json!({
+            "id": "test-forge-1.0", "inheritsFrom": "test", "libraries": []
+        });
+        let mut installer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, body) in [("install_profile.json", profile), ("version.json", version)] {
+            installer.start_file(name, stored).unwrap();
+            installer.write_all(body.to_string().as_bytes()).unwrap();
         }
+        let installer = installer.finish().unwrap().into_inner();
+
+        // 官方地址用解析不了的域名，经源计划落到 mock：接线断了也连不到真实网络。
+        let server = MockServer::start().await;
+        let base = "https://meta.invalid";
+        for (route, body) in [
+            (
+                "/manifest.json".to_owned(),
+                format!(
+                    r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                        "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
+                        "time":"t","releaseTime":"t"}}]}}"#
+                )
+                .into_bytes(),
+            ),
+            (
+                "/test.json".to_owned(),
+                br#"{"id":"test","type":"release","mainClass":"net.minecraft.client.main.Main",
+                    "javaVersion":{"component":"jre-legacy","majorVersion":8}}"#
+                    .to_vec(),
+            ),
+            (
+                format!(
+                    "/net/minecraftforge/forge/test-{RERUN_FORGE}/forge-test-{RERUN_FORGE}-installer.jar"
+                ),
+                installer,
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+                .mount(&server)
+                .await;
+        }
+
+        let config = PetalfallConfig {
+            default_java: Some(java8.clone()),
+            extra_java_paths: vec![java8, java17.clone()],
+            auto_download_java: false,
+            ..PetalfallConfig::default()
+        };
+        let petalfall = Petalfall::for_test(config, root.clone(), game)
+            .with_manifest_url(format!("{base}/manifest.json"))
+            .with_source_routes(
+                std::sync::Arc::new(crate::sources::tests::Routes {
+                    official: server.uri(),
+                    mirror: server.uri(),
+                }),
+                std::time::Duration::from_secs(600),
+                std::time::Duration::from_secs(2),
+            );
+        let seeded = petalfall
+            .detect_java_with(&JavaEnv::for_test(
+                |exe: &Path| {
+                    let home = exe.parent().and_then(Path::parent).and_then(Path::file_name);
+                    if home == Some(std::ffi::OsStr::new("jdk-8")) {
+                        Ok("java version \"1.8.0_51\"\nJava HotSpot(TM) 64-Bit Server VM (build 25.51-b03, mixed mode)\n".to_owned())
+                    } else if home == Some(std::ffi::OsStr::new("jdk-17")) {
+                        Ok("openjdk version \"17.0.8\" 2023-07-18\nOpenJDK 64-Bit Server VM (build 17.0.8+7-LTS, mixed mode)\n".to_owned())
+                    } else {
+                        panic!("夹具里没有 {}", exe.display())
+                    }
+                },
+                String::new(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            seeded
+                .iter()
+                .map(|java| (java.version.major, java.is_complete()))
+                .collect::<Vec<_>>(),
+            vec![(8, true), (17, true)]
+        );
+
+        (
+            RerunFixture {
+                _tmp: tmp,
+                _server: server,
+                root,
+                java17,
+                output,
+                good,
+            },
+            petalfall,
+        )
+    }
+
+    #[cfg(windows)]
+    impl RerunFixture {
+        /// 先用 Java 8 跑、对不上，换本机的 Java 17 重跑后产物对得上；阶段文字先说原因、再说换成了哪个 Java，
+        /// 「使用设置里指定的 Java」只在游戏取 Java 时出现那一次。
+        fn assert_rerun_with_java_17(
+            &self,
+            rx: &mut tokio::sync::mpsc::UnboundedReceiver<CoreEvent>,
+        ) {
+            assert_eq!(std::fs::read(&self.output).unwrap(), self.good);
+            let runs = std::fs::read_to_string(self.root.join("java-runs.log")).unwrap();
+            assert_eq!(
+                runs.lines().map(str::trim).collect::<Vec<_>>(),
+                ["java-8", "java-17"]
+            );
+            let stages = stage_texts(rx);
+            let reason = stages
+                .iter()
+                .position(|text| text == "安装器生成的文件与它声明的不符，换一个 Java 重跑")
+                .unwrap_or_else(|| panic!("应先说明为什么换 Java：{stages:?}"));
+            assert_eq!(
+                stages.get(reason + 1),
+                Some(&format!("改用 Java 17（{}）重跑", self.java17.display())),
+                "{stages:?}"
+            );
+            assert_eq!(
+                stages
+                    .iter()
+                    .filter(|text| text.contains("设置里指定的"))
+                    .count(),
+                1,
+                "{stages:?}"
+            );
+        }
+    }
+
+    /// 传统布局装 Forge：游戏要求 Java 8 时安装器带上了备用 Java，产物对不上就换本机的 Java 17 重跑、装上。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_legacy_forge_install_reruns_a_mismatched_processor_with_java_17() {
+        let (f, petalfall) = rerun_fixture().await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = petalfall
+            .install(
+                "test",
+                Some(LoaderChoice::Forge),
+                Some(RERUN_FORGE),
+                Some(&tx),
+            )
+            .await
+            .unwrap();
         drop(tx);
 
-        let mut announced = Vec::new();
-        while let Some(event) = rx.recv().await {
-            if let CoreEvent::Stage(text) = event
-                && text.contains("重跑")
-            {
-                announced.push(text);
-            }
-        }
         assert_eq!(
-            announced,
-            vec![format!(
-                "安装器生成的文件与它声明的不符，改用 Java 17 重跑：{}",
-                fixed.display()
-            )]
+            outcome.loader.map(|loader| loader.id),
+            Some("test-forge-1.0".to_owned())
         );
+        f.assert_rerun_with_java_17(&mut rx);
+    }
+
+    /// 新建 Forge 实例：同样带上备用 Java，产物对不上就换本机的 Java 17 重跑、装上。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_new_forge_instance_reruns_a_mismatched_processor_with_java_17() {
+        let (f, petalfall) = rerun_fixture().await;
+        let request = crate::instance_install::InstanceRequest {
+            mc_version: "test".to_owned(),
+            loader: Some(LoaderChoice::Forge),
+            loader_version: Some(RERUN_FORGE.to_owned()),
+            use_template: false,
+        };
+        petalfall
+            .create_instance_dir("旧版铁砧", &request)
+            .await
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = petalfall
+            .install_instance("旧版铁砧", &request, Some(&tx))
+            .await
+            .unwrap();
+        drop(tx);
+
+        assert_eq!(
+            outcome.loader,
+            Some(crate::instance_install::InstalledLoader {
+                choice: LoaderChoice::Forge,
+                version: RERUN_FORGE.to_owned(),
+            })
+        );
+        f.assert_rerun_with_java_17(&mut rx);
     }
 }

@@ -60,8 +60,23 @@ pub(crate) struct JavaEnv {
     runtime_manifest: String,
 }
 
+#[cfg(test)]
+impl JavaEnv {
+    /// 测试用：识别交给 `runner`，不扫系统位置，运行时清单指向 `runtime_manifest`。
+    pub(crate) fn for_test(
+        runner: impl Fn(&Path) -> petalfall_java::Result<String> + Send + Sync + 'static,
+        runtime_manifest: String,
+    ) -> Self {
+        Self {
+            runner: Arc::new(runner),
+            system: false,
+            runtime_manifest,
+        }
+    }
+}
+
 impl Petalfall {
-    fn java_env(&self) -> JavaEnv {
+    pub(crate) fn java_env(&self) -> JavaEnv {
         JavaEnv {
             runner: Arc::new(petalfall_java::run_java_version),
             system: true,
@@ -109,29 +124,11 @@ impl Petalfall {
         events: Option<&EventSink>,
         env: &JavaEnv,
     ) -> Result<(Vec<JavaInstallation>, PathBuf)> {
-        let cache = load_probe_cache(self.data_dir()).await;
         let fixed = self.config().default_java.clone();
-        let managed_exe = java_exe_in_home(&runtime_install_dir(self.data_dir(), required_major));
-        let managed_root = managed_runtime_root(self.data_dir());
-        let scope = self.detect_scope(env);
-        let runner = env.runner.clone();
-        let (found, cache) = tokio::task::spawn_blocking(move || {
-            let mut cache = cache;
-            let found = pick_local_java(
-                required_major,
-                fixed.as_deref(),
-                &managed_exe,
-                &managed_root,
-                &scope,
-                &mut cache,
-                &*runner,
-            );
-            (found, cache)
-        })
-        .await?;
-        save_probe_cache(self.data_dir(), &cache).await;
-
-        if let Some(picked) = found? {
+        if let Some(picked) = self
+            .pick_local_java_with(&[required_major], fixed, env)
+            .await?
+        {
             emit(
                 events,
                 CoreEvent::stage(format!(
@@ -149,6 +146,75 @@ impl Petalfall {
             return Ok((vec![picked.java], path));
         }
 
+        let java = self.download_java_with(required_major, events, env).await?;
+        let path = java.path.clone();
+        Ok((vec![java], path))
+    }
+
+    /// 给安装期的工具（Forge / NeoForge 的处理器）取 Java。工具不是游戏，不受「游戏用哪个 Java」这项设置约束，
+    /// 所以不看设置里固定的 Java：本机（上次探测的结果、托管目录、全量探测）按 `local` 的先后找第一个有的，都没有
+    /// 才按 `download` 这个主版本走自动下载（关着时报 [`CoreError::NoJava`]）。只校验最终挑中的那一个，不发「使用
+    /// 本地 Java」的阶段文字：用它做什么由调用方去说。
+    pub(crate) async fn resolve_tool_java_with(
+        &self,
+        local: &[u32],
+        download: u32,
+        events: Option<&EventSink>,
+        env: &JavaEnv,
+    ) -> Result<JavaInstallation> {
+        if let Some(picked) = self.pick_local_java_with(local, None, env).await? {
+            return Ok(picked.java);
+        }
+        self.download_java_with(download, events, env).await
+    }
+
+    /// 只在本机找、不下载：按 `majors` 的先后逐个交给 [`pick_local_java`]，交回第一个找得到的；`fixed` 是设置里
+    /// 固定的 Java，给了就只认它。
+    async fn pick_local_java_with(
+        &self,
+        majors: &[u32],
+        fixed: Option<PathBuf>,
+        env: &JavaEnv,
+    ) -> Result<Option<Picked>> {
+        let cache = load_probe_cache(self.data_dir()).await;
+        let data_dir = self.data_dir().to_path_buf();
+        let majors = majors.to_vec();
+        let managed_root = managed_runtime_root(self.data_dir());
+        let scope = self.detect_scope(env);
+        let runner = env.runner.clone();
+        let (found, cache) = tokio::task::spawn_blocking(move || {
+            let mut cache = cache;
+            let mut found = Ok(None);
+            for major in majors {
+                let managed_exe = java_exe_in_home(&runtime_install_dir(&data_dir, major));
+                found = pick_local_java(
+                    major,
+                    fixed.as_deref(),
+                    &managed_exe,
+                    &managed_root,
+                    &scope,
+                    &mut cache,
+                    &*runner,
+                );
+                // 排在前面的主版本找到了就用它，后面的只是退而求其次；出错也不再往下找。
+                if !matches!(found, Ok(None)) {
+                    break;
+                }
+            }
+            (found, cache)
+        })
+        .await?;
+        save_probe_cache(self.data_dir(), &cache).await;
+        found
+    }
+
+    /// 本机没有 `required_major` 时的下一步：关着自动下载报 [`CoreError::NoJava`]，开着就下 Mojang 的运行时并识别它。
+    async fn download_java_with(
+        &self,
+        required_major: u32,
+        events: Option<&EventSink>,
+        env: &JavaEnv,
+    ) -> Result<JavaInstallation> {
         if !self.config().auto_download_java {
             return Err(CoreError::NoJava {
                 major: required_major,
@@ -173,9 +239,7 @@ impl Petalfall {
         })
         .await?;
         save_probe_cache(self.data_dir(), &cache).await;
-        let java = probed?;
-        let path = java.path.clone();
-        Ok((vec![java], path))
+        Ok(probed?)
     }
 
     /// 下载并安装匹配 `required_major` 的 Mojang 运行时到托管目录，返回安装产物。
@@ -1139,5 +1203,152 @@ mod tests {
         let (list, path) = petalfall.resolve_java_with(17, None, &env).await.unwrap();
         assert_eq!(path, fixed);
         assert_eq!(list[0].missing_files, vec!["release", "lib/modules"]);
+    }
+
+    const OPENJDK_21: &str = "openjdk version \"21.0.3\" 2024-04-16\n\
+        OpenJDK 64-Bit Server VM Microsoft-9388422 (build 21.0.3+9-LTS, mixed mode)\n";
+
+    /// 按 Java 根目录的名字作答（以 17 或 21 结尾就答那个版本），记下每次识别的路径。
+    fn by_home_env(seen: Arc<std::sync::Mutex<Vec<PathBuf>>>, manifest: String) -> JavaEnv {
+        JavaEnv {
+            runner: Arc::new(move |path: &Path| {
+                seen.lock().unwrap().push(path.to_path_buf());
+                let home = path
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+                    .expect("测试里的 java 都在 <home>/bin 下");
+                if home.ends_with("21") {
+                    Ok(OPENJDK_21.to_owned())
+                } else if home.ends_with("17") {
+                    Ok(OPENJDK_17.to_owned())
+                } else {
+                    panic!("测试没准备 {home} 的版本输出")
+                }
+            }),
+            system: false,
+            runtime_manifest: manifest,
+        }
+    }
+
+    fn stage_texts(mut rx: mpsc::UnboundedReceiver<CoreEvent>) -> Vec<String> {
+        let mut stages = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let CoreEvent::Stage(text) = event {
+                stages.push(text);
+            }
+        }
+        stages
+    }
+
+    /// 给安装期工具取 Java 不看设置里固定的 Java：固定的是一个完整的 Java 17 也不用，取的是本机探测到的 21，
+    /// 不识别固定的那个，也不发「使用设置里指定的 Java」。
+    #[tokio::test]
+    async fn tool_java_ignores_the_fixed_default_java() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixed = jdk(dir.path(), "jdk-17", true);
+        let managed_21 = jdk(&managed_runtime_root(dir.path()), "21", true);
+        let config = PetalfallConfig {
+            default_java: Some(fixed.clone()),
+            auto_download_java: false,
+            ..PetalfallConfig::default()
+        };
+        let petalfall = petalfall_with(config, dir.path());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let env = by_home_env(seen.clone(), String::new());
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let java = petalfall
+            .resolve_tool_java_with(&[17, 21], 17, Some(&tx), &env)
+            .await
+            .unwrap();
+        drop(tx);
+
+        assert_eq!((java.path, java.version.major), (managed_21, 21));
+        assert!(
+            !seen.lock().unwrap().contains(&fixed),
+            "固定的 Java 不该被识别"
+        );
+        assert_eq!(stage_texts(rx), Vec::<String>::new());
+        // 游戏取 Java 照旧只认固定的那个。
+        let (_, path) = petalfall.resolve_java_with(21, None, &env).await.unwrap();
+        assert_eq!(path, fixed);
+    }
+
+    /// 本机有 17 就用 17，哪怕 21 是上次探测就记下的、17 只在托管目录里；没有 17 有 21 就用 21，不下载。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tool_java_prefers_a_local_17_then_a_local_21_without_downloading() {
+        let server = MockServer::start().await;
+        let (manifest, _) = mount_runtime(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manual_21 = jdk(&dir.path().join("elsewhere"), "jdk-21", true);
+        let mut petalfall = petalfall_with(PetalfallConfig::default(), dir.path());
+        assert!(petalfall.add_extra_java_path(manual_21.clone()));
+        let env = by_home_env(Arc::new(std::sync::Mutex::new(Vec::new())), manifest);
+        // 先探测一遍：21 记进了识别缓存，托管目录里还没有 17。
+        assert_eq!(
+            petalfall
+                .detect_java_with(&env)
+                .await
+                .unwrap()
+                .iter()
+                .map(|java| &java.path)
+                .collect::<Vec<_>>(),
+            vec![&manual_21]
+        );
+
+        let java = petalfall
+            .resolve_tool_java_with(&[17, 21], 17, None, &env)
+            .await
+            .unwrap();
+        assert_eq!((java.path, java.version.major), (manual_21.clone(), 21));
+
+        let managed_17 = jdk(&managed_runtime_root(dir.path()), "17", true);
+        let java = petalfall
+            .resolve_tool_java_with(&[17, 21], 17, None, &env)
+            .await
+            .unwrap();
+        assert_eq!((java.path, java.version.major), (managed_17, 17));
+        assert_eq!(requests_to(&server, "/all.json").await, 0, "本机有就不下载");
+    }
+
+    /// 本机 17、21 都没有：关着自动下载报找不到 Java 17，开着就下 Java 17 的运行时。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tool_java_downloads_17_only_when_neither_is_local() {
+        let server = MockServer::start().await;
+        let (manifest, java_bytes) = mount_runtime(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let env = by_home_env(Arc::new(std::sync::Mutex::new(Vec::new())), manifest);
+
+        let mut petalfall = petalfall_with(PetalfallConfig::default(), dir.path());
+        petalfall.set_auto_download_java(false);
+        let err = petalfall
+            .resolve_tool_java_with(&[17, 21], 17, None, &env)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::NoJava { major: 17 }),
+            "实际：{err:?}"
+        );
+        assert_eq!(requests_to(&server, "/all.json").await, 0);
+
+        petalfall.set_auto_download_java(true);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let java = petalfall
+            .resolve_tool_java_with(&[17, 21], 17, Some(&tx), &env)
+            .await
+            .unwrap();
+        drop(tx);
+        let expected = java_exe_in_home(&runtime_install_dir(dir.path(), 17));
+        assert_eq!(
+            (java.path.clone(), java.version.major),
+            (expected.clone(), 17)
+        );
+        assert_eq!(std::fs::read(&expected).unwrap(), java_bytes);
+        assert_eq!(
+            stage_texts(rx).first().map(String::as_str),
+            Some("本地未找到 Java 17，开始下载 Mojang 运行时")
+        );
     }
 }
