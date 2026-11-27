@@ -1973,6 +1973,12 @@ fn judge_cross_volume(stage: MoveStage, disk: Disk) -> Verdict {
         Committed | Settled if !disk.target && disk.old => {
             Verdict::Stuck("日志说已提交，可目标里没有这个实例，原件的旧目录还在")
         }
+        // 第二步改名成了，暂存里的副本就成了目标里的实例，两处不会都在。都在，是这一步没落盘（断电、拔盘），目标里那个
+        // 是之后才建出来的同名实例（导入、改名都不看移动日志）：补完会删掉旧目录里的原件与暂存里的副本，两份都不剩，
+        // 备份与游玩记录还会并给那个同名实例。
+        Committed | Settled if disk.target && disk.staged => {
+            Verdict::Stuck("日志说已提交，可目标里和暂存里都有这个实例")
+        }
         Committed | Settled => Verdict::Finish,
         Committing if disk.target && !disk.staged && !disk.source => Verdict::Finish,
         // 「提交中」写在校验通过之后，暂存副本是校验过的。
@@ -3901,6 +3907,92 @@ mod tests {
         }
     }
 
+    /// 跨卷提交的改名都做了、日志也记上了已提交，可目标卷上「暂存改名到目标」那一步没落盘（断电、拔盘），暂存里校验过
+    /// 的副本还在；收尾推迟期间，玩家在目标里导入或改名出一个同名实例。目标里那个不是移过去的：补完会删掉旧目录里的
+    /// 原件与暂存里的副本，两份都不剩，备份与游玩记录还会并给那个新实例。所以不动，日志留着、原因里带上各处路径。
+    #[tokio::test]
+    async fn a_newcomer_in_the_target_beside_the_intact_staging_is_left_alone() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let instance = snapshot(&dirs.instance_in(&dirs.source));
+        let backups = snapshot(&dirs.backups_in(&dirs.source));
+        let source_minutes = minutes(&dirs, &dirs.source).await;
+        assert!(source_minutes.is_some());
+        let mut journal = dirs.journal(false);
+        journal.stage = MoveStage::Committed;
+        journal.backups_staged = true;
+        let (staged, staged_backups) = (
+            journal.staged_instance().unwrap(),
+            journal.staged_backups().unwrap(),
+        );
+        copy_all(&dirs.instance_in(&dirs.source), &staged);
+        copy_all(&dirs.backups_in(&dirs.source), &staged_backups);
+        rename(&dirs.instance_in(&dirs.source), &journal.old_instance());
+        rename(&dirs.backups_in(&dirs.source), &journal.old_backups());
+        move_journal::write(&dirs.data, &journal).await.unwrap();
+        // 别人在目标里新建的同名实例：自己的设置与存档，没有备份。
+        let newcomer_dir = write_version(&dirs.target, ID, &instance_json());
+        put(&newcomer_dir.join("options.txt"), b"lang:en_us\n");
+        put(
+            &newcomer_dir.join("saves").join("w").join("level.dat"),
+            b"newcomer-level",
+        );
+        let newcomer = snapshot(&newcomer_dir);
+
+        let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
+
+        let [MoveRecovery::Deferred { id, reason }] = &recovered[..] else {
+            panic!("{recovered:?}");
+        };
+        assert_eq!(id, ID);
+        assert!(
+            reason.starts_with("日志说已提交，可目标里和暂存里都有这个实例"),
+            "{reason}"
+        );
+        for path in [
+            dirs.instance_in(&dirs.source),
+            dirs.instance_in(&dirs.target),
+            journal.old_dir.clone(),
+            staged.clone(),
+        ] {
+            assert!(
+                reason.contains(&path.display().to_string()),
+                "原因里应有 {}：{reason}",
+                path.display()
+            );
+        }
+        let left_alone = || {
+            assert_eq!(
+                snapshot(&journal.old_instance()),
+                instance,
+                "旧目录里的原件"
+            );
+            assert_eq!(snapshot(&staged), instance, "暂存里的副本");
+            assert_eq!(snapshot(&newcomer_dir), newcomer, "目标里的新实例");
+            assert_eq!(snapshot(&journal.old_backups()), backups, "原备份");
+            assert_eq!(snapshot(&staged_backups), backups, "暂存里的备份副本");
+            assert!(
+                !dirs.backups_in(&dirs.target).exists(),
+                "备份不能并给目标里的新实例"
+            );
+            assert_eq!(
+                journals(&dirs),
+                [journal_file(&journal.token)],
+                "日志要留着"
+            );
+        };
+        left_alone();
+        assert_eq!(minutes(&dirs, &dirs.source).await, source_minutes);
+        assert_eq!(minutes(&dirs, &dirs.target).await, None);
+
+        // 再收一遍结果相同，什么都不动。
+        let again = dirs.petalfall().recover_instance_moves().await.unwrap();
+        assert_eq!(again, recovered);
+        left_alone();
+        assert_eq!(minutes(&dirs, &dirs.source).await, source_minutes);
+        assert_eq!(minutes(&dirs, &dirs.target).await, None);
+    }
+
     /// 复制阶段中断时暂存看着齐全也没校验过：删暂存，原件不动，绝不往前补完。
     #[tokio::test]
     async fn an_interrupted_copy_is_never_rolled_forward() {
@@ -4419,6 +4511,7 @@ mod tests {
         };
         let only_staged = Verdict::Stuck("原位置和旧目录里都没有这个实例，只剩暂存里的副本");
         let target_gone = Verdict::Stuck("日志说已提交，可目标游戏目录已经不在了");
+        let target_and_staged = Verdict::Stuck("日志说已提交，可目标里和暂存里都有这个实例");
         let cases = [
             // 同卷：一次改名，在目标且不在原位才算提交了。
             (
@@ -4593,6 +4686,44 @@ mod tests {
                 false,
                 disk(true, false, false, true),
                 Verdict::RollForward,
+            ),
+            // 已提交、目标里有、暂存里也还有：第二步改名没落盘，目标里那个是后来别人建的同名实例。补完会删掉旧目录里的
+            // 原件与暂存里的副本，不动；原件在不在旧目录、原目录里有没有同名的新实例都一样。
+            (
+                Committed,
+                false,
+                disk(false, true, true, true),
+                target_and_staged,
+            ),
+            (
+                Committed,
+                false,
+                disk(false, true, false, true),
+                target_and_staged,
+            ),
+            (
+                Committed,
+                false,
+                disk(true, true, false, true),
+                target_and_staged,
+            ),
+            (
+                Committed,
+                false,
+                disk(true, true, true, true),
+                target_and_staged,
+            ),
+            (
+                Settled,
+                false,
+                disk(false, true, true, true),
+                target_and_staged,
+            ),
+            (
+                Settled,
+                false,
+                disk(false, true, false, true),
+                target_and_staged,
             ),
             // 目标游戏目录整个不在：回滚照常，补完一律不做；只剩清理的照常清理。
             (Copying, false, no_target(true, false), Verdict::Discard),
