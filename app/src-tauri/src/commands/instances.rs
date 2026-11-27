@@ -280,7 +280,7 @@ impl InstanceLocks {
         })
     }
 
-    /// `bases` 里第一个此刻容不下基底占用的基底，连同挡路的那件事：补全、重新安装加载器沿继承链依次占基底时，
+    /// `bases` 里第一个此刻容不下基底占用的基底，连同挡路的那件事：补全、重新安装加载器与移动沿继承链依次占基底时，
     /// 就停在它上面报 `instance_busy`，报的也是这一份。实例列表用它让界面提前禁用入口。
     pub fn blocking_base(&self, bases: &[String]) -> Option<BaseBusyDto> {
         let table = lock_table(&self.table);
@@ -1945,8 +1945,8 @@ async fn run_repair(
     let petalfall = facade.snapshot().await;
     // 先于占锁：换了目录时该报的是目录换了，而不是新目录里同名实例或它的基底在忙。
     ensure_game_dir(&petalfall, game_dir)?;
-    // 传统布局的加载器实例把客户端 jar 与 natives 补进继承链根的目录：补全期间基底不能被删、改名或补全。
-    // 依赖检查只在删除、改名动手那一刻扫一次，挡不住补全中途的这些操作。
+    // 传统布局的加载器实例把客户端 jar 与 natives 补进继承链根的目录：补全期间基底不能被删、改名、补全、移走或启动
+    // （游戏映射着 natives，补到一半会报 IO 错误）。依赖检查只在删除、改名、移动动手那一刻扫一次，挡不住补全中途的这些操作。
     let _guard = locks
         .acquire_with_chain(id, InstanceActivity::Repairing, async {
             petalfall.repair_chain(id).await.map_err(instance_error)
@@ -2356,7 +2356,8 @@ pub(crate) async fn move_instance_with(
     let target = validate_game_dir(args.target)?;
     let id = args.id;
     let snapshot = facade.snapshot().await;
-    // 基底的版本 JSON 与客户端 jar 要补到目标里：移动期间基底不能被删、改名或补全。
+    // 基底的版本 JSON 与客户端 jar 要补到目标里：移动期间基底不能被删、改名、补全、移走或启动（启动被挡只因同样以
+    // inherited 占基底，见 `compatible_with`）。
     let _guard = locks
         .acquire_with_chain(id, InstanceActivity::Moving, async {
             snapshot.inheritance_chain(id).await.map_err(instance_error)
