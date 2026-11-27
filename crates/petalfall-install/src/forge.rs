@@ -356,7 +356,7 @@ impl<'a> ForgeInstaller<'a> {
         }
     }
 
-    /// 注入的 java 的主版本，只用来把产物对不上的报错写成「Java 8（路径）」；`None` 时正文只写路径。
+    /// 注入的 java 的主版本，只用来在产物对不上的报错里写成「Java 8」；`None` 时写可执行文件的文件名。
     pub fn with_java_major(mut self, major: Option<u32>) -> Self {
         self.java.major = major;
         self
@@ -3560,9 +3560,9 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "处理器 {PROCESSOR_JAR} 用 Java 8（{}）生成的 out-1-b.jar 与安装器声明的不符（{}，期望 sha1 {expected}，实际 {actual}）",
-                old.display(),
-                path.display()
+                "处理器 {PROCESSOR_JAR} 用 Java 8 生成的 out-1-b.jar 与安装器声明的不符；文件 {}，期望 sha1 {expected}，实际 {actual}；Java 在 {}",
+                path.display(),
+                old.display()
             )
         );
         assert!(std::error::Error::source(&err).is_none());
@@ -3606,10 +3606,10 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "处理器 {PROCESSOR_JAR} 用 Java 8（{}）生成的 out-1-a.jar 与安装器声明的不符；又换 Java 17（{}）重跑，两次都对不上（{}，期望 sha1 {expected}，实际 {actual}）",
+                "处理器 {PROCESSOR_JAR} 用 Java 8 生成的 out-1-a.jar 与安装器声明的不符；又换 Java 17 重跑，两次都对不上；文件 {}，期望 sha1 {expected}，实际 {actual}；先用的 Java 在 {}，重跑用的在 {}",
+                path.display(),
                 old.display(),
-                new.display(),
-                path.display()
+                new.display()
             )
         );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -3723,9 +3723,9 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "处理器 {PROCESSOR_JAR} 用 Java 8（{}）生成的 out-1-b.jar 与安装器声明的不符；想换一个 Java 重跑，但没能取到：{reason}（{}，期望 sha1 {expected}，实际 {actual}）",
-                old.display(),
-                path.display()
+                "处理器 {PROCESSOR_JAR} 用 Java 8 生成的 out-1-b.jar 与安装器声明的不符；想换一个 Java 重跑，但没能取到：{reason}；文件 {}，期望 sha1 {expected}，实际 {actual}；Java 在 {}",
+                path.display(),
+                old.display()
             )
         );
         assert!(std::error::Error::source(&err).is_none());
