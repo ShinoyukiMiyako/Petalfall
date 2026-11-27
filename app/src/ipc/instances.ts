@@ -72,10 +72,23 @@ export interface InstanceDto {
   status: "ready" | "broken";
   broken_reason: string | null;
   /**
-   * 补全会被拒绝时（以 instance_failed 报不可补全）补全报的那句原因，原样照抄，可能还带一句指向目录里别的版本文件的提示；
-   * 只在 broken 且补全修不好时非空（版本 JSON 缺失或损坏、又没有记下当初装的是什么）。补全修得好的损坏实例与 ready 的实例都为 null。
+   * 补全会被拒绝时（以 instance_failed 报不可补全）的原因，与补全报的 detail.reason 是同一句，可能还带一句指向目录里别的版本文件的提示。
+   * 只在 broken 且补全修不好时非空：版本 JSON 缺失或损坏、又没有记下当初装的是什么，或版本 JSON 读不出来（不论有没有记下）。
+   * 读不出来时是「版本 JSON 读不出来：」后接读盘错误与系统给的原因；补全时再读一次盘，系统给的那段可能与列表这次不同，
+   * 两边只在这一段可能差开。补全修得好的损坏实例与 ready 的实例都为 null。
    */
   unrepairable_reason: string | null;
+  /**
+   * 补全为什么修不好；unrepairable_reason 非空时非空，否则为 null。unreadable：版本 JSON 读盘出错（被占用、没有权限、那个位置是个目录），
+   * 文件可能完好，放开占用或修好权限后重新扫描就恢复，这时不论有没有安装记录、未完成标记是不是 install 都修不好；no_record：版本 JSON
+   * 缺失或损坏，又没有安装记录可照着重装；modpack：整合包没有导入完（未完成标记是 modpack）。
+   */
+  unrepairable_kind: "unreadable" | "no_record" | "modpack" | null;
+  /**
+   * 改成这个名字实例就能认出来：只在 unrepairable_kind 为 no_record、实例目录里恰有一份名字对不上的版本 JSON、且实例改得成那个名字时非空，
+   * 这时 unrepairable_reason 里照旧带那句改名提示。
+   */
+  rename_to: string | null;
   /** 原版版本号；识别不出或 broken 时为 null。 */
   mc_version: string | null;
   loaders: LoaderDto[];
@@ -474,7 +487,9 @@ export const clearTemplate = (): Promise<TemplateInfoDto> => invoke<TemplateInfo
 /**
  * 长任务：补全实例文件；新建没装完的实例照当初的内容重装。可取消。reinstallLoader 把版本 JSON 里读出的加载器原样重装一遍，
  * 版本号、Mod、配置与存档不变；读不出能原样装回的内容（原版、叠着 OptiFine 或 LiteLoader、版本号读不出来）时报 instance_failed。
- * 上次补全败在 loader_library_missing 时，不带它也走重装。
+ * 上次补全败在 loader_library_missing 时，不带它也走重装。列表上补全修不好的实例（unrepairable_reason 非空，含版本 JSON 读不出来的）
+ * 补全与重装加载器都以 instance_failed 拒绝，detail 为 { id, reason }，reason 与列表的 unrepairable_reason 同一句（读不出来时系统给的
+ * 那段原因可能不同，见该字段）。
  */
 export const repairInstance = (taskId: string, gameDir: string, id: string, opts: { reinstallLoader?: true } = {}): Promise<RepairResultDto> =>
   invoke<RepairResultDto>("repair_instance", { taskId, gameDir, id, ...opts });

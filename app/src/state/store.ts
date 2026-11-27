@@ -1073,7 +1073,7 @@ type CreationMeta = Extract<TaskMeta, { type: "create" | "modpack" }>;
 function applyTaskEffect(base: InstanceSummary, pinned: boolean, effect: TaskEffect, creation: CreationMeta | null): InstanceSummary {
   if (effect === "installing") {
     const facts = creation !== null && base.mcVersion === null ? { mcVersion: creation.mcVersion, loader: creation.loader, loaderVersion: creation.loaderVersion } : {};
-    return { ...base, ...facts, pinned, status: "installing", brokenReason: null, unrepairableReason: null };
+    return { ...base, ...facts, pinned, status: "installing", brokenReason: null, unrepairableReason: null, unrepairableKind: null, renameTo: null };
   }
   if (effect === null) return { ...base, pinned };
   // 列表是任务开始前扫的，后端那时还没记下占用；后端报的活动（例如运行中）比前端推断的更准，留着它。
@@ -1115,6 +1115,8 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
     status: "installing",
     brokenReason: null,
     unrepairableReason: null,
+    unrepairableKind: null,
+    renameTo: null,
     createdAt,
     lastPlayedAt: null,
     playtimeMin: 0,

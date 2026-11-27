@@ -8,6 +8,8 @@ function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): Instance
     status: "ready",
     broken_reason: null,
     unrepairable_reason: null,
+    unrepairable_kind: null,
+    rename_to: null,
     mc_version: "1.21.1",
     loaders: [],
     release_type: "release",
@@ -117,6 +119,69 @@ describe("实例 DTO 适配：状态", () => {
     expect(instanceFromDto(instanceDto("E", { incomplete: incomplete({ kind: "repair", outcome: "cancelled", error: null }) }), idle)).toMatchObject({ status: "broken", unrepairableReason: null });
     expect(instanceFromDto(lost, { pins: [], busyTaskInstanceIds: new Set(["Lost"]) })).toMatchObject({ status: "installing", brokenReason: null, unrepairableReason: null });
     expect(instanceFromDto({ ...lost, activity: "repairing" }, idle)).toMatchObject({ status: "installing", unrepairableReason: null });
+  });
+
+  it("补全修不好的种类与改名目标随原因原样带过：读不出来、没有记录带改名、整合包没导入完各自成立", () => {
+    const unreadable = "版本 JSON 读不出来：文件 IO 失败: D:\\Games\\.minecraft\\versions\\锁着的\\锁着的.json：拒绝访问。 (os error 5)";
+    expect(instanceFromDto(instanceDto("锁着的", { status: "broken", broken_reason: unreadable, unrepairable_reason: unreadable, unrepairable_kind: "unreadable" }), idle)).toMatchObject({
+      status: "broken",
+      brokenReason: unreadable,
+      unrepairableReason: unreadable,
+      unrepairableKind: "unreadable",
+      renameTo: null,
+    });
+    // 读不出来时有安装标记也修不好：标记照常带过，种类不因它变
+    const marked = instanceFromDto(
+      instanceDto("锁着的", { status: "broken", broken_reason: unreadable, unrepairable_reason: unreadable, unrepairable_kind: "unreadable", incomplete: incomplete({ outcome: "pending", error: null }) }),
+      idle,
+    );
+    expect(marked).toMatchObject({ status: "broken", unrepairableKind: "unreadable", renameTo: null, incomplete: { kind: "install", outcome: "pending" } });
+
+    const hinted = "缺少版本 JSON，也没有记下当初装的是什么；目录里有一份叫 1.20.1-Fabric.json 的版本文件，把实例改名成 1.20.1-Fabric 就能认出来";
+    expect(
+      instanceFromDto(instanceDto("改过名的", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: hinted, unrepairable_kind: "no_record", rename_to: "1.20.1-Fabric" }), idle),
+    ).toMatchObject({ unrepairableReason: hinted, unrepairableKind: "no_record", renameTo: "1.20.1-Fabric" });
+    const lost = "版本 JSON 损坏：expected value at line 1 column 1，也没有记下当初装的是什么";
+    expect(instanceFromDto(instanceDto("坏了的", { status: "broken", broken_reason: "版本 JSON 损坏：expected value at line 1 column 1", unrepairable_reason: lost, unrepairable_kind: "no_record" }), idle)).toMatchObject({
+      unrepairableKind: "no_record",
+      renameTo: null,
+    });
+
+    const pack = "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入";
+    const half = instanceDto("半个整合包", {
+      status: "broken",
+      broken_reason: "缺少版本 JSON",
+      unrepairable_reason: pack,
+      unrepairable_kind: "modpack",
+      incomplete: incomplete({ kind: "modpack", outcome: "failed", spec: null }),
+    });
+    expect(instanceFromDto(half, idle)).toMatchObject({ unrepairableReason: pack, unrepairableKind: "modpack", renameTo: null });
+  });
+
+  it("排上任务或后端在装、在补时三者一起不带；就绪但带标记的也都为 null", () => {
+    const hinted = "缺少版本 JSON，也没有记下当初装的是什么；目录里有一份叫 1.20.1.json 的版本文件，把实例改名成 1.20.1 就能认出来";
+    const lost = instanceDto("Lost", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: hinted, unrepairable_kind: "no_record", rename_to: "1.20.1" });
+    const cleared = { status: "installing", unrepairableReason: null, unrepairableKind: null, renameTo: null };
+    expect(instanceFromDto(lost, { pins: [], busyTaskInstanceIds: new Set(["Lost"]) })).toMatchObject(cleared);
+    expect(instanceFromDto({ ...lost, activity: "repairing" }, idle)).toMatchObject(cleared);
+    expect(instanceFromDto({ ...lost, activity: "installing" }, idle)).toMatchObject(cleared);
+    expect(instanceFromDto(instanceDto("E", { incomplete: incomplete({ kind: "repair", outcome: "cancelled", error: null }) }), idle)).toMatchObject({
+      status: "broken",
+      unrepairableReason: null,
+      unrepairableKind: null,
+      renameTo: null,
+    });
+  });
+
+  it("种类不认识、有种类没原因、改名目标出在 no_record 之外、说整合包却没有整合包标记，都是契约破了，抛错", () => {
+    const reason = "版本 JSON 读不出来：文件 IO 失败: X.json：拒绝访问。 (os error 5)";
+    const broken = { status: "broken" as const, broken_reason: reason, unrepairable_reason: reason };
+    expect(() => instanceFromDto(instanceDto("X", { ...broken, unrepairable_kind: "locked" as never }), idle)).toThrow("未知的补全修不好的种类：locked");
+    expect(() => instanceFromDto(instanceDto("Y", { status: "broken", broken_reason: reason, unrepairable_kind: "unreadable" }), idle)).toThrow("实例 Y 没说补全为什么修不好，却给了修不好的种类：unreadable");
+    expect(() => instanceFromDto(instanceDto("Z", { ...broken, unrepairable_kind: "unreadable", rename_to: "1.20.1" }), idle)).toThrow("实例 Z 修不好的种类是 unreadable，却给了改名目标：1.20.1");
+    expect(() => instanceFromDto(instanceDto("W", { status: "broken", broken_reason: "缺少版本 JSON", rename_to: "1.20.1" }), idle)).toThrow("实例 W 修不好的种类是 null，却给了改名目标：1.20.1");
+    expect(() => instanceFromDto(instanceDto("V", { ...broken, unrepairable_kind: "modpack", incomplete: incomplete({ kind: "install" }) }), idle)).toThrow("实例 V 说整合包没有导入完，却没有整合包的未完成标记");
+    expect(() => instanceFromDto(instanceDto("U", { ...broken, unrepairable_kind: "modpack" }), idle)).toThrow("实例 U 说整合包没有导入完，却没有整合包的未完成标记");
   });
 
   it("没有损坏却说补全修不好是契约破了，抛错；排着任务也一样", () => {

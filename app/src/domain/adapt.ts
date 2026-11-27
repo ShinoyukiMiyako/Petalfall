@@ -117,6 +117,10 @@ export type InstanceStatus = "ready" | "installing" | "broken";
 export type ReleaseType = "release" | "snapshot" | "old";
 export type ExtraLoaderKind = "optifine" | "liteloader";
 
+const UNREPAIRABLE_KINDS = ["unreadable", "no_record", "modpack"] as const;
+/** 补全为什么修不好：版本 JSON 读不出来、没有记下当初装的是什么、整合包没导入完。 */
+export type UnrepairableKind = (typeof UNREPAIRABLE_KINDS)[number];
+
 /** 实例所来自的整合包。 */
 export interface InstanceModpack {
   /** 从本地文件导入时为 null。 */
@@ -175,6 +179,10 @@ export interface InstanceSummary {
    * 整合包没导入完的另由 needsReimport 判定，后端在它版本 JSON 还在时不报这一项。点修复有没有用看 rules 的 canRepair。
    */
   unrepairableReason: string | null;
+  /** 补全为什么修不好，取值与含义同 InstanceDto.unrepairable_kind；unrepairableReason 为 null 时为 null。界面分支只看它，不解析原因文字。 */
+  unrepairableKind: UnrepairableKind | null;
+  /** 把实例改成这个名字就能认出来；只在 unrepairableKind 为 no_record 时可能非空，含义同 InstanceDto.rename_to。 */
+  renameTo: string | null;
   createdAt: number | null;
   /** 上次游玩的毫秒时间戳；没玩过或游玩记录读不出时为 null，要说「从未游玩」先看 playError。 */
   lastPlayedAt: number | null;
@@ -259,26 +267,42 @@ export interface InstanceContext {
   busyTaskInstanceIds: ReadonlySet<string>;
 }
 
+type Unrepairable = Pick<InstanceSummary, "unrepairableReason" | "unrepairableKind" | "renameTo">;
+
+const REPAIRABLE: Unrepairable = { unrepairableReason: null, unrepairableKind: null, renameTo: null };
+
+/**
+ * 后端给的修不好的原因、种类与改名目标一起带过，不另做推断。有种类却没原因、改名目标出在 no_record 之外、种类说整合包没导入完
+ * 却没有整合包的未完成标记，都是契约破了：界面按种类给出路，错开了就会把读不出来的实例引去删除，或给出一个改不成的名字。
+ */
+function unrepairableFromDto(dto: InstanceDto, incomplete: InstanceIncomplete | null): Unrepairable {
+  const kind = dto.unrepairable_kind === null ? null : oneOf(dto.unrepairable_kind, UNREPAIRABLE_KINDS, "补全修不好的种类");
+  if (dto.unrepairable_reason === null && kind !== null) throw new Error(`实例 ${dto.id} 没说补全为什么修不好，却给了修不好的种类：${kind}`);
+  if (dto.rename_to !== null && kind !== "no_record") throw new Error(`实例 ${dto.id} 修不好的种类是 ${String(kind)}，却给了改名目标：${dto.rename_to}`);
+  if (kind === "modpack" && (incomplete === null || incomplete.kind !== "modpack")) throw new Error(`实例 ${dto.id} 说整合包没有导入完，却没有整合包的未完成标记`);
+  return { unrepairableReason: dto.unrepairable_reason, unrepairableKind: kind, renameTo: dto.rename_to };
+}
+
 function instanceStatus(
   dto: InstanceDto,
   incomplete: InstanceIncomplete | null,
   ctx: InstanceContext,
-): { status: InstanceStatus; brokenReason: string | null; unrepairableReason: string | null } {
+): { status: InstanceStatus; brokenReason: string | null } & Unrepairable {
   // 后端只对版本 JSON 不可用的实例下这个结论；版本 JSON 可用却说修不好，两端对这个字段的理解已经错开
   if (dto.unrepairable_reason !== null && dto.status !== "broken") throw new Error(`实例 ${dto.id} 没有损坏，却说补全修不好：${dto.unrepairable_reason}`);
+  const unrepairable = unrepairableFromDto(dto, incomplete);
   // 正在安装或补全时版本目录里也有未完成标记，必须先判安装中，否则排队中的新实例会被画成损坏
   if (ctx.busyTaskInstanceIds.has(dto.id) || dto.activity === "installing" || dto.activity === "repairing") {
-    return { status: "installing", brokenReason: null, unrepairableReason: null };
+    return { status: "installing", brokenReason: null, ...REPAIRABLE };
   }
   if (dto.status === "broken") {
-    const unrepairableReason = dto.unrepairable_reason;
-    if (dto.broken_reason !== null) return { status: "broken", brokenReason: dto.broken_reason, unrepairableReason };
-    if (incomplete !== null) return { status: "broken", brokenReason: incompleteReason(incomplete), unrepairableReason };
+    if (dto.broken_reason !== null) return { status: "broken", brokenReason: dto.broken_reason, ...unrepairable };
+    if (incomplete !== null) return { status: "broken", brokenReason: incompleteReason(incomplete), ...unrepairable };
     throw new Error(`实例 ${dto.id} 标为损坏却没有原因`);
   }
   if (dto.status !== "ready") throw new Error(`未知的实例状态：${String(dto.status)}`);
-  if (incomplete !== null) return { status: "broken", brokenReason: incompleteReason(incomplete), unrepairableReason: null };
-  return { status: "ready", brokenReason: null, unrepairableReason: null };
+  if (incomplete !== null) return { status: "broken", brokenReason: incompleteReason(incomplete), ...REPAIRABLE };
+  return { status: "ready", brokenReason: null, ...REPAIRABLE };
 }
 
 export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): InstanceSummary {
@@ -288,7 +312,7 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     .filter((l): l is { kind: ExtraLoaderKind; version: string | null } => l.kind === "optifine" || l.kind === "liteloader")
     .map((l) => ({ kind: l.kind, version: l.version }));
   const incomplete = dto.incomplete === null ? null : incompleteFromDto(dto.incomplete);
-  const { status, brokenReason, unrepairableReason } = instanceStatus(dto, incomplete, ctx);
+  const { status, brokenReason, unrepairableReason, unrepairableKind, renameTo } = instanceStatus(dto, incomplete, ctx);
   // 活动只报最要紧的那一件，被当作基底时它可能是 running 等；反过来报 inherited 却没说谁在用，或说了谁在用却没有任何占用，都是契约破了。
   if (dto.activity === "inherited" && dto.used_by === null) throw new Error(`实例 ${dto.id} 被当作基底占着，却没说是哪个实例在用`);
   if (dto.used_by !== null && dto.activity === null) throw new Error(`实例 ${dto.id} 正被 ${dto.used_by} 使用，却没有报出占用`);
@@ -317,6 +341,8 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     status,
     brokenReason,
     unrepairableReason,
+    unrepairableKind,
+    renameTo,
     createdAt: dto.created_at,
     lastPlayedAt: dto.last_played_at,
     playtimeMin: dto.playtime_min,

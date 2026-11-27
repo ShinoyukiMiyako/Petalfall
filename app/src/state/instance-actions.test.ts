@@ -1733,23 +1733,25 @@ describe("装好或补全好之后、落地重扫回来之前，实例照旧按�
     expect(find("生存")).toMatchObject({ status: "broken" });
   });
 
-  it("补全修不好的实例排着补全时按安装中派生、不带修不好的原因；补全被拒之后原因跟着损坏回来", async () => {
+  it("补全修不好的实例排着补全时按安装中派生、不带修不好的原因、种类与改名目标；补全被拒之后三者跟着损坏回来", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const reason = "缺少版本 JSON，也没有记下当初装的是什么";
-    instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason }) : i));
+    const reason = "缺少版本 JSON，也没有记下当初装的是什么；目录里有一份叫 1.20.1.json 的版本文件，把实例改名成 1.20.1 就能认出来";
+    instances = instances.map((i) =>
+      i.id === "生存" ? instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, unrepairable_kind: "no_record", rename_to: "1.20.1" }) : i,
+    );
     await store.actions.reload("instances");
     await settle();
-    expect(find("生存")).toMatchObject({ status: "broken", unrepairableReason: reason });
+    expect(find("生存")).toMatchObject({ status: "broken", unrepairableReason: reason, unrepairableKind: "no_record", renameTo: "1.20.1" });
     const repair = deferred<unknown>();
     ipc.overrides.set("repair_instance", () => repair.promise);
     await store.actions.repairInstance("生存");
     await settle();
-    expect(find("生存")).toMatchObject({ status: "installing", brokenReason: null, unrepairableReason: null });
+    expect(find("生存")).toMatchObject({ status: "installing", brokenReason: null, unrepairableReason: null, unrepairableKind: null, renameTo: null });
 
     repair.reject(new IpcError("instance_failed", `实例 生存 无法补全：${reason}`, { id: "生存", reason }));
     await settle();
     expect(store.getState().tasks.map((t) => t.status)).toEqual(["failed"]);
-    expect(find("生存")).toMatchObject({ status: "broken", brokenReason: "缺少版本 JSON", unrepairableReason: reason });
+    expect(find("生存")).toMatchObject({ status: "broken", brokenReason: "缺少版本 JSON", unrepairableReason: reason, unrepairableKind: "no_record", renameTo: "1.20.1" });
   });
 
   it("补全成功但落地重扫失败：不卡在安装中，退回手里那份列表，失败照常报出", async () => {

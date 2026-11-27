@@ -134,7 +134,9 @@ type DerivedField =
   | "modpack_error"
   | "last_crash_at"
   | "last_crash_error"
-  | "unrepairable_reason";
+  | "unrepairable_reason"
+  | "unrepairable_kind"
+  | "rename_to";
 
 interface MockInstance {
   dto: Omit<InstanceDto, DerivedField>;
@@ -775,6 +777,7 @@ function toDto(instance: MockInstance): InstanceDto {
   const play = playError === null ? mockPlaySummary(instance.dto.id) : null;
   const ready = instance.dto.status === "ready";
   const crash = mockCrashReport(instance.dto.id);
+  const refusal = instance.dto.status === "broken" ? mockRepairRefusal(instance) : null;
   return {
     ...instance.dto,
     description: instance.settings.description,
@@ -796,7 +799,9 @@ function toDto(instance: MockInstance): InstanceDto {
     last_crash_at: crash === null ? null : crash.at,
     last_crash_error: null,
     // 与后端一样只对版本 JSON 不可用的实例下结论：版本 JSON 还在的整合包半成品补全也会拒，由前端按未完成标记认出
-    unrepairable_reason: instance.dto.status === "broken" ? mockRepairRefusal(instance) : null,
+    unrepairable_reason: refusal === null ? null : refusal.reason,
+    unrepairable_kind: refusal === null ? null : refusal.kind,
+    rename_to: refusal === null ? null : refusal.renameTo,
     activity: activityOf(instance.dto.id),
     used_by: usedByOf(instance.dto.id),
     base_busy: ready ? baseBusyOf(instance.dto.id) : null,
@@ -1297,15 +1302,30 @@ function mockLoaderReinstallSpec(instance: MockInstance): NonNullable<Incomplete
   return { mc_version: mcVersion, loader: loader.kind, loader_version: loader.version };
 }
 
+/** 后端 broken_reason_text 给读不出来的版本 JSON 的前缀；mock 的损坏原因只存了这句话，按它认出是哪一种损坏。 */
+const UNREADABLE_JSON_PREFIX = "版本 JSON 读不出来：";
+
+/** 补全会以 instance_failed 拒绝时的原因、种类与改名目标，即列实例时的 unrepairable_reason、unrepairable_kind 与 rename_to。 */
+interface MockRepairRefusal {
+  reason: string;
+  kind: NonNullable<InstanceDto["unrepairable_kind"]>;
+  renameTo: string | null;
+}
+
 /**
- * 补全会以 instance_failed 拒绝时报的原因，与后端看未完成标记定补全方案的那一步同一套判定；修得好为 null。
- * 列实例给的 unrepairable_reason 与补全的拒绝都取这一句，两处逐字一致。mock 不记安装记录，版本 JSON 不可用时只看标记。
+ * 补全会以 instance_failed 拒绝时报的原因；修得好为 null。列实例给的三个字段与补全的拒绝都取这一份，与后端的判定同序：
+ * 先看整合包标记，再看版本 JSON 是不是读不出来（读不出来时不看记下的安装内容：照着重装最后也要把版本 JSON 写回那个读不出的
+ * 位置），最后看有没有记下当初装的是什么。mock 不记安装记录，记下的安装内容只看安装标记。
  */
-function mockRepairRefusal(instance: MockInstance): string | null {
-  if (instance.dto.incomplete?.kind === "modpack") return "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入";
+function mockRepairRefusal(instance: MockInstance): MockRepairRefusal | null {
+  if (instance.dto.incomplete?.kind === "modpack") return { reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入", kind: "modpack", renameTo: null };
+  if (instance.dto.status !== "broken") return null;
+  const broken = instance.dto.broken_reason;
+  if (broken === null) throw new Error(`mock 实例 ${instance.dto.id} 标为损坏却没有原因`);
+  if (broken.startsWith(UNREADABLE_JSON_PREFIX)) return { reason: broken, kind: "unreadable", renameTo: null };
   const marked = instance.dto.incomplete?.kind === "install" ? instance.dto.incomplete.spec : null;
-  if (instance.dto.status === "broken" && marked === null) return `${instance.dto.broken_reason ?? "版本 JSON 不可用"}，也没有记下当初装的是什么`;
-  return null;
+  if (marked !== null) return null;
+  return { reason: `${broken}，也没有记下当初装的是什么`, kind: "no_record", renameTo: null };
 }
 
 async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
@@ -1325,7 +1345,7 @@ async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
   }
   try {
     const refusal = mockRepairRefusal(instance);
-    if (refusal !== null) throw new IpcError("instance_failed", `实例 ${id} 无法补全：${refusal}`, { id, reason: refusal });
+    if (refusal !== null) throw new IpcError("instance_failed", `实例 ${id} 无法补全：${refusal.reason}`, { id, reason: refusal.reason });
     const marked = instance.dto.incomplete?.kind === "install" ? instance.dto.incomplete.spec : null;
     // 与后端一样：上次补全败在加载器自带的库上时，不带参数的补全也走重装，否则只会原样失败；装不回的照旧补全
     const stuck = instance.dto.incomplete?.error?.code === "loader_library_missing" && typeof reinstallableMockLoader(instance.dto.loaders) !== "string";

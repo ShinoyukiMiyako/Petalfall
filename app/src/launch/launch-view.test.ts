@@ -34,6 +34,8 @@ function inst(id: string, overrides: Partial<InstanceSummary> = {}): InstanceSum
     status: "ready",
     brokenReason: null,
     unrepairableReason: null,
+    unrepairableKind: null,
+    renameTo: null,
     createdAt: null,
     lastPlayedAt: null,
     playtimeMin: 0,

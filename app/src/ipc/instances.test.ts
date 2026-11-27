@@ -251,10 +251,11 @@ describe("mock：列表、内容与元数据", () => {
     expect(broken).toMatchObject({ status: "broken", mod_count: null, world_count: null, resource_pack_count: null, isolated: null, mc_version: null });
     expect(broken?.incomplete).toMatchObject({ kind: "install", outcome: "failed", spec: { loader: "neoforge" } });
     // 记着当初装的是什么，补全照着重装就能修好；没记下的那个补全修不好，就绪的实例一律不报
-    expect(broken?.unrepairable_reason).toBeNull();
-    expect(list.filter((i) => i.unrepairable_reason !== null).map((i) => [i.id, i.status, i.unrepairable_reason])).toEqual([
-      ["旧电脑拷来的", "broken", "缺少版本 JSON，也没有记下当初装的是什么"],
+    expect(broken).toMatchObject({ unrepairable_reason: null, unrepairable_kind: null, rename_to: null });
+    expect(list.filter((i) => i.unrepairable_reason !== null).map((i) => [i.id, i.status, i.unrepairable_reason, i.unrepairable_kind, i.rename_to])).toEqual([
+      ["旧电脑拷来的", "broken", "缺少版本 JSON，也没有记下当初装的是什么", "no_record", null],
     ]);
+    expect(list.filter((i) => i.unrepairable_reason === null).every((i) => i.unrepairable_kind === null && i.rename_to === null)).toBe(true);
   });
 
   it("内容：资源包顺序、当前光影与读不出 level.dat 的存档；损坏实例报 instance_failed", async () => {
@@ -461,7 +462,7 @@ describe("mock：新建与补全", () => {
   it("补全修不好的实例：补全以 instance_failed 拒绝，报的原因与列表给的逐字相同，实例原样留着、不占着", async () => {
     const ID = "旧电脑拷来的";
     const listed = (await listInstances()).find((i) => i.id === ID);
-    expect(listed).toMatchObject({ status: "broken", broken_reason: "缺少版本 JSON", incomplete: null });
+    expect(listed).toMatchObject({ status: "broken", broken_reason: "缺少版本 JSON", incomplete: null, unrepairable_kind: "no_record", rename_to: null });
     const error = await rejection(repairInstance("t-lost", mockGameDir(), ID));
     expect(error.code).toBe("instance_failed");
     expect(error.message).toBe(`实例 ${ID} 无法补全：缺少版本 JSON，也没有记下当初装的是什么`);
