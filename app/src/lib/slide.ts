@@ -76,6 +76,16 @@ export function elapsedSeconds(animation: Animation): number {
   return typeof time === "number" && time > 0 ? time / 1000 : 0;
 }
 
+/**
+ * 文档时间轴此刻的时间。途中接续时旧动画走了多久（currentTime）就是相对它算的，接着走的那一截起步时刻钉在这里才与读数同一刻。
+ * 它在帧与帧之间停在上一帧的帧时间上，比 performance.now() 早：钉在后者上，旧轨迹要等到那时才接着走，在动的东西先顿一截。
+ */
+export function timelineNow(doc: Document): number {
+  const time = doc.timeline.currentTime;
+  if (typeof time !== "number") throw new Error(`文档时间轴没有可用的时间（${String(time)}），接续的起步时刻无从钉起`);
+  return time;
+}
+
 interface Flight {
   animation: Animation;
   dx: number;
@@ -120,11 +130,17 @@ export class Slide {
     const now = this.offset();
     const dx = this.x + now.dx - x;
     const dy = this.y + now.dy - y;
+    // 旧的一段已在走（起步时刻已定）：新的一段起步时刻钉在文档时间轴此刻，与读旧轨迹的那一刻对齐。不钉的话新建的动画要到
+    // 带着它的那一帧（忙时更晚）才定起步时刻，这期间停在首帧，在动的东西先顿一两帧再接着走。
+    // 旧的一段自己还没定起步时刻（同一刻里连着转向）就不钉，与它一样交给引擎在本该起步的那一帧定。
+    // 先取时刻再取消：取不到时报错，旧的一段与登记都原样留着
+    const pin = this.flight !== null && typeof this.flight.animation.startTime === "number" ? timelineNow(this.el.ownerDocument) : null;
     this.flight?.animation.cancel();
     this.flight = null;
     this.place(x, y);
     if (Math.abs(dx) < REST_PX && Math.abs(dy) < REST_PX && Math.abs(now.vx) < REST_PX_PER_S && Math.abs(now.vy) < REST_PX_PER_S) return;
     const animation = playTrack(this.el, springTrack(this.spring, dx, now.vx, dy, now.vy, x, y));
+    if (pin !== null) animation.startTime = pin;
     const flight: Flight = { animation, dx, vx: now.vx, dy, vy: now.vy };
     this.flight = flight;
     animation.onfinish = () => {

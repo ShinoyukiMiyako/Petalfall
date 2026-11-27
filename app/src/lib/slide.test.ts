@@ -11,7 +11,8 @@ const scalesOf = (frames: Keyframe[]) => frames.map((frame) => Number(frame.scal
 interface Call {
   frames: Keyframe[];
   options: KeyframeAnimationOptions;
-  animation: { currentTime: number | null; cancel: ReturnType<typeof vi.fn>; onfinish: (() => void) | null };
+  /** startTime 与 Web Animations 一致：建好时为 null，等起步那一帧才定；用例可以直接写，模拟引擎已经定下。 */
+  animation: { currentTime: number | null; startTime: number | null; cancel: ReturnType<typeof vi.fn>; onfinish: (() => void) | null };
 }
 
 /** 带假 animate 的元素：jsdom 没有 Web Animations。 */
@@ -20,7 +21,7 @@ function animatable(): { el: HTMLElement; calls: Call[] } {
   const calls: Call[] = [];
   Object.defineProperty(el, "animate", {
     value(frames: Keyframe[], options: KeyframeAnimationOptions) {
-      const animation = { currentTime: 0, cancel: vi.fn(), onfinish: null };
+      const animation = { currentTime: 0, startTime: null, cancel: vi.fn(), onfinish: null };
       calls.push({ frames, options, animation });
       return animation;
     },
@@ -28,8 +29,15 @@ function animatable(): { el: HTMLElement; calls: Call[] } {
   return { el, calls };
 }
 
+/** jsdom 没有文档时间轴：桩上一个，此刻的时间取随机值并返回。 */
+function stubTimeline(currentTime: number | null = 500 + Math.round(Math.random() * 1e5) / 10): number | null {
+  Object.defineProperty(document, "timeline", { configurable: true, get: () => ({ currentTime }) });
+  return currentTime;
+}
+
 afterEach(() => {
   document.body.replaceChildren();
+  Reflect.deleteProperty(document, "timeline");
 });
 
 describe("springTrack：轨迹", () => {
@@ -230,6 +238,64 @@ describe("Slide", () => {
     const dy = 234 + mid.x - 134;
     expect(frames[1].translate).toBe(`0px ${r2(134 + springAt("settle", dy, mid.v, SAMPLE_S).x)}px`);
     expect(frames[frames.length - 1].translate).toBe("0px 134px");
+  });
+
+  it("从静止出发：不钉起步时刻，交给引擎在带着它的那一帧定", () => {
+    const { el, calls } = animatable();
+    const slide = new Slide(el, "settle");
+    slide.jump(0, 84);
+    // 没桩时间轴：要是去读它就抛错
+    slide.to(0, 234);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].animation.startTime).toBeNull();
+  });
+
+  it("途中转向、旧的一段已定下起步时刻：新的一段起步时刻钉在文档时间轴此刻，与读旧轨迹的那一刻对齐，不停在首帧等下一帧", () => {
+    const timeline = stubTimeline();
+    if (timeline === null) throw new Error("桩上的时间轴没有时间");
+    const { el, calls } = animatable();
+    const slide = new Slide(el, "settle");
+    slide.jump(0, 84);
+    slide.to(0, 234);
+    // 引擎在下一帧定下了起步时刻，之后又走了一段
+    const elapsed = 10 + Math.round(Math.random() * 200);
+    calls[0].animation.startTime = timeline - elapsed;
+    calls[0].animation.currentTime = elapsed;
+    slide.to(0, 134);
+    expect(calls).toHaveLength(2);
+    expect(calls[1].animation.startTime).toBe(timeline);
+    // 再转一次：钉过的那一段同样算已在走
+    calls[1].animation.currentTime = 0;
+    slide.to(0, 300);
+    expect(calls[2].animation.startTime).toBe(timeline);
+  });
+
+  it("途中转向、旧的一段还没定起步时刻（同一刻里连着转向）：新的一段也不钉，不读时间轴", () => {
+    const { el, calls } = animatable();
+    const slide = new Slide(el, "settle");
+    slide.jump(0, 84);
+    slide.to(0, 234);
+    slide.to(0, 134);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].animation.cancel).toHaveBeenCalledTimes(1);
+    expect(calls[1].animation.startTime).toBeNull();
+    expect(calls[1].frames[0].translate).toBe("0px 84px");
+  });
+
+  it("途中转向时文档时间轴没有可用的时间（文档不活动）：报错，旧的一段照旧在走，不另建没钉住的一段", () => {
+    stubTimeline(null);
+    const { el, calls } = animatable();
+    const slide = new Slide(el, "settle");
+    slide.jump(0, 84);
+    slide.to(0, 234);
+    calls[0].animation.startTime = 1000;
+    calls[0].animation.currentTime = 40;
+    const here = slide.at();
+    expect(() => slide.to(0, 134)).toThrow("文档时间轴没有可用的时间（null）");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].animation.cancel).not.toHaveBeenCalled();
+    expect(slide.at()).toEqual(here);
+    expect(el.style.translate).toBe("0px 234px");
   });
 
   it("途中回到原目标处但还有速度：照样接着滑，不当成已经停稳", () => {

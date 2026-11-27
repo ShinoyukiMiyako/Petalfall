@@ -42,7 +42,7 @@
 
 import { useMemo, useRef, type RefCallback } from "react";
 import { springAt, type SpringName } from "./motion";
-import { elapsedSeconds, springTrack } from "./slide";
+import { elapsedSeconds, springTrack, timelineNow } from "./slide";
 
 /**
  * 每一趟至多给这么多子项起动画：一次变化挪动的再多，既看不清谁在动，逐项起动画（每项一个合成层）的开销也不值。
@@ -179,7 +179,7 @@ function tick(view: Window, holds: Hold[]): void {
     // 有途中接续要换成整段的一批，整批钉在这一帧的时间上：换上的整段不能等引擎定（定在下一帧的话，接着走的旧轨迹
     // 在那一帧停住）；只钉它又不行，钉了起步时刻的一段新上合成线程时，同一批里还没定时刻、只在主线程上播的（叠加模式）
     // 要等到下一帧才定，里外两层又错开一帧（Chromium 实测，外层分组钉在这一帧、里面叠加模式的行晚一帧起步）
-    const pinned = due.some((hold) => hold.starts.length > 0) ? timelineNow(view) : null;
+    const pinned = due.some((hold) => hold.starts.length > 0) ? timelineNow(view.document) : null;
     if (pinned !== null) {
       for (const hold of due) {
         for (const start of hold.starts) {
@@ -257,16 +257,6 @@ export function startWhenPainted(start: (at: number) => void, view: Window, wait
 }
 
 /**
- * 文档时间轴此刻的时间。途中接续时旧动画走了多久（currentTime）就是相对它算的，接着走的那一截起步时刻钉在这里才与读数同一刻。
- * 它在帧与帧之间停在上一帧的帧时间上，比 performance.now() 早：钉在后者上，旧轨迹要等到那时才接着走，在动的东西先顿一截。
- */
-function timelineNow(view: Window): number {
-  const time = view.document.timeline.currentTime;
-  if (typeof time !== "number") throw new Error(`文档时间轴没有可用的时间（${String(time)}），接续的起步时刻无从钉起`);
-  return time;
-}
-
-/**
  * 途中接续里等新排布画出来的那一截：一条采样好的轨迹（lib/slide 的 springTrack 一类，旧轨迹接着走、这次的位移原样留着）
  * 交给 Web Animations 播，起步时刻钉在文档时间轴此刻，不先停在起点；fill 为 both，播完也停在留着位移的末帧，等着换成整段。
  * 与让位里带着速度接着走的同一个做法。给自己按解析解算接续的元素用（ui/Card 的 reflowEdge 外框），换的时机交给 startWhenPainted。
@@ -274,7 +264,7 @@ function timelineNow(view: Window): number {
 export function playContinuing(el: HTMLElement, track: { frames: Keyframe[]; duration: number }): Animation {
   const view = el.ownerDocument.defaultView;
   if (view === null) throw new Error("元素不在窗口里，没有文档时间轴可钉");
-  const at = timelineNow(view);
+  const at = timelineNow(view.document);
   const animation = el.animate(track.frames, { duration: track.duration, easing: "linear", fill: "both" });
   animation.startTime = at;
   return animation;
@@ -474,7 +464,7 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
       // 途中再被挤（被顶替的那段已在播）：旧轨迹不停（停下等就是在动的东西顿一下），起步时刻钉在读旧轨迹的这一刻；这一趟的新位移原样留着，
       // 与别处从静止起步的让位一样等新排布画出来，到期时在开播它们的同一个回调里，按那一刻的位置与速度换成整段，
       // 与它们钉同一个起步时刻（见 tick）
-      const flight = begin(el, planned, additive, "both", timelineNow(view), true);
+      const flight = begin(el, planned, additive, "both", timelineNow(view.document), true);
       hold = enqueue([], view, wait);
       flight.hold = hold;
       hold.starts.push((pinned) => {
