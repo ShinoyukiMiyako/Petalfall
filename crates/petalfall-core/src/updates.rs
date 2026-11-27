@@ -692,9 +692,13 @@ fn update_candidate(
 ///
 /// 新旧比的是所属发布的时间（这个发布最早传上来的时间，见 [`release_dates`]），不是两份构建各自的发布时间：
 /// 给旧发布补传的另一家构建传得晚，按它自己的时间比会被当成更新，换过去就是降级。候选必须同时满足：不是当前
-/// 版本、不是当前版本同一发布的另一份构建、通道被当前版本的通道放行、有发布时间、所属发布严格晚于当前版本所属的
-/// 发布、锁定了版本时所属发布不晚于锁定版本所属的发布。当前版本不在列表里（平台下架，或当初就装错了版本）或没有
-/// 发布时间时无从证明「更新」，不猜；锁定的版本不在列表里同理，没有上限就不报，不当作没锁。
+/// 版本、通道被当前版本的通道放行、有发布时间、所属发布严格晚于当前版本所属的发布、锁定了版本时所属发布不晚于
+/// 锁定版本所属的发布。当前版本不在列表里（平台下架，或当初就装错了版本）或没有发布时间时无从证明「更新」，
+/// 不猜；锁定的版本不在列表里同理，没有上限就不报，不当作没锁。
+///
+/// 当前版本同一发布的另一份构建不必另外排除：配成同一发布的两份，发布的时间相同，过不了「严格晚于」。也不能
+/// 另外按两份构建的版本号去排除：版本号跨发布不变的工程里，发布的时间那边已经认定这些同号构建认不出发布、各按
+/// 上传时间比，这里再按版本号把同号的新构建当成当前版本的另一份跳过，新发布只传了被借那一家时就报不出来。
 pub(crate) fn pick_update<'a>(
     versions: &'a [ModVersionInfo],
     current_version_id: &str,
@@ -716,8 +720,6 @@ pub(crate) fn pick_update<'a>(
         .zip(&released)
         .find(|&(candidate, &release)| {
             candidate.version_id != current.version_id
-                // 同一发布的另一份构建只是传得晚，换过去什么都没更新。
-                && !is_borrowed_twin(candidate, current)
                 && current.release_channel.admits(candidate.release_channel)
                 && !candidate.date_published.is_empty()
                 && release > released[at]
@@ -2986,6 +2988,53 @@ mod tests {
             picked_on_neoforge_1_20_1(&list, "1.4.0-neoforge", Some(&pin)).as_deref(),
             Some("1.5.0-neoforge")
         );
+    }
+
+    /// 版本号跨发布不变的工程：发布的时间那边认不出哪两份是同一发布、各按上传时间比，挑更新时也不能再按版本号把
+    /// 同号的新构建当成当前版本的另一份构建跳过，否则只传了被借那一家的新发布报不出来。
+    #[test]
+    fn pick_update_offers_a_same_numbered_build_when_the_number_names_no_release() {
+        use ModLoader::{Forge, NeoForge};
+        let build = |id: &str, number: &str, date: &str, loader: ModLoader| ModVersionInfo {
+            loaders: vec![loader],
+            version_number: number.to_owned(),
+            ..cf_version(id, date)
+        };
+
+        // 每个发布都叫 1.0，3 月的新发布只传了 forge 构建。
+        let list = vec![
+            build("forge-march", "1.0-forge", "2026-03-01T00:00:00Z", Forge),
+            build("forge-february", "1.0-forge", "2026-02-01T00:01:00Z", Forge),
+            build(
+                "neoforge-february",
+                "1.0-neoforge",
+                "2026-02-01T00:00:00Z",
+                NeoForge,
+            ),
+            build("forge-january", "1.0-forge", "2026-01-01T00:01:00Z", Forge),
+            build(
+                "neoforge-january",
+                "1.0-neoforge",
+                "2026-01-01T00:00:00Z",
+                NeoForge,
+            ),
+        ];
+        assert_eq!(
+            picked_on_neoforge_1_20_1(&list, "neoforge-february", None).as_deref(),
+            Some("forge-march")
+        );
+
+        // 版本号认得出发布、一对一配得上时，同一发布晚传的 forge 构建照旧不算更新。
+        let list = vec![
+            build("forge", "1.4.0-forge", "2026-01-02T00:00:00Z", Forge),
+            build(
+                "neoforge",
+                "1.4.0-neoforge",
+                "2026-01-01T00:00:00Z",
+                NeoForge,
+            ),
+        ];
+        assert_eq!(picked_on_neoforge_1_20_1(&list, "neoforge", None), None);
     }
 
     /// 忽略更新的 Mod 不出现在结果里，任何查询都不带它；实例里只剩它时一个请求都不发。
