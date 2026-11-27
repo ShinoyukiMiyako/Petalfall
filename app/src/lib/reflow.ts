@@ -443,7 +443,12 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
    */
   const launch = (planned: Launch, afterCommit: boolean, at: number) => {
     const { el, additive } = planned;
-    planned.replaces?.cancel();
+    if (planned.replaces !== null) {
+      // 登记当场清掉，同 land：下面建新的一段抛异常时元素已落到新位置，取消事件又不是当场派发的，这期间再来一趟会按已取消的
+      // 那一段记下的位置与速度当作在动的接着走，起点偏掉它走过的距离，还把它留着的位移累加进来
+      flights.delete(el);
+      planned.replaces.cancel();
+    }
     // 跟着 framer 形变走的与形变同一个时钟，见 observeReflow。钉了起步时刻，接下来那一帧的帧时间可能早于它
     // （尺寸观察报在这一帧的渲染步骤里，帧时间是这一帧开始时定的；长提交之后的第一帧，帧时间是长任务之前排下的）：
     // 不留住首帧，那一帧会画成终点

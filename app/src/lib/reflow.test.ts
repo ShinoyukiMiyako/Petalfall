@@ -829,6 +829,54 @@ describe("observeReflow：途中再被挤", () => {
     const now = springAt("morph", -120, 0, 0.05);
     expect(start(callsOn(b)[1])).toBe(`0px ${Math.round((now.x - 40) * 100) / 100}px`);
   });
+
+  it.each([
+    ["已在走", true],
+    ["还停在起点等新排布画出来", false],
+  ])("被顶替的那段%s、建新的一段抛异常：旧的一段当场取消、登记当场清掉；取消事件派发之前再被挤，从元素此刻的实际位置（新排布）静止起步", (_state, played) => {
+    const { a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const [first] = callsOn(b);
+    if (played) {
+      frame();
+      first.animation.currentTime = 20 + Math.random() * 200;
+    }
+    place(b, { top: 260 });
+    const animate = HTMLElement.prototype.animate;
+    const refused = new TypeError("关键帧不合法");
+    Object.defineProperty(HTMLElement.prototype, "animate", {
+      configurable: true,
+      writable: true,
+      value(this: HTMLElement, frames: Keyframe[], options: KeyframeAnimationOptions) {
+        if (this === b) throw refused;
+        return animate.call(this, frames, options);
+      },
+    });
+    expect(thrownBy(() => sizes.resize(a, 800))).toBe(refused);
+    // 旧的一段已取消：b 此刻没有任何位移，就在新排布的 260 上
+    expect(first.animation.cancel).toHaveBeenCalledTimes(1);
+    expect(first.animation.playState).toBe("idle");
+    Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, writable: true, value: animate });
+    // 取消事件还没派发（first.animation.oncancel 没调）就又被往下挤
+    const push = 10 + Math.round(Math.random() * 90);
+    place(b, { top: 260 + push });
+    sizes.resize(a, 800);
+    expect(callsOn(b)).toHaveLength(2);
+    const next = callsOn(b)[1];
+    // 起点就是这一趟挤出来的位移：不拿已取消那一段记下的位置与速度接着走，也不把它留着的位移累加进来
+    expect(start(next)).toBe(`0px ${-push}px`);
+    expect(next.frames.at(-1)?.translate).toBe("0px 0px");
+    // 静止起步：停在起点等新排布画出来，起步时刻不钉
+    expect(next.animation.playState).toBe("paused");
+    expect(next.animation.startTime).toBeNull();
+    expect(next.options.fill).toBe("auto");
+    // 已取消的那一段不再被当成要顶替的旧轨迹再取消一次
+    expect(first.animation.cancel).toHaveBeenCalledTimes(1);
+    frame();
+    expect(next.animation.play).toHaveBeenCalledTimes(1);
+    expect(first.animation.play).toHaveBeenCalledTimes(played ? 1 : 0);
+  });
 });
 
 describe("observeReflow：从静止起步等新排布画出来再计时", () => {
