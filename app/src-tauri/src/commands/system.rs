@@ -97,7 +97,7 @@ pub(crate) async fn complete_first_run_with(
         .collect::<Result<Vec<_>, _>>()?;
     // 整个提交持有基线锁：两次提交不交错，基线也只在第一次提交建目录之前取一次。
     let mut slot = baseline.0.lock().await;
-    let base = match slot.as_ref() {
+    let mut base = match slot.as_ref() {
         Some(base) => base.clone(),
         None => {
             let petalfall = facade.snapshot().await;
@@ -118,10 +118,13 @@ pub(crate) async fn complete_first_run_with(
         .await?;
     facade
         .update(|petalfall| {
-            petalfall.complete_first_run(&base, game_dir, extras);
+            petalfall.complete_first_run(&mut base, game_dir, extras);
             Ok::<_, CommandError>(())
         })
-        .await
+        .await?;
+    // 落盘成功、门面换进了这次的改动，基线才跟着记下这一次的结果。
+    *slot = Some(base);
+    Ok(())
 }
 
 // ---- 使用须知 ----
@@ -618,6 +621,52 @@ mod tests {
         assert_eq!(saved.game_directory.as_deref(), Some(petal.as_path()));
         assert_eq!(saved.extra_game_directories.len(), 1);
         assert!(saved.first_run_completed);
+    }
+
+    /// 两次提交之间由向导之外记进来的目录（启动收尾补完中断移动时记下的目标）不被第二次提交抹掉，
+    /// 第一次提交的勾选照样撤掉。
+    #[tokio::test]
+    async fn recommitting_first_run_keeps_a_directory_recorded_between_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let slot = FirstRunBaselineSlot::default();
+        let first = dir.path().join("A");
+        complete_first_run_with(
+            &facade,
+            &slot,
+            &first.display().to_string(),
+            vec![NamedDirectoryDto {
+                name: "HMCL".into(),
+                path: r"D:\HMCL\.minecraft".into(),
+            }],
+        )
+        .await
+        .unwrap();
+
+        let moved_to = std::path::PathBuf::from(r"F:\Moved\.minecraft");
+        facade
+            .update(|petalfall| {
+                petalfall.add_game_directory("移动目标", &moved_to);
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+        let second = dir.path().join("B");
+        complete_first_run_with(&facade, &slot, &second.display().to_string(), Vec::new())
+            .await
+            .unwrap();
+
+        let saved = ConfigStore::at(dir.path().join("config.json"))
+            .load()
+            .await
+            .unwrap();
+        assert_eq!(saved.game_directory.as_deref(), Some(second.as_path()));
+        let extras: Vec<(&str, &std::path::Path)> = saved
+            .extra_game_directories
+            .iter()
+            .map(|d| (d.name.as_str(), d.path.as_path()))
+            .collect();
+        assert_eq!(extras, [("移动目标", moved_to.as_path())]);
     }
 
     /// 校验不过时什么都不写：不建目录、不改配置、仍是首次启动。

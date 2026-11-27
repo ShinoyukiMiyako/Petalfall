@@ -66,9 +66,13 @@ impl GameDirProbe {
 pub struct FirstRunBaseline {
     game_directory: Option<PathBuf>,
     game_dir: PathBuf,
+    /// 向导之前的额外目录，加上之后各次提交时发现的、由向导之外记进来的。
     extra_game_directories: Vec<NamedDirectory>,
     /// 向导之前的当前目录那时在盘上是否存在。第一次提交可能就是在这里建的目录，事后再看盘就分不清了。
     current_exists: bool,
+    /// 上一次提交留下的额外目录；还没提交过时是取基线那一刻的。提交时配置里有、这里没有的目录是向导之外记进来的
+    /// （启动时在后台补完中断的实例移动会把目标记进来），并进基线，回到基线时不能把它们一起抹掉。
+    committed_extras: Vec<NamedDirectory>,
 }
 
 /// 切换游戏目录之前对当前目录做的一次限时探测，由 [`Petalfall::probe_current_game_dir`] 取得。
@@ -201,25 +205,38 @@ impl Petalfall {
     /// `current_exists` 是此刻的当前目录在盘上是否存在，由调用方在任何一次提交建目录之前限时探测
     /// （[`probe_dir`]）：记录过的目录可能在挂起的盘上，不能在门面锁里同步探测。
     pub fn first_run_baseline(&self, current_exists: bool) -> FirstRunBaseline {
+        let extra_game_directories = self.config().extra_game_directories.clone();
         FirstRunBaseline {
             game_directory: self.config().game_directory.clone(),
             game_dir: self.game_dir().to_path_buf(),
-            extra_game_directories: self.config().extra_game_directories.clone(),
+            committed_extras: extra_game_directories.clone(),
+            extra_game_directories,
             current_exists,
         }
     }
 
     /// 首次启动第一步提交：回到向导之前的目录记录，再把选定的目录设为当前、收下勾选的其它启动器文件夹、
-    /// 标记向导已完成。同一个基线上重复提交，结果与只提交最后一次相同。
+    /// 标记向导已完成。同一个基线上重复提交，结果与只提交最后一次相同。上一次提交之后由向导之外记进来的
+    /// 额外目录照样留着，只撤销向导自己上一次的选择。
+    ///
+    /// 提交之后 `baseline` 并进了新发现的向导之外的记录、记下了这一次留下的额外目录，调用方要在落盘成功后才
+    /// 把它存回去：落盘失败时门面没换进这次的改动，下一次提交仍要对照上一次真正生效的结果。
     ///
     /// 目录须事先经 [`validate_game_dir`] 校验并经 [`ensure_game_dir`] 建好；落盘仍由调用方
     /// [`Petalfall::save_config`] 完成。
     pub fn complete_first_run(
         &mut self,
-        baseline: &FirstRunBaseline,
+        baseline: &mut FirstRunBaseline,
         game_dir: PathBuf,
         extras: Vec<NamedDirectory>,
     ) {
+        for dir in &self.config().extra_game_directories {
+            let listed =
+                |list: &[NamedDirectory]| list.iter().any(|d| same_path(&d.path, &dir.path));
+            if !listed(&baseline.committed_extras) && !listed(&baseline.extra_game_directories) {
+                baseline.extra_game_directories.push(dir.clone());
+            }
+        }
         self.config_mut().game_directory = baseline.game_directory.clone();
         self.config_mut().extra_game_directories = baseline.extra_game_directories.clone();
         self.set_game_dir(baseline.game_dir.clone());
@@ -228,6 +245,7 @@ impl Petalfall {
             self.add_game_directory(extra.name, extra.path);
         }
         self.config_mut().first_run_completed = true;
+        baseline.committed_extras = self.config().extra_game_directories.clone();
     }
 
     /// 列出全部已知游戏目录：当前目录在前，其余按记录顺序；各目录并发限时探测是否可达与版本数。
@@ -1103,11 +1121,11 @@ mod tests {
 
         let chosen = tmp.path().join("Games").join(".minecraft");
         let chosen = validate_game_dir(&chosen.display().to_string()).unwrap();
-        let baseline = petalfall.first_run_baseline(probe_dir(petalfall.game_dir()).await);
+        let mut baseline = petalfall.first_run_baseline(probe_dir(petalfall.game_dir()).await);
         ensure_game_dir(&chosen).await.unwrap();
         assert!(chosen.is_dir(), "目录不存在会自动创建");
         petalfall.complete_first_run(
-            &baseline,
+            &mut baseline,
             chosen.clone(),
             vec![
                 named("HMCL", "D:/HMCL/.minecraft"),
@@ -1139,12 +1157,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let default_dir = default_game_dir(tmp.path());
         let mut petalfall = petalfall_at(tmp.path(), &default_dir, Vec::new());
-        let baseline = petalfall.first_run_baseline(probe_dir(petalfall.game_dir()).await);
+        let mut baseline = petalfall.first_run_baseline(probe_dir(petalfall.game_dir()).await);
         assert!(!default_dir.exists(), "向导之前默认目录还没建出来");
 
         ensure_game_dir(&default_dir).await.unwrap();
         petalfall.complete_first_run(
-            &baseline,
+            &mut baseline,
             default_dir.clone(),
             vec![
                 named("HMCL", "D:/HMCL/.minecraft"),
@@ -1156,7 +1174,7 @@ mod tests {
         let petal = tmp.path().join("Petal");
         ensure_game_dir(&petal).await.unwrap();
         petalfall.complete_first_run(
-            &baseline,
+            &mut baseline,
             petal.clone(),
             vec![named("官方启动器", "C:/Users/p/AppData/Roaming/.minecraft")],
         );
@@ -1189,7 +1207,7 @@ mod tests {
         );
 
         // 再改回默认目录：默认目录又是当前，Petal 不留记录
-        petalfall.complete_first_run(&baseline, default_dir.clone(), Vec::new());
+        petalfall.complete_first_run(&mut baseline, default_dir.clone(), Vec::new());
         assert_eq!(petalfall.game_dir(), default_dir);
         assert_eq!(
             petalfall.config().game_directory,
@@ -1211,23 +1229,77 @@ mod tests {
             &current,
             vec![named("PCL2", "E:/PCL2/.minecraft")],
         );
-        let baseline = petalfall.first_run_baseline(probe_dir(petalfall.game_dir()).await);
+        let mut baseline = petalfall.first_run_baseline(probe_dir(petalfall.game_dir()).await);
 
         let first = tmp.path().join("A");
         ensure_game_dir(&first).await.unwrap();
         petalfall.complete_first_run(
-            &baseline,
+            &mut baseline,
             first.clone(),
             vec![named("HMCL", "D:/HMCL/.minecraft")],
         );
         let second = tmp.path().join("B");
         ensure_game_dir(&second).await.unwrap();
-        petalfall.complete_first_run(&baseline, second.clone(), Vec::new());
+        petalfall.complete_first_run(&mut baseline, second.clone(), Vec::new());
 
         assert_eq!(petalfall.game_dir(), second);
         assert_eq!(
             petalfall.config().extra_game_directories,
             vec![named("PCL2", "E:/PCL2/.minecraft"), named("Games", current)]
+        );
+    }
+
+    /// 配置重置后重进向导时，启动收尾可能在取基线之后、两次提交之间把中断移动的目标记进额外目录：
+    /// 再提交只撤销向导自己上一次的选择，那条记录留着，否则移过去的实例在哪个列表里都找不到。
+    #[tokio::test(start_paused = true)]
+    async fn recommitting_first_run_keeps_directories_recorded_outside_the_wizard() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default_dir = default_game_dir(tmp.path());
+        let mut petalfall = petalfall_at(
+            tmp.path(),
+            &default_dir,
+            vec![named("PCL2", "E:/PCL2/.minecraft")],
+        );
+        let mut baseline = petalfall.first_run_baseline(probe_dir(petalfall.game_dir()).await);
+        // 取基线之后、第一次提交落到配置之前记进来的
+        petalfall.add_game_directory("移动目标", "F:/Moved/.minecraft");
+
+        let first = tmp.path().join("A");
+        ensure_game_dir(&first).await.unwrap();
+        petalfall.complete_first_run(
+            &mut baseline,
+            first.clone(),
+            vec![named("HMCL", "D:/HMCL/.minecraft")],
+        );
+        assert_eq!(
+            petalfall.config().extra_game_directories,
+            vec![
+                named("PCL2", "E:/PCL2/.minecraft"),
+                named("移动目标", "F:/Moved/.minecraft"),
+                named("HMCL", "D:/HMCL/.minecraft"),
+            ]
+        );
+
+        // 两次提交之间记进来的
+        petalfall.add_game_directory("另一个目标", "G:/Other/.minecraft");
+        let second = tmp.path().join("B");
+        ensure_game_dir(&second).await.unwrap();
+        petalfall.complete_first_run(
+            &mut baseline,
+            second.clone(),
+            vec![named("官方启动器", "C:/Users/p/AppData/Roaming/.minecraft")],
+        );
+
+        assert_eq!(petalfall.game_dir(), second);
+        assert_eq!(
+            petalfall.config().extra_game_directories,
+            vec![
+                named("PCL2", "E:/PCL2/.minecraft"),
+                named("移动目标", "F:/Moved/.minecraft"),
+                named("另一个目标", "G:/Other/.minecraft"),
+                named("官方启动器", "C:/Users/p/AppData/Roaming/.minecraft"),
+            ],
+            "向导上一次勾选的 HMCL 与选过的 A 都撤掉，向导之外记进来的两条都在"
         );
     }
 
