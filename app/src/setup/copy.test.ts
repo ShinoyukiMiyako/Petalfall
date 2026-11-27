@@ -61,7 +61,7 @@ describe("文案表", () => {
 
   it("提权时的提示只说不直接打开，不说从开始菜单打开就是普通权限", () => {
     // UAC 关着的电脑上所有进程都带管理员权限，从开始菜单打开也一样
-    expect(COPY.zh.done.elevated).toBe(`安装程序是以管理员身份运行的，这里不直接打开${APP_NAME}，请从开始菜单打开。`);
+    expect(COPY.zh.done.elevated).toBe(`安装程序是以管理员身份运行的，这里不直接打开${APP_NAME}，从开始菜单打开它。`);
     expect(COPY.en.done.elevated).toBe(`Setup is running as administrator, so it won't open ${APP_NAME_EN} for you. Open it from the Start menu.`);
   });
 

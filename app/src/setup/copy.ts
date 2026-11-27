@@ -318,7 +318,7 @@ const ZH: SetupCopy = {
     firstRun: `第一次打开时，${APP_NAME}会带你设置游戏目录、Java 和账户。`,
     kept: "设置、账户和游戏文件都还在。",
     switchKept: SWITCH_KEPT_ZH,
-    elevated: `安装程序是以管理员身份运行的，这里不直接打开${APP_NAME}，请从开始菜单打开。`,
+    elevated: `安装程序是以管理员身份运行的，这里不直接打开${APP_NAME}，从开始菜单打开它。`,
     open: `打开${APP_NAME}`,
     close: "关闭",
   },
