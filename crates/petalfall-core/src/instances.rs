@@ -1249,14 +1249,20 @@ pub(crate) async fn hide_base_versions(game_dir: &Path, scan: &mut VersionScan) 
 /// 玩家的。
 pub(crate) async fn is_unclaimed_base_version(game_dir: &Path, id: &str) -> bool {
     let recorded = match read_base_record(game_dir).await {
-        Ok(record) => record.versions.iter().any(|recorded| recorded == id),
+        Ok(record) => record.versions,
         Err(err) => {
             let error = error_with_causes(&err);
             tracing::warn!(id, %error, "依赖版本记录读不出来，这个版本目录按玩家的算");
-            false
+            Vec::new()
         }
     };
-    if !recorded {
+    is_unclaimed_in(game_dir, &recorded, id).await
+}
+
+/// 同 [`is_unclaimed_base_version`]，依赖版本记录由调用方读好传进来（`recorded`，读不出来时传空）：一次检查要看
+/// 好几个目录时只读一次记录，读不出来也只记一条日志。
+async fn is_unclaimed_in(game_dir: &Path, recorded: &[String], id: &str) -> bool {
+    if !recorded.iter().any(|recorded| recorded == id) {
         return false;
     }
     let dir = petalfall_install::GameLayout::new(game_dir).version_dir(id);
@@ -1334,23 +1340,41 @@ pub(crate) async fn blocking_dependents(
     scan: &VersionScan,
     id: &str,
 ) -> Vec<String> {
+    let dependents = dependents_in(scan, id);
+    if dependents.is_empty() {
+        return dependents;
+    }
+    // 每个继承者的每一层都要对照记录：在这里读一次，读不出来只记一条，不是每层各读各记。
+    let recorded = match read_base_record(game_dir).await {
+        Ok(record) => record.versions,
+        Err(err) => {
+            let error = error_with_causes(&err);
+            tracing::warn!(id, %error, "依赖版本记录读不出来，继承它的版本都按玩家的算");
+            Vec::new()
+        }
+    };
     let mut blocking = Vec::new();
-    for dependent in dependents_in(scan, id) {
-        if !is_unused_subtree(game_dir, scan, &dependent).await {
+    for dependent in dependents {
+        if !is_unused_subtree(game_dir, scan, &recorded, &dependent).await {
             blocking.push(dependent);
         }
     }
     blocking
 }
 
-/// `id` 与继承着它的各层是不是都是启动器自己落下、没人玩过的依赖版本目录。继承关系成环时按不是算：环里的
-/// 版本说不清谁靠谁，当成玩家的。
-async fn is_unused_subtree(game_dir: &Path, scan: &VersionScan, id: &str) -> bool {
+/// `id` 与继承着它的各层是不是都是启动器自己落下、没人玩过的依赖版本目录（`recorded` 是读好的依赖版本记录）。
+/// 继承关系成环时按不是算：环里的版本说不清谁靠谁，当成玩家的。
+async fn is_unused_subtree(
+    game_dir: &Path,
+    scan: &VersionScan,
+    recorded: &[String],
+    id: &str,
+) -> bool {
     let mut seen = HashSet::new();
     let mut pending = vec![id.to_owned()];
     while let Some(current) = pending.pop() {
         if !seen.insert(current.to_lowercase())
-            || !is_unclaimed_base_version(game_dir, &current).await
+            || !is_unclaimed_in(game_dir, recorded, &current).await
         {
             return false;
         }
@@ -2522,6 +2546,86 @@ pub(crate) mod tests {
         let mut listed = listed_ids(&petalfall).await;
         listed.sort();
         assert_eq!(listed, ["1.21.1", "生存服"]);
+    }
+
+    /// 收下装上订阅器之后当前线程打出的日志（不带颜色）。
+    #[derive(Clone)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Captured {
+        /// tracing-core 只登记着一个调度器时，日志点头一回被走到就按走到它的那条线程的默认调度器定兴趣并全局缓存：
+        /// 并行的别的用例先走到同一个日志点，会把它缓存成「不启用」。先常驻登记一个级别上限为 OFF 的调度器，兴趣就
+        /// 按所有存活的调度器合起来算。
+        fn new() -> Self {
+            use tracing_subscriber::layer::SubscriberExt as _;
+            static GATE: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+            GATE.get_or_init(|| {
+                tracing::Dispatch::new(
+                    tracing_subscriber::registry()
+                        .with(tracing_subscriber::filter::LevelFilter::OFF),
+                )
+            });
+            Self(Arc::default())
+        }
+
+        /// 在当前线程上装一个把日志写到这里的订阅器，守卫放掉时卸下。
+        fn install(&self) -> tracing::subscriber::DefaultGuard {
+            let writer = self.clone();
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::INFO)
+                    .with_writer(move || writer.clone())
+                    .finish(),
+            )
+        }
+
+        fn lines_with(&self, needle: &str) -> Vec<String> {
+            String::from_utf8(self.0.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains(needle))
+                .map(str::to_owned)
+                .collect()
+        }
+    }
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 依赖版本记录读不懂时，一次依赖检查不管有几个继承者、几层，只读一次记录、只记一条 warn；继承者都按玩家的算。
+    #[tokio::test]
+    async fn an_unreadable_base_record_is_read_and_warned_once_per_dependency_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        for id in ["叠加甲", "叠加乙", "叠加丙"] {
+            write_version(&game, id, &fabric_json(id, "1.21.1"));
+        }
+        let meta = game.join(PETALFALL_META_DIR);
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(meta.join("base-versions.json"), b"{oops").unwrap();
+        let scan = discover_versions(&game).await.unwrap();
+        let captured = Captured::new();
+
+        let mut blocking = {
+            let _guard = captured.install();
+            blocking_dependents(&game, &scan, "1.21.1").await
+        };
+
+        blocking.sort();
+        assert_eq!(blocking, ["叠加丙", "叠加乙", "叠加甲"]);
+        let warned = captured.lines_with("依赖版本记录读不出来");
+        assert_eq!(warned.len(), 1, "{warned:?}");
     }
 
     /// 记录读不懂时认不出哪些是依赖版本：宁可多列一个，也不把看不清的目录藏起来；继承规则不看记录，列表照常返回。
