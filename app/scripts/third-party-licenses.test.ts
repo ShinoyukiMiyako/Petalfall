@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { collectCargoPackages, collectNpmPackages, distributionTarget, hostTarget, npmLicense } from "./third-party-licenses.mjs";
 
 const APP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -74,15 +74,24 @@ describe("前端依赖闭包", () => {
   });
 });
 
-describe("清单按哪个平台过滤 Rust 依赖", () => {
+// hostTarget 每调一次都同步起一个 rustc -vV 子进程，机器满载时一次就可能要好几秒，几次叠起来会超出默认的 5 秒。
+// 本机平台在 beforeAll 里只取一次；distributionTarget({}) 要取本机平台，仍会起 rustc，所以这一组的用例与钩子都放宽到这个上限
+const RUSTC_TIMEOUT_MS = 30_000;
+
+describe("清单按哪个平台过滤 Rust 依赖", { timeout: RUSTC_TIMEOUT_MS }, () => {
+  let host: string;
+  beforeAll(() => {
+    host = hostTarget();
+  }, RUSTC_TIMEOUT_MS);
+
   it("交叉编译时取 Tauri 传来的目标，不取构建机自己的平台", () => {
-    const target = hostTarget() === "x86_64-pc-windows-msvc" ? "x86_64-unknown-linux-gnu" : "x86_64-pc-windows-msvc";
+    const target = host === "x86_64-pc-windows-msvc" ? "x86_64-unknown-linux-gnu" : "x86_64-pc-windows-msvc";
     expect(distributionTarget({ TAURI_ENV_TARGET_TRIPLE: target })).toBe(target);
   });
 
   it("不经 Tauri 直接构建时取本机平台，空值也算没传", () => {
-    expect(distributionTarget({})).toBe(hostTarget());
-    expect(distributionTarget({ TAURI_ENV_TARGET_TRIPLE: "" })).toBe(hostTarget());
+    expect(distributionTarget({})).toBe(host);
+    expect(distributionTarget({ TAURI_ENV_TARGET_TRIPLE: "" })).toBe(host);
   });
 });
 
