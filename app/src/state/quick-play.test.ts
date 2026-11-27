@@ -118,7 +118,7 @@ describe("直达走与启动相同的拦截链", () => {
   });
 
   describe("别的实例在运行时点失败通知上的重试", () => {
-    const unrepairable = instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null });
+    const unrepairable = instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", unrepairable_kind: "no_record", mc_version: null });
     const repairable = instanceDto("生存", { status: "broken", broken_reason: "缺少客户端 jar" });
 
     /** 「生存」以 first 启动失败，留下带重试的通知；接着「创造」开起来在运行。返回那条通知上的重试。 */
@@ -291,7 +291,7 @@ describe("直达走与启动相同的拦截链", () => {
   it.each<[string, Partial<InstanceDto>, string]>([
     [
       "后端说补全修不好：报出后端给的原因原文",
-      { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null, quick_play: null },
+      { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", unrepairable_kind: "no_record", mc_version: null, quick_play: null },
       "缺少版本 JSON，也没有记下当初装的是什么",
     ],
     [
@@ -305,6 +305,7 @@ describe("直达走与启动相同的拦截链", () => {
         status: "broken",
         broken_reason: "缺少版本 JSON",
         unrepairable_reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入",
+        unrepairable_kind: "modpack",
         incomplete: { kind: "modpack", outcome: "pending", started_at: 1_719_999_000_000, spec: null, error: null },
         mc_version: null,
         quick_play: null,

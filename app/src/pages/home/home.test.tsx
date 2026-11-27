@@ -628,7 +628,7 @@ describe("主页：最近游玩", () => {
 
   it("最近卡上的实例补全修不好：角上的修复按钮带原因禁用，提示第二行是后端给的原因，点了不发补全", async () => {
     const reason = "缺少版本 JSON，也没有记下当初装的是什么";
-    instances = instances.map((i) => (i.id === "创造" ? { ...i, status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, mc_version: null, world_count: null, mod_count: null } : i));
+    instances = instances.map((i) => (i.id === "创造" ? { ...i, status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, unrepairable_kind: "no_record", mc_version: null, world_count: null, mod_count: null } : i));
     await mount();
     const card = buttonByLabel("打开「创造」").closest<HTMLElement>("[data-clip]");
     if (card === null) throw new Error("找不到「创造」的最近卡");

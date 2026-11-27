@@ -2080,7 +2080,7 @@ describe("实例详情：补全修不好的损坏实例", () => {
   };
 
   beforeEach(() => {
-    instances = instances.map((i) => (i.id === ID ? instanceDto(ID, { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: UNREPAIRABLE, mc_version: null }) : i));
+    instances = instances.map((i) => (i.id === ID ? instanceDto(ID, { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: UNREPAIRABLE, unrepairable_kind: "no_record", mc_version: null }) : i));
   });
 
   it("概览横幅：标题不说暂时，正文是后端给的原因原文而不是损坏原因，不给「修复实例」，给「删除实例」", async () => {
@@ -2297,7 +2297,7 @@ describe("实例详情：补全修不好的损坏实例", () => {
   });
 
   it("修得好的损坏实例照旧：崩溃页的「补全游戏文件」能点，发出补全", async () => {
-    instances = instances.map((i) => (i.id === ID ? { ...i, unrepairable_reason: null } : i));
+    instances = instances.map((i) => (i.id === ID ? { ...i, unrepairable_reason: null, unrepairable_kind: null } : i));
     ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
     crash = report([{ category: "native_library_missing" }], NOW - 60_000);
     await open("crash");
@@ -2340,7 +2340,7 @@ describe("实例详情：损坏实例上进入存档、导出与移动的原因"
     ],
     [
       "补全修不好：不承诺修复，写明后端给的原因",
-      { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: LOST, mc_version: null },
+      { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: LOST, unrepairable_kind: "no_record", mc_version: null },
       { enter: `实例文件不完整，补全修不好：${LOST}`, export: `实例文件不完整，补全修不好：${LOST}`, move: `实例文件不完整，补全修不好：${LOST}` },
     ],
     [

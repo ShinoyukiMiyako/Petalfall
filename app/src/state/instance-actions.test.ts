@@ -315,7 +315,7 @@ describe("修复完成后的启动失败卡", () => {
   const unrepairable: [string, Partial<InstanceDto>, string][] = [
     [
       "后端说补全修不好：报出的是后端给的原因",
-      { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null },
+      { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", unrepairable_kind: "no_record", mc_version: null },
       "缺少版本 JSON，也没有记下当初装的是什么",
     ],
     ["整合包没导入完：报出的是重新导入那一句", { incomplete: { kind: "modpack", outcome: "pending", started_at: 1_719_999_000_000, spec: null, error: null } }, MODPACK_REIMPORT_COPY.note],
@@ -325,6 +325,7 @@ describe("修复完成后的启动失败卡", () => {
         status: "broken",
         broken_reason: "缺少版本 JSON",
         unrepairable_reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入",
+        unrepairable_kind: "modpack",
         incomplete: { kind: "modpack", outcome: "pending", started_at: 1_719_999_000_000, spec: null, error: null },
         mc_version: null,
       },
@@ -371,7 +372,7 @@ describe("修复完成后的启动失败卡", () => {
 describe("启动拦截遇上补全修不好的实例：边角路径把原因交给错误处理", () => {
   const LOST = "缺少版本 JSON，也没有记下当初装的是什么";
   const unrepairable: [string, Partial<InstanceDto>, string][] = [
-    ["后端说补全修不好：报出后端给的原因原文", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: LOST, mc_version: null }, LOST],
+    ["后端说补全修不好：报出后端给的原因原文", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: LOST, unrepairable_kind: "no_record", mc_version: null }, LOST],
     [
       "整合包没导入完：报出重新导入那一句",
       { incomplete: { kind: "modpack", outcome: "pending", started_at: 1_719_999_000_000, spec: null, error: null } },
@@ -383,6 +384,7 @@ describe("启动拦截遇上补全修不好的实例：边角路径把原因交�
         status: "broken",
         broken_reason: "缺少版本 JSON",
         unrepairable_reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入",
+        unrepairable_kind: "modpack",
         incomplete: { kind: "modpack", outcome: "pending", started_at: 1_719_999_000_000, spec: null, error: null },
         mc_version: null,
       },

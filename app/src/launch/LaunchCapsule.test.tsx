@@ -292,7 +292,7 @@ describe("被别的实例当作基底时的启动", () => {
 });
 
 describe("损坏面的带原因禁用", () => {
-  const refreshWith = async (over: { activity?: "backing_up" | "modifying" | "inherited" | null; used_by?: string | null; modpack_incomplete?: boolean; unrepairable_reason?: string | null }) => {
+  const refreshWith = async (over: { activity?: "backing_up" | "modifying" | "inherited" | null; used_by?: string | null; modpack_incomplete?: boolean; unrepairable_reason?: string | null; unrepairable_kind?: "unreadable" | "no_record" | "modpack" | null }) => {
     ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "版本 JSON 不可用", activity: null, ...over })]);
     await act(async () => {
       await launcher.actions.refreshInstances();
@@ -330,7 +330,7 @@ describe("损坏面的带原因禁用", () => {
     ["同时正在备份（修不好排在被占着之前说）", "backing_up" as const],
   ])("补全修不好、%s：「修复并启动」保持可聚焦、读出不可用，提示是后端给的原因，点了不发补全", async (_name, activity) => {
     const reason = "缺少版本 JSON，也没有记下当初装的是什么";
-    await refreshWith({ activity, unrepairable_reason: reason });
+    await refreshWith({ activity, unrepairable_reason: reason, unrepairable_kind: "no_record" });
     const go = repair();
     act(() => go.focus());
     expect(document.activeElement).toBe(go);
@@ -365,7 +365,7 @@ describe("失败面的「修复实例」", () => {
       await launcher.actions.launch("生存");
       await settle();
     });
-    ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, mc_version: null })]);
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, unrepairable_kind: "no_record", mc_version: null })]);
     await act(async () => {
       await launcher.actions.refreshInstances();
       await settle();

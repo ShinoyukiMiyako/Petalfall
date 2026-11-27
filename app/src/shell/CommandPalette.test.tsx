@@ -196,11 +196,11 @@ describe("命令面板", () => {
     expect(document.documentElement.getAttribute("data-sk-mode")).toBe("day");
   });
 
-  it.each([
-    ["补全修得好：给出「修复并启动」", null, true],
-    ["补全修不好：不出现「修复并启动」", "缺少版本 JSON，也没有记下当初装的是什么", false],
-  ])("当前实例损坏，%s", async (_name, unrepairable, offered) => {
-    ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: unrepairable, mc_version: null }), instanceDto("创造")]);
+  it.each<[string, string | null, InstanceDto["unrepairable_kind"], boolean]>([
+    ["补全修得好：给出「修复并启动」", null, null, true],
+    ["补全修不好：不出现「修复并启动」", "缺少版本 JSON，也没有记下当初装的是什么", "no_record", false],
+  ])("当前实例损坏，%s", async (_name, unrepairable, kind, offered) => {
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: unrepairable, unrepairable_kind: kind, mc_version: null }), instanceDto("创造")]);
     ipc.overrides.set("get_config", () => configDto({ selected_version: "生存" }));
     await mount();
     act(() => shell.openPalette("生存"));
@@ -210,7 +210,7 @@ describe("命令面板", () => {
 
   it.each<[string, Partial<InstanceDto> | null, boolean]>([
     ["实例照旧完好：照常给出启动", null, true],
-    ["实例被重扫成补全修不好：不给启动", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null }, false],
+    ["实例被重扫成补全修不好：不给启动", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", unrepairable_kind: "no_record", mc_version: null }, false],
     ["实例被重扫成整合包没导入完：不给启动", { incomplete: { kind: "modpack", outcome: "pending", started_at: 1_699_000_000_000, spec: null, error: null } }, false],
     ["实例被重扫成修得好的损坏、没有被挡住：照常给出启动", { status: "broken", broken_reason: "缺少客户端 jar" }, true],
     ["实例被重扫成修得好的损坏、它依赖的实例正在运行：不给启动", { status: "broken", broken_reason: "缺少客户端 jar", base_busy: { id: "创造", activity: "running" } }, false],

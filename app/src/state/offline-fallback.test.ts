@@ -242,7 +242,7 @@ describe("以离线方式进单人：状态容器", () => {
     ["补全修得好：叫玩家先修复", { status: "broken", broken_reason: "missing_json" }, "实例需要先修复"],
     [
       "后端说补全修不好：报后端给的原因原文",
-      { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null },
+      { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", unrepairable_kind: "no_record", mc_version: null },
       "缺少版本 JSON，也没有记下当初装的是什么",
     ],
     [
@@ -251,6 +251,7 @@ describe("以离线方式进单人：状态容器", () => {
         status: "broken",
         broken_reason: "缺少版本 JSON",
         unrepairable_reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入",
+        unrepairable_kind: "modpack",
         incomplete: { kind: "modpack", outcome: "pending", started_at: T0 - 60_000, spec: null, error: null },
         mc_version: null,
       },

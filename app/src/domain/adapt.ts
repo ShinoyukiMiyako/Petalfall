@@ -279,6 +279,8 @@ const REPAIRABLE: Unrepairable = { unrepairableReason: null, unrepairableKind: n
 function unrepairableFromDto(dto: InstanceDto, incomplete: InstanceIncomplete | null): Unrepairable {
   const kind = dto.unrepairable_kind === null ? null : oneOf(dto.unrepairable_kind, UNREPAIRABLE_KINDS, "补全修不好的种类");
   if (dto.unrepairable_reason === null && kind !== null) throw new Error(`实例 ${dto.id} 没说补全为什么修不好，却给了修不好的种类：${kind}`);
+  // 页面按种类分出路，不解析原因文字：只有原因没有种类的话，读不出来的实例会被当成只能删除
+  if (dto.unrepairable_reason !== null && kind === null) throw new Error(`实例 ${dto.id} 说补全修不好，却没给修不好的种类：${dto.unrepairable_reason}`);
   if (dto.rename_to !== null && kind !== "no_record") throw new Error(`实例 ${dto.id} 修不好的种类是 ${String(kind)}，却给了改名目标：${dto.rename_to}`);
   if (kind === "modpack" && (incomplete === null || incomplete.kind !== "modpack")) throw new Error(`实例 ${dto.id} 说整合包没有导入完，却没有整合包的未完成标记`);
   return { unrepairableReason: dto.unrepairable_reason, unrepairableKind: kind, renameTo: dto.rename_to };

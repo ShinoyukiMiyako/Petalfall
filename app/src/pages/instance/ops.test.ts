@@ -21,7 +21,8 @@ const UNREADABLE = "版本 JSON 读不出来：文件 IO 失败: D:\\Games\\.min
 const RENAMABLE = `${LOST}；目录里有一份叫 1.20.1-NeoForge.json 的版本文件，把实例改名成 1.20.1-NeoForge 就能认出来`;
 
 const of = (over: Partial<InstanceDto>): InstanceSummary => instanceFromDto(instanceDto("生存", over), idle);
-const lost = (reason: string) => of({ status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, mc_version: null });
+const lost = (reason: string, renameTo: string | null = null) =>
+  of({ status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, unrepairable_kind: "no_record", rename_to: renameTo, mc_version: null });
 // 读不出来的带着记下安装内容的安装标记：有记录也修不好
 const unreadable = () =>
   of({ status: "broken", broken_reason: UNREADABLE, unrepairable_reason: UNREADABLE, unrepairable_kind: "unreadable", incomplete: INSTALL_PENDING, mc_version: null });
@@ -49,7 +50,7 @@ describe("损坏实例被挡住的原因", () => {
 
   it("后端原因已带句末标点或后面跟着一句提示：原样接在末尾，不改写也不补句号", () => {
     const hinted = `${LOST}；目录里有一份叫 1.20.1.json 的版本文件，把实例改名成 1.20.1 就能认出来`;
-    expect(reasons(lost(hinted)).enter).toBe(`实例文件不完整，补全修不好：${hinted}`);
+    expect(reasons(lost(hinted, "1.20.1")).enter).toBe(`实例文件不完整，补全修不好：${hinted}`);
     // 句末标点随机取一种（含没有）：有没有都照原文，不多也不少
     const tail = ["", "。", ".", "！", "?"][Math.floor(Math.random() * 5)];
     const reason = `Version JSON is missing ${Math.floor(Math.random() * 1000)}${tail}`;
@@ -67,13 +68,13 @@ describe("损坏实例被挡住的原因", () => {
 
   it("整合包没导入完的指向重新导入；后端同时报了原因也先说重新导入，与页面上给的入口一致", () => {
     expect(reasons(of({ incomplete: MODPACK_PENDING }))).toEqual({ enter: REIMPORT, export: REIMPORT, move: REIMPORT });
-    const both = of({ status: "broken", broken_reason: "整合包没有导入完", unrepairable_reason: LOST, incomplete: MODPACK_PENDING });
+    const both = of({ status: "broken", broken_reason: "整合包没有导入完", unrepairable_reason: LOST, unrepairable_kind: "no_record", incomplete: MODPACK_PENDING });
     expect(reasons(both)).toEqual({ enter: REIMPORT, export: REIMPORT, move: REIMPORT });
   });
 
   it("补全按钮的原因：整合包没导入完、后端也给了它的那句原因时，同样先说前端的重新导入说明", () => {
     const backendPack = "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入";
-    const pack = of({ status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: backendPack, incomplete: MODPACK_PENDING, mc_version: null });
+    const pack = of({ status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: backendPack, unrepairable_kind: "modpack", incomplete: MODPACK_PENDING, mc_version: null });
     expect(repairReason(pack, locksOf(pack, false))).toBe(REIMPORT);
     // 版本 JSON 还在、后端没报原因的同一种情况：说的是同一句
     const intact = of({ incomplete: MODPACK_PENDING });

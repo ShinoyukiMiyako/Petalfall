@@ -559,7 +559,7 @@ describe("实例设置：补全修不好的损坏实例", () => {
   const REASON = "缺少版本 JSON，也没有记下当初装的是什么。目录里有一份叫 1.20.1.json 的版本文件，可能是改名时没跟上";
 
   it("补全一行的说明换成后端给的原因，原来两条留作占位；「补全」带同一句原因禁用，点了不发补全", async () => {
-    instances = [instanceDto(ID, { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: REASON, mc_version: null })];
+    instances = [instanceDto(ID, { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: REASON, unrepairable_kind: "no_record", mc_version: null })];
     await openSettings();
     const repairRow = row(SETTINGS_COPY.repairTitle);
     const slot = description(repairRow).firstElementChild as HTMLElement;

@@ -1292,7 +1292,7 @@ describe("侧栏", () => {
 
   it.each<[string, Partial<InstanceDto>, string]>([
     ["补全修得好", { status: "broken", broken_reason: "缺少客户端 jar" }, "需要修复"],
-    ["补全修不好", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null }, "文件不完整，补全修不好"],
+    ["补全修不好", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", unrepairable_kind: "no_record", mc_version: null }, "文件不完整，补全修不好"],
     ["整合包没导入完", { incomplete: { kind: "modpack", outcome: "pending", started_at: 1_699_000_000_000, spec: null, error: null } }, "整合包没导入完，需要重新导入"],
   ])("损坏的固定实例（%s）：名称提示第二行按修不修得好换说法", async (_name, over, expected) => {
     ipc.overrides.set("list_instances", () => [instanceDto("生存", over), instanceDto("创造"), instanceDto("空岛")]);
@@ -1414,7 +1414,7 @@ describe("侧栏", () => {
 
     it("补全修不好的固定实例：第一项「修复并启动」带原因禁用，原因是后端给的原文，按下不排补全", async () => {
       const reason = "缺少版本 JSON，也没有记下当初装的是什么";
-      ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, mc_version: null }), instanceDto("创造"), instanceDto("空岛")]);
+      ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, unrepairable_kind: "no_record", mc_version: null }), instanceDto("创造"), instanceDto("空岛")]);
       await mount();
       await openMenu("生存");
       const first = menuOf("生存")?.querySelector<HTMLElement>("[role='menuitem']");
@@ -1447,7 +1447,7 @@ describe("侧栏", () => {
         await launcher.launch("生存");
       });
       await flush();
-      ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, mc_version: null }), instanceDto("创造"), instanceDto("空岛")]);
+      ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: reason, unrepairable_kind: "no_record", mc_version: null }), instanceDto("创造"), instanceDto("空岛")]);
       await act(async () => {
         await launcher.refreshInstances();
       });

@@ -59,7 +59,7 @@ describe("点修复能不能修好", () => {
 
   it("从列表项适配出来的实例直接能问：修不好的那个回答修不好，排上补全之后按安装中不再带原因", () => {
     const idle = { pins: [] as string[], busyTaskInstanceIds: new Set<string>() };
-    const lost = instanceDto("旧电脑拷来的", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: LOST, mc_version: null });
+    const lost = instanceDto("旧电脑拷来的", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: LOST, unrepairable_kind: "no_record", mc_version: null });
     expect(canRepair(instanceFromDto(lost, idle))).toBe(false);
     expect(canRepair(instanceFromDto(instanceDto("没装完", { status: "broken", broken_reason: "缺少版本 JSON", mc_version: null }), idle))).toBe(true);
     expect(instanceFromDto(lost, { pins: [], busyTaskInstanceIds: new Set(["旧电脑拷来的"]) })).toMatchObject({ status: "installing", unrepairableReason: null });
