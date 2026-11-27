@@ -5,7 +5,7 @@
 //! [`is_safe_instance_id`]。
 //!
 //! 改名与删除会牵连两类引用：别的实例经 `inheritsFrom` 依赖它（传统布局的加载器版本），这种情况
-//! 直接拒绝；配置里的侧栏固定、当前选中与固定服务器记住的实例由调用方拿到写锁后经
+//! 直接拒绝（启动器自己落下、没人用的依赖版本目录不算，见 `blocking_dependents`）；配置里的侧栏固定、当前选中与固定服务器记住的实例由调用方拿到写锁后经
 //! [`Petalfall::rename_instance_refs`] / [`Petalfall::forget_instance`] 同步再落盘，文件操作本身在快照上做，不占门面锁。
 
 use std::collections::{HashMap, HashSet};
@@ -140,7 +140,8 @@ pub struct DeletionPreview {
     pub worlds: Vec<WorldEntry>,
     pub size_bytes: u64,
     pub file_count: u64,
-    /// 经 `inheritsFrom` 依赖它的实例；非空时删除会被拒绝。
+    /// 经 `inheritsFrom` 依赖它、要玩家先处理的实例（启动器自己落下、没人用的依赖版本目录不算）；非空时删除
+    /// 会被拒绝。
     pub dependents: Vec<String>,
     /// 这个实例名下存档备份的目录。备份不随实例删除。
     pub backups_dir: PathBuf,
@@ -318,7 +319,7 @@ impl Petalfall {
             worlds,
             size_bytes,
             file_count,
-            dependents: dependents_in(&scan, id),
+            dependents: blocking_dependents(self.game_dir(), &scan, id).await,
             backups_dir: self.instance_backups_dir(id)?,
             backup_count: self.kept_backup_count(id).await?,
         })
@@ -338,7 +339,8 @@ impl Petalfall {
     }
 
     /// 把实例目录交给 `disposer`（生产是系统回收站）。返回目录原先是否存在：不存在时什么都不做，
-    /// 重复删除是幂等的。有别的实例依赖它时报 [`InstanceError::HasDependents`]。
+    /// 重复删除是幂等的。有别的实例依赖它时报 [`InstanceError::HasDependents`]；启动器自己落下、没人用的依赖
+    /// 版本目录不算（`blocking_dependents`）。
     ///
     /// 只处理文件；配置里的引用由调用方随后经 [`Petalfall::forget_instance`] 清掉。先核对游戏目录的数据格式
     /// 记号，规则同 [`Petalfall::set_instance_settings`]。
@@ -356,7 +358,7 @@ impl Petalfall {
             Err(source) => return Err(petalfall_base::Error::Io { path: dir, source }.into()),
         }
         let scan = discover_versions(self.game_dir()).await?;
-        ensure_no_dependents(&scan, id)?;
+        ensure_no_dependents(self.game_dir(), &scan, id).await?;
         tracing::info!(id, dir = %dir.display(), "删除实例：移入回收站");
         tokio::task::spawn_blocking(move || disposer.dispose(&dir)).await??;
         Ok(true)
@@ -469,8 +471,8 @@ impl Petalfall {
 
     /// 改名：实例目录、版本 JSON（文件名与其中的 `id`）、客户端 jar 与 natives 目录一起改。
     ///
-    /// 新名字按命名规则校验（不分大小写重名，自己除外）；有实例依赖它时拒绝。中途失败时把已经改掉的
-    /// 逐项改回去再报错。只处理文件；配置里的引用由调用方随后经 [`Petalfall::rename_instance_refs`] 同步。
+    /// 新名字按命名规则校验（不分大小写重名，自己除外）；有实例依赖它时拒绝，启动器自己落下、没人用的依赖版本
+    /// 目录不算（`blocking_dependents`）。中途失败时把已经改掉的逐项改回去再报错。只处理文件；配置里的引用由调用方随后经 [`Petalfall::rename_instance_refs`] 同步。
     /// 先核对游戏目录的数据格式记号，规则同 [`Petalfall::set_instance_settings`]。
     pub async fn rename_instance_files(&self, old: &str, new: &str) -> Result<()> {
         self.guard_game_dir(GuardMode::Use).await?;
@@ -486,7 +488,7 @@ impl Petalfall {
             return Ok(());
         }
         let scan = discover_versions(self.game_dir()).await?;
-        ensure_no_dependents(&scan, old)?;
+        ensure_no_dependents(self.game_dir(), &scan, old).await?;
         let new_dir = self.instance_dir(new)?;
         let (old, new) = (old.to_owned(), new.to_owned());
         tracing::info!(%old, %new, "实例改名");
@@ -1097,7 +1099,7 @@ async fn read_base_record(game_dir: &Path) -> Result<BaseRecord> {
     }
 }
 
-/// 改写记录。读不懂的旧内容作废重记：记录只管显示，不该让导入失败。
+/// 改写记录。读不懂的旧内容作废重记：记录只管哪些目录不当实例列出、不拦着别的版本，不该让导入失败。
 async fn update_base_record(game_dir: &Path, change: impl FnOnce(&mut Vec<String>)) -> Result<()> {
     let _turn = BASE_RECORD_LOCK.lock().await;
     let mut record = match read_base_record(game_dir).await {
@@ -1250,11 +1252,12 @@ pub(crate) async fn is_unclaimed_base_version(game_dir: &Path, id: &str) -> bool
     }
 }
 
-/// 游戏目录里经 `inheritsFrom` 直接继承 `versions/<id>` 的版本，与 [`dependents_in`] 同一口径与顺序。只算版本
-/// JSON 读得懂的：读不出来或读不懂的版本说不清继承着谁，不算。版本目录扫不出来时照实报错。
+/// 游戏目录里经 `inheritsFrom` 直接继承 `versions/<id>`、要玩家先处理的版本（见 [`blocking_dependents`]），顺序同
+/// [`dependents_in`]。只算版本 JSON 读得懂的：读不出来或读不懂的版本说不清继承着谁，不算。版本目录扫不出来时
+/// 照实报错。
 pub(crate) async fn base_version_dependents(game_dir: &Path, id: &str) -> Result<Vec<String>> {
     let scan = discover_versions(game_dir).await?;
-    Ok(dependents_in(&scan, id))
+    Ok(blocking_dependents(game_dir, &scan, id).await)
 }
 
 /// 版本目录是不是加载器安装器落下的样子：继承着别的版本，目录名里带着加载器的版本号
@@ -1298,8 +1301,52 @@ pub(crate) fn dependents_in(scan: &VersionScan, id: &str) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn ensure_no_dependents(scan: &VersionScan, id: &str) -> Result<()> {
-    let dependents = dependents_in(scan, id);
+/// 直接继承 `id` 的版本里要玩家先处理的那些。改名、删除、移到别的游戏目录之前按这份名单拦；导入整合包要换掉
+/// 一个版本时，报文点的是这份名单，启动器自己落下的加载器目录重不重装也看它。
+///
+/// 启动器自己落下、没人玩过的依赖版本目录（见 [`is_unclaimed_base_version`]）不算，只要挂在它下面的每一层也都是
+/// 这样的目录（见 [`is_unused_subtree`]）。实例库不列它们（见 [`hide_base_versions`]），玩家找不到、也处理不了，
+/// 算上的话就成了挪不开的拦路项；它们也不托着谁：导入出的实例各有一份版本 JSON 的副本，移动实例带过来的基底
+/// 在那个实例走了之后没人用。它们继承的版本改名、删掉或移走之后悬空着，下次导入用到时原版与加载器都重新装上。
+///
+/// 下面挂着玩家的版本的照算，那个版本要靠它运行。依赖版本记录或实例痕迹读不出来时照算；版本 JSON 读不出来的
+/// 版本说不清继承着谁，同 [`dependents_in`] 不算。
+pub(crate) async fn blocking_dependents(
+    game_dir: &Path,
+    scan: &VersionScan,
+    id: &str,
+) -> Vec<String> {
+    let mut blocking = Vec::new();
+    for dependent in dependents_in(scan, id) {
+        if !is_unused_subtree(game_dir, scan, &dependent).await {
+            blocking.push(dependent);
+        }
+    }
+    blocking
+}
+
+/// `id` 与继承着它的各层是不是都是启动器自己落下、没人玩过的依赖版本目录。继承关系成环时按不是算：环里的
+/// 版本说不清谁靠谁，当成玩家的。
+async fn is_unused_subtree(game_dir: &Path, scan: &VersionScan, id: &str) -> bool {
+    let mut seen = HashSet::new();
+    let mut pending = vec![id.to_owned()];
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current.to_lowercase())
+            || !is_unclaimed_base_version(game_dir, &current).await
+        {
+            return false;
+        }
+        pending.extend(dependents_in(scan, &current));
+    }
+    true
+}
+
+pub(crate) async fn ensure_no_dependents(
+    game_dir: &Path,
+    scan: &VersionScan,
+    id: &str,
+) -> Result<()> {
+    let dependents = blocking_dependents(game_dir, scan, id).await;
     if dependents.is_empty() {
         return Ok(());
     }
@@ -1503,7 +1550,7 @@ pub(crate) mod tests {
 
     /// 记下要处理的目录，然后真的删掉（测试里不往用户回收站里塞东西）。
     #[derive(Clone, Default)]
-    struct RecordingDisposer(Arc<Mutex<Vec<PathBuf>>>);
+    pub(crate) struct RecordingDisposer(Arc<Mutex<Vec<PathBuf>>>);
 
     impl Disposer for RecordingDisposer {
         fn dispose(&self, dir: &Path) -> petalfall_instance::Result<()> {
@@ -1970,7 +2017,8 @@ pub(crate) mod tests {
     }
 
     /// 导入 NeoForge 整合包后盘上的样子：原版与加载器版本是这次新落下的，都在记录里。玩家只建了一个实例，列表里
-    /// 就只有这一个；目录留着、名字占着，继承链与依赖检查照常算它们，实例的 Java 与直达方式穿过隐藏的原版算出来。
+    /// 就只有这一个；目录留着、名字占着，继承链照常算它们，实例的 Java 与直达方式穿过隐藏的原版算出来。依赖检查
+    /// 只点玩家处理得了的：继承着原版的加载器版本没人用、实例库里也找不到，不算。
     #[tokio::test]
     async fn recorded_base_versions_stay_out_of_the_list() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2016,7 +2064,7 @@ pub(crate) mod tests {
             ["1.21.1"]
         );
         let preview = petalfall.deletion_preview("1.21.1").await.unwrap();
-        assert_eq!(preview.dependents, [NATURAL_NEOFORGE, "周末整合包"]);
+        assert_eq!(preview.dependents, ["周末整合包"]);
     }
 
     /// 别的启动器的游戏目录里已有同款原版与加载器版本：导入时目录原本就在，不进记录，它们是玩家的，整合包用上它们
@@ -2603,6 +2651,97 @@ pub(crate) mod tests {
             CoreError::Instance(InstanceError::HasDependents { .. })
         ));
         assert!(parent.exists());
+    }
+
+    /// 启动器自己落下、没人玩过、自己也没人继承的依赖版本目录不拦它继承的实例：实例库不列它，玩家处理不了它，
+    /// 也没有实例靠它运行。不在依赖版本记录里、下面还挂着版本、或被当实例玩过的照样拦。
+    #[tokio::test]
+    async fn an_unused_launcher_dropped_dependency_version_does_not_hold_its_base() {
+        const LOADER: &str = "fabric-loader-0.16.10-1.21.1";
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        let base = write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        let loader = write_version(&game, LOADER, &fabric_json(LOADER, "1.21.1"));
+        // 删除预览、删除与改名三处口径一致：要么都点出它，要么都不拦。
+        let held_by = || async {
+            let preview = petalfall.deletion_preview("1.21.1").await.unwrap();
+            for refused in [
+                petalfall
+                    .delete_instance_files("1.21.1", RecordingDisposer::default())
+                    .await
+                    .map(|_| ()),
+                petalfall.rename_instance_files("1.21.1", "原版").await,
+            ] {
+                match refused.unwrap_err() {
+                    CoreError::Instance(InstanceError::HasDependents { id, dependents }) => {
+                        assert_eq!(id, "1.21.1");
+                        assert_eq!(dependents, preview.dependents);
+                    }
+                    other => panic!("应报有依赖，实际：{other:?}"),
+                }
+            }
+            assert!(base.is_dir(), "目录不该被动过");
+            preview.dependents
+        };
+
+        // 不在依赖版本记录里：别的启动器装的加载器版本，玩家在实例库里看得见它。
+        assert_eq!(held_by().await, [LOADER]);
+
+        petalfall
+            .record_base_versions(&[LOADER.to_owned()])
+            .await
+            .unwrap();
+        // 记录里有它，可它下面挂着一个版本：那个版本靠它运行。
+        let child = write_version(&game, "叠加", &fabric_json("叠加", LOADER));
+        assert_eq!(held_by().await, [LOADER]);
+        // 挂在它下面的也是启动器落下、没人玩过的（移动实例带过来的多层基底，实例走了之后就是这样）：整串不拦。
+        petalfall
+            .record_base_versions(&["叠加".to_owned()])
+            .await
+            .unwrap();
+        let preview = petalfall.deletion_preview("1.21.1").await.unwrap();
+        assert!(preview.dependents.is_empty(), "{:?}", preview.dependents);
+        std::fs::remove_dir_all(&child).unwrap();
+        // 依赖版本记录读不出来：看不清哪些是启动器落下的，照样拦。
+        let record = game.join(PETALFALL_META_DIR).join("base-versions.json");
+        let recorded = std::fs::read(&record).unwrap();
+        std::fs::write(&record, b"{oops").unwrap();
+        assert_eq!(held_by().await, [LOADER]);
+        std::fs::write(&record, recorded).unwrap();
+        // 记录里有它，可被当实例玩过（有启动器的元数据目录）：按玩家的算。
+        let meta = loader.join(PETALFALL_META_DIR);
+        std::fs::create_dir_all(&meta).unwrap();
+        assert_eq!(held_by().await, [LOADER]);
+        std::fs::remove_dir_all(&meta).unwrap();
+
+        // 记录里有它、没人玩过、也没人继承：不拦。改名之后它留在原处悬空着。
+        assert!(
+            petalfall
+                .deletion_preview("1.21.1")
+                .await
+                .unwrap()
+                .dependents
+                .is_empty()
+        );
+        petalfall
+            .rename_instance_files("1.21.1", "原版")
+            .await
+            .unwrap();
+        assert!(!base.exists());
+        assert!(game.join("versions/原版/原版.json").is_file());
+        assert!(loader.join(format!("{LOADER}.json")).is_file());
+
+        // 删除同理。
+        let base = write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        assert!(
+            petalfall
+                .delete_instance_files("1.21.1", RecordingDisposer::default())
+                .await
+                .unwrap()
+        );
+        assert!(!base.exists());
+        assert!(loader.join(format!("{LOADER}.json")).is_file());
     }
 
     #[tokio::test]

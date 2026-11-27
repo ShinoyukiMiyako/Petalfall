@@ -115,7 +115,8 @@ pub mod code {
     /// duplicate）。
     pub const INSTANCE_NAME_INVALID: &str = "instance_name_invalid";
     /// 整合包要用的原版或加载器的版本目录名下已经有一个别的版本，装了会换掉它的版本 JSON（detail.id 为那个
-    /// 版本，detail.inherited_by 为直接继承它的版本，没有时为空数组）。前端没有统一说法，显示后端原文。
+    /// 版本，detail.inherited_by 为直接继承它、要玩家先处理的版本，启动器自己落下、没人用的依赖版本目录不算，
+    /// 没有时为空数组）。前端没有统一说法，显示后端原文。
     pub const MODPACK_BASE_OCCUPIED: &str = "modpack_base_occupied";
     /// 启动器写在实例里的 JSON 文件读不懂（detail.path）。
     pub const JSON_FILE_INVALID: &str = "json_file_invalid";

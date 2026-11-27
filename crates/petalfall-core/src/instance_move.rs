@@ -36,7 +36,7 @@ use crate::event::{CoreEvent, DownloadProgress, EventSink, InstallPhase, emit};
 use crate::facade::Petalfall;
 use crate::folders::{DIR_PROBE_TIMEOUT, same_path, validate_game_dir};
 use crate::instances::{
-    dependents_in, forget_base_versions_in, forget_unlanded_base_versions_in,
+    blocking_dependents, forget_base_versions_in, forget_unlanded_base_versions_in,
     record_base_versions_in,
 };
 use crate::move_copy::{
@@ -57,7 +57,7 @@ pub enum MoveBlocker {
     TargetInsideSource,
     /// 目标里已有同名（不分大小写）的版本目录，含隐藏的依赖版本目录。
     NameTaken,
-    /// 别的实例经 `inheritsFrom` 依赖它。
+    /// 别的实例经 `inheritsFrom` 依赖它；启动器自己落下、没人用的依赖版本目录不算（`blocking_dependents`）。
     HasDependents(Vec<String>),
     /// 实例目录或它的备份目录里有符号链接、目录联接（相对实例目录或备份目录的路径）。复制会把链接指向的
     /// 内容复制一份，删原件时又可能顺着链接删到别处。
@@ -434,7 +434,7 @@ impl Petalfall {
             move || take_footprint(&instance_dir, &backups_dir, &source, &target)
         });
         let plan = plan_dependencies(&source, &target, id, self.runtime()).await?;
-        let dependents = dependents_in(&discover_versions(&source).await?, id);
+        let dependents = blocking_dependents(&source, &discover_versions(&source).await?, id).await;
         let name_taken = name_taken(&target, id).await?;
         let isolated = self.resolve_working_dir(id).await?.isolated;
         let pending = move_journal::is_held(self.data_dir(), id, &source, &target).await?;
@@ -2988,6 +2988,44 @@ mod tests {
             &[MoveBlocker::HasDependents(vec!["Child".to_owned()])],
         )
         .await;
+    }
+
+    /// 继承着它的只有启动器自己落下、没人玩过、自己也没人继承的依赖版本目录时不拦：实例库不列那个目录，玩家没法
+    /// 先把它移走或删掉。那个目录下面还挂着版本时照样拦。
+    #[tokio::test]
+    async fn an_unused_launcher_dropped_dependency_version_inheriting_from_it_does_not_block() {
+        const DROPPED: &str = "fabric-loader-0.16.10-pack";
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        write_version(
+            &dirs.source,
+            DROPPED,
+            &json!({"id": DROPPED, "inheritsFrom": "pack", "type": "release", "mainClass": "m"})
+                .to_string(),
+        );
+        record_base_versions_in(&dirs.source, &[DROPPED.to_owned()])
+            .await
+            .unwrap();
+        let blockers = || async {
+            dirs.petalfall()
+                .inspect_move(ID, &dirs.target, &MoveEnv::default())
+                .await
+                .unwrap()
+                .preview
+                .blockers
+        };
+        assert_eq!(blockers().await, []);
+
+        write_version(
+            &dirs.source,
+            "Child",
+            &json!({"id": "Child", "inheritsFrom": DROPPED, "type": "release", "mainClass": "m"})
+                .to_string(),
+        );
+        assert_eq!(
+            blockers().await,
+            [MoveBlocker::HasDependents(vec![DROPPED.to_owned()])]
+        );
     }
 
     #[cfg(windows)]

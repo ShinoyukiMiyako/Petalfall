@@ -782,9 +782,10 @@ impl Petalfall {
     /// 只在认得出它是别的东西时才拦（[`occupied_by`]）。不拦的还有两种：目录不在、缺版本 JSON 或 JSON 读不懂
     /// 的，那里没有认得出的版本可丢，安装会补上；启动器自己落下、玩家没拿来当实例用的依赖版本目录。后一种在
     /// 加载器的位置上，导入出的实例各有一份版本 JSON 的副本，重装它不影响它们（1.20.1 上 Forge 与 NeoForge 的
-    /// 版本号撞上时，两个整合包就共用这样一个目录名）；可要是有别的版本直接继承着它（别的启动器建的叠加版本，
-    /// 或移动实例时连基底一起带过来的），换掉它就换了那个版本的底，照样拦。在原版的位置上，导入出的实例本来就
-    /// 直接继承它，重装等于把它还原成这些实例要的那个原版，不看有没有人继承。
+    /// 版本号撞上时，两个整合包就共用这样一个目录名）；可要是有别的版本直接继承着它、要玩家先处理（别的启动器
+    /// 建的叠加版本，或移动实例时带过来、上面还挂着实例的基底），换掉它就换了那个版本的底，照样拦；继承它的
+    /// 只有启动器自己落下、没人用的依赖版本目录时不算（见 `blocking_dependents`）。在原版的位置上，导入出的
+    /// 实例本来就直接继承它，重装等于把它还原成这些实例要的那个原版，不看有没有人继承。
     ///
     /// 查两遍。准备阶段一遍：这时还没占名字、没建目录，平台整合包虽然已经下载，游戏与加载器都还没装，早一步
     /// 报出来。落盘一步建实例目录之前再一遍：准备阶段查过之后还要解析、探测远程文件，调用方再去占名字，这期间
@@ -3248,6 +3249,30 @@ mod tests {
                 &format!(r#"{{"id":"{id}","inheritsFrom":"test","mainClass":"M"}}"#),
             );
         }
+        // 落樱以前导入同版本的整合包时落下的加载器版本也继承着它：记在依赖版本记录里、没人玩过、也没人继承。
+        // 实例库不列它，玩家处理不了它，报文不点它的名，它也不拦后面的改名。
+        const DROPPED: &str = "fabric-loader-0.15.0-test";
+        write_game_version(
+            &petalfall,
+            DROPPED,
+            &format!(
+                r#"{{"id":"{DROPPED}","inheritsFrom":"test","mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
+                    "libraries":[{{"name":"net.fabricmc:fabric-loader:0.15.0"}}]}}"#
+            ),
+        );
+        // 还没记进记录时它就是一个普通的继承者，照样点名。
+        let err = import_as(&petalfall, pack.clone(), "周末包")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::BaseVersionOccupied { inherited_by, .. }
+                if inherited_by == &[DROPPED, "叠加一", "叠加二"]),
+            "{err:?}"
+        );
+        petalfall
+            .record_base_versions(&[DROPPED.to_owned()])
+            .await
+            .unwrap();
         let err = import_as(&petalfall, pack.clone(), "周末包")
             .await
             .unwrap_err();
@@ -3269,10 +3294,12 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&theirs).unwrap(), json);
         assert!(!versions.join("周末包").exists());
+        // 照报文做第一步：用启动器的删除把继承它的版本删掉。
         for id in stacked {
-            std::fs::remove_dir_all(versions.join(id)).unwrap();
+            let disposer = crate::instances::tests::RecordingDisposer::default();
+            assert!(petalfall.delete_instance_files(id, disposer).await.unwrap());
         }
-        // 照报文做完第一步（继承它的版本没了）再导入还是拒收，这回说的是改名：所以上面那句把两步一起说了。
+        // 只做完第一步再导入还是拒收，这回说的是改名：所以上面那句把两步一起说了。
         let err = import_as(&petalfall, pack.clone(), "周末包")
             .await
             .unwrap_err();
@@ -3282,6 +3309,19 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&theirs).unwrap(), json);
         assert!(!versions.join("周末包").exists());
+        // 第二步：给它改名。两步做完导入就成，原版装回这个名字下，改了名的那个还装着 Fabric。
+        petalfall
+            .rename_instance_files("test", "改了名的")
+            .await
+            .unwrap();
+        import_as(&petalfall, pack.clone(), "照做之后")
+            .await
+            .unwrap();
+        let restored = std::fs::read_to_string(&theirs).unwrap();
+        assert!(!restored.contains("fabric-loader"), "{restored}");
+        assert!(versions.join("照做之后").is_dir());
+        let renamed = std::fs::read_to_string(versions.join("改了名的").join("改了名的.json"));
+        assert!(renamed.unwrap().contains("fabric-loader:0.14.0"));
 
         // 同一个目录要是落樱自己落下的（记在依赖版本记录里、没人在里面玩过），装着什么都照常还原成原版；
         // 原版的位置上实例本来就直接继承它，有人继承也不拦。
@@ -3445,6 +3485,24 @@ mod tests {
         let stacked = petalfall.game_dir().join("versions").join("叠在上面的");
         std::fs::remove_dir_all(&stacked).unwrap();
         import_as(&petalfall, pack.clone(), "继承者走了照装")
+            .await
+            .unwrap();
+        assert_eq!(main_class(), KNOT);
+
+        // 继承它的只有启动器自己落下、没人用的依赖版本目录：不算有人继承，照常重装。
+        write_game_version(&petalfall, NATURAL_FABRIC, &quilt);
+        write_game_version(
+            &petalfall,
+            "落下没人用的",
+            &format!(
+                r#"{{"id":"落下没人用的","inheritsFrom":"{NATURAL_FABRIC}","mainClass":"M"}}"#
+            ),
+        );
+        petalfall
+            .record_base_versions(&["落下没人用的".to_owned()])
+            .await
+            .unwrap();
+        import_as(&petalfall, pack.clone(), "没人用的不拦")
             .await
             .unwrap();
         assert_eq!(main_class(), KNOT);
