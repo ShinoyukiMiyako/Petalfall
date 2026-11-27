@@ -15,7 +15,7 @@
 //! （光影由 Iris / OptiFine）读取，与实例装的 Mod 加载器无关。
 
 use std::borrow::Borrow;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -290,23 +290,129 @@ pub(crate) fn is_borrowed_twin(other: &ModVersionInfo, own_build: &ModVersionInf
         .any(|pair| pair.is_twin(other, own_build))
 }
 
-/// 借着别家跑的实例上，把同一发布里给实例那一家传的构建排到被借那一家的构建前面；没借的实例不动。
-/// `versions` 按发布时间倒序。
+/// 一份构建所属发布的时间，见 [`release_times`]。
+struct ReleaseTime<'v> {
+    /// 这个发布最早传上来的时间；构建自己与孪生都没有发布时间时为空串。
+    published: &'v str,
+    /// 这份是给被借那一家传的、列表里有它同一发布的自家构建。
+    borrowed_twin: bool,
+}
+
+/// 列表里每份构建所属发布的时间，与 `versions` 同序，按 `pairs` 这几对借用关系配孪生。
 ///
-/// 只在同一发布内换位，不是带实例那一家标的一律优先：不少 Mod 后来不再标 quilt，AppleSkin 的 quilt 标停在
+/// 平台只给每份构建的发布时间，没有可比的版本号。作者先发了新版、回头给旧发布补传另一家的构建时，补传那份的
+/// 时间说的不是它的发布有多新：按它比，补传的旧发布会排到更新的发布前面，更新检查把它报成更新（实为降级），
+/// 挑版本时更新的发布被挤下去。所以一个发布的时间取它最早传上来的那份：构建自己与它在列表里的孪生（
+/// [`BorrowedLoader::is_twin`] 配上的另一家构建）里最早的发布时间，没有孪生的就是它自己的时间。没有发布时间的
+/// 构建不参与取最早。
+///
+/// 列表可能有几百项：每份构建的各段只切一次，按各段分组后只在组内配对。
+fn release_times<'v, V: Borrow<ModVersionInfo>>(
+    versions: &'v [V],
+    pairs: &[BorrowedLoader],
+) -> Vec<ReleaseTime<'v>> {
+    let mut times: Vec<ReleaseTime<'v>> = versions
+        .iter()
+        .map(|version| ReleaseTime {
+            published: version.borrow().date_published.as_str(),
+            borrowed_twin: false,
+        })
+        .collect();
+    for pair in pairs {
+        // 各段 -> (只标被借那一家的构建, 标着实例那一家的构建)，存下标。
+        let mut by_parts: HashMap<Vec<String>, (Vec<usize>, Vec<usize>)> = HashMap::new();
+        for (at, version) in versions.iter().enumerate() {
+            let version = version.borrow();
+            let Some(side) = pair.side(version) else {
+                continue;
+            };
+            let builds = by_parts.entry(pair.release_parts(version)).or_default();
+            match side {
+                Side::Borrowed => builds.0.push(at),
+                Side::Own => builds.1.push(at),
+            }
+        }
+        for (parts, (borrowed, own)) in &by_parts {
+            for &b in borrowed {
+                for &o in own {
+                    let (other, own_build) = (versions[b].borrow(), versions[o].borrow());
+                    if !names_a_release(parts, other, own_build) {
+                        continue;
+                    }
+                    times[b].borrowed_twin = true;
+                    times[b].published = earliest(times[b].published, &own_build.date_published);
+                    times[o].published = earliest(times[o].published, &other.date_published);
+                }
+            }
+        }
+    }
+    times
+}
+
+/// 两个发布时间里早的那个；空串不算一个时间。
+fn earliest<'v>(a: &'v str, b: &'v str) -> &'v str {
+    if b.is_empty() || (!a.is_empty() && a <= b) {
+        a
+    } else {
+        b
+    }
+}
+
+/// 列表里每份构建所属发布的时间（这个发布最早传上来的时间，口径见 [`release_times`]），与 `versions` 同序。
+///
+/// 两对借用关系都试，与 [`is_borrowed_twin`] 同一口径：给不知道实例借了哪家的调用方（更新检查在版本列表上挑更新）
+/// 用。没有孪生的构建就是它自己的发布时间。
+pub(crate) fn release_dates(versions: &[ModVersionInfo]) -> Vec<&str> {
+    release_times(versions, &[QUILT_RUNS_FABRIC, NEOFORGE_RUNS_FORGE])
+        .into_iter()
+        .map(|time| time.published)
+        .collect()
+}
+
+/// 借着别家跑的实例上，按发布排好版本列表：发布的时间（这个发布最早传上来的时间，见 [`release_times`]）新的在前，
+/// 同一发布里给实例那一家传的构建排在被借那一家的构建前面，其余保持传入的先后；没借的实例不动。`versions` 按
+/// 发布时间倒序传入。
+///
+/// 补传的那份排回它的自家孪生后面，而不是把自家孪生提到补传那份的位置上：作者先发了新版、回头给旧发布补传
+/// 另一家的构建时，提上来的是旧发布，更新的发布反被挤到后面。
+///
+/// 只在同一发布内让自家构建优先，不是带实例那一家标的一律优先：不少 Mod 后来不再标 quilt，AppleSkin 的 quilt 标停在
 /// 2023 年的 2.5.0，一律优先就是把 Quilt 玩家钉在那个旧版上；1.20.1 上后来只标 forge 的 Mod 同理。
 pub(crate) fn prefer_own_builds<V: Borrow<ModVersionInfo>>(
     versions: &mut [V],
     borrowed: &[BorrowedLoader],
 ) {
-    for pair in borrowed {
-        for at in 0..versions.len() {
-            let twin = versions[at + 1..]
-                .iter()
-                .position(|later| pair.is_twin(versions[at].borrow(), later.borrow()));
-            if let Some(offset) = twin {
-                versions[at..=at + 1 + offset].rotate_right(1);
+    if borrowed.is_empty() {
+        return;
+    }
+    let times = release_times(versions, borrowed);
+    let mut order: Vec<usize> = (0..versions.len()).collect();
+    // 与 sort_by_published_desc 同一口径：没有时间的沉底。排序是稳定的：同一时间里除了被借那一家的孪生排到后面，
+    // 先后不变。
+    order.sort_by(|&a, &b| {
+        let (a, b) = (&times[a], &times[b]);
+        a.published
+            .is_empty()
+            .cmp(&b.published.is_empty())
+            .then_with(|| b.published.cmp(a.published))
+            .then_with(|| a.borrowed_twin.cmp(&b.borrowed_twin))
+    });
+    permute(versions, &order);
+}
+
+/// 按 `order` 重排：重排后第 k 位是原来的第 `order[k]` 项。逐个环交换，元素不必能克隆。
+fn permute<V>(items: &mut [V], order: &[usize]) {
+    let mut placed = vec![false; items.len()];
+    for start in 0..items.len() {
+        let mut at = start;
+        while !placed[at] {
+            placed[at] = true;
+            let from = order[at];
+            if from == start {
+                break;
             }
+            items.swap(at, from);
+            at = from;
         }
     }
 }
@@ -1412,7 +1518,7 @@ mod tests {
     }
 
     /// 同一发布分加载器各传一份时 Quilt 实例拿 quilt 那份，哪怕 fabric 那份传得晚。版本号的写法都取自
-    /// 平台上的真实工程。
+    /// 平台上的真实工程。更旧的发布不受影响。
     #[test]
     fn quilt_instance_takes_the_quilt_build_of_the_same_release() {
         use ModLoader::{Fabric, Quilt};
@@ -1432,8 +1538,8 @@ mod tests {
         ] {
             let versions = vec![
                 release("fabric", fabric, 2026, &[Fabric], &["1.20.1"]),
-                release("patch", "0.9.0", 2025, &[Fabric], &["1.20.1"]),
-                release("quilt", quilt, 2024, &[Quilt], &["1.20.1"]),
+                release("quilt", quilt, 2025, &[Quilt], &["1.20.1"]),
+                release("older", "0.9.0", 2024, &[Fabric], &["1.20.1"]),
             ];
             assert_eq!(
                 best_for(&versions, "1.20.1", "quilt").as_deref(),
@@ -1519,8 +1625,8 @@ mod tests {
         ] {
             let versions = vec![
                 release("forge", forge, 2026, &[Forge], &["1.20.1"]),
-                release("patch", "0.9.0", 2025, &[Forge], &["1.20.1"]),
-                release("neoforge", neoforge, 2024, &[NeoForge], &["1.20.1"]),
+                release("neoforge", neoforge, 2025, &[NeoForge], &["1.20.1"]),
+                release("older", "0.9.0", 2024, &[Forge], &["1.20.1"]),
             ];
             assert_eq!(
                 best_for(&versions, "1.20.1", "neoforge").as_deref(),
@@ -1567,6 +1673,82 @@ mod tests {
             &names(&["forge", "neoforge"]),
         );
         assert_eq!(best.unwrap().version_id, "forge");
+    }
+
+    /// 指定发布时间的 [`release`]，标的 MC 版本是 1.20.1。
+    fn uploaded(id: &str, date: &str, loaders: &[ModLoader]) -> ModVersionInfo {
+        ModVersionInfo {
+            date_published: date.to_owned(),
+            ..release(id, id, 2026, loaders, &["1.20.1"])
+        }
+    }
+
+    fn ids(versions: &[&ModVersionInfo]) -> Vec<String> {
+        versions.iter().map(|v| v.version_id.clone()).collect()
+    }
+
+    /// 作者先发了新版、回头给旧发布补传被借那一家的构建：补传那份排回它的自家构建后面，不把旧发布的自家构建提到
+    /// 更新的发布前面，挑中的是更新的发布。
+    #[test]
+    fn a_late_upload_for_an_older_release_does_not_outrank_a_newer_release() {
+        use ModLoader::{Fabric, Forge, NeoForge, Quilt};
+        for (borrowed, own, instance) in [(Forge, NeoForge, "neoforge"), (Fabric, Quilt, "quilt")] {
+            let (b, o) = (borrowed.modrinth_facet(), own.modrinth_facet());
+            let late = format!("1.5.0-{b}");
+            let newer = format!("1.6.0-{o}");
+            let older = format!("1.5.0-{o}");
+            let versions = vec![
+                uploaded(&late, "2026-04-01T00:00:00Z", &[borrowed]),
+                uploaded(&newer, "2026-03-01T00:00:00Z", &[own]),
+                uploaded(&older, "2026-02-01T00:00:00Z", &[own]),
+            ];
+            assert_eq!(best_for(&versions, "1.20.1", instance), Some(newer.clone()));
+
+            let mut ordered: Vec<&ModVersionInfo> = versions.iter().collect();
+            prefer_own_builds(
+                &mut ordered,
+                &runnable_loaders(&[own], Some("1.20.1")).borrowed,
+            );
+            assert_eq!(ids(&ordered), [newer, older, late]);
+        }
+    }
+
+    /// 没有孪生的构建保持传入的先后；同一发布的两份构建排在一起，按最早传上来的那份定位置。
+    #[test]
+    fn prefer_own_builds_keeps_unrelated_builds_in_place() {
+        use ModLoader::{Forge, NeoForge};
+        let versions = [
+            uploaded("2.0.0-forge", "2026-05-01T00:00:00Z", &[Forge]),
+            uploaded("1.4.0-forge", "2026-04-01T00:00:00Z", &[Forge]),
+            uploaded("1.9.0-neoforge", "2026-03-01T00:00:00Z", &[NeoForge]),
+            uploaded("1.8.0-forge", "2026-02-01T00:00:00Z", &[Forge]),
+            uploaded("1.4.0-neoforge", "2026-01-01T00:00:00Z", &[NeoForge]),
+            uploaded("undated-forge", "", &[Forge]),
+        ];
+        let mut ordered: Vec<&ModVersionInfo> = versions.iter().collect();
+        prefer_own_builds(
+            &mut ordered,
+            &runnable_loaders(&[NeoForge], Some("1.20.1")).borrowed,
+        );
+        assert_eq!(
+            ids(&ordered),
+            [
+                "2.0.0-forge",
+                "1.9.0-neoforge",
+                "1.8.0-forge",
+                "1.4.0-neoforge",
+                "1.4.0-forge",
+                "undated-forge",
+            ]
+        );
+
+        // 没借的实例不动。
+        let mut untouched: Vec<&ModVersionInfo> = versions.iter().collect();
+        prefer_own_builds(
+            &mut untouched,
+            &runnable_loaders(&[Forge, NeoForge], Some("1.20.1")).borrowed,
+        );
+        assert_eq!(ids(&untouched), ids(&versions.iter().collect::<Vec<_>>()));
     }
 
     /// 认同一发布要去掉字样后各段相同，且其中有一段像 Mod 自己的版本号：只剩 MC 版本、或什么都不剩的不算，

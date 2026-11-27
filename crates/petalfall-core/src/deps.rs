@@ -2940,6 +2940,43 @@ mod tests {
         );
     }
 
+    /// 作者先发了 1.6.0、回头给 1.5.0 补传 forge 构建：补传那份传得最晚，也不把 1.5.0 提到更新的 1.6.0 前面。
+    #[test]
+    fn pick_latest_compatible_is_not_pulled_back_by_a_late_twin_of_an_older_release() {
+        let facts = InstanceFacts {
+            mc_version: Some("1.20.1".to_owned()),
+            loaders: vec!["neoforge".to_owned()],
+            mod_loaders: runnable_loaders(&[ModLoader::NeoForge], Some("1.20.1")),
+        };
+        let build = |number: &str, loader: ModLoader, date: &str| {
+            let mut item = version("some-lib", number);
+            item.version_number = number.to_owned();
+            item.loaders = vec![loader];
+            item.date_published = date.to_owned();
+            item
+        };
+        let picked = pick_latest_compatible(
+            vec![
+                build("1.5.0-forge", ModLoader::Forge, "2026-04-01T00:00:00Z"),
+                build(
+                    "1.6.0-neoforge",
+                    ModLoader::NeoForge,
+                    "2026-03-01T00:00:00Z",
+                ),
+                build(
+                    "1.5.0-neoforge",
+                    ModLoader::NeoForge,
+                    "2026-02-01T00:00:00Z",
+                ),
+            ],
+            &facts,
+        );
+        assert_eq!(
+            picked.map(|picked| picked.version_id).as_deref(),
+            Some("1.6.0-neoforge")
+        );
+    }
+
     /// 1.20.1 以后的 NeoForge 实例照旧不收 Forge 的前置。
     #[test]
     fn pick_latest_compatible_on_later_neoforge_rejects_forge_builds() {
