@@ -601,9 +601,9 @@ pub struct InstanceDto {
     pub status: &'static str,
     pub broken_reason: Option<String>,
     /// 补全修不好的原因，与对它发起补全时报的 `detail.reason` 逐字相同；只有 broken 且补全会被拒绝时非空，
-    /// 修得好的 broken 实例与 ready 实例为 null。未完成标记是 repair 或没有标记时，版本 JSON 读不出来的有没有安装
-    /// 记录都非空，是「版本 JSON 读不出来：」后接读盘错误与系统给的原因（标记是 install 时照标记重装、为 null，是
-    /// modpack 时是重新导入那句）；补全时再读一次，系统给的原因可能与列表那一次不同，两边只在这一段可能差开。
+    /// 修得好的 broken 实例与 ready 实例为 null。版本 JSON 读不出来时一律非空：未完成标记是 modpack 的是重新导入
+    /// 那句，其余不论标记是不是 install、有没有安装记录都是「版本 JSON 读不出来：」后接读盘错误与系统给的原因；
+    /// 补全时再读一次，系统给的原因可能与列表那一次不同，两边只在这一段可能差开。
     pub unrepairable_reason: Option<String>,
     /// 补全为什么修不好，与 unrepairable_reason 同有同无：unreadable（版本 JSON 读盘出错，文件可能完好，放开占用或
     /// 修好权限后重新扫描就恢复）/ no_record（版本 JSON 缺失或损坏，又没有安装记录可照着重装）/ modpack（整合包

@@ -462,7 +462,9 @@ impl Petalfall {
 
     /// 定补全方案并写下新的未完成标记，返回方案与标记。
     ///
-    /// 标记文件损坏时当作没有标记：版本 JSON 可用就照它补全，不可用时照安装记录重装，连记录也没有才报不可补全。
+    /// 标记文件损坏时当作没有标记：版本 JSON 可用就照它补全，缺失或损坏时照安装记录重装，连记录也没有才报不可补全。
+    /// 版本 JSON 读不出来（被占用、没有权限、那个位置是个目录）时，除了整合包没导入完的照旧报重新导入，不论标记与
+    /// 安装记录都报不可补全，标记不动。
     ///
     /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，标记不动。
     /// 任务中心重试补全不经列实例，不能指望调用方已经核对过。
@@ -630,7 +632,8 @@ impl Unrepairable {
 /// 照未完成标记、版本 JSON 与安装记录定补全方案，不写盘。版本 JSON 用不了时的那一段（[`broken_verdict`]）与实例
 /// 列表共用：列表上说的修不好的原因就是真去补全时报的那句，两边不各写一套判断，不会一边说修得好、一边又拒绝。
 ///
-/// `previous` 是读到的未完成标记，读不出的当作没有。标记里记着安装内容或整合包时用不到版本 JSON，不为此多读一次。
+/// `previous` 是读到的未完成标记，读不出的当作没有。标记是 install 时也要先探一次版本 JSON：读不出来的话，照标记
+/// 重装最后也要把版本 JSON 写回那个位置（见 [`unreadable_verdict`]）。
 pub(crate) async fn decide_repair(
     game_dir: &Path,
     id: &str,
@@ -641,11 +644,6 @@ pub(crate) async fn decide_repair(
     // 与任务重试的入口都带不上「重装」这个意思，所以由看标记定方案的这一步替它们换掉。装不回的照旧补全：
     // 玩家可能已经把文件放回去了，这是清掉标记的唯一办法；没放回去时照样报缺失。
     let stuck = previous.is_some_and(lost_loader_library);
-    if let Some(verdict) = marker_verdict(previous) {
-        return verdict
-            .map(RepairPlan::Reinstall)
-            .map_err(|refusal| refusal.into_error(id));
-    }
     let version = match probe_version(game_dir, id).await {
         Ok(VersionProbe::Found(version)) => version,
         Ok(VersionProbe::Broken(broken)) => {
@@ -659,9 +657,14 @@ pub(crate) async fn decide_repair(
         Err(err) => {
             let detail = error_with_causes(&err);
             tracing::warn!(id, error = %detail, "版本 JSON 读不出来");
-            return Err(unreadable_refusal(detail).into_error(id));
+            return Err(unreadable_verdict(previous, detail).into_error(id));
         }
     };
+    if let Some(verdict) = marker_verdict(previous) {
+        return verdict
+            .map(RepairPlan::Reinstall)
+            .map_err(|refusal| refusal.into_error(id));
+    }
     if reinstall_loader || (stuck && reinstallable_loader(&version.loaders).is_ok()) {
         Ok(RepairPlan::Reinstall(
             loader_reinstall_request(game_dir, &version).await?,
@@ -697,11 +700,11 @@ async fn broken_verdict(
     previous: Option<&IncompleteMarker>,
     broken: &BrokenVersion,
 ) -> std::result::Result<InstanceRequest, Unrepairable> {
+    if let BrokenReason::Unreadable(detail) = &broken.reason {
+        return Err(unreadable_verdict(previous, detail.clone()));
+    }
     if let Some(verdict) = marker_verdict(previous) {
         return verdict;
-    }
-    if let BrokenReason::Unreadable(detail) = &broken.reason {
-        return Err(unreadable_refusal(detail.clone()));
     }
     let record = match InstallRecordStore::for_version_dir(&broken.dir)
         .load()
@@ -743,6 +746,18 @@ fn unreadable_refusal(detail: String) -> Unrepairable {
     Unrepairable {
         kind: UnrepairableKind::Unreadable,
         reason: broken_reason_text(&BrokenReason::Unreadable(detail)),
+    }
+}
+
+/// 版本 JSON 读不出来时修不好的判定。整合包没导入完的照旧报重新导入：那件事与版本 JSON 读不读得出无关，放开占用
+/// 以后照样修不好。其余不论未完成标记是不是 install、有没有安装记录都报读不出来（见 [`unreadable_refusal`]）：照
+/// 标记重装同样要下完整套文件，最后在写回版本 JSON 时失败。
+fn unreadable_verdict(previous: Option<&IncompleteMarker>, detail: String) -> Unrepairable {
+    match previous.map(|marker| &marker.kind) {
+        Some(IncompleteKind::Modpack { .. }) => modpack_refusal(),
+        Some(IncompleteKind::Install { .. } | IncompleteKind::Repair) | None => {
+            unreadable_refusal(detail)
+        }
     }
 }
 
@@ -2217,6 +2232,105 @@ mod tests {
             assert!(
                 !marker_path(&versions.join(id)).exists(),
                 "{id} 补全在写标记之前就拒绝"
+            );
+        }
+    }
+
+    /// 版本 JSON 读不出来、未完成标记是 install（新建在写出版本 JSON 之后失败）：照标记重装最后也要把版本 JSON 写回
+    /// 那个位置，同样修不好。列表上的原因与补全、重装加载器报的都是读不出来那句，两者在写标记之前就拒绝，原来的标记
+    /// 原样留着。整合包没导入完的照旧是重新导入那句。
+    #[tokio::test]
+    async fn an_unreadable_version_json_is_not_repairable_from_an_install_marker_either() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let versions = petalfall.game_dir().join("versions");
+        let fabric = request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"));
+        let install = IncompleteMarker {
+            error: Some(MarkerError {
+                code: "network_failed".into(),
+                message: "连不上".into(),
+            }),
+            outcome: IncompleteOutcome::Failed,
+            ..IncompleteMarker::pending(
+                IncompleteKind::Install {
+                    spec: fabric.spec(),
+                },
+                1_700_000_000_000,
+            )
+        };
+        let modpack = IncompleteMarker::pending(
+            IncompleteKind::Modpack {
+                task_id: "mp#1".into(),
+            },
+            1_700_000_000_000,
+        );
+        for (id, marker) in [("装到一半", &install), ("导到一半", &modpack)] {
+            std::fs::create_dir_all(versions.join(id).join(format!("{id}.json"))).unwrap();
+            MarkerStore::for_version_dir(&versions.join(id))
+                .save(marker)
+                .await
+                .unwrap();
+        }
+        let json = versions.join("装到一半").join("装到一半.json");
+        let expected = [
+            (
+                "装到一半",
+                &install,
+                refusal(
+                    UnrepairableKind::Unreadable,
+                    &format!(
+                        "版本 JSON 读不出来：文件 IO 失败: {}：{}",
+                        json.display(),
+                        std::fs::read(&json).unwrap_err()
+                    ),
+                ),
+            ),
+            (
+                "导到一半",
+                &modpack,
+                refusal(
+                    UnrepairableKind::Modpack,
+                    "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入",
+                ),
+            ),
+        ];
+
+        let list = petalfall.list_instances().await.unwrap();
+        assert_eq!(list.len(), expected.len());
+        for (id, marker, unrepairable) in expected {
+            let listed = list.iter().find(|i| i.id == id).unwrap();
+            assert!(
+                matches!(
+                    &listed.version,
+                    crate::instances::InstanceVersion::Broken(BrokenReason::Unreadable(_))
+                ),
+                "{id}：{:?}",
+                listed.version
+            );
+            assert_eq!(
+                listed.unrepairable.as_ref(),
+                Some(&unrepairable),
+                "{id} 在列表上"
+            );
+            assert_eq!(
+                repair_verdict(&petalfall, id).await,
+                Err(unrepairable.reason.clone()),
+                "{id} 去补全"
+            );
+            match petalfall.begin_loader_reinstall(id).await {
+                Err(CoreError::Instance(InstanceError::NotRepairable { reason, .. })) => {
+                    assert_eq!(reason, unrepairable.reason, "{id} 重装加载器");
+                }
+                other => panic!("{id} 重装加载器应报不可补全：{other:?}"),
+            }
+            assert_eq!(
+                MarkerStore::for_version_dir(&versions.join(id))
+                    .load()
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                Some(marker),
+                "{id} 在写标记之前就拒绝"
             );
         }
     }

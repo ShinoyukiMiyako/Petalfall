@@ -92,10 +92,9 @@ pub struct InstanceSummary {
     /// 其中的原因与补全报的 [`InstanceError::NotRepairable`] 里的 `reason` 逐字相同；修得好的损坏实例为 `None`。
     /// 版本 JSON 可用的实例不看，一律为 `None`（整合包没导入完这类拒绝从 `incomplete` 就看得出）。
     ///
-    /// 未完成标记是 repair 或没有标记时，版本 JSON 读不出来（[`BrokenReason::Unreadable`]）的有没有安装记录都修不好，
-    /// 原因是「版本 JSON 读不出来：」后接读盘错误连同系统给的原因；标记是 install 时照标记重装，为 `None`，是
-    /// modpack 时给的是重新导入那句。这一段是列表扫描那一次读到的，补全时再读一次，系统给的原因可能不同（这一刻被
-    /// 占用、下一刻没有权限），两边只在这里可能差开。
+    /// 版本 JSON 读不出来（[`BrokenReason::Unreadable`]）时，除了未完成标记是 modpack 的给重新导入那句，不论标记是不是
+    /// install、有没有安装记录都修不好，原因是「版本 JSON 读不出来：」后接读盘错误连同系统给的原因。这一段是列表
+    /// 扫描那一次读到的，补全时再读一次，系统给的原因可能不同（这一刻被占用、下一刻没有权限），两边只在这里可能差开。
     pub unrepairable: Option<Unrepairable>,
 }
 
