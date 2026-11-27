@@ -129,7 +129,7 @@ describe("第三方许可清单", () => {
   });
 
   it("内容不是 JSON（例如开发服务器把缺的文件回落成页面）时报错：整句带称呼与地址，解析错误留作 cause", async () => {
-    vi.stubGlobal("fetch", async () => new Response("<!doctype html><title>落樱</title>", { status: 200 }));
+    vi.stubGlobal("fetch", async () => new Response("<!doctype html><div id=\"root\"></div>", { status: 200 }));
     const cause = await causeOf(loadThirdPartyLicenses);
     if (!(cause instanceof SyntaxError)) throw new Error(`解析失败的原错误不是 SyntaxError：${String(cause)}`);
     expect(await rejection(loadThirdPartyLicenses)).toEqual({
