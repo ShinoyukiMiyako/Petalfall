@@ -137,9 +137,11 @@ function splitValue(value) {
   return parts;
 }
 
-function isTokenValue(value) {
+function isTokenValue(property, value) {
+  // 间距、圆角可以由令牌推算（calc(var(--sk-radius) - 1px)）；字号只取字阶，令牌加减像素或乘系数得到的是字阶之外的字号
+  const calcAllowed = property !== "font-size";
   return splitValue(value.replace(/!important\s*$/, "").trim()).every(
-    (part) => T2_KEYWORDS.has(part) || /^var\(--[a-z0-9-]+(,.*)?\)$/.test(part) || (/^calc\(.*\)$/.test(part) && part.includes("var(--sk-")),
+    (part) => T2_KEYWORDS.has(part) || /^var\(--[a-z0-9-]+(,.*)?\)$/.test(part) || (calcAllowed && /^calc\(.*\)$/.test(part) && part.includes("var(--sk-")),
   );
 }
 
@@ -360,7 +362,7 @@ function checkSourceFile(srcRel, text, allowedUiLiterals, shadows, report) {
     if (inZones("pages", "flows", "setup")) {
       if (isCss) {
         const decl = cssDeclaration(line);
-        if (decl && T2_PROPERTY.test(decl.property) && !isTokenValue(decl.value)) report(i, "T2", line);
+        if (decl && T2_PROPERTY.test(decl.property) && !isTokenValue(decl.property, decl.value)) report(i, "T2", line);
       }
       if (isTsx) {
         for (const style of line.matchAll(/style=\{\{(.*?)\}\}/g)) if (T2_INLINE.test(style[1])) report(i, "T2", line);
@@ -371,7 +373,7 @@ function checkSourceFile(srcRel, text, allowedUiLiterals, shadows, report) {
     if (inZones(...T2_FONT_SIZE_ZONES)) {
       if (isCss) {
         const decl = cssDeclaration(line);
-        if (decl && decl.property === "font-size" && !isTokenValue(decl.value)) report(i, "T2", line);
+        if (decl && decl.property === "font-size" && !isTokenValue(decl.property, decl.value)) report(i, "T2", line);
       }
       if (isTsx) for (const style of line.matchAll(/style=\{\{(.*?)\}\}/g)) if (T2_INLINE_FONT_SIZE.test(style[1])) report(i, "T2", line);
     }

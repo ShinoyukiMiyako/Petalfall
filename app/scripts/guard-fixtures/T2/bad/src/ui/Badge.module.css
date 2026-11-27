@@ -6,3 +6,7 @@
 .label {
   font-size: 0.75em; /* expect T2 */
 }
+
+.count {
+  font-size: calc(var(--sk-fs-caption) * 0.9); /* expect T2 */
+}

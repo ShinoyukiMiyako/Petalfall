@@ -5,3 +5,8 @@
   gap: var(--sk-space-2) 4px; /* expect T2 */
   background: var(--sk-bg) url(x.png); /* expect T2 */
 }
+
+.sub {
+  padding: calc(var(--sk-space-2) + 1px);
+  font-size: calc(var(--sk-fs-body) + 1px); /* expect T2 */
+}
