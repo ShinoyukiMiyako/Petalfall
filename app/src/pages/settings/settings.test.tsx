@@ -2428,7 +2428,8 @@ describe("设置页：关于与启动器更新", () => {
       await mount("about");
       await click(rowButton(title, "查看"));
       const [dialog] = openDialogs();
-      expect(dialog.querySelector('[role="alert"] [class*="errorText"]')?.textContent).toBe(`${title}的文首应是一行「# 标题」，接着一行「版本：N」（N 是从 1 起的整数）`);
+      // 标题已点名是哪份，原文只给原因
+      expect(dialog.querySelector('[role="alert"] [class*="errorText"]')?.textContent).toBe("文首应是一行「# 标题」，接着一行「版本：N」（N 是从 1 起的整数）");
       expect(dialog.querySelector('[role="region"]')).toBeNull();
     });
   });

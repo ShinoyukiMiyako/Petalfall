@@ -39,6 +39,27 @@ async function rejection(load: () => Promise<unknown>): Promise<{ message: strin
   return { message: error.message, reason: error.reason };
 }
 
+/** 读失败时底下的原始错误（BundledFileError 的 cause）。 */
+async function causeOf(load: () => Promise<unknown>): Promise<unknown> {
+  const error: unknown = await load().then(
+    () => {
+      throw new Error("该失败的却读成功了");
+    },
+    (e: unknown) => e,
+  );
+  if (!(error instanceof BundledFileError)) throw new Error(`读失败的不是 BundledFileError：${String(error)}`);
+  return error.cause;
+}
+
+/** fetch 拿不到响应时浏览器给的错误：只有一句话，不带地址。 */
+function refusedFetch(): TypeError {
+  const failure = new TypeError(`Failed to fetch ${Math.random().toString(36).slice(2)}`);
+  vi.stubGlobal("fetch", async () => {
+    throw failure;
+  });
+  return failure;
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -97,6 +118,25 @@ describe("第三方许可清单", () => {
       reason: "/third-party-licenses.json 返回 404",
     });
   });
+
+  it("请求本身失败（拿不到响应）时报错：整句带称呼与地址，原错误的说法接在后面，原错误留作 cause", async () => {
+    const failure = refusedFetch();
+    expect(await rejection(loadThirdPartyLicenses)).toEqual({
+      message: `第三方许可清单读不出来：/third-party-licenses.json 请求失败：${failure.message}`,
+      reason: `/third-party-licenses.json 请求失败：${failure.message}`,
+    });
+    expect(await causeOf(loadThirdPartyLicenses)).toBe(failure);
+  });
+
+  it("内容不是 JSON（例如开发服务器把缺的文件回落成页面）时报错：整句带称呼与地址，解析错误留作 cause", async () => {
+    vi.stubGlobal("fetch", async () => new Response("<!doctype html><title>落樱</title>", { status: 200 }));
+    const cause = await causeOf(loadThirdPartyLicenses);
+    if (!(cause instanceof SyntaxError)) throw new Error(`解析失败的原错误不是 SyntaxError：${String(cause)}`);
+    expect(await rejection(loadThirdPartyLicenses)).toEqual({
+      message: `第三方许可清单读不出来：/third-party-licenses.json 解析失败：${cause.message}`,
+      reason: `/third-party-licenses.json 解析失败：${cause.message}`,
+    });
+  });
 });
 
 describe.each([
@@ -117,6 +157,12 @@ describe.each([
     const status = 400 + Math.floor(Math.random() * 200);
     vi.stubGlobal("fetch", async () => new Response("Not Found", { status }));
     expect(await rejection(load)).toEqual({ message: `${name}读不出来：${url} 返回 ${status}`, reason: `${url} 返回 ${status}` });
+  });
+
+  it("请求本身失败时报错：整句带称呼与地址，原错误留作 cause", async () => {
+    const failure = refusedFetch();
+    expect(await rejection(load)).toEqual({ message: `${name}读不出来：${url} 请求失败：${failure.message}`, reason: `${url} 请求失败：${failure.message}` });
+    expect(await causeOf(load)).toBe(failure);
   });
 });
 
@@ -139,8 +185,15 @@ describe.each([
     expect(await rejection(load)).toEqual({ message: `${name}读不出来：${url} 返回 ${status}`, reason: `${url} 返回 ${status}` });
   });
 
-  it("文首没有版本号时报错，不当成第 1 版", async () => {
+  it("请求本身失败时报错：整句带称呼与地址，原错误留作 cause", async () => {
+    const failure = refusedFetch();
+    expect(await rejection(load)).toEqual({ message: `${name}读不出来：${url} 请求失败：${failure.message}`, reason: `${url} 请求失败：${failure.message}` });
+    expect(await causeOf(load)).toBe(failure);
+  });
+
+  it("文首没有版本号时报错，不当成第 1 版：整句带称呼，原因单独一份不带称呼", async () => {
     vi.stubGlobal("fetch", async () => new Response(`# ${name}\n\n正文\n`, { status: 200 }));
-    await expect(load()).rejects.toThrow(`${name}的文首应是一行「# 标题」，接着一行「版本：N」`);
+    const reason = "文首应是一行「# 标题」，接着一行「版本：N」（N 是从 1 起的整数）";
+    expect(await rejection(load)).toEqual({ message: `${name}读不出来：${reason}`, reason });
   });
 });

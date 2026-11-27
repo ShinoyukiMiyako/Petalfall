@@ -49,19 +49,39 @@ export { ADDITIONAL_TERMS_FILE, ASSET_LICENSE_FILE };
 /** 使用须知与隐私说明在产物根目录下的文件名（源文件在仓库的 docs 下，同样由 vite.config.ts 写进两个产物）。 */
 export { PRIVACY_NOTICE_FILE, USAGE_NOTICE_FILE };
 
+const detailOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/**
+ * 请求产物根目录下的一份文件；what 是报错里对它的称呼。请求本身失败（fetch 拿不到响应）与状态码不对都报成带称呼的
+ * BundledFileError：fetch 自己的错误只有一句「Failed to fetch」，启动错误页与日志里看不出是哪份没读到。
+ */
+async function fetchBundled(file: string, what: string): Promise<{ url: string; response: Response }> {
+  const url = `${import.meta.env.BASE_URL}${file}`;
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (error) {
+    throw new BundledFileError(what, `${url} 请求失败：${detailOf(error)}`, { cause: error });
+  }
+  if (!response.ok) throw new BundledFileError(what, `${url} 返回 ${response.status}`);
+  return { url, response };
+}
+
 /** 第三方许可清单：体积大、只有关于页用到，用到时才去读。 */
 export async function loadThirdPartyLicenses(): Promise<ThirdPartyManifest> {
-  const url = `${import.meta.env.BASE_URL}${THIRD_PARTY_LICENSES_FILE}`;
-  const response = await fetch(url);
-  if (!response.ok) throw new BundledFileError("第三方许可清单", `${url} 返回 ${response.status}`);
-  return (await response.json()) as ThirdPartyManifest;
+  const what = "第三方许可清单";
+  const { url, response } = await fetchBundled(THIRD_PARTY_LICENSES_FILE, what);
+  // 解析失败时 JSON 自己的错误只说哪个字符不对，同样补上称呼与地址
+  try {
+    return (await response.json()) as ThirdPartyManifest;
+  } catch (error) {
+    throw new BundledFileError(what, `${url} 解析失败：${detailOf(error)}`, { cause: error });
+  }
 }
 
 /** 读产物根目录下的一份许可文本；what 是报错里对它的称呼。 */
 async function loadLegalText(file: string, what: string): Promise<string> {
-  const url = `${import.meta.env.BASE_URL}${file}`;
-  const response = await fetch(url);
-  if (!response.ok) throw new BundledFileError(what, `${url} 返回 ${response.status}`);
+  const { response } = await fetchBundled(file, what);
   return response.text();
 }
 

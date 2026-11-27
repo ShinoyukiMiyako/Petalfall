@@ -458,7 +458,7 @@ describe("启动时读须知", () => {
 
   it("文首没有版本行：照实报错，不猜一个版本号", async () => {
     serveNotice(`# 测试须知\n\n正文 ${marker}\n`);
-    await expect(loadUsageNoticeState()).rejects.toThrow("使用须知的文首应是一行「# 标题」，接着一行「版本：N」");
+    await expect(loadUsageNoticeState()).rejects.toThrow("使用须知读不出来：文首应是一行「# 标题」，接着一行「版本：N」");
   });
 
   it("确认记录读不出来：照实报错", async () => {

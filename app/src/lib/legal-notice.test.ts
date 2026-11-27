@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { BundledFileError } from "./bundled-file";
 import { parseLegalNotice } from "./legal-notice";
 
 /** 1 到 999 之间的随机版本号：读出来的必须是文首写的那个，而不是哪里写死的值。 */
@@ -35,7 +36,17 @@ describe("须知的文首约定", () => {
     ["版本行后面还跟着字", "# 标题\n\n版本：1（草稿）\n\n正文\n"],
     ["第一行不是一级标题", "## 标题\n\n版本：1\n\n正文\n"],
     ["文首有空行", "\n# 标题\n\n版本：1\n\n正文\n"],
-  ])("%s时报错，带上文件的称呼，不猜一个版本号", (_name, text) => {
-    expect(() => parseLegalNotice(text, "使用须知")).toThrow("使用须知的文首应是一行「# 标题」，接着一行「版本：N」（N 是从 1 起的整数）");
+  ])("%s时报错，不猜一个版本号：算这份文件读不出来，整句带上文件的称呼，原因单独一份不带称呼", (_name, text) => {
+    const what = Math.random() < 0.5 ? "使用须知" : "隐私说明";
+    const reason = "文首应是一行「# 标题」，接着一行「版本：N」（N 是从 1 起的整数）";
+    let thrown: unknown = null;
+    try {
+      parseLegalNotice(text, what);
+    } catch (error) {
+      thrown = error;
+    }
+    if (!(thrown instanceof BundledFileError)) throw new Error(`文首不合约定时抛的不是 BundledFileError：${String(thrown)}`);
+    expect(thrown.message).toBe(`${what}读不出来：${reason}`);
+    expect(thrown.reason).toBe(reason);
   });
 });

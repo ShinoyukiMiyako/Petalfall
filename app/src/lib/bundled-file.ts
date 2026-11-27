@@ -6,15 +6,15 @@ export class BundledFileError extends Error {
   /** 不带称呼的原因，如「/LICENSE.txt 返回 404」。 */
   readonly reason: string;
 
-  /** what 是对这份文件的称呼，与读失败提示的标题同一个说法。 */
-  constructor(what: string, reason: string) {
-    super(`${what}读不出来：${reason}`);
+  /** what 是对这份文件的称呼，与读失败提示的标题同一个说法；options.cause 留着底下的原始错误（请求本身失败、内容解析不了）。 */
+  constructor(what: string, reason: string, options?: ErrorOptions) {
+    super(`${what}读不出来：${reason}`, options);
     this.name = "BundledFileError";
     this.reason = reason;
   }
 }
 
-/** 读失败提示里放在标题下的原文：随产物分发的文件只给原因；别的错误（fetch 本身失败、内容解析不了）照原文。 */
+/** 读失败提示里放在标题下的原文：随产物分发的文件只给原因（请求失败、状态码不对、内容解析不了都是）；别的错误照原文。 */
 export function readFailureReason(error: Error): string {
   return error instanceof BundledFileError ? error.reason : error.message;
 }
