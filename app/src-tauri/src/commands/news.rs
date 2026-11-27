@@ -46,7 +46,8 @@ fn launcher_error(err: &CoreError) -> CommandError {
 
 /// 取资讯。官方资讯 6 小时内用磁盘缓存，联网失败时退回缓存并标 `offline: true`，
 /// 连缓存都没有才让整条命令报错（network_failed 或 feed_invalid，detail.url 为出错的地址）。
-/// 启动器资讯进程内缓存 1 小时，偏好的更新通道与安装包的通道都是正式版时不含预发布；它取不到且没有缓存时
+/// 启动器资讯进程内缓存 1 小时，偏好的更新通道与安装包的通道都是正式版时不含预发布，两者中较快的是测试版时
+/// 只含测试版的预发布；它取不到且没有缓存时
 /// 命令照常成功，错误放在 `launcher_error`。启动器资讯取不到之后按 1、5、15、60 分钟退避，
 /// 退避期内不请求、照样给上次的结果；`retry` 为 true（重试按钮、恢复联网后的重取）时不等退避期满。
 #[tauri::command]
@@ -204,21 +205,23 @@ mod tests {
         Facade::new(Petalfall::open(config, dir.to_path_buf(), dir.join("config.json")).unwrap())
     }
 
-    /// 资讯含不含预发布由门面里存着的偏好与正在运行的版本号一起定（`Stable` 时滤掉预发布）。
+    /// 资讯含哪些预发布由门面里存着的偏好与正在运行的版本号一起定（`Stable` 时滤掉预发布，`Beta` 时只留
+    /// 测试版的预发布）。
     #[tokio::test]
     async fn prereleases_follow_the_stored_preference_and_the_package_channel() {
-        use LauncherChannel::{Prerelease, Stable};
+        use LauncherChannel::{Beta, Prerelease, Stable};
         for (update_channel, package, expected) in [
             // 偏好测试版的人经跟随装上了正式版，仍看测试版的发布
-            (Some("beta"), "1.0.0", Prerelease),
+            (Some("beta"), "1.0.0", Beta),
             (Some("dev"), "1.0.0", Prerelease),
             (Some("stable"), "1.0.0", Stable),
             // 偏好缺省按包的通道
             (None, "1.0.0", Stable),
             (None, "1.0.0-dev.3", Prerelease),
-            (None, "1.0.0-beta.2", Prerelease),
-            // 偏好已改成正式版、还在等正式版追上来，跑的仍是预发布
-            (Some("stable"), "1.0.0-beta.2", Prerelease),
+            (None, "1.0.0-beta.2", Beta),
+            // 偏好已改成正式版、还在等正式版追上来，跑的仍是测试版
+            (Some("stable"), "1.0.0-beta.2", Beta),
+            (Some("beta"), "1.0.0-dev.3", Prerelease),
             // 认不出的偏好值按缺省算，不因此多给预发布
             (Some("nightly"), "1.0.0", Stable),
             // 包的通道认不出时不是正式版

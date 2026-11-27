@@ -8,8 +8,8 @@
 //! [`CACHE_TTL`] 内直接用缓存；取不到时退回缓存并标记离线，连缓存都没有才报错。
 //!
 //! 启动器资讯取本启动器公开仓库（[`REPO_URL`]）的 GitHub Releases，免鉴权，进程内缓存
-//! [`LAUNCHER_CACHE_TTL`]；草稿一律不收，偏好的更新通道与安装包的通道都是正式版时不收预发布
-//! （[`LauncherChannel`]）。
+//! [`LAUNCHER_CACHE_TTL`]；草稿一律不收，偏好的更新通道与安装包的通道都是正式版时不收预发布，两者中较快的是
+//! 测试版时只收测试版的预发布（[`LauncherChannel`]）。
 //! 取不到时同样退回缓存并标记离线；连缓存都没有时只在 [`NewsFeed::launcher_error`] 里报错，
 //! 官方资讯照常返回。取不到之后按 [`LAUNCHER_BACKOFF`] 退避：退避期内不请求 GitHub，直接给上次取到的
 //! 发布（标记离线）或上次的失败，主页不必每次都等满请求时限；调用方明确要求重试时（重试按钮、恢复联网
@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
+use crate::release::install_policy::channel_of;
 use crate::release::order::Channel;
 
 /// 内容源与图片的根地址；条目里的图片地址是相对它的路径。
@@ -70,12 +71,15 @@ pub enum NewsTag {
     Launcher,
 }
 
-/// 启动器资讯里显示不显示预发布，由用户偏好的更新通道与安装包自带的通道一起定。
+/// 启动器资讯里显示哪些预发布，由用户偏好的更新通道与安装包自带的通道一起定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LauncherChannel {
     /// 生效的偏好与包的通道都是正式版：只看正式发布。
     Stable,
-    /// 其余情形，预发布也看。
+    /// 两者中较快的是测试版：正式发布之外只看标签是测试版版本号的预发布。预览版的滚动预发布 `dev-build`
+    /// 不给测试版用户看：它的附件是预览版安装包，点进去装上就离开了测试版通道。
+    Beta,
+    /// 其余情形（较快的是预览版，或包的通道认不出），预发布全看。
     Prerelease,
 }
 
@@ -83,17 +87,32 @@ impl LauncherChannel {
     /// `preference` 是存着的更新通道偏好（[`Petalfall::update_channel_preference`]），`None` 表示缺省、按包的
     /// 通道算；`package` 是正在运行的版本号经 [`Channel::of_version`] 判出的通道，认不出时为 `None`。
     ///
-    /// 只看包的通道不够：偏好测试版的人经跟随装上了正式版，仍想看到测试版的发布。只看偏好也不够：偏好改成
-    /// 正式版、还在等正式版追上来的人，跑的仍是预发布。认不出通道的包（`rc`、`alpha` 这类标识）同样是预发布。
+    /// 取两者中较快的通道。只看包的通道不够：偏好测试版的人经跟随装上了正式版，仍想看到测试版的发布。只看偏好
+    /// 也不够：偏好改成正式版、还在等正式版追上来的人，跑的仍是预发布。认不出通道的包（`rc`、`alpha` 这类标识）
+    /// 不知道离哪个通道近，预发布全看。
     pub fn from_channels(preference: Option<Channel>, package: Option<Channel>) -> Self {
-        match (preference.or(package), package) {
-            (Some(Channel::Stable), Some(Channel::Stable)) => Self::Stable,
-            _ => Self::Prerelease,
+        let Some(package) = package else {
+            return Self::Prerelease;
+        };
+        let preference = preference.unwrap_or(package);
+        let fastest = if preference.is_faster_than(package) {
+            preference
+        } else {
+            package
+        };
+        match fastest {
+            Channel::Stable => Self::Stable,
+            Channel::Beta => Self::Beta,
+            Channel::Dev => Self::Prerelease,
         }
     }
 
     fn shows(self, release: &LauncherRelease) -> bool {
-        !release.prerelease || self == Self::Prerelease
+        match self {
+            Self::Stable => !release.prerelease,
+            Self::Beta => !release.prerelease || release.tag_channel == Some(Channel::Beta),
+            Self::Prerelease => true,
+        }
     }
 }
 
@@ -151,11 +170,14 @@ struct OfficialNews {
     offline: bool,
 }
 
-/// 一条启动器发布，带着是否预发布，供按通道过滤。
+/// 一条启动器发布，带着是否预发布与标签所属的通道，供按通道过滤。
 #[derive(Debug, Clone)]
 struct LauncherRelease {
     item: NewsItem,
     prerelease: bool,
+    /// 标签去掉开头的 `v` 后按版本号判出的通道；标签不是版本号（滚动预发布 `dev-build`）或预发布标识认不出时为
+    /// `None`。
+    tag_channel: Option<Channel>,
 }
 
 /// 按通道过滤前的全集：切换通道不用重新联网。
@@ -644,6 +666,7 @@ fn parse_releases(bytes: &[u8], url: &str) -> Result<Vec<LauncherRelease>> {
             let date = entry_date(published_at, &id)?;
             Some(LauncherRelease {
                 prerelease: release.prerelease,
+                tag_channel: tag_channel(&release.tag_name),
                 item: NewsItem {
                     title: release_title(release.name.as_deref(), &release.tag_name),
                     summary: release_summary(release.body.as_deref()),
@@ -656,6 +679,12 @@ fn parse_releases(bytes: &[u8], url: &str) -> Result<Vec<LauncherRelease>> {
             })
         })
         .collect())
+}
+
+/// 发布流水线给测试版与正式版打的标签是 `v<版本号>`；不带 `v` 的版本号标签同样认。
+fn tag_channel(tag_name: &str) -> Option<Channel> {
+    let tag = tag_name.trim();
+    channel_of(tag.strip_prefix('v').unwrap_or(tag))
 }
 
 /// 发布没起名时 GitHub 网页上显示的就是标签名，这里照同一规则。
@@ -939,15 +968,15 @@ mod tests {
         );
     }
 
-    /// 生效的偏好与包的通道都是正式版才不看预发布。包的通道照正在运行的版本号判：主版本是 0 的正式版号同样
-    /// 是正式版，认不出通道的预发布标识不是正式版。
+    /// 取生效的偏好与包的通道中较快的一个：都是正式版才不看预发布，较快的是测试版时只看测试版的预发布。包的
+    /// 通道照正在运行的版本号判：主版本是 0 的正式版号同样是正式版，认不出通道的预发布标识预发布全看。
     #[test]
     fn launcher_channel_follows_build_channel_rule() {
-        use crate::release::install_policy::channel_of;
-        use LauncherChannel::{Prerelease, Stable};
+        use LauncherChannel::{Beta, Prerelease, Stable};
 
         let stable_packages = ["1.0.0", "0.1.0", "18446744073709551615.0.0"];
-        let prerelease_packages = ["1.0.0-dev.3", "1.0.0-beta.2", "0.1.0-dev.41"];
+        let beta_packages = ["1.0.0-beta.2", "0.3.0-BETA.1"];
+        let dev_packages = ["1.0.0-dev.3", "0.1.0-dev.41"];
         let unrecognized_packages = ["1.0.0-rc.1", "1.0.0-alpha", "1.0.0-dev-1"];
         for version in unrecognized_packages {
             assert_eq!(channel_of(version), None, "{version} 应当认不出通道");
@@ -958,7 +987,17 @@ mod tests {
             cases.extend([
                 (None, version, Stable),
                 (Some(Channel::Stable), version, Stable),
-                (Some(Channel::Beta), version, Prerelease),
+                // 偏好测试版的人经跟随装上了正式版，仍看测试版的发布，但不看预览版的
+                (Some(Channel::Beta), version, Beta),
+                (Some(Channel::Dev), version, Prerelease),
+            ]);
+        }
+        for version in beta_packages {
+            cases.extend([
+                (None, version, Beta),
+                // 偏好已改成正式版、还在等正式版追上来，跑的仍是测试版
+                (Some(Channel::Stable), version, Beta),
+                (Some(Channel::Beta), version, Beta),
                 (Some(Channel::Dev), version, Prerelease),
             ]);
         }
@@ -968,7 +1007,7 @@ mod tests {
             Some(Channel::Beta),
             Some(Channel::Dev),
         ];
-        for version in prerelease_packages.into_iter().chain(unrecognized_packages) {
+        for version in dev_packages.into_iter().chain(unrecognized_packages) {
             cases.extend(preferences.map(|preference| (preference, version, Prerelease)));
         }
         for (preference, version, expected) in cases {
@@ -1019,6 +1058,56 @@ mod tests {
         assert!(
             matches!(err, CoreError::FeedParse { ref url, .. } if url == "https://api.github.com/releases")
         );
+    }
+
+    /// 测试版档只收正式发布与标签是测试版版本号的预发布：滚动预发布 `dev-build`、预览版号与认不出通道的预发布
+    /// 都不收；正式版档只收正式发布，预览版档全收。
+    #[test]
+    fn beta_channel_hides_dev_build_and_other_non_beta_prereleases() {
+        let release = |id: u64, tag: &str, prerelease: bool| {
+            serde_json::json!({
+                "id": id,
+                "tag_name": tag,
+                "name": null,
+                "body": null,
+                "draft": false,
+                "prerelease": prerelease,
+                "published_at": format!("2026-10-{:02}T00:00:00Z", id - 300),
+            })
+        };
+        let body = serde_json::to_string(&[
+            release(329, "dev-build", true),
+            release(328, "v1.0.0-beta.3", true),
+            release(327, "v1.0.0-dev.60", true),
+            release(326, "v1.0.0-rc.1", true),
+            release(325, "1.0.0-beta.2", true),
+            release(324, "v1.0.0", false),
+            release(323, "dev-build", false),
+        ])
+        .unwrap();
+        let releases = parse_releases(body.as_bytes(), "releases").unwrap();
+        let visible = |channel: LauncherChannel| -> Vec<String> {
+            releases
+                .iter()
+                .filter(|release| channel.shows(release))
+                .map(|release| release.item.id.clone())
+                .collect()
+        };
+
+        assert_eq!(
+            visible(LauncherChannel::Beta),
+            [
+                "launcher-328",
+                "launcher-325",
+                "launcher-324",
+                "launcher-323"
+            ]
+        );
+        assert_eq!(
+            visible(LauncherChannel::Stable),
+            ["launcher-324", "launcher-323"]
+        );
+        assert_eq!(visible(LauncherChannel::Prerelease).len(), 7);
     }
 
     #[test]
