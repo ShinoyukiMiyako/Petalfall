@@ -2327,6 +2327,31 @@ describe("实例详情：补全修不好的损坏实例", () => {
       expect(errorToasts()).toEqual(errorsBefore);
       expect(button("删除实例", banner).getAttribute("aria-disabled")).toBeNull();
     });
+
+    // 名字改不成是状态容器发请求之前先拒的，锁放开了照样改不成：两样都在时说名字，不让玩家白等备份结束；与实例库横幅同一个先后
+    it.each<[string, InstanceDto["activity"], boolean, string]>([
+      ["正在备份存档、同时改名目标已被排队中的新建占着：说重名，不说等备份完成", "backing_up", true, "已经有同名的实例了，换一个吧"],
+      ["只在备份存档：说等备份完成", "backing_up", false, "正在备份或恢复这个实例的存档，完成后才能重命名"],
+      ["只有改名目标被排队中的新建占着：说重名", null, true, "已经有同名的实例了，换一个吧"],
+    ])("「改名为」此刻改不成，%s；点了不改名", async (_name, activity, taken, reason) => {
+      instances = instances.map((i) => (i.id === ID ? renamable({ activity }) : i));
+      ipc.overrides.set("install_version", () => new Promise(() => undefined));
+      await open("overview");
+      if (taken) {
+        await act(async () => {
+          await launcher.actions.createInstance({ name: "1.20.1-NeoForge", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "cherry_planks" });
+          await settle();
+        });
+      }
+      expect(launcher.state.instances.find((i) => i.id === ID)?.activity).toBe(activity);
+      expect(launcher.state.instances.some((i) => i.id === "1.20.1-NeoForge")).toBe(taken);
+      const rename = button("改名为「1.20.1-NeoForge」", bannerOf("实例文件不完整，补全修不好"));
+      expect(rename.getAttribute("aria-disabled")).toBe("true");
+      expect(await tipOf(rename)).toBe(reason);
+      click(rename);
+      await flush();
+      expect(callsOf(ipc, "rename_instance")).toEqual([]);
+    });
   });
 
   it("头图菜单的「补全游戏文件」带原因禁用，悬停写后端给的原因；点了不发补全、不留任务", async () => {
