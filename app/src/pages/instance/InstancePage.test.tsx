@@ -2095,7 +2095,7 @@ describe("实例详情：补全修不好的损坏实例", () => {
     expect(() => button("修复实例")).toThrow("找不到按钮");
   });
 
-  it("概览横幅的「删除实例」走删除确认：先问后端删除预览，确认框写着要删的实例，不发补全", async () => {
+  it("概览横幅的「删除实例」走删除确认：先问后端删除预览，确认框写着要删的实例，确认后删的就是它，不发补全", async () => {
     await open("overview");
     const title = [...document.querySelectorAll("div")].find((el) => el.childElementCount === 0 && el.textContent === "实例文件不完整，补全修不好" && live(el));
     const banner = title === undefined ? null : title.closest<HTMLElement>('[class*="_banner_"]');
@@ -2106,7 +2106,29 @@ describe("实例详情：补全修不好的损坏实例", () => {
     await flush();
     expect(callsOf(ipc, "preview_instance_deletion")).toEqual([{ id: ID }]);
     expect(dialog().querySelector("h2")?.textContent).toBe(`删除「${ID}」？`);
+    expect(callsOf(ipc, "delete_instance")).toEqual([]);
+    click(button("删除实例和 2 个存档", dialog()));
+    await flush();
+    expect(callsOf(ipc, "delete_instance")).toEqual([{ id: ID }]);
     expect(callsOf(ipc, "repair_instance")).toEqual([]);
+  });
+
+  it("实例被别的实例当作基底时，概览横幅的「删除实例」带原因禁用：点了不问删除预览、不开确认框", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "inherited", used_by: "Fabric 整合" } : i));
+    await open("overview");
+    const title = [...document.querySelectorAll("div")].find((el) => el.childElementCount === 0 && el.textContent === "实例文件不完整，补全修不好" && live(el));
+    const banner = title === undefined ? null : title.closest<HTMLElement>('[class*="_banner_"]');
+    if (banner === null) throw new Error("没有损坏横幅");
+    const remove = button("删除实例", banner);
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    expect(await tipOf(remove)).toBe("实例「Fabric 整合」正在使用它，结束后才能删除");
+    const errorsBefore = launcher.state.toasts.filter((t) => t.tone === "error");
+    click(remove);
+    await flush();
+    // 没占用时同一个按钮一点就问删除预览（见上一条）：这里没问、也没多出错误通知，说明点击在按钮上就被拦下了
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual(errorsBefore);
   });
 
   describe("修不好时按剩下的出路给按钮", () => {
@@ -2328,9 +2350,13 @@ describe("实例详情：损坏实例上进入存档、导出与移动的原因"
     expect(play.getAttribute("aria-disabled")).toBe("true");
     // 图标按钮的提示气泡先写按钮名，再写禁用原因
     expect(await tipOf(play)).toBe(`进入「新世界」${expected.enter}`);
+    // 点击漏进状态容器的话，启动拦截在发出 launch_game 之前就抛错，同样不启动，却会多一条启动失败的错误通知：
+    // 没有新的错误通知才说明点击在按钮上就被拦下了
+    const errorsBefore = launcher.state.toasts.filter((t) => t.tone === "error");
     click(play);
     await flush();
     expect(callsOf(ipc, "launch_game")).toEqual([]);
+    expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual(errorsBefore);
 
     click(button("更多操作"));
     for (const [label, reason] of [
