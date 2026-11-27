@@ -1848,6 +1848,37 @@ describe("装到一半被重扫扫到半成品目录", () => {
     await settle();
     expect(store.getState().instances.find((i) => i.id === "生存")).toMatchObject({ status: "installing", mcVersion: null, loader: "vanilla" });
   });
+
+  it("导入整合包：还没写版本 JSON 时沿用入队时的内容；写下之后显示扫到的，入队时缺的加载器版本不盖掉它", async () => {
+    const pack = deferred<unknown>();
+    ipc.overrides.set("install_modpack", () => pack.promise);
+    // 发现页还没读到清单摘要时点的安装：入队时只知道游戏版本与加载器，不知道加载器版本
+    await store.actions.installModpack({
+      source: { kind: "file", path: "C:/packs/pack.mrpack" },
+      name: "整合包",
+      cover: "grass",
+      packName: "整合包",
+      packVersion: "1.0.0",
+      modCount: 12,
+      mcVersion: "1.20.1",
+      loader: "forge",
+      loaderVersion: null,
+      excludedOptional: [],
+    });
+    await settle();
+    const marker = { kind: "modpack" as const, outcome: "pending" as const, started_at: 1_720_000_000_000, spec: null, error: null };
+    const find = () => store.getState().instances.find((i) => i.id === "整合包");
+    instances = [...instances, instanceDto("整合包", { status: "broken", broken_reason: "缺少版本 JSON", mc_version: null, loaders: [], activity: "installing", incomplete: marker })];
+    await store.actions.reload("instances");
+    await settle();
+    expect(find()).toMatchObject({ placeholder: false, status: "installing", mcVersion: "1.20.1", loader: "forge", loaderVersion: null });
+
+    // 版本 JSON 在下载 Mod 之前就写成了真实内容，之后的重扫扫到的是准的
+    instances = instances.map((i) => (i.id === "整合包" ? instanceDto("整合包", { mc_version: "1.20.1", loaders: [{ kind: "forge", version: "47.4.20" }], activity: "installing", incomplete: marker }) : i));
+    await store.actions.reload("instances");
+    await settle();
+    expect(find()).toMatchObject({ placeholder: false, status: "installing", mcVersion: "1.20.1", loader: "forge", loaderVersion: "47.4.20" });
+  });
 });
 
 describe("补全失败的通知", () => {
@@ -2188,5 +2219,21 @@ describe("重启后重试上次关闭时中断的新建与导入", () => {
     await settle();
     expect(entry("整合包")).toBeUndefined();
     expect(store.getState().sidebarPins).toEqual([]);
+  });
+
+  it("导入整合包：重试后写下了版本 JSON、正在下载 Mod 时重扫，显示扫到的版本与加载器，不是恢复出来的「原版 · 版本未知」", async () => {
+    await restartWith(interrupted("t-pack", "modpack", "整合包", "install_modpack", { source: { kind: "file", path: "C:/packs/pack.mrpack" }, name: "整合包" }));
+    const pack = deferred<unknown>();
+    ipc.overrides.set("install_modpack", () => pack.promise);
+    store.actions.retryTask("t-pack");
+    await settle();
+    // 恢复出来的任务只有命令参数：不知道版本与加载器
+    expect(entry("整合包")).toMatchObject({ placeholder: true, status: "installing", mcVersion: null, loader: "vanilla", loaderVersion: null });
+
+    const marker = { kind: "modpack" as const, outcome: "pending" as const, started_at: 1_720_000_000_000, spec: null, error: null };
+    instances = [...instances, instanceDto("整合包", { mc_version: "1.20.1", loaders: [{ kind: "forge", version: "47.4.20" }], activity: "installing", incomplete: marker })];
+    await store.actions.reload("instances");
+    await settle();
+    expect(entry("整合包")).toMatchObject({ placeholder: false, status: "installing", mcVersion: "1.20.1", loader: "forge", loaderVersion: "47.4.20" });
   });
 });
