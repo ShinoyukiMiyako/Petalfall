@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use petalfall_install::error::JavaExecutable;
 use petalfall_install::forge::{FallbackJava, FallbackJavaError};
 use petalfall_install::{
     ForgeInstaller, InstallContext, LoaderInstaller, LoaderSummary, VanillaInstaller,
@@ -259,7 +260,7 @@ impl Petalfall {
                 choice.display_name()
             )),
         );
-        let (_, java_path) = self.resolve_java(required_major, events).await?;
+        let (found, java_path) = self.resolve_java(required_major, events).await?;
 
         emit(
             events,
@@ -268,8 +269,9 @@ impl Petalfall {
                 choice.display_name()
             )),
         );
+        let java_major = found.first().map(|picked| picked.version.major);
         let summary = self
-            .forge_installer(cx, required_major, java_path, events)
+            .forge_installer(cx, required_major, java_path, java_major, events)
             .install(installer_url)
             .await?;
         emit(
@@ -289,18 +291,20 @@ impl Petalfall {
         })
     }
 
-    /// Forge / NeoForge 安装器：处理器先用 `java`（按游戏要求的主版本 `required_major` 取的那个）跑，installer 的
-    /// `.sha1` 按下载源方案取；游戏要求的 Java 低于 [`PROCESSOR_FALLBACK_JAVA_MAJOR`] 时带上备用 Java。传统布局安装
-    /// 与新建、重装实例共用这一份。
+    /// Forge / NeoForge 安装器：处理器先用 `java`（按游戏要求的主版本 `required_major` 取的那个，`java_major` 是它
+    /// 实际的主版本，只用来写报错正文）跑，installer 的 `.sha1` 按下载源方案取；游戏要求的 Java 低于
+    /// [`PROCESSOR_FALLBACK_JAVA_MAJOR`] 时带上备用 Java。传统布局安装与新建、重装实例共用这一份。
     pub(crate) fn forge_installer<'a>(
         &'a self,
         cx: InstallContext<'a>,
         required_major: u32,
         java: PathBuf,
+        java_major: Option<u32>,
         events: Option<&'a EventSink>,
     ) -> ForgeInstaller<'a> {
         let fallback = self.processor_fallback_java(required_major, &java, events);
         ForgeInstaller::new(cx, java)
+            .with_java_major(java_major)
             .with_sources(self.source_plan(self.config().download_source))
             .with_fallback_java(fallback)
     }
@@ -329,18 +333,18 @@ impl Petalfall {
         &self,
         primary: PathBuf,
         events: Option<&EventSink>,
-    ) -> std::result::Result<PathBuf, FallbackJavaError> {
+    ) -> std::result::Result<JavaExecutable, FallbackJavaError> {
         let resolved = self
             .resolve_java(PROCESSOR_FALLBACK_JAVA_MAJOR, events)
             .await;
         let fallback = fallback_outcome(resolved)?;
         // 设置里固定了 Java 时取回的就是先用的那个，安装器认出是同一个、不重跑，这里也不说要换。
-        if fallback != primary {
+        if fallback.path != primary {
             emit(
                 events,
                 CoreEvent::stage(format!(
                     "安装器生成的文件与它声明的不符，改用 Java {PROCESSOR_FALLBACK_JAVA_MAJOR} 重跑：{}",
-                    fallback.display()
+                    fallback.path.display()
                 )),
             );
         }
@@ -351,9 +355,12 @@ impl Petalfall {
 /// 取备用 Java 的结果交给安装器：取消照常以取消结束；别的失败记一条 warn，原因原样交给安装器写进报错。
 fn fallback_outcome(
     resolved: Result<(Vec<JavaInstallation>, PathBuf)>,
-) -> std::result::Result<PathBuf, FallbackJavaError> {
+) -> std::result::Result<JavaExecutable, FallbackJavaError> {
     match resolved {
-        Ok((_, path)) => Ok(path),
+        Ok((found, path)) => Ok(JavaExecutable {
+            major: found.first().map(|picked| picked.version.major),
+            path,
+        }),
         Err(err) if err.is_cancelled() => Err(FallbackJavaError::Cancelled),
         Err(err) => {
             tracing::warn!(
@@ -1258,14 +1265,16 @@ mod tests {
         let picked = PathBuf::from(r"D:\data\runtime\17\bin\java.exe");
         assert_eq!(
             fallback_outcome(Ok((Vec::new(), picked.clone()))).unwrap(),
-            picked
+            JavaExecutable {
+                path: picked,
+                major: None
+            }
         );
     }
 
-    /// 经 resolve_java 取备用 Java 失败（这里是设置里固定的 Java 不见了）：原因交给安装器，产物对不上的报错正文里
-    /// 就带着它。
+    /// 经 resolve_java 取备用 Java 失败（这里是设置里固定的 Java 不见了）：交回取不到，原因是 resolve_java 报错的原文。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_failed_fallback_java_hands_its_reason_to_the_installer_error() {
+    async fn a_fallback_java_that_cannot_be_resolved_is_unavailable_with_its_reason() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         let missing = root
@@ -1287,23 +1296,9 @@ mod tests {
             other => panic!("应为取不到，实际：{other:?}"),
         };
 
-        let shown = format!("执行 java 可执行文件失败：{}", missing.display());
-        assert_eq!(reason.to_string(), shown);
-        let err = petalfall_install::Error::ProcessorOutputMismatch(Box::new(
-            petalfall_install::error::ProcessorOutputMismatch {
-                jar: "net.minecraftforge:jarsplitter:1.1.0".into(),
-                path: root.join("client-1.13.2-20190213.203750-extra.jar"),
-                expected: "938487f2".into(),
-                actual: "2f9435b4".into(),
-                java: missing.clone(),
-                retried_with: None,
-                fallback_error: Some(reason),
-            },
-        ));
-        let message = err.to_string();
-        assert!(
-            message.ends_with(&format!("；想换一个 Java 重跑，但没能取到：{shown}")),
-            "{message}"
+        assert_eq!(
+            reason.to_string(),
+            format!("执行 java 可执行文件失败：{}", missing.display())
         );
     }
 
@@ -1332,14 +1327,18 @@ mod tests {
             .join("bin")
             .join(petalfall_java::JAVA_EXE);
         {
+            let picked = JavaExecutable {
+                path: fixed.clone(),
+                major: Some(17),
+            };
             let same = petalfall
                 .processor_fallback_java(8, &fixed, Some(&tx))
                 .unwrap();
-            assert_eq!(same().await.unwrap(), fixed);
+            assert_eq!(same().await.unwrap(), picked);
             let switched = petalfall
                 .processor_fallback_java(8, &other, Some(&tx))
                 .unwrap();
-            assert_eq!(switched().await.unwrap(), fixed);
+            assert_eq!(switched().await.unwrap(), picked);
         }
         drop(tx);
 

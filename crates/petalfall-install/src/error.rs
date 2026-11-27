@@ -211,12 +211,30 @@ fn file_label(path: &std::path::Path) -> String {
     )
 }
 
+/// 跑过处理器的一个 Java：可执行文件，连同调用方给出的主版本。主版本只用来把报错正文写成玩家认得出的
+/// 「Java 8（路径）」；调用方不知道时为空，正文只写路径，不去猜。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaExecutable {
+    pub path: PathBuf,
+    pub major: Option<u32>,
+}
+
+impl std::fmt::Display for JavaExecutable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.major {
+            Some(major) => write!(f, "Java {major}（{}）", self.path.display()),
+            None => write!(f, "{}", self.path.display()),
+        }
+    }
+}
+
 /// 处理器跑完了，生成的产物却与安装器声明的 sha1 对不上。官方 installer 同样判失败，校验不能放宽。旧版安装工具在
 /// 老的 Java 8 上生成的 jar 字节与声明的不同，换新一些的 Java 就对得上，所以安装器有备用 Java 时会换它重跑一次
 /// （见 [`crate::forge::FallbackJava`]），这里报的是重跑之后仍对不上、或没能换的情形。
 ///
-/// 正文写全处理器、产物的完整路径与两边的 sha1，再交代用过哪个 Java、为什么没换：命令层不另带详情，玩家与
-/// 「复制错误原文」看到的就是这一句。
+/// 命令层不另带详情，玩家与「复制错误原文」看到的就是正文这一句，而实例卡片与任务行只显示一行、超出的截掉。
+/// 所以结论与该做什么排在前面：哪个处理器用哪个 Java 生成的哪个文件（只写文件名）不符，又换了哪个 Java 重跑、
+/// 或为什么没能换；完整路径与两边的 sha1 放在句末的括号里，截掉的只是细节。
 #[derive(Debug)]
 pub struct ProcessorOutputMismatch {
     /// 处理器的 maven 坐标。
@@ -226,10 +244,10 @@ pub struct ProcessorOutputMismatch {
     pub expected: String,
     pub actual: String,
     /// 先跑这个处理器的 Java。
-    pub java: PathBuf,
-    /// 换过 Java 重跑时是换上的那个；`expected` 与 `actual` 是重跑之后的结果。
-    pub retried_with: Option<PathBuf>,
-    /// 想换 Java 重跑却没能取到备用 Java 的原因，同时挂在原因链上。
+    pub java: JavaExecutable,
+    /// 换过 Java 重跑时是换上的那个；`path`、`expected` 与 `actual` 是重跑之后的结果。
+    pub retried_with: Option<JavaExecutable>,
+    /// 想换 Java 重跑却没能取到备用 Java 的原因，原文写进正文；原因链从它的下一层接着。
     pub fallback_error: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
@@ -237,33 +255,40 @@ impl std::fmt::Display for ProcessorOutputMismatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "处理器 {} 生成的 {} 与安装器声明的不符（期望 sha1 {}，实际 {}）",
+            "处理器 {} 用 {}{}生成的 {} 与安装器声明的不符",
             self.jar,
-            self.path.display(),
-            self.expected,
-            self.actual
+            self.java,
+            gap_after(&self.java),
+            file_label(&self.path)
         )?;
-        match &self.retried_with {
-            Some(second) => write!(
-                f,
-                "，先用 {} 跑、又换 {} 重跑，两次都对不上",
-                self.java.display(),
-                second.display()
-            )?,
-            None => write!(f, "，用的 Java 是 {}", self.java.display())?,
+        if let Some(second) = &self.retried_with {
+            write!(f, "；又换 {second}{}重跑，两次都对不上", gap_after(second))?;
         }
         if let Some(reason) = &self.fallback_error {
             write!(f, "；想换一个 Java 重跑，但没能取到：{reason}")?;
         }
-        Ok(())
+        write!(
+            f,
+            "（{}，期望 sha1 {}，实际 {}）",
+            self.path.display(),
+            self.expected,
+            self.actual
+        )
     }
+}
+
+/// 正文里 Java 后面接中文时的间隔：带主版本时以全角括号收尾，直接接上；只有路径时空一格，路径才不与后文粘在一起。
+fn gap_after(java: &JavaExecutable) -> &'static str {
+    if java.major.is_some() { "" } else { " " }
 }
 
 impl std::error::Error for ProcessorOutputMismatch {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // 取不到的原因已经写进正文，再把它挂上原因链，日志与「复制错误原文」里同一句话就会出现两遍；更深一层
+        // （读盘、网络之类的原错误）正文里没有，照样留在链上，上层沿链才认得出断网。
         self.fallback_error
             .as_deref()
-            .map(|reason| reason as &(dyn std::error::Error + 'static))
+            .and_then(|reason| reason.source())
     }
 }
 
@@ -414,64 +439,108 @@ mod tests {
         assert!(err.is_retryable());
     }
 
-    /// 产物对不上的正文要指认处理器与文件、写出两边的 sha1，再按有没有换过 Java、为什么没换各说一句；没能换的原因
-    /// 同时挂在原因链上。
+    /// 产物对不上的正文先说结论：哪个处理器用哪个 Java 生成的哪个文件不符，再按换过 Java、没能换各接一句；完整路径
+    /// 与两边的 sha1 放在句末括号里。取不到的原因原文写进正文，原因链只交出正文里没有的更深一层。
     #[test]
-    fn processor_output_mismatch_names_the_processor_the_file_and_the_javas() {
+    fn processor_output_mismatch_puts_the_verdict_first_and_the_details_last() {
         let path = PathBuf::from(
             r"D:\mc\libraries\net\minecraft\client\1.13.2-20190213.203750\client-1.13.2-20190213.203750-extra.jar",
         );
-        let java8 = PathBuf::from(r"D:\data\runtime\8\bin\java.exe");
-        let java17 = PathBuf::from(r"D:\data\runtime\17\bin\java.exe");
+        let java8 = JavaExecutable {
+            path: PathBuf::from(r"D:\data\runtime\8\bin\java.exe"),
+            major: Some(8),
+        };
+        let java17 = JavaExecutable {
+            path: PathBuf::from(r"D:\data\runtime\17\bin\java.exe"),
+            major: Some(17),
+        };
         let mismatch =
-            |retried_with: Option<PathBuf>,
+            |java: JavaExecutable,
+             retried_with: Option<JavaExecutable>,
              fallback_error: Option<Box<dyn std::error::Error + Send + Sync>>| {
                 Error::ProcessorOutputMismatch(Box::new(ProcessorOutputMismatch {
                     jar: "net.minecraftforge:jarsplitter:1.1.0".into(),
                     path: path.clone(),
                     expected: "938487f2".into(),
                     actual: "2f9435b4".into(),
-                    java: java8.clone(),
+                    java,
                     retried_with,
                     fallback_error,
                 }))
             };
-        let head = format!(
-            "处理器 net.minecraftforge:jarsplitter:1.1.0 生成的 {} 与安装器声明的不符（期望 sha1 938487f2，实际 2f9435b4）",
-            path.display()
-        );
+        let details = format!("（{}，期望 sha1 938487f2，实际 2f9435b4）", path.display());
 
-        let plain = mismatch(None, None);
+        let plain = mismatch(java17.clone(), None, None);
         assert_eq!(
             plain.to_string(),
-            format!("{head}，用的 Java 是 {}", java8.display())
+            format!(
+                r"处理器 net.minecraftforge:jarsplitter:1.1.0 用 Java 17（D:\data\runtime\17\bin\java.exe）生成的 client-1.13.2-20190213.203750-extra.jar 与安装器声明的不符{details}"
+            )
         );
         assert!(std::error::Error::source(&plain).is_none());
         assert!(!plain.is_retryable());
 
-        let retried = mismatch(Some(java17.clone()), None);
+        let retried = mismatch(java8.clone(), Some(java17.clone()), None);
         assert_eq!(
             retried.to_string(),
             format!(
-                "{head}，先用 {} 跑、又换 {} 重跑，两次都对不上",
-                java8.display(),
-                java17.display()
+                r"处理器 net.minecraftforge:jarsplitter:1.1.0 用 Java 8（D:\data\runtime\8\bin\java.exe）生成的 client-1.13.2-20190213.203750-extra.jar 与安装器声明的不符；又换 Java 17（D:\data\runtime\17\bin\java.exe）重跑，两次都对不上{details}"
             )
         );
+        assert!(std::error::Error::source(&retried).is_none());
         assert!(!retried.is_retryable());
 
-        let reason = "未找到匹配 Java 17 的运行时，且自动下载已关闭";
-        let unavailable = mismatch(None, Some(Box::new(std::io::Error::other(reason))));
+        // 原因本身就是最底层：正文里有它，原因链上什么都不剩。
+        let reason = "未找到匹配 Java 17 的运行时，且自动下载已关闭（开启 auto_download_java 或手动安装对应 Java）";
+        let unavailable = mismatch(
+            java8.clone(),
+            None,
+            Some(Box::new(std::io::Error::other(reason))),
+        );
         assert_eq!(
             unavailable.to_string(),
             format!(
-                "{head}，用的 Java 是 {}；想换一个 Java 重跑，但没能取到：{reason}",
-                java8.display()
+                r"处理器 net.minecraftforge:jarsplitter:1.1.0 用 Java 8（D:\data\runtime\8\bin\java.exe）生成的 client-1.13.2-20190213.203750-extra.jar 与安装器声明的不符；想换一个 Java 重跑，但没能取到：{reason}{details}"
             )
         );
+        assert!(std::error::Error::source(&unavailable).is_none());
+
+        // 原因下面还有一层：原因链交出的是那一层，不是正文里已经写过的原因。
+        let deeper = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "连接被重置");
+        let unreachable = mismatch(
+            java8,
+            None,
+            Some(Box::new(Error::Io {
+                path: PathBuf::from(r"D:\data\runtime\17\bin\java.exe"),
+                source: deeper,
+            })),
+        );
+        let source = std::error::Error::source(&unreachable).expect("更深一层留在原因链上");
+        assert_eq!(source.to_string(), "连接被重置");
         assert_eq!(
-            std::error::Error::source(&unavailable).map(ToString::to_string),
-            Some(reason.to_owned())
+            source
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::ConnectionReset)
+        );
+
+        // 调用方不知道主版本时只写路径，与后文空一格隔开。
+        let unknown = mismatch(
+            JavaExecutable {
+                path: PathBuf::from(r"E:\jdk\bin\java.exe"),
+                major: None,
+            },
+            Some(JavaExecutable {
+                path: PathBuf::from(r"F:\jdk-21\bin\java.exe"),
+                major: None,
+            }),
+            None,
+        );
+        assert_eq!(
+            unknown.to_string(),
+            format!(
+                r"处理器 net.minecraftforge:jarsplitter:1.1.0 用 E:\jdk\bin\java.exe 生成的 client-1.13.2-20190213.203750-extra.jar 与安装器声明的不符；又换 F:\jdk-21\bin\java.exe 重跑，两次都对不上{details}"
+            )
         );
     }
 

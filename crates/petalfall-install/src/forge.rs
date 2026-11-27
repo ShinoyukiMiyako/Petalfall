@@ -26,7 +26,9 @@ use tokio::process::{Child, Command};
 
 use crate::complete;
 use crate::context::{InstallContext, InstallPhase};
-use crate::error::{Error, ProcessorOutput, ProcessorOutputMismatch, Result, io_err, zip_err};
+use crate::error::{
+    Error, JavaExecutable, ProcessorOutput, ProcessorOutputMismatch, Result, io_err, zip_err,
+};
 use crate::layout::checked_segment;
 use crate::net;
 use crate::plan;
@@ -307,13 +309,14 @@ enum Target<'t> {
 /// 随后读它就失败。串行的代价只是后来的那个多等一会儿。
 static FORGE_INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// 处理器产物校验不过时换用的 Java 从哪里取，交回 java 可执行文件的路径。按需求值：只有真的对不上才去取，取的时候
-/// 可能要下载一个运行时；一次安装最多求值一次。
+/// 处理器产物校验不过时换用的 Java 从哪里取，交回 java 可执行文件与它的主版本（主版本只用来写报错正文）。按需
+/// 求值：只有真的对不上才去取，取的时候可能要下载一个运行时；一次安装最多求值一次。
 pub type FallbackJava<'a> = Box<dyn Fn() -> FallbackJavaFuture<'a> + Send + Sync + 'a>;
 
 /// [`FallbackJava`] 每次求值交回的 future。
-pub type FallbackJavaFuture<'a> =
-    Pin<Box<dyn Future<Output = std::result::Result<PathBuf, FallbackJavaError>> + Send + 'a>>;
+pub type FallbackJavaFuture<'a> = Pin<
+    Box<dyn Future<Output = std::result::Result<JavaExecutable, FallbackJavaError>> + Send + 'a>,
+>;
 
 /// 没能取到备用 Java。
 #[derive(Debug)]
@@ -332,7 +335,7 @@ pub enum FallbackJavaError {
 /// [`petalfall_download::Error::Cancelled`] 返回。下载阶段的取消由上下文里的下载池自己负责。
 pub struct ForgeInstaller<'a> {
     cx: InstallContext<'a>,
-    java_path: PathBuf,
+    java: JavaExecutable,
     side: String,
     sources: Option<SourcePlan>,
     fallback_java: Option<FallbackJava<'a>>,
@@ -343,11 +346,20 @@ impl<'a> ForgeInstaller<'a> {
     pub fn new(cx: InstallContext<'a>, java_path: impl Into<PathBuf>) -> Self {
         Self {
             cx,
-            java_path: java_path.into(),
+            java: JavaExecutable {
+                path: java_path.into(),
+                major: None,
+            },
             side: "client".to_owned(),
             sources: None,
             fallback_java: None,
         }
+    }
+
+    /// 注入的 java 的主版本，只用来把产物对不上的报错写成「Java 8（路径）」；`None` 时正文只写路径。
+    pub fn with_java_major(mut self, major: Option<u32>) -> Self {
+        self.java.major = major;
+        self
     }
 
     /// installer 旁的 `.sha1` 校验文件按此方案在官方与镜像之间兜底抓取。
@@ -576,7 +588,7 @@ impl<'a> ForgeInstaller<'a> {
         let values = self.build_values(profile, minecraft, minecraft_jar, installer, extracted)?;
 
         let mut java = ProcessorJava {
-            current: self.java_path.clone(),
+            current: self.java.clone(),
             fallback: self.fallback_java.as_ref(),
         };
         let mut ran = 0usize;
@@ -645,13 +657,20 @@ impl<'a> ForgeInstaller<'a> {
         }
 
         let first = java.current.clone();
-        self.execute_processor(processor, &first, &classpath, &main_class, &args, &outputs)
-            .await?;
+        self.execute_processor(
+            processor,
+            &first.path,
+            &classpath,
+            &main_class,
+            &args,
+            &outputs,
+        )
+        .await?;
         let mismatches = mismatched_outputs(&outputs).await?;
         let Some(mismatch) = mismatches.first() else {
             return Ok(true);
         };
-        log_mismatches(&processor.jar, &mismatches, &first);
+        log_mismatches(&processor.jar, &mismatches, &first.path);
 
         // 不报新的一步：已经在处理器这一步了，Java 那一步早就报过，再报会让步骤倒退。取备用 Java 时要是下载运行时，
         // 下载进度就算在处理器这一步里。
@@ -667,15 +686,15 @@ impl<'a> ForgeInstaller<'a> {
                 return Err(mismatch.to_error(&processor.jar, &first, None, Some(reason)));
             }
         };
-        // 设置里固定了 Java 时取回的还是它，同一个 Java 再跑一遍只会生成同样的字节。
-        if fallback == first {
-            tracing::warn!(jar = %processor.jar, java = %first.display(), "取到的备用 Java 就是正在用的这个，处理器不重跑");
+        // 取回的还是正在用的这个 Java 时，同一个 Java 再跑一遍只会生成同样的字节。
+        if fallback.path == first.path {
+            tracing::warn!(jar = %processor.jar, java = %first.path.display(), "取到的备用 Java 就是正在用的这个，处理器不重跑");
             return Err(mismatch.to_error(&processor.jar, &first, None, None));
         }
         tracing::warn!(
             jar = %processor.jar,
-            from = %first.display(),
-            to = %fallback.display(),
+            from = %first.path.display(),
+            to = %fallback.path.display(),
             "处理器生成的产物与安装器声明的不符，换用备用 Java 重跑，本次安装余下的处理器也用它"
         );
         // 对不上的产物先删掉（被占着时照样报占用）：jarsplitter 带自己的缓存文件，产物还在就不会重新生成。
@@ -685,7 +704,7 @@ impl<'a> ForgeInstaller<'a> {
         java.current = fallback;
         self.execute_processor(
             processor,
-            &java.current,
+            &java.current.path,
             &classpath,
             &main_class,
             &args,
@@ -696,7 +715,7 @@ impl<'a> ForgeInstaller<'a> {
         let Some(mismatch) = mismatches.first() else {
             return Ok(true);
         };
-        log_mismatches(&processor.jar, &mismatches, &java.current);
+        log_mismatches(&processor.jar, &mismatches, &java.current.path);
         Err(mismatch.to_error(&processor.jar, &first, Some(&java.current), None))
     }
 
@@ -1098,7 +1117,7 @@ async fn discard_stale_output(jar: &str, path: &Path) -> Result<()> {
 
 /// 本次安装跑处理器用的 Java：起初是注入的那个，换过备用的之后余下的处理器都用备用的。
 struct ProcessorJava<'f, 'a> {
-    current: PathBuf,
+    current: JavaExecutable,
     /// 还没取过的备用来源；取过一次就清掉，一次安装只换一次。
     fallback: Option<&'f FallbackJava<'a>>,
 }
@@ -1114,8 +1133,8 @@ impl OutputMismatch {
     fn to_error(
         &self,
         jar: &str,
-        java: &Path,
-        retried_with: Option<&Path>,
+        java: &JavaExecutable,
+        retried_with: Option<&JavaExecutable>,
         fallback_error: Option<Box<dyn std::error::Error + Send + Sync>>,
     ) -> Error {
         Error::ProcessorOutputMismatch(Box::new(ProcessorOutputMismatch {
@@ -1123,8 +1142,8 @@ impl OutputMismatch {
             path: self.path.clone(),
             expected: self.expected.clone(),
             actual: self.actual.clone(),
-            java: java.to_path_buf(),
-            retried_with: retried_with.map(Path::to_path_buf),
+            java: java.clone(),
+            retried_with: retried_with.cloned(),
             fallback_error,
         }))
     }
@@ -3387,7 +3406,7 @@ mod tests {
     /// 每次求值都记一笔、交回 `outcome()` 的备用 Java 来源。
     fn fallback_from<'a>(
         calls: &'a std::sync::atomic::AtomicUsize,
-        outcome: impl Fn() -> std::result::Result<PathBuf, FallbackJavaError> + Send + Sync + 'a,
+        outcome: impl Fn() -> std::result::Result<JavaExecutable, FallbackJavaError> + Send + Sync + 'a,
     ) -> FallbackJava<'a> {
         Box::new(move || {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -3396,28 +3415,46 @@ mod tests {
         })
     }
 
+    fn java_of(path: &Path, major: u32) -> JavaExecutable {
+        JavaExecutable {
+            path: path.to_path_buf(),
+            major: Some(major),
+        }
+    }
+
+    /// 处理器先用 `java` 跑，主版本照样交给安装器。
     async fn install_with_fallback<'a>(
         f: &'a Fixture,
-        java: &Path,
+        java: &JavaExecutable,
         installer: &Path,
         fallback: Option<FallbackJava<'a>>,
     ) -> Result<ForgeSummary> {
         let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
-        ForgeInstaller::new(cx, java)
+        ForgeInstaller::new(cx, &java.path)
+            .with_java_major(java.major)
             .with_fallback_java(fallback)
             .install_from_installer(installer)
             .await
     }
 
-    fn mismatch_of(err: &Error) -> (&str, &Path, &str, &str, &Path, Option<&Path>) {
+    fn mismatch_of(
+        err: &Error,
+    ) -> (
+        &str,
+        &Path,
+        &str,
+        &str,
+        &JavaExecutable,
+        Option<&JavaExecutable>,
+    ) {
         match err {
             Error::ProcessorOutputMismatch(mismatch) => (
                 mismatch.jar.as_str(),
                 mismatch.path.as_path(),
                 mismatch.expected.as_str(),
                 mismatch.actual.as_str(),
-                mismatch.java.as_path(),
-                mismatch.retried_with.as_deref(),
+                &mismatch.java,
+                mismatch.retried_with.as_ref(),
             ),
             other => panic!("应为 ProcessorOutputMismatch，实际 {other:?}"),
         }
@@ -3434,9 +3471,9 @@ mod tests {
         let old = producing_java(&f, "java-8", &log, false);
         let new = producing_java(&f, "java-17", &log, true);
         let calls = std::sync::atomic::AtomicUsize::new(0);
-        let fallback = fallback_from(&calls, || Ok(new.clone()));
+        let fallback = fallback_from(&calls, || Ok(java_of(&new, 17)));
 
-        let summary = install_with_fallback(&f, &old, &installer, Some(fallback))
+        let summary = install_with_fallback(&f, &java_of(&old, 8), &installer, Some(fallback))
             .await
             .unwrap();
 
@@ -3464,7 +3501,7 @@ mod tests {
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let fallback = fallback_from(&calls, || panic!("产物对得上，不该去取备用 Java"));
 
-        let summary = install_with_fallback(&f, &java, &installer, Some(fallback))
+        let summary = install_with_fallback(&f, &java_of(&java, 17), &installer, Some(fallback))
             .await
             .unwrap();
 
@@ -3482,7 +3519,7 @@ mod tests {
         let log = f.root.join("java-runs.log");
         let old = producing_java(&f, "java-8", &log, false);
 
-        let err = install_with_fallback(&f, &old, &installer, None)
+        let err = install_with_fallback(&f, &java_of(&old, 8), &installer, None)
             .await
             .unwrap_err();
 
@@ -3497,16 +3534,16 @@ mod tests {
                 path.as_path(),
                 expected.as_str(),
                 actual.as_str(),
-                old.as_path(),
+                &java_of(&old, 8),
                 None
             )
         );
         assert_eq!(
             err.to_string(),
             format!(
-                "处理器 {PROCESSOR_JAR} 生成的 {} 与安装器声明的不符（期望 sha1 {expected}，实际 {actual}），用的 Java 是 {}",
-                path.display(),
-                old.display()
+                "处理器 {PROCESSOR_JAR} 用 Java 8（{}）生成的 out-1-b.jar 与安装器声明的不符（{}，期望 sha1 {expected}，实际 {actual}）",
+                old.display(),
+                path.display()
             )
         );
         assert!(std::error::Error::source(&err).is_none());
@@ -3525,9 +3562,9 @@ mod tests {
         let old = producing_java(&f, "java-8", &log, false);
         let new = producing_java(&f, "java-17", &log, false);
         let calls = std::sync::atomic::AtomicUsize::new(0);
-        let fallback = fallback_from(&calls, || Ok(new.clone()));
+        let fallback = fallback_from(&calls, || Ok(java_of(&new, 17)));
 
-        let err = install_with_fallback(&f, &old, &installer, Some(fallback))
+        let err = install_with_fallback(&f, &java_of(&old, 8), &installer, Some(fallback))
             .await
             .unwrap_err();
 
@@ -3541,25 +3578,25 @@ mod tests {
                 path.as_path(),
                 expected.as_str(),
                 actual.as_str(),
-                old.as_path(),
-                Some(new.as_path())
+                &java_of(&old, 8),
+                Some(&java_of(&new, 17))
             )
         );
-        let shown = err.to_string();
-        assert!(
-            shown.ends_with(&format!(
-                "，先用 {} 跑、又换 {} 重跑，两次都对不上",
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "处理器 {PROCESSOR_JAR} 用 Java 8（{}）生成的 out-1-b.jar 与安装器声明的不符；又换 Java 17（{}）重跑，两次都对不上（{}，期望 sha1 {expected}，实际 {actual}）",
                 old.display(),
-                new.display()
-            )),
-            "{shown}"
+                new.display(),
+                path.display()
+            )
         );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(java_runs(&log), ["java-8", "java-17"]);
         assert!(!petalfall_base::retry::RetryableError::is_retryable(&err));
     }
 
-    /// 取回的备用 Java 就是正在用的那个（设置里固定了 Java）：不重跑，照报产物对不上。
+    /// 取回的备用 Java 就是正在用的那个：不重跑，照报产物对不上。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_fallback_that_is_the_same_java_is_not_rerun() {
         let f = fixture();
@@ -3568,9 +3605,10 @@ mod tests {
         let log = f.root.join("java-runs.log");
         let old = producing_java(&f, "java-8", &log, false);
         let calls = std::sync::atomic::AtomicUsize::new(0);
-        let fallback = fallback_from(&calls, || Ok(old.clone()));
+        // 认的是同一个可执行文件：来源报的主版本不同也不算换了 Java。
+        let fallback = fallback_from(&calls, || Ok(java_of(&old, 17)));
 
-        let err = install_with_fallback(&f, &old, &installer, Some(fallback))
+        let err = install_with_fallback(&f, &java_of(&old, 8), &installer, Some(fallback))
             .await
             .unwrap_err();
 
@@ -3580,7 +3618,7 @@ mod tests {
             (
                 PROCESSOR_JAR,
                 library(&f, OUT_B).as_path(),
-                old.as_path(),
+                &java_of(&old, 8),
                 None
             )
         );
@@ -3589,7 +3627,7 @@ mod tests {
         assert_eq!(java_runs(&log), ["java-8"]);
     }
 
-    /// 取不到备用 Java：不重跑，报产物对不上，取不到的原因写进正文、挂在原因链上。
+    /// 取不到备用 Java：不重跑，报产物对不上，取不到的原因原文写进正文，原因链上不再挂同一句。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unavailable_fallback_java_is_reported_with_its_reason() {
         let f = fixture();
@@ -3605,32 +3643,29 @@ mod tests {
             )))
         });
 
-        let err = install_with_fallback(&f, &old, &installer, Some(fallback))
+        let err = install_with_fallback(&f, &java_of(&old, 8), &installer, Some(fallback))
             .await
             .unwrap_err();
 
-        let (jar, path, _, _, java, retried_with) = mismatch_of(&err);
+        let (jar, path, expected, actual, java, retried_with) = mismatch_of(&err);
         assert_eq!(
             (jar, path, java, retried_with),
             (
                 PROCESSOR_JAR,
                 library(&f, OUT_B).as_path(),
-                old.as_path(),
+                &java_of(&old, 8),
                 None
             )
         );
-        let shown = err.to_string();
-        assert!(
-            shown.ends_with(&format!(
-                "，用的 Java 是 {}；想换一个 Java 重跑，但没能取到：{reason}",
-                old.display()
-            )),
-            "{shown}"
-        );
         assert_eq!(
-            std::error::Error::source(&err).map(ToString::to_string),
-            Some(reason.to_owned())
+            err.to_string(),
+            format!(
+                "处理器 {PROCESSOR_JAR} 用 Java 8（{}）生成的 out-1-b.jar 与安装器声明的不符；想换一个 Java 重跑，但没能取到：{reason}（{}，期望 sha1 {expected}，实际 {actual}）",
+                old.display(),
+                path.display()
+            )
         );
+        assert!(std::error::Error::source(&err).is_none());
         assert_eq!(java_runs(&log), ["java-8"]);
     }
 
@@ -3645,7 +3680,7 @@ mod tests {
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let fallback = fallback_from(&calls, || Err(FallbackJavaError::Cancelled));
 
-        let err = install_with_fallback(&f, &old, &installer, Some(fallback))
+        let err = install_with_fallback(&f, &java_of(&old, 8), &installer, Some(fallback))
             .await
             .unwrap_err();
 

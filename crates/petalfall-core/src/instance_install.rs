@@ -311,7 +311,7 @@ impl Petalfall {
                     .as_ref()
                     .map_or(LEGACY_JAVA_MAJOR, |java| java.major_version);
                 announcer.enter(InstallPhase::Java);
-                let (_, java) = self.resolve_java(major, events).await?;
+                let (found, java) = self.resolve_java(major, events).await?;
                 let url = match choice {
                     LoaderChoice::Forge => forge_installer_url(mc, &version),
                     _ => neoforge_installer_url(&version),
@@ -328,8 +328,9 @@ impl Petalfall {
                 let placed = place_json_for_processors(&layout, &base).await?;
                 // 处理器不看下载池的令牌，取消看的是上下文上挂的那个（make_context 已挂上）：
                 // 取消时正在跑的处理器要被结束，不能等宽限期满被丢下。
+                let java_major = found.first().map(|picked| picked.version.major);
                 let installed = self
-                    .forge_installer(cx, major, java, events)
+                    .forge_installer(cx, major, java, java_major, events)
                     .install_for_instance(&url, id)
                     .await;
                 let (embedded, summary) = match installed {
