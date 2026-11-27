@@ -175,6 +175,11 @@ const FORGE_CHECKED_MC: (McVersion, McVersion) = ((1, 13, 0), (1, 20, 1));
 /// `--fml.neoForgeVersion` 推出的产物在这些游戏版本上对过文件名，两端都含。
 const NEOFORGE_CHECKED_MC: (McVersion, McVersion) = ((1, 20, 2), (1, 21, 1));
 
+/// NeoForge 的 FML 从这个版本起按 NeoForge 自己的版本号找补丁 jar。更早的 FML（1.0.2 到 1.0.9，NeoForge
+/// 20.2.3-beta 到 20.2.43-beta 带的）还沿用 Forge 的写法，版本号前面带着游戏版本，安装器也照这个写法生成：
+/// `net.neoforged:neoforge:1.20.2-20.2.3-beta:client`。
+const NEOFORGE_FML_PLAIN_VERSION_SINCE: (u32, u32, u32) = (1, 0, 10);
+
 /// 加载器安装器的处理器在本机生成、不在库清单里的产物，路径都相对库目录（正斜杠分隔）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessorOutputs {
@@ -187,7 +192,8 @@ pub struct ProcessorOutputs {
 /// 按合并后版本 JSON 的 `--fml.*` 启动参数推出处理器产物的位置。FML 启动时按同样的参数到库目录里找它们：
 /// 处理器的产物按 `[坐标]` 落到坐标对应的库路径（见 forge.rs 的 `resolve_outputs`），Forge 的补丁 jar 是
 /// `<组>:forge:<mc>-<forge>:client`（组见 [`default_forge_group`]），NeoForge 的是
-/// `net.neoforged:neoforge:<版本>:client`，反混淆产物在 `net.minecraft:client:<mc>-<mcp 或 neoform>` 的目录下。
+/// `net.neoforged:neoforge:<版本>:client`（头一批 20.2 测试版的版本前面还带游戏版本，见
+/// [`neoforge_artifact_version`]），反混淆产物在 `net.minecraft:client:<mc>-<mcp 或 neoform>` 的目录下。
 /// Forge 这套参数另给出不带 mcp 版本号的 `net.minecraft:client:<mc>` 目录：1.13 到 1.15 的 Forge 把 extra、slim
 /// 生成在那里，1.16.5 上已经并进带 mcp 版本号的目录。不是 Forge 系的版本（原版、Fabric、Quilt、1.12 及更早的
 /// 旧式 Forge）没有这些参数，得到空表。参数取值带 `..`、分隔符或盘符时报 [`Error::UnsafePath`]。
@@ -238,8 +244,9 @@ fn derive_processor_outputs(version: &VersionJson, checked_only: bool) -> Result
     if let Some(neoforge) = fml_arg(&tokens, "--fml.neoForgeVersion")?
         && neoforge_wanted
     {
+        let artifact = neoforge_artifact_version(&tokens, mc.as_deref(), &neoforge);
         outputs.patched_jars.push(coordinate_path(&format!(
-            "net.neoforged:neoforge:{neoforge}:client"
+            "net.neoforged:neoforge:{artifact}:client"
         ))?);
     }
     if let (Some(mc), Some(neoform)) = (&mc, fml_arg(&tokens, "--fml.neoFormVersion")?)
@@ -260,6 +267,20 @@ fn default_forge_group(version: &VersionJson) -> &'static str {
         NEOFORGED_FORGE_GROUP
     } else {
         DEFAULT_FORGE_GROUP
+    }
+}
+
+/// NeoForge 补丁 jar 坐标里的版本号：`--fml.fmlVersion` 早于 [`NEOFORGE_FML_PLAIN_VERSION_SINCE`] 的是
+/// `<mc>-<NeoForge 版本>`，其余（含没写 FML 版本、版本号不是三段数字的）就是 NeoForge 版本本身。FML 版本只拿来
+/// 比大小、不拼进路径，所以不按路径段校验。
+fn neoforge_artifact_version(tokens: &[String], mc: Option<&str>, neoforge: &str) -> String {
+    let keeps_mc_prefix = flag_value(tokens, "--fml.fmlVersion")
+        .as_deref()
+        .and_then(release_version)
+        .is_some_and(|fml| fml < NEOFORGE_FML_PLAIN_VERSION_SINCE);
+    match mc {
+        Some(mc) if keeps_mc_prefix => format!("{mc}-{neoforge}"),
+        _ => neoforge.to_owned(),
     }
 }
 
@@ -850,6 +871,51 @@ mod tests {
             checked_processor_outputs(&neoforge).unwrap(),
             neoforge_outputs
         );
+    }
+
+    /// NeoForge 20.2 头一批测试版的补丁 jar 版本号前面带着游戏版本，从 20.2.44-beta（FML 1.0.10）起才不带。下面的
+    /// 参数与文件名照这几个构建的安装器实际写出、生成的来。
+    #[test]
+    fn early_neoforge_betas_keep_the_game_version_in_the_patched_jar() {
+        let neoforge_with_fml = |neoforge: &str, fml: &str| {
+            with_game_args(&format!(
+                "--fml.neoForgeVersion {neoforge} --fml.fmlVersion {fml} --fml.mcVersion 1.20.2 \
+                 --fml.neoFormVersion 20231019.002635 --launchTarget forgeclient"
+            ))
+        };
+        for (neoforge, fml, artifact) in [
+            ("20.2.3-beta", "1.0.2", "1.20.2-20.2.3-beta"),
+            ("20.2.43-beta", "1.0.9", "1.20.2-20.2.43-beta"),
+            ("20.2.44-beta", "1.0.10", "20.2.44-beta"),
+            ("20.2.93", "1.0.16", "20.2.93"),
+        ] {
+            let expected = outputs(
+                &[&format!(
+                    "net/neoforged/neoforge/{artifact}/neoforge-{artifact}-client.jar"
+                )],
+                &["net/minecraft/client/1.20.2-20231019.002635"],
+            );
+            let version = neoforge_with_fml(neoforge, fml);
+            assert_eq!(processor_outputs(&version).unwrap(), expected, "{neoforge}");
+            assert_eq!(
+                checked_processor_outputs(&version).unwrap(),
+                expected,
+                "{neoforge}"
+            );
+        }
+
+        // FML 版本只拿来比大小：没写的、不是三段数字的都按不带游戏版本算，取值再怪也不当成路径越界。
+        for fml_arg in ["", "--fml.fmlVersion 1.0.x", "--fml.fmlVersion ../.."] {
+            let version = with_game_args(&format!(
+                "--fml.neoForgeVersion 20.2.93 {fml_arg} --fml.mcVersion 1.20.2 \
+                 --fml.neoFormVersion 20231019.002635"
+            ));
+            assert_eq!(
+                processor_outputs(&version).unwrap().patched_jars,
+                ["net/neoforged/neoforge/20.2.93/neoforge-20.2.93-client.jar"],
+                "{fml_arg}"
+            );
+        }
     }
 
     /// 没写 `--fml.forgeGroup` 时组看版本带的是哪一家的 FML：Forge 的 FML（或认不出）按 net.minecraftforge，
