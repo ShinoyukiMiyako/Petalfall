@@ -364,7 +364,8 @@ mod tests {
     }
 
     /// NeoForge 1.20.1（47.x）沿用 Forge 的坐标和启动参数，组名是 net.neoforged：只报 NeoForge，版本从 Forge
-    /// 的位置取。多报一个 Forge 的后果和工具库那条一样：导出被拦，Forge 专用的 jar 判成兼容。
+    /// 的位置取。多报一个 Forge 的后果在下游：导出整合包被「不止一种加载器」拦下，重新安装时取错加载器。Forge 的
+    /// Mod 在这一代上照样能用，由兼容判断那边放行，不靠把它报成 Forge。
     #[test]
     fn neoforge_1_20_1_is_not_reported_as_forge() {
         let by_library = v(r#"{

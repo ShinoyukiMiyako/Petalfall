@@ -25,8 +25,8 @@ use petalfall_modplatform::{DependencyKind, ModLoader, ModVersionInfo, Platform,
 use serde::Serialize;
 
 use crate::compat::{
-    Compatibility, classify, instance_loaders, instance_mc_version, instance_mod_loaders,
-    prefer_quilt_builds,
+    Compatibility, RunnableLoaders, classify, instance_loaders, instance_mc_version,
+    instance_mod_loaders, prefer_own_builds,
 };
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
@@ -76,8 +76,8 @@ struct InstanceFacts {
     mc_version: Option<String>,
     /// 已装加载器的小写名。OptiFine 这类非 Mod 加载器也在其中，由 [`classify`] 自行忽略。
     loaders: Vec<String>,
-    /// 下推给平台的加载器过滤条件（认不出的名字已剔除）。
-    mod_loaders: Vec<ModLoader>,
+    /// 能跑哪些加载器的 Mod：`all` 是下推给平台的过滤条件（认不出的名字已剔除），`borrowed` 给挑构建用。
+    mod_loaders: RunnableLoaders,
 }
 
 /// 一条跳过说明。先记工程标识，等整份计划的标题批量取回后再渲染成句子：
@@ -595,7 +595,12 @@ impl Petalfall {
         // 却报没有适配版本」；带上条件，平台先筛过再分页。缓存里有完整的不过滤列表时由它本地代答。
         let game_versions: Vec<String> = facts.mc_version.clone().into_iter().collect();
         let listed = self
-            .list_mod_versions(platform, dep_project, &game_versions, &facts.mod_loaders)
+            .list_mod_versions(
+                platform,
+                dep_project,
+                &game_versions,
+                &facts.mod_loaders.all,
+            )
             .await;
         let candidates = match listed {
             Ok(candidates) => candidates,
@@ -629,7 +634,7 @@ async fn quilt_stand_in(
 ) -> Result<Option<&'static str>> {
     if platform != Platform::Modrinth
         || dep_project != FABRIC_API_PROJECT
-        || !facts.mod_loaders.contains(&ModLoader::Quilt)
+        || !facts.mod_loaders.all.contains(&ModLoader::Quilt)
     {
         return Ok(None);
     }
@@ -663,7 +668,7 @@ fn pick_latest_compatible(
 ) -> Option<ModVersionInfo> {
     sort_by_published_desc(&mut candidates);
     candidates.retain(|version| !matches!(judge(version, facts), Compatibility::Mismatch { .. }));
-    prefer_quilt_builds(&mut candidates, &facts.mod_loaders);
+    prefer_own_builds(&mut candidates, &facts.mod_loaders.borrowed);
     let best = ReleaseChannel::Alpha
         .admitted()
         .iter()
@@ -744,6 +749,7 @@ async fn held_back(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compat::runnable_loaders;
     use crate::config::PetalfallConfig;
     use petalfall_modplatform::ReleaseChannel;
     use std::collections::HashMap;
@@ -1399,6 +1405,78 @@ mod tests {
 
         let plan = petalfall
             .plan_install("1.20.1-quilt", Platform::Modrinth, "needs-lib", "v1")
+            .await
+            .unwrap();
+
+        assert_eq!(plan.items.len(), 2);
+        assert_eq!(plan.items[1].version.version_id, "lib1");
+        assert_eq!(plan.items[1].required_by, Some("needs-lib".to_owned()));
+        assert_eq!(plan.skipped, Vec::<String>::new());
+    }
+
+    /// 1.20.1 的 NeoForge 实例上，只标 forge 的前置能用：过滤带着 neoforge、forge 两家下推，NeoForge 在前。
+    /// 实例的版本 JSON 是 NeoForge 47.1.106 安装器实际写出的样子，MC 版本只在 `--fml.mcVersion` 里。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn neoforge_1_20_1_instance_resolves_a_forge_only_dependency() {
+        let server = MockServer::start().await;
+        mount_versions(
+            &server,
+            "needs-lib",
+            &[modrinth_version(
+                "v1",
+                "needs-lib",
+                "2026-01-01T00:00:00Z",
+                &["1.20.1"],
+                &["forge"],
+                r#"{"project_id":"forge-lib","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/project/forge-lib/version"))
+            .and(query_param("game_versions", r#"["1.20.1"]"#))
+            .and(query_param("loaders", r#"["neoforge","forge"]"#))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                "[{}]",
+                modrinth_version(
+                    "lib1",
+                    "forge-lib",
+                    "2026-01-01T00:00:00Z",
+                    &["1.20.1"],
+                    &["forge"],
+                    "",
+                )
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/project/forge-lib/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .with_priority(200)
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let id = "my-pack";
+        let dir = tmp.path().join("versions").join(id);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(
+            dir.join(format!("{id}.json")),
+            format!(
+                r#"{{"id":"{id}","mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+                    "arguments":{{"game":["--launchTarget","forgeclient","--fml.forgeVersion","47.1.106",
+                                          "--fml.fmlVersion","47.2.2","--fml.mcVersion","1.20.1",
+                                          "--fml.mcpVersion","20230612.114412"],"jvm":[]}},
+                    "libraries":[{{"name":"net.neoforged.fancymodloader:loader:47.2.2"}},
+                                 {{"name":"net.minecraftforge:accesstransformers:8.0.4"}}]}}"#
+            ),
+        )
+        .await
+        .unwrap();
+        let petalfall = petalfall_at(tmp.path(), server.uri());
+
+        let plan = petalfall
+            .plan_install(id, Platform::Modrinth, "needs-lib", "v1")
             .await
             .unwrap();
 
@@ -2693,7 +2771,7 @@ mod tests {
         let unknown_mc = InstanceFacts {
             mc_version: None,
             loaders: vec!["fabric".to_owned()],
-            mod_loaders: vec![ModLoader::Fabric],
+            mod_loaders: runnable_loaders(&[ModLoader::Fabric], None),
         };
         let mut fabric_1_21 = version("fabric-api", "x");
         fabric_1_21.game_versions = vec!["1.21".to_owned()];
@@ -2715,7 +2793,7 @@ mod tests {
         let known_mc = InstanceFacts {
             mc_version: Some("1.20.1".to_owned()),
             loaders: vec!["fabric".to_owned()],
-            mod_loaders: vec![ModLoader::Fabric],
+            mod_loaders: runnable_loaders(&[ModLoader::Fabric], Some("1.20.1")),
         };
         assert_eq!(
             judge(&fabric_1_21, &known_mc),
@@ -2730,7 +2808,7 @@ mod tests {
         let facts = InstanceFacts {
             mc_version: Some("1.20.1".to_owned()),
             loaders: vec!["fabric".to_owned()],
-            mod_loaders: vec![ModLoader::Fabric],
+            mod_loaders: runnable_loaders(&[ModLoader::Fabric], Some("1.20.1")),
         };
         let mut older = version("fabric-api", "older");
         older.loaders = vec![ModLoader::Fabric];
@@ -2759,7 +2837,7 @@ mod tests {
         let facts = InstanceFacts {
             mc_version: Some("1.20.1".to_owned()),
             loaders: vec!["quilt".to_owned()],
-            mod_loaders: vec![ModLoader::Quilt, ModLoader::Fabric],
+            mod_loaders: runnable_loaders(&[ModLoader::Quilt], Some("1.20.1")),
         };
         let build =
             |id: &str, number: &str, loader: ModLoader, channel: ReleaseChannel, date: &str| {
@@ -2799,13 +2877,73 @@ mod tests {
         assert_eq!(id(vec![fabric, quilt_beta]).as_deref(), Some("fabric"));
     }
 
+    /// 1.20.1 的 NeoForge 实例的前置：只有 forge 构建时用它，同一发布有 neoforge 构建时用 neoforge 那份。
+    #[test]
+    fn pick_latest_compatible_on_neoforge_1_20_1_takes_forge_builds_and_prefers_neoforge_twins() {
+        let facts = InstanceFacts {
+            mc_version: Some("1.20.1".to_owned()),
+            loaders: vec!["neoforge".to_owned()],
+            mod_loaders: runnable_loaders(&[ModLoader::NeoForge], Some("1.20.1")),
+        };
+        let build = |id: &str, number: &str, loader: ModLoader, date: &str| {
+            let mut item = version("some-lib", id);
+            item.version_number = number.to_owned();
+            item.loaders = vec![loader];
+            item.date_published = date.to_owned();
+            item
+        };
+        let forge = build(
+            "forge",
+            "1.4.0-forge",
+            ModLoader::Forge,
+            "2026-02-01T00:00:00Z",
+        );
+        let neoforge = build(
+            "neoforge",
+            "1.4.0-neoforge",
+            ModLoader::NeoForge,
+            "2026-01-01T00:00:00Z",
+        );
+        let fabric = build(
+            "fabric",
+            "1.4.0-fabric",
+            ModLoader::Fabric,
+            "2026-03-01T00:00:00Z",
+        );
+
+        let id = |list: Vec<ModVersionInfo>| {
+            pick_latest_compatible(list, &facts).map(|picked| picked.version_id)
+        };
+        assert_eq!(id(vec![forge.clone()]).as_deref(), Some("forge"));
+        assert_eq!(
+            id(vec![fabric.clone(), forge, neoforge]).as_deref(),
+            Some("neoforge")
+        );
+        assert_eq!(id(vec![fabric]), None);
+    }
+
+    /// 1.20.1 以后的 NeoForge 实例照旧不收 Forge 的前置。
+    #[test]
+    fn pick_latest_compatible_on_later_neoforge_rejects_forge_builds() {
+        let facts = InstanceFacts {
+            mc_version: Some("1.21.1".to_owned()),
+            loaders: vec!["neoforge".to_owned()],
+            mod_loaders: runnable_loaders(&[ModLoader::NeoForge], Some("1.21.1")),
+        };
+        let mut forge = version("some-lib", "forge");
+        forge.game_versions = vec!["1.21.1".to_owned()];
+        forge.loaders = vec![ModLoader::Forge];
+        assert_eq!(facts.mod_loaders.all, vec![ModLoader::NeoForge]);
+        assert!(pick_latest_compatible(vec![forge], &facts).is_none());
+    }
+
     /// 新装的前置与更新检查同一条底线：有正式版就不把测试版带进来，没有才退到测试版、内测版。
     #[test]
     fn pick_latest_compatible_prefers_the_most_stable_channel() {
         let facts = InstanceFacts {
             mc_version: Some("1.20.1".to_owned()),
             loaders: vec!["fabric".to_owned()],
-            mod_loaders: vec![ModLoader::Fabric],
+            mod_loaders: runnable_loaders(&[ModLoader::Fabric], Some("1.20.1")),
         };
         let build = |id: &str, channel: ReleaseChannel, date: &str| {
             let mut item = version("fabric-api", id);

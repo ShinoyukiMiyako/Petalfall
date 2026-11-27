@@ -20,12 +20,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use petalfall_modplatform::{
     BodyFormat, CurseForgeClient, CurseForgeFile, CurseForgeFingerprintMatch, InstalledMod,
-    ModHashes, ModLoader, ModVersionInfo, ModrinthVersion, Platform, ReleaseChannel, hash_mod_file,
+    ModHashes, ModVersionInfo, ModrinthVersion, Platform, ReleaseChannel, hash_mod_file,
 };
 use serde::Serialize;
 
 use crate::compat::{
-    instance_mc_version, instance_mod_loaders, is_fabric_twin, prefer_quilt_builds,
+    RunnableLoaders, instance_mc_version, instance_mod_loaders, is_borrowed_twin, prefer_own_builds,
 };
 use crate::data_format::GuardMode;
 use crate::deps::project_gone;
@@ -114,7 +114,7 @@ impl Petalfall {
         let instance = self.resolve_instance(version_id).await?;
         // 只装了 OptiFine 的实例同样没有 Mod 加载器：OptiFine 不认 mods 目录里的 Mod。
         let loaders = instance_mod_loaders(&instance);
-        if loaders.is_empty() {
+        if loaders.all.is_empty() {
             return Ok(Vec::new());
         }
         // 认不出实例的 MC 版本就没有兼容判定的基准，任何「最新版」都只是猜测。宁可不报，也不推一个
@@ -139,7 +139,7 @@ impl Petalfall {
         version_id: &str,
         dirs: &InstanceDirs,
         installed: &[InstalledMod],
-        loaders: Vec<ModLoader>,
+        loaders: RunnableLoaders,
         mc_version: String,
         curseforge: impl FnOnce() -> Result<CurseForgeClient>,
     ) -> Result<Vec<UpdateCandidate>> {
@@ -262,7 +262,7 @@ impl Petalfall {
             let latest = modrinth
                 .latest_versions_by_hashes(
                     &hashes,
-                    &loaders,
+                    &loaders.all,
                     &[mc_version.as_str()],
                     channel.admitted(),
                 )
@@ -289,9 +289,13 @@ impl Petalfall {
                 {
                     continue;
                 }
-                // 端点按时间只给一个，分不出同一发布的 quilt 构建：Quilt 实例拿到只标 fabric 的结果时，
+                // 端点按时间只给一个，分不出同一发布里给实例那一家传的构建：借着别家跑的实例拿到没标自己
+                // 那一家的结果时（Quilt 实例拿到只标 fabric 的、1.20.1 的 NeoForge 实例拿到只标 forge 的），
                 // 改走版本列表在本地挑。
-                if loaders.contains(&ModLoader::Quilt) && !info.loaders.contains(&ModLoader::Quilt)
+                if loaders
+                    .borrowed
+                    .iter()
+                    .any(|pair| !info.loaders.contains(&pair.own))
                 {
                     listed_targets.push((file_name.clone(), entry.clone()));
                     continue;
@@ -327,7 +331,7 @@ impl Petalfall {
                             entry.platform,
                             &entry.project_id,
                             &[mc_version],
-                            &loaders,
+                            &loaders.all,
                         )
                         .await;
                     let mut versions = match listed {
@@ -344,7 +348,7 @@ impl Petalfall {
                         }
                         Err(err) => return Err(err),
                     };
-                    prefer_quilt_builds(&mut versions, &loaders);
+                    prefer_own_builds(&mut versions, &loaders.borrowed);
                     Ok(
                         pick_update(&versions, &entry.version_id, entry.update_hold.as_ref()).map(
                             |latest| UpdateCandidate {
@@ -633,7 +637,7 @@ pub(crate) fn pick_update<'a>(
     versions.iter().find(|candidate| {
         candidate.version_id != current.version_id
             // 同一发布的另一份构建只是传得晚，换过去什么都没更新。
-            && !is_fabric_twin(candidate, current)
+            && !is_borrowed_twin(candidate, current)
             && current.release_channel.admits(candidate.release_channel)
             && !candidate.date_published.is_empty()
             && candidate.date_published > current.date_published
@@ -659,12 +663,13 @@ fn index_by_fingerprint(matches: Vec<CurseForgeFingerprintMatch>) -> HashMap<u32
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compat::runnable_loaders;
     use crate::config::PetalfallConfig;
     use crate::data_format::testing::with_fixture;
     use crate::instances::tests::{NEWER_STAMP, NEWER_WRITER, disk_state, own_format, write_stamp};
     use crate::ledger::Ledger;
     use petalfall_instance::IsolationPolicy;
-    use petalfall_modplatform::ReleaseChannel;
+    use petalfall_modplatform::{ModLoader, ReleaseChannel};
     use petalfall_release::data_format::{StampFile, StampRead, parse_stamp};
     use sha1::{Digest, Sha1};
     use std::path::{Path, PathBuf};
@@ -895,10 +900,53 @@ mod tests {
         latest: String,
         listed: impl FnOnce(&str) -> Vec<String>,
     ) -> Vec<UpdateCandidate> {
+        borrowed_updates(
+            ("1.20.1-quilt", QUILT_JSON),
+            serde_json::json!(["quilt", "fabric"]),
+            current,
+            latest,
+            listed,
+        )
+        .await
+    }
+
+    /// 1.20.1 的 NeoForge 实例：NeoForge 47.1.106 安装器实际写出的版本 JSON，MC 版本只在 `--fml.mcVersion` 里。
+    const NEOFORGE_1_20_1_JSON: &str = r#"{"id":"my-pack",
+        "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+        "arguments":{"game":["--launchTarget","forgeclient","--fml.forgeVersion","47.1.106",
+                             "--fml.fmlVersion","47.2.2","--fml.mcVersion","1.20.1",
+                             "--fml.mcpVersion","20230612.114412"],"jvm":[]},
+        "libraries":[{"name":"net.neoforged.fancymodloader:loader:47.2.2"},
+                     {"name":"net.minecraftforge:accesstransformers:8.0.4"}]}"#;
+
+    /// 1.20.1 的 NeoForge 实例上跑一次更新检查，参数同 [`quilt_updates`]。
+    async fn neoforge_1_20_1_updates(
+        current: impl FnOnce(&str) -> String,
+        latest: String,
+        listed: impl FnOnce(&str) -> Vec<String>,
+    ) -> Vec<UpdateCandidate> {
+        borrowed_updates(
+            ("my-pack", NEOFORGE_1_20_1_JSON),
+            serde_json::json!(["neoforge", "forge"]),
+            current,
+            latest,
+            listed,
+        )
+        .await
+    }
+
+    /// 在 `instance`（实例 id 与版本 JSON）上跑一次更新检查：批量端点只认下推了 `pushed` 这组加载器的请求。
+    async fn borrowed_updates(
+        (instance, json): (&str, &str),
+        pushed: serde_json::Value,
+        current: impl FnOnce(&str) -> String,
+        latest: String,
+        listed: impl FnOnce(&str) -> Vec<String>,
+    ) -> Vec<UpdateCandidate> {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path();
-        put_version(mc, "1.20.1-quilt", QUILT_JSON).await;
-        let (_, sha1) = put_mod(mc, "1.20.1-quilt", "installed.jar", b"installed").await;
+        put_version(mc, instance, json).await;
+        let (_, sha1) = put_mod(mc, instance, "installed.jar", b"installed").await;
 
         let server = MockServer::start().await;
         mount_post(
@@ -910,7 +958,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/version_files/update"))
             .and(body_partial_json(serde_json::json!({
-                "loaders": ["quilt", "fabric"],
+                "loaders": pushed,
                 "game_versions": ["1.20.1"]
             })))
             .respond_with(
@@ -930,7 +978,7 @@ mod tests {
         let petalfall = petalfall_at(mc, &server.uri());
         save_ledger(
             &petalfall,
-            "1.20.1-quilt",
+            instance,
             vec![ledger_entry(
                 "installed.jar",
                 "AANobbMI",
@@ -939,7 +987,7 @@ mod tests {
             )],
         )
         .await;
-        petalfall.check_updates("1.20.1-quilt").await.unwrap()
+        petalfall.check_updates(instance).await.unwrap()
     }
 
     /// 真实数据：AppleSkin 2.5.0+mc1.20 之后的版本只标 fabric，只拿 quilt 去问平台就报不出更新。
@@ -1048,6 +1096,125 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].latest.version_id, "quilt");
+    }
+
+    /// 装着 neoforge 构建的 1.20.1 实例上，只标 forge 的新发布照报更新：查询带着 neoforge、forge 两家下推。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn neoforge_1_20_1_instance_is_offered_a_forge_only_update() {
+        let current = |sha1: &str| {
+            on_loaders(
+                modrinth_version(
+                    "current",
+                    "AANobbMI",
+                    "1.3.0-neoforge",
+                    "2025-01-01T00:00:00Z",
+                    "installed.jar",
+                    sha1,
+                ),
+                r#"["neoforge"]"#,
+            )
+        };
+        let newest = on_loaders(
+            modrinth_version(
+                "newest",
+                "AANobbMI",
+                "1.4.0-forge",
+                "2026-01-01T00:00:00Z",
+                "newest.jar",
+                "bb",
+            ),
+            r#"["forge"]"#,
+        );
+
+        let found =
+            neoforge_1_20_1_updates(current, newest.clone(), |sha1| vec![newest, current(sha1)])
+                .await;
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].current_version_id, "current");
+        assert_eq!(found[0].latest.version_id, "newest");
+    }
+
+    /// 装着 neoforge 构建时，同一发布晚几分钟传的 forge 构建不是更新。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn neoforge_build_is_not_updated_to_its_forge_twin() {
+        let current = |sha1: &str| {
+            on_loaders(
+                modrinth_version(
+                    "current",
+                    "AANobbMI",
+                    "1.4.0-neoforge",
+                    "2026-01-01T00:00:00Z",
+                    "installed.jar",
+                    sha1,
+                ),
+                r#"["neoforge"]"#,
+            )
+        };
+        let twin = on_loaders(
+            modrinth_version(
+                "twin",
+                "AANobbMI",
+                "1.4.0-forge",
+                "2026-01-01T00:05:00Z",
+                "twin.jar",
+                "bb",
+            ),
+            r#"["forge"]"#,
+        );
+
+        let found =
+            neoforge_1_20_1_updates(current, twin.clone(), |sha1| vec![twin, current(sha1)]).await;
+
+        assert_eq!(found, Vec::new());
+    }
+
+    /// 同一发布的 neoforge 构建被更晚传的 forge 构建压住：1.20.1 的 NeoForge 实例要报 neoforge 那份。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn neoforge_1_20_1_instance_updates_to_the_neoforge_build_of_a_new_release() {
+        let current = |sha1: &str| {
+            on_loaders(
+                modrinth_version(
+                    "current",
+                    "AANobbMI",
+                    "1.3.0-neoforge",
+                    "2025-01-01T00:00:00Z",
+                    "installed.jar",
+                    sha1,
+                ),
+                r#"["neoforge"]"#,
+            )
+        };
+        let forge = on_loaders(
+            modrinth_version(
+                "forge",
+                "AANobbMI",
+                "1.4.0-forge",
+                "2026-01-01T00:05:00Z",
+                "forge.jar",
+                "bb",
+            ),
+            r#"["forge"]"#,
+        );
+        let neoforge = on_loaders(
+            modrinth_version(
+                "neoforge",
+                "AANobbMI",
+                "1.4.0-neoforge",
+                "2026-01-01T00:00:00Z",
+                "neoforge.jar",
+                "cc",
+            ),
+            r#"["neoforge"]"#,
+        );
+
+        let found = neoforge_1_20_1_updates(current, forge.clone(), |sha1| {
+            vec![forge, neoforge, current(sha1)]
+        })
+        .await;
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].latest.version_id, "neoforge");
     }
 
     /// 平台给回的「最新兼容版」比玩家正在用的还旧：不报更新，否则就是一次降级。
@@ -1461,7 +1628,7 @@ mod tests {
                 "1.20.1-fabric",
                 &dirs,
                 &scanned,
-                vec![ModLoader::Fabric],
+                runnable_loaders(&[ModLoader::Fabric], Some("1.20.1")),
                 "1.20.1".to_owned(),
                 key_missing,
             )

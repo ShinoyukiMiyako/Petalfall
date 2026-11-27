@@ -140,58 +140,117 @@ fn join_loader_names(loaders: &[ModLoader]) -> String {
         .join("/")
 }
 
-/// 装着这些加载器的实例能跑哪些加载器的 Mod。
+/// 实例借着自己装的加载器去跑的另一家：`own` 能加载为 `borrowed` 写的 Mod，反过来不行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BorrowedLoader {
+    /// 实例自己装的加载器。
+    pub(crate) own: ModLoader,
+    /// 借来跑的那一家。
+    pub(crate) borrowed: ModLoader,
+}
+
+const QUILT_RUNS_FABRIC: BorrowedLoader = BorrowedLoader {
+    own: ModLoader::Quilt,
+    borrowed: ModLoader::Fabric,
+};
+
+const NEOFORGE_RUNS_FORGE: BorrowedLoader = BorrowedLoader {
+    own: ModLoader::NeoForge,
+    borrowed: ModLoader::Forge,
+};
+
+/// NeoForge 还能加载 Forge Mod 的唯一一代 MC 版本。NeoForge 从 Forge 47.1 分出来，1.20.1 上与同版本的 Forge
+/// 二进制兼容；从 20.2 起两边分道，之后的 NeoForge 不认 Forge 的 jar。
+const NEOFORGE_RUNS_FORGE_ON: &str = "1.20.1";
+
+impl BorrowedLoader {
+    /// 版本号去掉这一对加载器字样后的各段。
+    ///
+    /// 同一发布分加载器各传一份时，版本号只差这个字样（`1.4.0-fabric` 与 `1.4.0-quilt`、`fabric-1.4.0` 与
+    /// `quilt-1.4.0`、`1.4.0` 与 `1.4.0+quilt`、`1.4.0-forge` 与 `1.4.0-neoforge`），两份都不写字样的版本号
+    /// 完全相同。按分隔符切开比删子串稳：字样前的分隔符各家不一，有的工程只有一份带字样。
+    fn release_parts(self, version: &ModVersionInfo) -> Vec<String> {
+        let names = [self.own.modrinth_facet(), self.borrowed.modrinth_facet()];
+        version
+            .version_number
+            .to_ascii_lowercase()
+            .split(['-', '+', '_'])
+            .filter(|part| !names.contains(part))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// `other` 是不是 `own_build` 这份构建在同一发布里给被借那一家传的构建。
+    fn is_twin(self, other: &ModVersionInfo, own_build: &ModVersionInfo) -> bool {
+        other.loaders.contains(&self.borrowed)
+            && !other.loaders.contains(&self.own)
+            && own_build.loaders.contains(&self.own)
+            && self.release_parts(other) == self.release_parts(own_build)
+    }
+}
+
+/// 实例能跑哪些加载器的 Mod。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunnableLoaders {
+    /// 自己装的在前、借来的在后，下推给平台过滤版本用（OptiFine 这类不是 Mod 加载器的不在其中）。
+    pub(crate) all: Vec<ModLoader>,
+    /// 其中借着自己装的加载器去跑的那几家。
+    pub(crate) borrowed: Vec<BorrowedLoader>,
+}
+
+/// 装着这些加载器、基于这个 MC 版本的实例能跑哪些加载器的 Mod。
 ///
-/// Quilt 能加载 Fabric Mod，而平台上大量 Fabric Mod 从不标 quilt：只认标签会判成不兼容，再退到还标着
-/// quilt 的旧版上。判定与下推过滤共用这一处，否则落位矩阵放行的版本会被版本列表先筛掉。
-fn runnable_loaders(installed: &[ModLoader]) -> Vec<ModLoader> {
-    let mut runnable = installed.to_vec();
+/// 平台上大量 Mod 只标写它时针对的那一家：Quilt 能加载 Fabric Mod，大量 Fabric Mod 从不标 quilt；1.20.1 的
+/// NeoForge 能加载 Forge Mod，大量 1.20.1 的 Mod 只标 forge。只认标签会判成不兼容，再退到还标着实例那一家的
+/// 旧版上。判定与下推过滤共用这一处，否则落位矩阵放行的版本会被版本列表先筛掉。实例真装着被借的那一家时
+/// 不算借，照它自己装的判。MC 版本认不出时不放行 Forge 的 Mod：不是 1.20.1 的 NeoForge 加载不了它们。
+pub(crate) fn runnable_loaders(
+    installed: &[ModLoader],
+    mc_version: Option<&str>,
+) -> RunnableLoaders {
+    let mut borrowed = Vec::new();
     if installed.contains(&ModLoader::Quilt) && !installed.contains(&ModLoader::Fabric) {
-        runnable.push(ModLoader::Fabric);
+        borrowed.push(QUILT_RUNS_FABRIC);
     }
-    runnable
+    if installed.contains(&ModLoader::NeoForge)
+        && !installed.contains(&ModLoader::Forge)
+        && mc_version == Some(NEOFORGE_RUNS_FORGE_ON)
+    {
+        borrowed.push(NEOFORGE_RUNS_FORGE);
+    }
+    let all = installed
+        .iter()
+        .copied()
+        .chain(borrowed.iter().map(|pair| pair.borrowed))
+        .collect();
+    RunnableLoaders { all, borrowed }
 }
 
-/// 版本号去掉加载器字样后的各段。
+/// `other` 是不是 `own_build` 在同一发布里给被借那一家传的构建（Quilt 构建的 Fabric 构建、NeoForge 构建的
+/// Forge 构建）。
+pub(crate) fn is_borrowed_twin(other: &ModVersionInfo, own_build: &ModVersionInfo) -> bool {
+    [QUILT_RUNS_FABRIC, NEOFORGE_RUNS_FORGE]
+        .into_iter()
+        .any(|pair| pair.is_twin(other, own_build))
+}
+
+/// 借着别家跑的实例上，把同一发布里给实例那一家传的构建排到被借那一家的构建前面；没借的实例不动。
+/// `versions` 按发布时间倒序。
 ///
-/// 同一发布分加载器各传一份时，版本号只差这个字样（`1.4.0-fabric` 与 `1.4.0-quilt`、`fabric-1.4.0` 与
-/// `quilt-1.4.0`、`1.4.0` 与 `1.4.0+quilt`），两份都不写字样的版本号完全相同。按分隔符切开比删子串稳：
-/// 字样前的分隔符各家不一，有的工程只有 quilt 那份带字样。
-fn release_parts(version: &ModVersionInfo) -> Vec<String> {
-    version
-        .version_number
-        .to_ascii_lowercase()
-        .split(['-', '+', '_'])
-        .filter(|part| !matches!(*part, "fabric" | "quilt"))
-        .map(str::to_owned)
-        .collect()
-}
-
-/// `fabric` 是不是 `quilt` 这份构建在同一发布里的 Fabric 构建。
-pub(crate) fn is_fabric_twin(fabric: &ModVersionInfo, quilt: &ModVersionInfo) -> bool {
-    fabric.loaders.contains(&ModLoader::Fabric)
-        && !fabric.loaders.contains(&ModLoader::Quilt)
-        && quilt.loaders.contains(&ModLoader::Quilt)
-        && release_parts(fabric) == release_parts(quilt)
-}
-
-/// Quilt 实例上，把同一发布的 quilt 构建排到它的 fabric 构建前面；别的实例不动。`versions` 按发布时间倒序。
-///
-/// 只在同一发布内换位，不是带 quilt 标的一律优先：不少 Mod 后来不再标 quilt，AppleSkin 的 quilt 标停在
-/// 2023 年的 2.5.0，一律优先就是把 Quilt 玩家钉在那个旧版上。
-pub(crate) fn prefer_quilt_builds<V: Borrow<ModVersionInfo>>(
+/// 只在同一发布内换位，不是带实例那一家标的一律优先：不少 Mod 后来不再标 quilt，AppleSkin 的 quilt 标停在
+/// 2023 年的 2.5.0，一律优先就是把 Quilt 玩家钉在那个旧版上；1.20.1 上后来只标 forge 的 Mod 同理。
+pub(crate) fn prefer_own_builds<V: Borrow<ModVersionInfo>>(
     versions: &mut [V],
-    loaders: &[ModLoader],
+    borrowed: &[BorrowedLoader],
 ) {
-    if !loaders.contains(&ModLoader::Quilt) {
-        return;
-    }
-    for at in 0..versions.len() {
-        let twin = versions[at + 1..]
-            .iter()
-            .position(|later| is_fabric_twin(versions[at].borrow(), later.borrow()));
-        if let Some(offset) = twin {
-            versions[at..=at + 1 + offset].rotate_right(1);
+    for pair in borrowed {
+        for at in 0..versions.len() {
+            let twin = versions[at + 1..]
+                .iter()
+                .position(|later| pair.is_twin(versions[at].borrow(), later.borrow()));
+            if let Some(offset) = twin {
+                versions[at..=at + 1 + offset].rotate_right(1);
+            }
         }
     }
 }
@@ -199,7 +258,8 @@ pub(crate) fn prefer_quilt_builds<V: Borrow<ModVersionInfo>>(
 /// 纯函数：判定某个版本能否用于给定的实例事实。
 ///
 /// `instance_loaders` 取实例已装的加载器名（大小写不敏感，非 Mod 加载器如 OptiFine 会被忽略）。
-/// Quilt 实例同时接受 Fabric 的版本，放行范围见 [`runnable_loaders`]。
+/// Quilt 实例同时接受 Fabric 的版本，1.20.1 的 NeoForge 实例同时接受 Forge 的版本，放行范围见
+/// [`runnable_loaders`]。
 /// 判定顺序按「越确凿越先判」排：先看加载器（对不上一定装不了），再看 MC 版本，最后才把
 /// 元数据缺失归到 [`Compatibility::Unknown`]。
 /// `instance_mc_version` 传 `None` 表示「认不出这个实例基于哪个 MC 版本」。此时只判加载器，
@@ -224,7 +284,7 @@ pub fn classify(
                 reason: "该实例未安装 Mod 加载器".to_owned(),
             };
         }
-        let runnable = runnable_loaders(&instance_kinds);
+        let runnable = runnable_loaders(&instance_kinds, instance_mc_version).all;
         let intersects = version
             .loaders
             .iter()
@@ -330,7 +390,10 @@ fn pick_best(
         .filter_map(|name| parse_loader_name(name))
         .collect();
     let mut ordered: Vec<&ModVersionInfo> = versions.iter().collect();
-    prefer_quilt_builds(&mut ordered, &kinds);
+    prefer_own_builds(
+        &mut ordered,
+        &runnable_loaders(&kinds, instance_mc_version).borrowed,
+    );
 
     for version in ordered {
         match judge(
@@ -427,14 +490,15 @@ pub(crate) fn instance_loaders(version: &DiscoveredVersion) -> Vec<String> {
         .collect()
 }
 
-/// 实例能跑哪些加载器的 Mod，下推给平台过滤版本用（认不出的名字，即 OptiFine 这类非 Mod 加载器，已剔除）。
-pub(crate) fn instance_mod_loaders(version: &DiscoveredVersion) -> Vec<ModLoader> {
+/// 实例能跑哪些加载器的 Mod：`all` 下推给平台过滤版本用（认不出的名字，即 OptiFine 这类非 Mod 加载器，
+/// 已剔除），`borrowed` 给同一发布里挑哪份构建用。MC 版本与 [`classify`] 同一口径取自 [`instance_mc_version`]。
+pub(crate) fn instance_mod_loaders(version: &DiscoveredVersion) -> RunnableLoaders {
     let installed: Vec<ModLoader> = version
         .loaders
         .iter()
         .filter_map(|info| parse_loader_name(info.kind.as_str()))
         .collect();
-    runnable_loaders(&installed)
+    runnable_loaders(&installed, instance_mc_version(version).as_deref())
 }
 
 /// 按 MC 版本补拉 CurseForge 文件页时同时在途的请求数：实例用到的 MC 版本可能有十来种，
@@ -956,6 +1020,79 @@ mod tests {
         );
     }
 
+    /// 1.20.1 的 NeoForge 能跑 Forge Mod：平台上只标 forge 的版本不能因此判成不兼容，标 neoforge 的照常兼容。
+    #[test]
+    fn neoforge_1_20_1_instance_runs_forge_only_version() {
+        let forge_only = version(&[ModLoader::Forge], &["1.20.1"]);
+        assert_eq!(
+            classify(&forge_only, Some("1.20.1"), &names(&["neoforge"])),
+            Compatibility::Match
+        );
+        let neoforge = version(&[ModLoader::NeoForge], &["1.20.1"]);
+        assert_eq!(
+            classify(&neoforge, Some("1.20.1"), &names(&["neoforge"])),
+            Compatibility::Match
+        );
+    }
+
+    /// 放行只到 Forge：Fabric 的版本照旧不兼容，原因只说实例真正装的 NeoForge，不把借来的 Forge 也列进去。
+    #[test]
+    fn neoforge_1_20_1_instance_still_rejects_fabric_only_version() {
+        let v = version(&[ModLoader::Fabric], &["1.20.1"]);
+        assert_eq!(
+            classify(&v, Some("1.20.1"), &names(&["neoforge"])),
+            mismatch("需要 Fabric，该实例装的是 NeoForge")
+        );
+    }
+
+    /// 20.2 起 NeoForge 与 Forge 分道，之后的 NeoForge 不认 Forge 的 jar。
+    #[test]
+    fn later_neoforge_instances_still_reject_forge_only_versions() {
+        for mc in ["1.20.2", "1.20.4", "1.21.1"] {
+            let v = version(&[ModLoader::Forge], &[mc]);
+            assert_eq!(
+                classify(&v, Some(mc), &names(&["neoforge"])),
+                mismatch("需要 Forge，该实例装的是 NeoForge"),
+                "MC {mc}"
+            );
+        }
+    }
+
+    /// 认不出 MC 版本就不知道是不是 1.20.1，不放行 Forge 的版本。
+    #[test]
+    fn neoforge_instance_of_unknown_game_version_rejects_forge_only_version() {
+        let v = version(&[ModLoader::Forge], &["1.20.1"]);
+        assert_eq!(
+            classify(&v, None, &names(&["neoforge"])),
+            mismatch("需要 Forge，该实例装的是 NeoForge")
+        );
+    }
+
+    /// 同时装着 Forge 与 NeoForge 的实例照它自己装的判，不算借：两家的版本都兼容，Fabric 的照旧不兼容。
+    #[test]
+    fn forge_and_neoforge_instance_is_judged_by_what_it_has() {
+        let both = names(&["forge", "neoforge"]);
+        for loader in [ModLoader::Forge, ModLoader::NeoForge] {
+            let v = version(&[loader], &["1.20.1"]);
+            assert_eq!(classify(&v, Some("1.20.1"), &both), Compatibility::Match);
+        }
+        assert_eq!(
+            classify(
+                &version(&[ModLoader::Fabric], &["1.20.1"]),
+                Some("1.20.1"),
+                &both
+            ),
+            mismatch("需要 Fabric，该实例装的是 Forge/NeoForge")
+        );
+        assert_eq!(
+            runnable_loaders(&[ModLoader::Forge, ModLoader::NeoForge], Some("1.20.1")),
+            RunnableLoaders {
+                all: vec![ModLoader::Forge, ModLoader::NeoForge],
+                borrowed: Vec::new(),
+            }
+        );
+    }
+
     #[test]
     fn vanilla_instance_rejects_loader_requiring_version() {
         let v = version(&[ModLoader::Forge], &["1.20.1"]);
@@ -1298,6 +1435,72 @@ mod tests {
         );
     }
 
+    /// 1.20.1 的 NeoForge 实例上，同一发布分 forge、neoforge 各传一份时拿 neoforge 那份，哪怕 forge 那份传得晚。
+    #[test]
+    fn neoforge_1_20_1_instance_takes_the_neoforge_build_of_the_same_release() {
+        use ModLoader::{Forge, NeoForge};
+        for (forge, neoforge) in [
+            ("1.4.0-forge", "1.4.0-neoforge"),
+            ("forge-1.20.1-2.1.0", "neoforge-1.20.1-2.1.0"),
+            ("2.1.0+1.20.1", "2.1.0+1.20.1-neoforge"),
+            ("1.20.1-Forge-3.2.0", "1.20.1-NeoForge-3.2.0"),
+            (
+                "jei-1.20.1-forge-15.2.0.27.jar",
+                "jei-1.20.1-neoforge-15.2.0.27.jar",
+            ),
+        ] {
+            let versions = vec![
+                release("forge", forge, 2026, &[Forge], &["1.20.1"]),
+                release("patch", "0.9.0", 2025, &[Forge], &["1.20.1"]),
+                release("neoforge", neoforge, 2024, &[NeoForge], &["1.20.1"]),
+            ];
+            assert_eq!(
+                best_for(&versions, "1.20.1", "neoforge").as_deref(),
+                Some("neoforge"),
+                "{forge} 与 {neoforge} 是同一发布"
+            );
+        }
+    }
+
+    /// 偏好只在同一发布内：更新的 forge 构建不让位给旧发布的 neoforge 构建，只有 forge 构建时就用它。
+    #[test]
+    fn neoforge_1_20_1_instance_keeps_the_newest_release_and_falls_back_to_forge_builds() {
+        use ModLoader::{Forge, NeoForge};
+        let versions = vec![
+            release("forge", "2.0.1-forge", 2026, &[Forge], &["1.20.1"]),
+            release("neoforge", "2.0.0-neoforge", 2025, &[NeoForge], &["1.20.1"]),
+        ];
+        assert_eq!(
+            best_for(&versions, "1.20.1", "neoforge").as_deref(),
+            Some("forge")
+        );
+        let forge_only = vec![
+            release("newer", "2.0.1-forge", 2026, &[Forge], &["1.20.1"]),
+            release("older", "2.0.0-forge", 2025, &[Forge], &["1.20.1"]),
+        ];
+        assert_eq!(
+            best_for(&forge_only, "1.20.1", "neoforge").as_deref(),
+            Some("newer")
+        );
+    }
+
+    /// 同时装着 Forge 与 NeoForge 的实例不算借 Forge，不换位：照旧取最新的那份。
+    #[test]
+    fn neoforge_preference_leaves_forge_and_neoforge_instances_alone() {
+        use ModLoader::{Forge, NeoForge};
+        let versions = vec![
+            release("forge", "1.4.0-forge", 2026, &[Forge], &["1.20.1"]),
+            release("neoforge", "1.4.0-neoforge", 2025, &[NeoForge], &["1.20.1"]),
+        ];
+        let (_, best) = pick_best(
+            ResourceType::Mod,
+            &versions,
+            Some("1.20.1"),
+            &names(&["forge", "neoforge"]),
+        );
+        assert_eq!(best.unwrap().version_id, "forge");
+    }
+
     /// 工程压根没有这个 MC 版本的文件时，说「需要 NeoForge」等于让玩家去换加载器，换了也没得装。
     #[test]
     fn pick_best_reports_the_game_version_when_the_project_never_covers_it() {
@@ -1599,7 +1802,7 @@ mod tests {
         // 探测顺序固定为 Forge 先于 OptiFine；非 Mod 加载器也如实列出，取舍交给 classify。
         assert_eq!(instance_loaders(&v), names(&["forge", "optifine"]));
         // Mod 加载器视图剔除 OptiFine。
-        assert_eq!(instance_mod_loaders(&v), vec![ModLoader::Forge]);
+        assert_eq!(instance_mod_loaders(&v).all, vec![ModLoader::Forge]);
 
         let vanilla = discovered("1.21", r#"{"id":"1.21","type":"release"}"#);
         assert!(instance_loaders(&vanilla).is_empty());
@@ -1614,10 +1817,77 @@ mod tests {
                 "libraries":[{"name":"org.quiltmc:quilt-loader:0.26.0"}]}"#,
         );
         assert_eq!(
-            instance_mod_loaders(&v),
+            instance_mod_loaders(&v).all,
             vec![ModLoader::Quilt, ModLoader::Fabric]
         );
         assert_eq!(instance_loaders(&v), names(&["quilt"]));
+    }
+
+    /// 1.20.1 的 NeoForge 47.1.106 安装器实际写出的版本 JSON：没有 `net.neoforged:forge` 坐标，也不写
+    /// `--fml.forgeGroup`，库清单里是 NeoForge 自己的 FML。
+    const NEOFORGE_1_20_1_JSON: &str = r#"{"id":"我的整合包",
+        "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+        "arguments":{"game":["--launchTarget","forgeclient","--fml.forgeVersion","47.1.106",
+                             "--fml.fmlVersion","47.2.2","--fml.mcVersion","1.20.1",
+                             "--fml.mcpVersion","20230612.114412"],"jvm":[]},
+        "libraries":[{"name":"net.neoforged.fancymodloader:loader:47.2.2"},
+                     {"name":"net.neoforged.fancymodloader:earlydisplay:47.2.2"},
+                     {"name":"net.minecraftforge:accesstransformers:8.0.4"},
+                     {"name":"net.minecraftforge:JarJarSelector:0.3.19"}]}"#;
+
+    /// 下推过滤要带上 Forge、排在 NeoForge 后面，否则平台先把只标 forge 的版本筛掉；实例事实仍只有 neoforge。
+    /// 落位矩阵取的是同一份实例事实，只标 forge 的版本在这里判兼容，只标 fabric 的照旧不兼容。
+    #[test]
+    fn neoforge_1_20_1_instance_pushes_forge_down_after_neoforge() {
+        let v = discovered("我的整合包", NEOFORGE_1_20_1_JSON);
+        let mc = instance_mc_version(&v);
+        assert_eq!(mc.as_deref(), Some("1.20.1"));
+        let loaders = instance_loaders(&v);
+        assert_eq!(loaders, names(&["neoforge"]));
+        assert_eq!(
+            instance_mod_loaders(&v).all,
+            vec![ModLoader::NeoForge, ModLoader::Forge]
+        );
+
+        let versions = vec![
+            dated("fabric", 2026, &[ModLoader::Fabric], &["1.20.1"]),
+            dated("forge", 2025, &[ModLoader::Forge], &["1.20.1"]),
+        ];
+        let (compat, best) = pick_best(ResourceType::Mod, &versions, mc.as_deref(), &loaders);
+        assert_eq!(compat, Compatibility::Match);
+        assert_eq!(best.unwrap().version_id, "forge");
+        let (compat, best) = pick_best(ResourceType::Mod, &versions[..1], mc.as_deref(), &loaders);
+        assert_eq!(compat, mismatch("需要 Fabric，该实例装的是 NeoForge"));
+        assert!(best.is_none());
+    }
+
+    /// 20.2 以后的 NeoForge、认不出 MC 版本的 NeoForge 都只下推 neoforge。
+    #[test]
+    fn other_neoforge_instances_push_down_only_neoforge() {
+        let later = discovered(
+            "nf-21.1.265",
+            r#"{"id":"nf-21.1.265","mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+                "arguments":{"game":["--fml.neoForgeVersion","21.1.265","--fml.mcVersion","1.21.1",
+                                     "--launchTarget","forgeclient"],"jvm":[]},
+                "libraries":[{"name":"net.neoforged.fancymodloader:loader:4.0.45"},
+                             {"name":"net.neoforged:bus:8.0.5"},
+                             {"name":"net.minecraftforge:srgutils:0.4.15"}]}"#,
+        );
+        assert_eq!(instance_mc_version(&later).as_deref(), Some("1.21.1"));
+        assert_eq!(instance_mod_loaders(&later).all, vec![ModLoader::NeoForge]);
+
+        let unknown = discovered(
+            "nf",
+            &NEOFORGE_1_20_1_JSON
+                .replace(r#""--fml.mcVersion","1.20.1","#, "")
+                .replace("我的整合包", "nf"),
+        );
+        assert_eq!(instance_mc_version(&unknown), None);
+        assert_eq!(instance_loaders(&unknown), names(&["neoforge"]));
+        assert_eq!(
+            instance_mod_loaders(&unknown).all,
+            vec![ModLoader::NeoForge]
+        );
     }
 
     // ---- 实例匹配矩阵（端到端，平台走本地 mock）----
