@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use petalfall_core::folders::validate_game_dir;
+use petalfall_core::folders::{same_path, validate_game_dir};
 use petalfall_core::instance_install::{Unrepairable, UnrepairableKind};
 use petalfall_core::{
     is_safe_instance_id, BackupKind, CoreError, CoverBackground, CoverImageSlot, DeletionPreview,
@@ -1624,7 +1624,8 @@ pub(crate) async fn get_sidebar_pins_with(facade: &Facade) -> Result<Vec<String>
 }
 
 /// 整份设置侧栏固定列表并落盘，返回写下的列表。超过 5 个、重复或含不存在的实例报 `invalid_argument`，
-/// detail.reason 为 too_many / duplicate / not_found，detail.id 为出问题的实例。
+/// detail.reason 为 too_many / duplicate / not_found，detail.id 为出问题的实例。校验完、写入前切换了游戏目录报
+/// `game_dir_changed`，什么都不写。
 #[tauri::command]
 pub async fn set_sidebar_pins(
     pins: Vec<String>,
@@ -1637,19 +1638,51 @@ pub(crate) async fn set_sidebar_pins_with(
     facade: &Facade,
     pins: Vec<String>,
 ) -> Result<Vec<String>, CommandError> {
-    facade
-        .snapshot()
-        .await
+    let snapshot = facade.snapshot().await;
+    write_sidebar_pins(facade, &snapshot, pins).await
+}
+
+/// 在快照 `snapshot` 上校验 `pins`，再写进门面。校验扫的是快照那一刻的游戏目录，这期间切换了目录的话，这份列表说的是
+/// 原目录里的实例，照样写进来就成了新目录的固定，新目录原来的固定被冲掉，所以写入时核对（[`ensure_checked_game_dir`]）。
+async fn write_sidebar_pins(
+    facade: &Facade,
+    snapshot: &Petalfall,
+    pins: Vec<String>,
+) -> Result<Vec<String>, CommandError> {
+    snapshot
         .validate_sidebar_pins(&pins)
         .await
         .map_err(instance_error)?;
+    let checked_in = snapshot.game_dir();
     facade
         .update(|petalfall| {
+            ensure_checked_game_dir(petalfall, checked_in)?;
             petalfall.set_sidebar_pins(pins.clone());
             Ok::<_, CommandError>(())
         })
         .await?;
     Ok(pins)
+}
+
+/// 在快照上校验过的配置写入，换进门面之前的核对：校验时的游戏目录 `checked_in` 此刻已不是当前目录就报
+/// `game_dir_changed`（detail 同任务命令的核对），什么都不写。切换目录之后前端会重读，照当前目录再操作一次就能成。
+fn ensure_checked_game_dir(petalfall: &Petalfall, checked_in: &Path) -> Result<(), CommandError> {
+    let current = petalfall.game_dir();
+    if same_path(checked_in, current) {
+        return Ok(());
+    }
+    Err(CommandError::new(
+        code::GAME_DIR_CHANGED,
+        format!(
+            "游戏目录刚换过（原来是 {}，现在是 {}），这次没有保存，在当前目录里再操作一次",
+            checked_in.display(),
+            current.display()
+        ),
+    )
+    .with_detail(json!({
+        "expected": checked_in.display().to_string(),
+        "current": current.display().to_string(),
+    })))
 }
 
 /// 新建或导入把实例 `name` 建在了游戏目录 `game_dir` 里：去掉配置在那个目录名下与它同名的旧固定（见
@@ -5493,6 +5526,41 @@ mod tests {
             five
         );
         assert_eq!(env.saved_config().await.sidebar_pins, five);
+    }
+
+    /// 在快照上校验完、写入前切换了游戏目录：报 game_dir_changed，按原目录校验的列表不写进新目录，新目录自己的固定与
+    /// 收起的原目录固定都原样，配置文件也没动。
+    #[tokio::test]
+    async fn sidebar_pins_checked_in_one_directory_are_not_written_into_another() {
+        let env = Env::new();
+        env.vanilla("创造");
+        let (home, other) = twin_directories(&env, "生存");
+        env.vanilla("生存");
+        switch_game_dir(&env, &other).await;
+        pin_and_select(&env, "生存").await;
+        switch_game_dir(&env, &home).await;
+        set_sidebar_pins_with(&env.facade, vec!["创造".into()])
+            .await
+            .unwrap();
+        let checked = env.facade.snapshot().await;
+        switch_game_dir(&env, &other).await;
+        let before = env.saved_config().await;
+
+        let err = write_sidebar_pins(&env.facade, &checked, vec!["生存".into(), "创造".into()])
+            .await
+            .unwrap_err();
+
+        assert_game_dir_changed(&err, &home.display().to_string(), &other);
+        let config = env.facade.read().await.config().clone();
+        assert_eq!(config.sidebar_pins, vec!["生存".to_owned()]);
+        let parked: Vec<_> = config
+            .parked_directories
+            .iter()
+            .filter(|parked| petalfall_core::folders::same_path(&parked.path, &home))
+            .map(|parked| parked.sidebar_pins.clone())
+            .collect();
+        assert_eq!(parked, vec![vec!["创造".to_owned()]]);
+        assert_eq!(env.saved_config().await, before);
     }
 
     #[tokio::test]

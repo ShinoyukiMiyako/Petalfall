@@ -567,7 +567,7 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 | `world_backups_not_moved` | 改名已完成，只差存档备份没挪过去，前端照成功处理再提示 | `{ id, renamed_to, path }`，`path` 是留在旧名下的备份目录 |
 | `server_not_pinned` | 要改的服务器不在固定列表里 | `{ address }` |
 | `quick_play_unsupported` | 实例的版本不支持这种直达方式 | `{ version_id, mode }`，`mode` 取 `singleplayer`、`multiplayer` |
-| `game_dir_changed` | 按实例名动手的任务命令带来的 `game_dir`（入队那一刻的游戏目录）已经不是当前目录，什么都没动（见「长任务」） | `{ expected, current }`：`expected` 是命令带来的目录，`current` 是此刻的当前目录 |
+| `game_dir_changed` | 按实例名动手的任务命令带来的 `game_dir`（入队那一刻的游戏目录）已经不是当前目录，什么都没动（见「长任务」）；`set_sidebar_pins` 在快照上校验完、写入前切换了游戏目录也报它，什么都没写 | `{ expected, current }`：`expected` 是命令带来的目录（写固定时是校验时的目录），`current` 是此刻的当前目录 |
 | `java_path_invalid` | 手动添加的路径不是可用的 java 可执行文件 | `{ path, reason }` |
 | `java_runtime_incomplete` | 手动添加的 Java 缺运行时文件 | `{ path, missing }` |
 | `gpu_query_failed` | 枚举显卡失败 | `{ hresult, causes }` |
