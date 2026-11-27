@@ -69,6 +69,13 @@ export const OfflineDialog = memo(function OfflineDialog({ report }: { report: R
   useLayoutEffect(() => {
     presentNow.current = present;
   }, [present]);
+  // 退场途中又被打开（同一个 key 被接回，组件不重挂）：成功提交留下的提交中只该陪着上一次退场播完，
+  // 不清掉的话接回来的弹窗一直转圈、再也提交不了
+  const [presentBefore, setPresentBefore] = useState(present);
+  if (present !== presentBefore) {
+    setPresentBefore(present);
+    if (present) setSentAgainst(null);
+  }
   const check = validateOfflineName(name, sentAgainst === null ? takenNames : sentAgainst);
   const display = nameDisplay(name, check, touched);
   const figureName = useDebounced(name, FIGURE_DEBOUNCE_MS);

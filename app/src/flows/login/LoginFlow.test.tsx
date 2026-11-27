@@ -314,6 +314,37 @@ describe("离线账户弹窗", () => {
       expect(nameLine()).toBe(OFFLINE_NAME_COPY.ok);
     });
 
+    it("添加成功后退场途中又打开离线账户：接回的弹窗不再转圈，换个名字能再添加一个", async () => {
+      await mount({ presence: true });
+      await act(async () => {
+        await launcher.actions.openLogin("offline");
+      });
+      await flush();
+      typeInto(inputs()[0], "Steve");
+      pressEnter(inputs()[0]);
+      await flush();
+      expect(launcher.state.login).toBeNull();
+      expect(button(OFFLINE_NAME_COPY.submit).getAttribute("aria-busy")).toBe("true");
+
+      // jsdom 里退场播不完：再打开时同一个 key 回来，接回的是还在退场的那个流程
+      await act(async () => {
+        await launcher.actions.openLogin("offline");
+      });
+      await flush();
+      expect(launcher.state.login).toEqual({ kind: "offline", intent: MANUAL_LOGIN });
+      // 不是新挂一个弹窗叠在退场的旧弹窗上：浮层根里只有接回的这一层
+      expect(document.querySelectorAll("[data-sk-modal-layer]")).toHaveLength(1);
+      const submit = button(OFFLINE_NAME_COPY.submit);
+      expect(submit.hasAttribute("aria-busy")).toBe(false);
+
+      typeInto(inputs()[0], "Herobrine");
+      pressEnter(inputs()[0]);
+      await flush();
+      expect(callsOf(ipc, "create_offline_account")).toEqual([{ name: "Steve" }, { name: "Herobrine" }]);
+      expect(launcher.state.accounts.map((a) => a.name)).toEqual(["Alex", "Steve", "Herobrine"]);
+      expect(launcher.state.login).toBeNull();
+    });
+
     it("由启动触发：加上账户后接着启动，启动还没回来与随后失败时，退场途中都不报同名、主按钮一直转圈", async () => {
       stored = [];
       const launching = deferred<never>();
