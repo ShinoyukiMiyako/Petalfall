@@ -8,6 +8,11 @@
 // 设置里打开「自动下载受限的 CurseForge 文件」后，真后端在 download-url 端点拿不到地址时改用拼出的 CDN 地址，
 // 拿到地址就照常下载、不再看认领过的副本；这里把两种受限夹具都当作探得到，预览不列受限文件、导入直接成功，
 // 认领状态不影响结果。探不到（401、403、404、410）仍要手动下载的那一支不在夹具里。
+// 导入成功时步骤表与后端同一规则；整合包自己那几步（拿包、读包、放文件、解覆盖文件、导入完成）推不推下载快照、报什么
+// 阶段文字也照后端。与后端不同的有三处：装原版与加载器那几步后端还有各自的阶段文字（开始安装原版、安装器执行完成之类），
+// 这里只报步骤与快照；后端先拿包、读包（报过这几步、平台整合包还下载过本体）再查跳过的可选文件与实例名、再占住名字，
+// 本体受限没认领时也是进了拿包那一步才失败，这里在报任何步骤之前就查这些、占名字，跳过的不是可选文件、名字不合格、重名
+// 与本体没认领时一条事件都不推；默认设置不真的套，只按配置报那一步，后端套上了文件时的那句阶段文字没有。
 // 导出读 Mod mock 里的同一份 mods 目录与卷宗，额外项的文件数与体积用固定表（浏览器里没有磁盘）。
 
 import type { InstallPhase } from "../../../domain/types";
@@ -122,9 +127,14 @@ function formatOf(path: string): PackFormat {
   throw new IpcError("modpack_unsupported_extension", `只认 .mrpack 和 CurseForge 导出的 .zip：${path}`, { path });
 }
 
-function stemOf(path: string): string {
+function fileOf(path: string): string {
   const file = path.split(/[\\/]/).pop();
   if (file === undefined) throw new Error("split 至少返回一段");
+  return file;
+}
+
+function stemOf(path: string): string {
+  const file = fileOf(path);
   const dot = file.lastIndexOf(".");
   return dot > 0 ? file.slice(0, dot) : file;
 }
@@ -170,6 +180,12 @@ function fixtureMods(fixture: LocalFixture): PackModDto[] {
 /** 夹具里能在导入前取消勾选的文件落点。 */
 function fixtureOptional(fixture: LocalFixture): readonly string[] {
   return fixture === "mrpack" ? [OPTIONAL_MOD, OPTIONAL_EXTRA] : [];
+}
+
+/** 受限夹具里一个文件的大小：夹具都写了，没写是夹具本身的错。 */
+function fixtureSize(file: BlockedFileDto): number {
+  if (file.size === null) throw new Error(`mock 受限夹具 ${file.file_name} 缺少 size`);
+  return file.size;
 }
 
 function unclaimedBlocked(): BlockedFileDto[] {
@@ -220,6 +236,8 @@ interface PackFacts {
   minecraft: string;
   /** 卷宗外的 Mod 文件名前缀。 */
   slug: string;
+  /** 整合包本体的文件名：平台整合包是目录里这个版本的文件，本地包是选的那个文件。 */
+  packFile: string;
   packBytes: number;
   manifest: MockPackManifest;
   /** 整合包文件本身受限时的那一项，其余 null。 */
@@ -235,6 +253,7 @@ function packOf(source: ModpackSource): PackFacts {
       version: LOCAL_VERSION,
       minecraft: LOCAL_MINECRAFT,
       slug: "pack",
+      packFile: fileOf(source.path),
       packBytes: 0,
       manifest: LOCAL_MANIFEST,
       blockedBody: null,
@@ -261,6 +280,7 @@ function packOf(source: ModpackSource): PackFacts {
     version: version.info.version_number,
     minecraft,
     slug: found.source.slug,
+    packFile: version.info.file_name,
     packBytes: version.info.file_size,
     manifest: version.manifest,
     blockedBody: version.bodyBlocked
@@ -481,11 +501,20 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
     const { manifest } = pack;
     // 与后端一样，读到包之前先按来源预排一份步骤表，读完再把还没走到的步骤换成确切的
     const prelude = preludePlan(source);
-    if (source.kind === "platform") await walk(taskId, prelude, "modpack_download", { files: 1, bytes: pack.packBytes });
+    if (source.kind === "platform") {
+      // 与后端 download_platform_pack 一样先报一句再下载；本体受限、关着自动下载时用的是认领到的副本（没认领的上面已经拒了），
+      // 只报这一句、不推下载快照
+      phase(taskId, prelude, "modpack_download");
+      const fromClaim = pack.blockedBody !== null && !mockDownloadRestrictedCurseforgeFiles();
+      emitCoreEvent({ task_id: taskId, kind: "stage", message: fromClaim ? `使用手动下载的整合包 ${pack.packFile}` : `下载整合包 ${pack.packFile}` });
+      if (fromClaim) await idleStep(taskId);
+      else await fakeBatch(taskId, { files: 1, bytes: pack.packBytes });
+    }
     await walk(taskId, prelude, "modpack_read", null);
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `读取整合包 ${pack.name}：${manifest.remoteFiles} 个远程文件，${manifest.overrideFiles} 个覆盖文件` });
     // 开关打开时受限文件与其余远程文件一起下载，没有放入手动下载文件这一步
     let claimedFiles = 0;
+    let claimedBytes = 0;
     if (fixture === "blocked" && !mockDownloadRestrictedCurseforgeFiles()) {
       // 与后端一样在读包时判定：还有没认领到的受限文件就整体失败，不建实例
       const missing = unclaimedBlocked();
@@ -494,18 +523,25 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
         throw new IpcError(DISTRIBUTION_BLOCKED, `这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：${names}`, { files: missing });
       }
       claimedFiles = BLOCKED_FIXTURE.length;
+      claimedBytes = BLOCKED_FIXTURE.reduce((sum, f) => sum + fixtureSize(f), 0);
     }
     const plan = exactPlan(source, manifest, claimedFiles);
     for (const key of plan) if (isRuntimeStep(key)) await walk(taskId, plan, key, RUNTIME_BATCHES[key]);
     if (plan.includes("modpack_files")) {
       phase(taskId, plan, "modpack_files");
       if (claimedFiles > 0) emitCoreEvent({ task_id: taskId, kind: "stage", message: `放入 ${claimedFiles} 个手动下载的文件` });
-      if (manifest.remoteFiles > 0) {
-        emitCoreEvent({ task_id: taskId, kind: "stage", message: `开始下载 ${pack.name} 的 ${manifest.remoteFiles} 个文件` });
-        await fakeBatch(taskId, { files: manifest.remoteFiles, bytes: manifest.remoteBytes });
+      // 认领到的文件从暂存位复制，与后端一样不算进下载的那一批
+      const downloads = manifest.remoteFiles - claimedFiles;
+      if (downloads > 0) {
+        emitCoreEvent({ task_id: taskId, kind: "stage", message: `下载 ${downloads} 个整合包文件` });
+        await fakeBatch(taskId, { files: downloads, bytes: manifest.remoteBytes - claimedBytes });
       }
     }
-    if (plan.includes("modpack_overrides")) await walk(taskId, plan, "modpack_overrides", null);
+    if (plan.includes("modpack_overrides")) {
+      phase(taskId, plan, "modpack_overrides");
+      emitCoreEvent({ task_id: taskId, kind: "stage", message: `解出 ${manifest.overrideFiles} 个覆盖文件` });
+      await idleStep(taskId);
+    }
     // mock 不真的套默认设置，只按配置报这一步，步骤表与后端一致
     if (plan.includes("template")) await walk(taskId, plan, "template", null);
     const modpack = {

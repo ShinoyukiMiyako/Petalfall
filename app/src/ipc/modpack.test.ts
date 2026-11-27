@@ -427,7 +427,8 @@ describe("整合包 mock：可选文件与需要手动下载的文件", () => {
     expect(outcome.modpack).toMatchObject({ format: "curseforge", platform: null, project_id: null, version_id: null, name: "Blocked-Pack", version: "1.0.0", remote_files: 48, override_files: 57 });
     expect(events.filter((e) => e.kind === "stage").map((e) => e.message)).toEqual([
       "读取整合包 Blocked-Pack：48 个远程文件，57 个覆盖文件",
-      "开始下载 Blocked-Pack 的 48 个文件",
+      "下载 48 个整合包文件",
+      "解出 57 个覆盖文件",
       "整合包已导入为实例 受限包",
     ]);
     expect((await listInstances()).find((i) => i.id === "受限包")?.modpack).toMatchObject({ platform: null, name: "Blocked-Pack", version: "1.0.0" });
@@ -547,6 +548,44 @@ describe("整合包 mock：导入的步骤事件", () => {
     expect(events.at(-1)).toEqual({ task_id: "t-steps", kind: "stage", message: "整合包已导入为实例 Fabulously Optimized" });
   });
 
+  it("整合包自己那几步的阶段文字照后端：拿包先报下载整合包再推快照，放文件报下载几个整合包文件，解覆盖文件报解出几个", async () => {
+    const { events } = await run("t-stages", FABULOUSLY, "阶段文字");
+    /** 这一步里除下载快照以外的事件：它的步骤事件之后、下一条步骤事件之前。 */
+    const stagesIn = (key: string) => {
+      const start = events.findIndex((e) => e.kind === "phase" && e.plan[e.index] === key);
+      if (start === -1) throw new Error(`没有走到 ${key}`);
+      const end = events.findIndex((e, i) => i > start && e.kind === "phase");
+      return events.slice(start + 1, end === -1 ? undefined : end).filter((e) => e.kind !== "download");
+    };
+    expect(stagesIn("modpack_download")).toEqual([{ task_id: "t-stages", kind: "stage", message: "下载整合包 1KVo5zza-6.4.1.mrpack" }]);
+    // 阶段文字排在这一步的快照之前
+    const download = events.findIndex((e) => e.kind === "stage" && e.message === "下载整合包 1KVo5zza-6.4.1.mrpack");
+    expect(events.findIndex((e) => e.kind === "download")).toBeGreaterThan(download);
+    expect(stagesIn("modpack_files")).toEqual([{ task_id: "t-stages", kind: "stage", message: "下载 48 个整合包文件" }]);
+    expect(stagesIn("modpack_overrides")).toEqual([{ task_id: "t-stages", kind: "stage", message: "解出 57 个覆盖文件" }]);
+  });
+
+  it("平台整合包本体用的是认领到的副本：拿包这一步只报使用手动下载的整合包，不推下载快照；打开自动下载后照常下载本体", async () => {
+    const BODY_BLOCKED: ModpackSource = { kind: "platform", platform: "curseforge", project_id: "285109", version_id: "4501122" };
+    const body = blockedFilesOf(await summarizePlatformModpack("curseforge", "285109", "4501122").then(() => null, (e: unknown) => e));
+    if (body === null) throw new Error("本体应要手动下载");
+    seedMockDownloads(["285109-2.9.2.zip"]);
+    expect(await claimBlockedFiles(MOCK_DOWNLOADS_DIR, body)).toMatchObject({ missing: [] });
+
+    const claimed = await run("t-body-claimed", BODY_BLOCKED, "认领本体");
+    expect(claimed.result).toMatchObject({ version_id: "认领本体" });
+    expect(snapshotCounts(claimed.events)[0]).toEqual(["modpack_download", 0]);
+    const at = (events: readonly CoreEvent[], key: string) => events.findIndex((e) => e.kind === "phase" && e.plan[e.index] === key);
+    expect(claimed.events.slice(at(claimed.events, "modpack_download") + 1, at(claimed.events, "modpack_read"))).toEqual([
+      { task_id: "t-body-claimed", kind: "stage", message: "使用手动下载的整合包 285109-2.9.2.zip" },
+    ]);
+
+    await updateConfig({ downloadRestrictedCurseforgeFiles: true });
+    const derived = await run("t-body-derived", BODY_BLOCKED, "直接下载本体");
+    expect(snapshotCounts(derived.events)[0]).toEqual(["modpack_download", 5]);
+    expect(derived.events.find((e) => e.kind === "stage")).toEqual({ task_id: "t-body-derived", kind: "stage", message: "下载整合包 285109-2.9.2.zip" });
+  });
+
   it("报下载的步骤各推一批 5 条快照、批与批的文件数和总字节都不同；读包、natives、取 profile、解覆盖文件、套默认设置只报步骤", async () => {
     const { events } = await run("t-batches", FABULOUSLY, "下载批次");
     expect(snapshotCounts(events)).toEqual([
@@ -659,16 +698,17 @@ describe("整合包 mock：导入的步骤事件", () => {
     expect(walkedOf(second.events)).toEqual(FABRIC_FILE);
     const at = (key: string) => second.events.findIndex((e) => e.kind === "phase" && e.plan[e.index] === key);
     const filesStep = second.events.slice(at("modpack_files") + 1, at("modpack_overrides"));
+    // 认领到的 2 个文件是复制进来的，下载的那一批只有其余 46 个，总字节也扣掉它们
     expect(filesStep.filter((e) => e.kind !== "download")).toEqual([
       { task_id: "t-blocked-steps-2", kind: "stage", message: "放入 2 个手动下载的文件" },
-      { task_id: "t-blocked-steps-2", kind: "stage", message: "开始下载 Blocked-Pack 的 48 个文件" },
+      { task_id: "t-blocked-steps-2", kind: "stage", message: "下载 46 个整合包文件" },
     ]);
-    expect(filesStep.filter((e): e is DownloadEvent => e.kind === "download").map((e) => [e.total, e.finished])).toEqual([
-      [48, 9],
-      [48, 19],
-      [48, 28],
-      [48, 38],
-      [48, 48],
+    expect(filesStep.filter((e): e is DownloadEvent => e.kind === "download").map((e) => [e.total, e.finished, e.total_bytes])).toEqual([
+      [46, 9, 96_466_944],
+      [46, 18, 96_466_944],
+      [46, 27, 96_466_944],
+      [46, 36, 96_466_944],
+      [46, 46, 96_466_944],
     ]);
     expect(second.events.filter((e) => e.kind === "stage" && e.message === "放入 2 个手动下载的文件")).toHaveLength(1);
   });
