@@ -1,9 +1,24 @@
 // 实例库页面自己的文案。跨页面共用的（加载器名、启动入口、删除确认、通知目录）从 copy/flows 引用，这里不重复。
 
-import { joinMixed, LOADER_NAME, PAGE_LABEL, sentence } from "../../copy/flows";
+import { joinMixed, LOADER_NAME, PAGE_LABEL, REPAIR_EXIT_COPY, sentence } from "../../copy/flows";
 import { formatPlaytime } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
-import type { SortKey } from "./model";
+import type { SortKey, UnrepairableExit } from "./model";
+
+/** 横幅正文里一个补全修不好的实例：名字、后端给的原因原文与它剩下的出路。 */
+export interface UnrepairableLine {
+  name: string;
+  reason: string;
+  exit: UnrepairableExit["kind"];
+}
+
+const quoted = (names: readonly string[]) => names.map((n) => `「${n}」`).join("");
+
+/** 修不好的实例在正文里的一句。读不出来的文件可能完好，说暂时无法启动并接上怎么恢复，不说补全修不好。 */
+function unrepairableSentence(names: readonly string[], reason: string, exit: UnrepairableExit["kind"]): string {
+  if (exit === "rescan") return `${quoted(names)}暂时无法启动：${sentence(reason)}${REPAIR_EXIT_COPY.unreadableHint}`;
+  return sentence(`${quoted(names)}补全修不好：${reason}`);
+}
 
 export const LIBRARY_COPY = {
   title: PAGE_LABEL.library,
@@ -22,23 +37,34 @@ export const LIBRARY_COPY = {
   dirVersions: (count: number) => `${count} 个版本`,
   dirVersionsUnknown: "版本数读不到",
 
+  /** 有修得好的实例时的标题，count 只数修得好的：与修复按钮能兑现的个数一致。 */
   repairTitle: (count: number) => `${count} 个实例需要修复`,
   /** 横幅列出的实例一个都修不好时的标题：补全一律被拒，不说需要修复。 */
   unrepairableTitle: (count: number) => `${count} 个实例补全修不好`,
+  /** 一个都修不好、而且全是版本 JSON 读不出来的：文件可能完好，放开占用或修好权限就恢复，不说修不好。 */
+  unreadableTitle: (count: number) => `${count} 个实例暂时无法启动`,
   /**
-   * 横幅正文：补全修得好的合成一句；修不好的另起，写明后端给的原因，不承诺补全后就能启动。原因相同的并成一句
-   * （从旧电脑拷来的一批实例往往是同一个原因），按各原因第一次出现的先后排。只有一拨时只出那一拨。
+   * 横幅正文：补全修得好的合成一句；修不好的另起，写明后端给的原因，不承诺补全后就能启动。只能删除的实例原因相同时并成一句
+   * （从旧电脑拷来的一批实例往往是同一个原因）。带改名目标的不并：原因里那句改名提示只核对过这一个实例改不改得成，
+   * 实例名不分大小写唯一，几个实例最多一个能照做；读不出来的各自带着自己的路径，也不并。按各句第一次出现的先后排，
+   * 只有一拨时只出那一拨。
    */
-  repairBody: (repairable: readonly string[], unrepairable: readonly { name: string; reason: string }[]) => {
+  repairBody: (repairable: readonly string[], unrepairable: readonly UnrepairableLine[]) => {
     if (repairable.length === 0 && unrepairable.length === 0) throw new Error("修复横幅没有要列的实例");
-    const fixable = repairable.length === 0 ? "" : `${repairable.map((n) => `「${n}」`).join("")}缺少游戏文件，补全后就能启动。`;
-    const byReason = new Map<string, string[]>();
-    for (const { name, reason } of unrepairable) {
-      const names = byReason.get(reason);
-      if (names === undefined) byReason.set(reason, [name]);
-      else names.push(name);
+    const fixable = repairable.length === 0 ? "" : `${quoted(repairable)}缺少游戏文件，补全后就能启动。`;
+    const lines: { names: string[]; reason: string; exit: UnrepairableExit["kind"] }[] = [];
+    const mergeable = new Map<string, string[]>();
+    for (const { name, reason, exit } of unrepairable) {
+      const names = exit === "delete" ? mergeable.get(reason) : undefined;
+      if (names !== undefined) {
+        names.push(name);
+        continue;
+      }
+      const line = { names: [name], reason, exit };
+      lines.push(line);
+      if (exit === "delete") mergeable.set(reason, line.names);
     }
-    return fixable + [...byReason].map(([reason, names]) => sentence(`${names.map((n) => `「${n}」`).join("")}补全修不好：${reason}`)).join("");
+    return fixable + lines.map((line) => unrepairableSentence(line.names, line.reason, line.exit)).join("");
   },
   repairOne: "立即修复",
   repairAll: "全部修复",

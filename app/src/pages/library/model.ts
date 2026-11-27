@@ -3,7 +3,7 @@
 import { gameDirSwitchReason } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
-import { canRepair, needsReimport } from "../../domain/rules";
+import { repairExit, type RepairExit } from "../../domain/rules";
 import { REFLOW_MAX_ITEMS } from "../../lib/reflow";
 import type { GameDirectoryDto } from "../../state/queries/catalog";
 import type { SelectOption } from "../../ui/Select";
@@ -101,17 +101,21 @@ export function totalPlaytime(list: readonly InstanceSummary[]): number | null {
   return total;
 }
 
-/** 修复横幅里补全修不好的一个实例，连同后端给的原因（原文照写）。 */
+/** 进修复横幅的修不好的实例剩下的出路：整合包没导入完的（重新导入）不进横幅。 */
+export type UnrepairableExit = Exclude<RepairExit, { kind: "reimport" }>;
+
+/** 修复横幅里补全修不好的一个实例，连同后端给的原因（原文照写）与它剩下的出路。 */
 export interface UnrepairableInstance {
   inst: InstanceSummary;
   reason: string;
+  exit: UnrepairableExit;
 }
 
 /** 修复横幅列出的实例，按补全修不修得好分两拨，各自保持列表顺序；横幅在不在看两拨之和。 */
 export interface BrokenInstances {
   /** 补全能修好的：横幅的按钮只为它们排补全。 */
   repairable: InstanceSummary[];
-  /** 补全修不好的：补全一律被拒，横幅只写明原因。 */
+  /** 补全修不好的：补全一律被拒，横幅写明原因；只列着一个时按它的出路给按钮。 */
   unrepairable: UnrepairableInstance[];
 }
 
@@ -120,14 +124,30 @@ export function brokenInstances(list: readonly InstanceSummary[]): BrokenInstanc
   const repairable: InstanceSummary[] = [];
   const unrepairable: UnrepairableInstance[] = [];
   for (const inst of list) {
-    if (inst.status !== "broken" || needsReimport(inst)) continue;
+    if (inst.status !== "broken") continue;
+    const exit = repairExit(inst);
+    if (exit === null) {
+      repairable.push(inst);
+      continue;
+    }
+    if (exit.kind === "reimport") continue;
+    // 整合包没导入完的上面已排掉，剩下的修不好只能是后端报的；没有原因就是两边对修不修得好的判定错开了
     const reason = inst.unrepairableReason;
-    if (canRepair(inst)) repairable.push(inst);
-    else if (reason !== null) unrepairable.push({ inst, reason });
-    // 整合包没导入完的上面已排掉，canRepair 为 false 的只剩后端报了修不好的；没有原因就是两边对修不修得好的判定错开了
-    else throw new Error(`实例 ${inst.id} 补全修不好，却没有原因`);
+    if (reason === null) throw new Error(`实例 ${inst.id} 补全修不好，却没有原因`);
+    unrepairable.push({ inst, reason, exit });
   }
   return { repairable, unrepairable };
+}
+
+/**
+ * 修复横幅的标题。有修得好的时只数它们：与「立即修复」「全部修复」能兑现的个数一致，修不好的留给正文各说各的。
+ * 一个都修不好时不说需要修复；全是版本 JSON 读不出来的，文件可能完好、放开占用就恢复，说暂时无法启动而不说修不好。
+ */
+export function repairBannerTitle(broken: BrokenInstances): string {
+  if (broken.repairable.length > 0) return LIBRARY_COPY.repairTitle(broken.repairable.length);
+  const count = broken.unrepairable.length;
+  if (count === 0) throw new Error("修复横幅没有要列的实例");
+  return broken.unrepairable.every((u) => u.exit.kind === "rescan") ? LIBRARY_COPY.unreadableTitle(count) : LIBRARY_COPY.unrepairableTitle(count);
 }
 
 /**

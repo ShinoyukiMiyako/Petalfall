@@ -3,7 +3,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { CONFIRM_COPY, DELETE_INSTANCE_COPY, GAME_DIR_SWITCH_COPY, SLOW_LOADING_HINT, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR, CONFIRM_COPY, DELETE_INSTANCE_COPY, GAME_DIR_SWITCH_COPY, REPAIR_EXIT_COPY, SLOW_LOADING_HINT, TOAST_COPY } from "../../copy/flows";
 import { INSTANCE_RESCAN_MIN_MS } from "../../domain/limits";
 import type { GameDirectoryDto } from "../../ipc/config";
 import { IpcError } from "../../ipc/errors";
@@ -65,7 +65,27 @@ function sample(): InstanceDto[] {
 const UNREPAIRABLE = "缺少版本 JSON，也没有记下当初装的是什么";
 /** 补全修不好的损坏实例：版本 JSON 缺失，也没有安装记录。 */
 const unrepairable = (id: string, overrides: Partial<InstanceDto> = {}) =>
-  instanceDto(id, { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: UNREPAIRABLE, mc_version: null, ...overrides });
+  instanceDto(id, { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: UNREPAIRABLE, unrepairable_kind: "no_record", mc_version: null, ...overrides });
+/** 版本 JSON 被别的程序占着、读不出来时后端给的原因：带着这个实例自己那份文件的路径。 */
+const unreadableReason = (id: string) =>
+  `版本 JSON 读不出来：文件 IO 失败: D:\\Games\\Launcher\\.minecraft\\versions\\${id}\\${id}.json：另一个程序正在使用此文件，进程无法访问。 (os error 32)`;
+/** 版本 JSON 读不出来的损坏实例：带着安装记录也修不好，文件可能完好。 */
+const unreadable = (id: string) =>
+  instanceDto(id, {
+    status: "broken",
+    broken_reason: unreadableReason(id),
+    unrepairable_reason: unreadableReason(id),
+    unrepairable_kind: "unreadable",
+    incomplete: { kind: "install", outcome: "pending", started_at: null, spec: { mc_version: "1.21.1", loader: "fabric", loader_version: "0.16.10" }, error: null },
+    mc_version: null,
+  });
+/** 目录里有一份叫 to.json 的版本文件时后端接在原因后面的改名提示，与后端同一个全角分号格式。 */
+const renameHint = (to: string) => `${UNREPAIRABLE}；目录里有一份叫 ${to}.json 的版本文件，把实例改名成 ${to} 就能认出来`;
+/** 缺版本 JSON、又没有安装记录，但改个名就能认出来的损坏实例。 */
+const renamable = (id: string, to: string) =>
+  instanceDto(id, { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: renameHint(to), unrepairable_kind: "no_record", rename_to: to, mc_version: null });
+/** 此刻的错误通知：点了被拦住的按钮不该多出一条。 */
+const errorToasts = () => launcher.state.toasts.filter((t) => t.tone === "error");
 
 let instances: InstanceDto[];
 /** 启动时读到的界面形状：默认没记过。 */
@@ -1267,12 +1287,12 @@ describe("实例库：动作", () => {
     expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的"]);
   });
 
-  it("修复横幅：补全修不好的另起一句写明后端给的原因，「立即修复」只为修得好的那个排补全", async () => {
+  it("修复横幅：补全修不好的另起一句写明后端给的原因，标题只数修得好的，「立即修复」只为修得好的那个排补全", async () => {
     instances = [...instances, unrepairable("旧电脑拷来的")];
     await mount();
     const button = byText<HTMLButtonElement>("button", LIBRARY_COPY.repairOne);
     const banner = button.closest(`.${bannerStyles.banner}`);
-    expect(banner?.textContent).toBe("2 个实例需要修复「坏掉的」缺少游戏文件，补全后就能启动。「旧电脑拷来的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。立即修复");
+    expect(banner?.textContent).toBe("1 个实例需要修复「坏掉的」缺少游戏文件，补全后就能启动。「旧电脑拷来的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。立即修复");
     expect(button.getAttribute("aria-disabled")).toBeNull();
     click(button);
     await flush();
@@ -1280,13 +1300,38 @@ describe("实例库：动作", () => {
     expect(launcher.state.tasks.filter((t) => t.spec.command === "repair_instance").map((t) => t.spec.args)).toEqual([{ id: "坏掉的" }]);
   });
 
-  it("修复横幅：两个修得好、一个修不好时按修得好的个数给「全部修复」，只为那两个排补全", async () => {
+  it("修复横幅：两个修得好、一个修不好时标题与「全部修复」都按修得好的个数，只为那两个排补全", async () => {
     instances = [...instances, unrepairable("旧电脑拷来的"), instanceDto("也坏了", { status: "broken", broken_reason: "缺少客户端 jar" })];
     await mount();
-    expect(document.body.textContent).toContain("3 个实例需要修复「坏掉的」「也坏了」缺少游戏文件，补全后就能启动。「旧电脑拷来的」补全修不好：");
-    click(byText("button", LIBRARY_COPY.repairAll));
+    const button = byText<HTMLButtonElement>("button", LIBRARY_COPY.repairAll);
+    expect(button.closest(`.${bannerStyles.banner}`)?.textContent).toBe(
+      "2 个实例需要修复「坏掉的」「也坏了」缺少游戏文件，补全后就能启动。「旧电脑拷来的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。全部修复",
+    );
+    click(button);
     await flush();
     expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的", "也坏了"]);
+  });
+
+  it("修复横幅：修得好的与一个修不好的同列时点了修复，按钮位换成重新挂上的「删除实例」，不是刚按过的那个节点，焦点也不在它上面", async () => {
+    // 补全一直不结束：修得好的那个停在安装中，横幅只剩修不好的那一个
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    instances = [...instances, unrepairable("旧电脑拷来的")];
+    await mount();
+    const repair = byText<HTMLButtonElement>(`.${bannerStyles.banner} button`, LIBRARY_COPY.repairOne);
+    const banner = repair.closest(`.${bannerStyles.banner}`);
+    if (banner === null) throw new Error("没有修复横幅");
+    act(() => repair.focus());
+    expect(document.activeElement).toBe(repair);
+    click(repair);
+    await flush();
+    expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的"]);
+    expect(banner.closest("[inert]")).toBeNull();
+    expect(banner.textContent).toBe("1 个实例补全修不好「旧电脑拷来的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。删除实例");
+    const remove = byText<HTMLButtonElement>("button", LIBRARY_COPY.menu.remove, banner);
+    expect(remove).not.toBe(repair);
+    expect(repair.isConnected).toBe(false);
+    expect(document.activeElement).not.toBe(remove);
+    expect(document.activeElement).toBe(document.body);
   });
 
   it("修复横幅：修得好的都被别的实例当作基底、另有修不好的时，按钮带锁的原因禁用，点了什么都不排", async () => {
@@ -1335,6 +1380,86 @@ describe("实例库：动作", () => {
     await flush();
     expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
     expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("唯一修不好的实例是版本 JSON 读不出来：标题说暂时无法启动，正文接上怎么恢复，按钮位给「重新扫描」；占用放开后重读列表，横幅随之淡出", async () => {
+    instances = [...instances.filter((i) => i.id !== "坏掉的"), unreadable("网盘同步的")];
+    await mount();
+    const banner = document.querySelector<HTMLElement>(`.${bannerStyles.banner}`);
+    if (banner === null) throw new Error("没有修复横幅");
+    expect(banner.textContent).toBe(`1 个实例暂时无法启动「网盘同步的」暂时无法启动：${unreadableReason("网盘同步的")}。${REPAIR_EXIT_COPY.unreadableHint}${REPAIR_EXIT_COPY.rescan}`);
+    expect(banner.textContent).not.toContain("补全修不好");
+    expect([...banner.querySelectorAll("button")].map((b) => b.textContent)).toEqual([REPAIR_EXIT_COPY.rescan]);
+    const scans = callsOf(ipc, "list_instances").length;
+    const errorsBefore = errorToasts();
+    instances = instances.map((i) => (i.id === "网盘同步的" ? instanceDto("网盘同步的") : i));
+    click(byText<HTMLButtonElement>("button", REPAIR_EXIT_COPY.rescan, banner));
+    await flush();
+    expect(callsOf(ipc, "list_instances")).toHaveLength(scans + 1);
+    expect(errorToasts()).toEqual(errorsBefore);
+    expect(banner.closest("[inert]")).not.toBeNull();
+    await afterMotion();
+    expect(document.querySelector(`.${bannerStyles.banner}`)).toBeNull();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+  });
+
+  it("「重新扫描」读不出列表：按刷新失败报一条错误通知，实例列表与横幅都留着，不换成读取失败的整页", async () => {
+    instances = [...instances.filter((i) => i.id !== "坏掉的"), unreadable("网盘同步的")];
+    await mount();
+    ipc.overrides.set("list_instances", () => {
+      throw new IpcError("io_failed", "versions 目录读不出来");
+    });
+    click(byText<HTMLButtonElement>(`.${bannerStyles.banner} button`, REPAIR_EXIT_COPY.rescan));
+    await flush();
+    expect(toastTitles()).toContain(`error:${ACTION_ERROR.refreshInstances}`);
+    expect(launcher.state.status.instances.kind).toBe("ready");
+    expect(cardNames()).toContain("网盘同步的");
+    expect(document.querySelector(`.${bannerStyles.banner}`)?.textContent).toContain("1 个实例暂时无法启动");
+  });
+
+  it("唯一修不好的实例改个名就能认出来：正文照后端原因说改名，按钮位给「改名为「X」」，点了去它的详情页，不改名也不删", async () => {
+    instances = [...instances.filter((i) => i.id !== "坏掉的"), renamable("朋友发来的", "1.20.1-NeoForge")];
+    await mount();
+    const banner = document.querySelector<HTMLElement>(`.${bannerStyles.banner}`);
+    if (banner === null) throw new Error("没有修复横幅");
+    expect(banner.textContent).toBe(`1 个实例补全修不好「朋友发来的」补全修不好：${renameHint("1.20.1-NeoForge")}。改名为「1.20.1-NeoForge」`);
+    const rename = byText<HTMLButtonElement>("button", REPAIR_EXIT_COPY.rename("1.20.1-NeoForge"), banner);
+    expect([...banner.querySelectorAll("button")]).toEqual([rename]);
+    click(rename);
+    expect(nav.route).toEqual({ page: "instance", id: "朋友发来的", tab: "overview" });
+    await flush();
+    expect(callsOf(ipc, "rename_instance")).toEqual([]);
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+  });
+
+  it("同一句带改名提示的原因不合并：两份拷来的副本各自成句，横幅不给按钮", async () => {
+    instances = [...instances.filter((i) => i.id !== "坏掉的"), renamable("生存", "1.20.1"), renamable("创造", "1.20.1")];
+    await mount();
+    const banner = document.querySelector<HTMLElement>(`.${bannerStyles.banner}`);
+    if (banner === null) throw new Error("没有修复横幅");
+    expect(banner.textContent).toBe(`2 个实例补全修不好「生存」补全修不好：${renameHint("1.20.1")}。「创造」补全修不好：${renameHint("1.20.1")}。`);
+    expect(banner.querySelector("button")).toBeNull();
+  });
+
+  it("修不好的不止一个：全是读不出来的标题说暂时无法启动、各自成句；掺着只能删除的标题说补全修不好；都不给按钮", async () => {
+    instances = [...instances.filter((i) => i.id !== "坏掉的"), unreadable("网盘甲"), unreadable("网盘乙")];
+    await mount();
+    const banner = () => {
+      const live = [...document.querySelectorAll<HTMLElement>(`.${bannerStyles.banner}`)].filter((el) => el.closest("[inert]") === null);
+      if (live.length !== 1) throw new Error(`修复横幅应当恰有一条，实为 ${live.length} 条`);
+      return live[0];
+    };
+    const hint = REPAIR_EXIT_COPY.unreadableHint;
+    expect(banner().textContent).toBe(`2 个实例暂时无法启动「网盘甲」暂时无法启动：${unreadableReason("网盘甲")}。${hint}「网盘乙」暂时无法启动：${unreadableReason("网盘乙")}。${hint}`);
+    expect(banner().querySelector("button")).toBeNull();
+    instances = [...instances.filter((i) => i.id !== "网盘乙"), unrepairable("旧电脑拷来的")];
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+      await settle();
+    });
+    expect(banner().textContent).toBe(`2 个实例补全修不好「网盘甲」暂时无法启动：${unreadableReason("网盘甲")}。${hint}「旧电脑拷来的」补全修不好：${UNREPAIRABLE}。`);
+    expect(banner().querySelector("button")).toBeNull();
   });
 
   it("修不好的不止一个：横幅不给批量删除，各自卡片菜单里的「删除实例」照常可用", async () => {

@@ -7,7 +7,7 @@
 import { AnimatePresence, motion, useAnimate, useReducedMotionConfig, type Variants } from "framer-motion";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef } from "react";
 import { Icon } from "../../art/Icon";
-import { ACTION_ERROR, GAME_DIR_SWITCH_COPY, gameDirSwitchReason, LOADER_NAME, lockReason, SLOW_LOADING_HINT } from "../../copy/flows";
+import { ACTION_ERROR, GAME_DIR_SWITCH_COPY, gameDirSwitchReason, LOADER_NAME, lockReason, REPAIR_EXIT_COPY, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { locksOf } from "../../domain/instance-locks";
 import { useMounted } from "../../lib/useMounted";
@@ -48,12 +48,14 @@ import {
   isFiltered,
   loaderCounts,
   normalizedQuery,
+  repairBannerTitle,
   SORT_KEYS,
   totalPlaytime,
   visibleInstances,
   type GridShape,
   type LoaderFilter,
   type SortKey,
+  type UnrepairableInstance,
 } from "./model";
 import { useLibraryView } from "./view-state";
 
@@ -155,11 +157,35 @@ export default function LibraryPage() {
   const repairAll = () => {
     for (const inst of queueable) void run(() => actions.repairInstance(inst.id), ACTION_ERROR.repair);
   };
-  // 一个都修不好时标题不说需要修复。只列着一个修不好的实例时，横幅给它删除入口：删掉是它剩下的出路；
-  // 列着多个时删除留在各自卡片的菜单与详情页上，横幅不做批量删除
-  const repairTitle = broken.repairable.length === 0 ? LIBRARY_COPY.unrepairableTitle(brokenCount) : LIBRARY_COPY.repairTitle(brokenCount);
-  const lone = broken.repairable.length === 0 && broken.unrepairable.length === 1 ? broken.unrepairable[0].inst : null;
+  // 只列着一个修不好的实例时，横幅按它剩下的出路给一个按钮；列着多个时出路留在各自卡片的菜单与详情页上，横幅不做批量操作
+  const lone = broken.repairable.length === 0 && broken.unrepairable.length === 1 ? broken.unrepairable[0] : null;
   const deleteInstance = useDeleteInstance();
+  // 每种按钮各带一个 key：点了修复、修得好的转入安装后按钮位换成另一个实例的出路时整个重挂，
+  // 刚按过「立即修复」的指针与键盘焦点不会原地落到一个删除按钮上
+  const loneAction = ({ inst, exit }: UnrepairableInstance) => {
+    switch (exit.kind) {
+      case "delete":
+        return (
+          <Button key="delete" size="sm" variant="danger" icon="trash" disabledReason={lockReason(locksOf(inst, inst.id === sessionInstance).delete, "delete")} onClick={() => void deleteInstance(inst)}>
+            {LIBRARY_COPY.menu.remove}
+          </Button>
+        );
+      case "rescan":
+        // 文件可能完好，占用放开或权限修好后重读一次列表就恢复
+        return (
+          <Button key="rescan" size="sm" icon="refresh" onClick={() => void run(() => actions.refreshInstances(), ACTION_ERROR.refreshInstances)}>
+            {REPAIR_EXIT_COPY.rescan}
+          </Button>
+        );
+      case "rename":
+        // 实例库没有改名入口：带去详情页，那里的横幅给改名按钮，校验与失败的说法都在那一套里
+        return (
+          <Button key="rename" size="sm" icon="edit" onClick={() => go({ page: "instance", id: inst.id, tab: "overview" })}>
+            {REPAIR_EXIT_COPY.rename(exit.to)}
+          </Button>
+        );
+    }
+  };
 
   const clearFilter = () => setView({ loader: "all", query: "" });
   const switchDirectory = (dir: GameDirectoryDto) => void switchTo(dir.path, dir.name);
@@ -236,20 +262,18 @@ export default function LibraryPage() {
             icon="wrench"
             title={
               <Loadable view={gate.view} skeleton={<Skeleton shape="text" width={REPAIR_SKELETON.title} />}>
-                {() => repairTitle}
+                {() => repairBannerTitle(broken)}
               </Loadable>
             }
             actions={
-              // 全都修不好时不给修复按钮：补全一律被拒；只剩一个修不好的换成它的删除，多个时不给按钮。还在读时不知道，按记下的形状先占着按钮位
+              // 全都修不好时不给修复按钮：补全一律被拒；只剩一个修不好的换成它的出路，多个时不给按钮。还在读时不知道，按记下的形状先占着按钮位
               gate.view === "content" && broken.repairable.length === 0 && lone === null ? undefined : (
                 <Loadable view={gate.view} skeleton={<Skeleton shape="block" width={REPAIR_SKELETON.actionWidth} height={REPAIR_SKELETON.actionHeight} radius="sm" />}>
                   {() =>
                     lone !== null ? (
-                      <Button size="sm" variant="danger" icon="trash" disabledReason={lockReason(locksOf(lone, lone.id === sessionInstance).delete, "delete")} onClick={() => void deleteInstance(lone)}>
-                        {LIBRARY_COPY.menu.remove}
-                      </Button>
+                      loneAction(lone)
                     ) : (
-                      <Button size="sm" disabledReason={queueable.length === 0 ? repairReason(broken.repairable[0]) : undefined} onClick={repairAll}>
+                      <Button key="repair" size="sm" disabledReason={queueable.length === 0 ? repairReason(broken.repairable[0]) : undefined} onClick={repairAll}>
                         {broken.repairable.length > 1 ? LIBRARY_COPY.repairAll : LIBRARY_COPY.repairOne}
                       </Button>
                     )
@@ -259,7 +283,12 @@ export default function LibraryPage() {
             }
           >
             <Loadable view={gate.view} skeleton={<Skeleton shape="text" width={REPAIR_SKELETON.body} />}>
-              {() => LIBRARY_COPY.repairBody(broken.repairable.map((inst) => inst.name), broken.unrepairable.map(({ inst, reason }) => ({ name: inst.name, reason })))}
+              {() =>
+                LIBRARY_COPY.repairBody(
+                  broken.repairable.map((inst) => inst.name),
+                  broken.unrepairable.map(({ inst, reason, exit }) => ({ name: inst.name, reason, exit: exit.kind })),
+                )
+              }
             </Loadable>
           </Banner>
         )}

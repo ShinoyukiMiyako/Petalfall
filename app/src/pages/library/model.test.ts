@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { GAME_DIR_SWITCH_COPY } from "../../copy/flows";
+import { GAME_DIR_SWITCH_COPY, REPAIR_EXIT_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { REFLOW_MAX_ITEMS } from "../../lib/reflow";
 import type { GameDirectoryDto } from "../../state/queries/catalog";
@@ -14,6 +14,7 @@ import {
   isFiltered,
   loaderCounts,
   matchesView,
+  repairBannerTitle,
   sortInstances,
   totalPlaytime,
   visibleInstances,
@@ -167,7 +168,44 @@ describe("统计与签名", () => {
     ];
     const broken = brokenInstances(list);
     expect(ids(broken.repairable)).toEqual(["坏掉的"]);
-    expect(broken.unrepairable.map((u) => [u.inst.id, u.reason])).toEqual([["旧电脑拷来的", reason]]);
+    expect(broken.unrepairable.map((u) => [u.inst.id, u.reason, u.exit])).toEqual([["旧电脑拷来的", reason, { kind: "delete" }]]);
+  });
+
+  it("修不好的一拨各带出路：读不出来的重新扫描（有安装记录也一样），带改名目标的改名，其余删除", () => {
+    const unreadable = "版本 JSON 读不出来：文件 IO 失败: D:\\v\\网盘\\网盘.json：另一个程序正在使用此文件，进程无法访问。 (os error 32)";
+    const lost = "缺少版本 JSON，也没有记下当初装的是什么";
+    const hinted = `${lost}；目录里有一份叫 1.20.1-NeoForge.json 的版本文件，把实例改名成 1.20.1-NeoForge 就能认出来`;
+    const install = { kind: "install" as const, outcome: "pending" as const, startedAt: null, spec: null, error: null };
+    const list = [
+      inst("网盘同步的", { status: "broken", brokenReason: unreadable, unrepairableReason: unreadable, unrepairableKind: "unreadable", incomplete: install, mcVersion: null }),
+      inst("朋友发来的", { status: "broken", brokenReason: "缺少版本 JSON", unrepairableReason: hinted, unrepairableKind: "no_record", renameTo: "1.20.1-NeoForge", mcVersion: null }),
+      inst("旧电脑拷来的", { status: "broken", brokenReason: "缺少版本 JSON", unrepairableReason: lost, unrepairableKind: "no_record", mcVersion: null }),
+    ];
+    expect(brokenInstances(list).unrepairable.map((u) => [u.inst.id, u.exit])).toEqual([
+      ["网盘同步的", { kind: "rescan" }],
+      ["朋友发来的", { kind: "rename", to: "1.20.1-NeoForge" }],
+      ["旧电脑拷来的", { kind: "delete" }],
+    ]);
+  });
+
+  it("修复横幅的标题：有修得好的只数修得好的，与修复按钮兑现的个数一致", () => {
+    const lost = "缺少版本 JSON，也没有记下当初装的是什么";
+    const fixable = Array.from({ length: 1 + Math.floor(Math.random() * 4) }, (_, i) => inst(`修得好${i}`, { status: "broken", brokenReason: "缺少客户端 jar" }));
+    const list = [...fixable, inst("修不好", { status: "broken", brokenReason: "缺少版本 JSON", unrepairableReason: lost, unrepairableKind: "no_record", mcVersion: null })];
+    expect(repairBannerTitle(brokenInstances(list))).toBe(`${fixable.length} 个实例需要修复`);
+  });
+
+  it("修复横幅的标题：一个都修不好时，全是读不出来的说暂时无法启动，掺着别的说补全修不好", () => {
+    const unreadable = (id: string) => {
+      const reason = `版本 JSON 读不出来：文件 IO 失败: D:\\v\\${id}\\${id}.json：拒绝访问。 (os error 5)`;
+      return inst(id, { status: "broken", brokenReason: reason, unrepairableReason: reason, unrepairableKind: "unreadable", mcVersion: null });
+    };
+    const lost = inst("旧档", { status: "broken", brokenReason: "缺少版本 JSON", unrepairableReason: "缺少版本 JSON，也没有记下当初装的是什么", unrepairableKind: "no_record", mcVersion: null });
+    expect(repairBannerTitle(brokenInstances([unreadable("甲")]))).toBe("1 个实例暂时无法启动");
+    expect(repairBannerTitle(brokenInstances([unreadable("甲"), inst("好的"), unreadable("乙")]))).toBe("2 个实例暂时无法启动");
+    expect(repairBannerTitle(brokenInstances([unreadable("甲"), lost]))).toBe("2 个实例补全修不好");
+    expect(repairBannerTitle(brokenInstances([lost]))).toBe("1 个实例补全修不好");
+    expect(() => repairBannerTitle(brokenInstances([inst("好的")]))).toThrow("修复横幅没有要列的实例");
   });
 
   it("两拨各自保持列表里的顺序，不论修得好的与修不好的怎么交错", () => {
@@ -316,10 +354,10 @@ describe("文案", () => {
 
   it("修复横幅：修不好的另起一句、各带自己的原因，不说补全后就能启动；只有修不好的时只出这一句", () => {
     const reason = "缺少版本 JSON，也没有记下当初装的是什么";
-    expect(LIBRARY_COPY.repairBody(["坏掉的"], [{ name: "旧电脑拷来的", reason }])).toBe("「坏掉的」缺少游戏文件，补全后就能启动。「旧电脑拷来的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。");
+    expect(LIBRARY_COPY.repairBody(["坏掉的"], [{ name: "旧电脑拷来的", reason, exit: "delete" }])).toBe("「坏掉的」缺少游戏文件，补全后就能启动。「旧电脑拷来的」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。");
     const both = [
-      { name: "甲", reason },
-      { name: "乙", reason: "版本 JSON 损坏，也没有记下当初装的是什么" },
+      { name: "甲", reason, exit: "delete" as const },
+      { name: "乙", reason: "版本 JSON 损坏，也没有记下当初装的是什么", exit: "delete" as const },
     ];
     expect(LIBRARY_COPY.repairBody([], both)).toBe("「甲」补全修不好：缺少版本 JSON，也没有记下当初装的是什么。「乙」补全修不好：版本 JSON 损坏，也没有记下当初装的是什么。");
   });
@@ -328,29 +366,64 @@ describe("文案", () => {
     const lost = "缺少版本 JSON，也没有记下当初装的是什么";
     const broken = "版本 JSON 损坏，也没有记下当初装的是什么";
     const list = [
-      { name: "甲", reason: lost },
-      { name: "乙", reason: broken },
-      { name: "丙", reason: lost },
+      { name: "甲", reason: lost, exit: "delete" as const },
+      { name: "乙", reason: broken, exit: "delete" as const },
+      { name: "丙", reason: lost, exit: "delete" as const },
     ];
     expect(LIBRARY_COPY.repairBody([], list)).toBe(`「甲」「丙」补全修不好：${lost}。「乙」补全修不好：${broken}。`);
     expect(LIBRARY_COPY.repairBody(["坏掉的"], list.slice(0, 1).concat(list.slice(2)))).toBe(`「坏掉的」缺少游戏文件，补全后就能启动。「甲」「丙」补全修不好：${lost}。`);
     // 随机多少个同一原因的实例：原因只出现一次，名字按列表顺序一个不少
     const names = Array.from({ length: 2 + Math.floor(Math.random() * 6) }, (_, i) => `旧档${i}`);
-    const merged = LIBRARY_COPY.repairBody([], names.map((name) => ({ name, reason: lost })));
+    const merged = LIBRARY_COPY.repairBody([], names.map((name) => ({ name, reason: lost, exit: "delete" as const })));
     expect(merged).toBe(`${names.map((n) => `「${n}」`).join("")}补全修不好：${lost}。`);
     expect(merged.split(lost)).toHaveLength(2);
   });
 
-  it("修复横幅的标题：一个都修不好时说补全修不好，不说需要修复；有修得好的照旧", () => {
+  it("修复横幅：同一句带改名提示的原因不合并，按后端真实的全角分号格式各自成句；只能删除的照旧合并，先后不乱", () => {
+    const lost = "缺少版本 JSON，也没有记下当初装的是什么";
+    // 两份拷来的副本目录里都只有 1.20.1.json：后端给两者同一句原因，但实例名唯一，最多一个改得成
+    const hinted = `${lost}；目录里有一份叫 1.20.1.json 的版本文件，把实例改名成 1.20.1 就能认出来`;
+    const body = LIBRARY_COPY.repairBody(
+      [],
+      [
+        { name: "生存", reason: hinted, exit: "rename" },
+        { name: "旧档甲", reason: lost, exit: "delete" },
+        { name: "创造", reason: hinted, exit: "rename" },
+        { name: "旧档乙", reason: lost, exit: "delete" },
+      ],
+    );
+    expect(body).toBe(`「生存」补全修不好：${hinted}。「旧档甲」「旧档乙」补全修不好：${lost}。「创造」补全修不好：${hinted}。`);
+    expect(body.split("把实例改名成 1.20.1 就能认出来")).toHaveLength(3);
+  });
+
+  it("修复横幅：读不出来的说暂时无法启动，原因句末补上句号后接怎么恢复；同一句原因也不合并", () => {
+    const reason = "版本 JSON 读不出来：文件 IO 失败: D:\\Games\\Launcher\\.minecraft\\versions\\网盘同步的\\网盘同步的.json：另一个程序正在使用此文件，进程无法访问。 (os error 32)";
+    expect(LIBRARY_COPY.repairBody([], [{ name: "网盘同步的", reason, exit: "rescan" }])).toBe(
+      `「网盘同步的」暂时无法启动：${reason}。关掉占用它的程序或修好读取权限后，重新扫描就能恢复。`,
+    );
+    const same = "版本 JSON 读不出来：拒绝访问。";
+    expect(
+      LIBRARY_COPY.repairBody(
+        ["坏掉的"],
+        [
+          { name: "甲", reason: same, exit: "rescan" },
+          { name: "乙", reason: same, exit: "rescan" },
+        ],
+      ),
+    ).toBe(`「坏掉的」缺少游戏文件，补全后就能启动。「甲」暂时无法启动：${same}${REPAIR_EXIT_COPY.unreadableHint}「乙」暂时无法启动：${same}${REPAIR_EXIT_COPY.unreadableHint}`);
+  });
+
+  it("修复横幅的标题：一个都修不好时说补全修不好，全是读不出来的说暂时无法启动，不说需要修复；有修得好的照旧", () => {
     expect(LIBRARY_COPY.unrepairableTitle(1)).toBe("1 个实例补全修不好");
     expect(LIBRARY_COPY.unrepairableTitle(3)).toBe("3 个实例补全修不好");
+    expect(LIBRARY_COPY.unreadableTitle(2)).toBe("2 个实例暂时无法启动");
     expect(LIBRARY_COPY.repairTitle(2)).toBe("2 个实例需要修复");
   });
 
   it("修复横幅：原因已带句末标点或后跟一句提示时照原文接上，不再补句号", () => {
     const withHint = "缺少版本 JSON，也没有记下当初装的是什么。目录里还有一份别的版本文件，可能是改名时留下的。";
-    expect(LIBRARY_COPY.repairBody([], [{ name: "甲", reason: withHint }])).toBe(`「甲」补全修不好：${withHint}`);
-    expect(LIBRARY_COPY.repairBody([], [{ name: "乙", reason: "Version JSON is missing." }])).toBe("「乙」补全修不好：Version JSON is missing.");
+    expect(LIBRARY_COPY.repairBody([], [{ name: "甲", reason: withHint, exit: "delete" }])).toBe(`「甲」补全修不好：${withHint}`);
+    expect(LIBRARY_COPY.repairBody([], [{ name: "乙", reason: "Version JSON is missing.", exit: "delete" }])).toBe("「乙」补全修不好：Version JSON is missing.");
   });
 
   it("修复横幅两拨都空时是调用错了：横幅不该出现", () => {
