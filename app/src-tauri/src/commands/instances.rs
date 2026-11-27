@@ -5873,72 +5873,88 @@ mod tests {
         );
     }
 
-    /// 版本 JSON 读盘出错的实例（这里是那个位置上放了个目录）：补全与重装加载器两条命令都报成带原因的不可补全，
-    /// 原因与列表给的是同一句，而不是在占锁读继承链那一步就以读盘错误结束。
+    /// 版本 JSON 读盘出错的实例（这里是那个位置上放了个目录）：补全与重装加载器两条命令都在占锁读继承链这一步报成
+    /// 带原因的不可补全，而不是读盘错误；原因与列表给的是同一句，整合包没导入完的是重新导入那句。
     #[tokio::test]
     async fn an_unreadable_version_json_is_refused_by_the_repair_commands_with_the_listed_reason() {
         let env = Env::new();
-        let json = env
-            .game_dir()
-            .join("versions")
-            .join("读不出")
-            .join("读不出.json");
+        let versions = env.game_dir().join("versions");
+        let json = versions.join("读不出").join("读不出.json");
         std::fs::create_dir_all(&json).unwrap();
+        std::fs::create_dir_all(versions.join("导到一半").join("导到一半.json")).unwrap();
+        petalfall_core::MarkerStore::for_version_dir(&versions.join("导到一半"))
+            .save(&IncompleteMarker::pending(
+                IncompleteKind::Modpack {
+                    task_id: "mp#1".into(),
+                },
+                1_700_000_000_000,
+            ))
+            .await
+            .unwrap();
         let locks = InstanceLocks::default();
 
         let list = list_instances_with(&env.facade, &locks, &test_textures())
             .await
             .unwrap();
-        let entry = list.iter().find(|i| i.id == "读不出").unwrap();
-        assert_eq!(entry.status, "broken");
-        assert_eq!(
-            (entry.unrepairable_kind, entry.rename_to.as_deref()),
-            (Some("unreadable"), None)
-        );
-        let listed = entry.unrepairable_reason.clone().unwrap();
+        let listed = |id: &str| {
+            let entry = list.iter().find(|i| i.id == id).unwrap();
+            assert_eq!(entry.status, "broken", "{id}");
+            assert_eq!(entry.rename_to, None, "{id}");
+            (
+                entry.unrepairable_kind,
+                entry.unrepairable_reason.clone().unwrap(),
+            )
+        };
+        let (kind, unreadable) = listed("读不出");
+        assert_eq!(kind, Some("unreadable"));
         assert!(
-            listed.starts_with(&format!(
+            unreadable.starts_with(&format!(
                 "版本 JSON 读不出来：文件 IO 失败: {}",
                 json.display()
             )),
-            "{listed}"
+            "{unreadable}"
+        );
+        assert_eq!(
+            listed("导到一半"),
+            (
+                Some("modpack"),
+                "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入".to_owned()
+            )
         );
 
         let game_dir = current_game_dir(&env.facade).await;
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let tasks = TaskRegistry::default();
-        for (task_id, reinstall) in [("r", false), ("l", true)] {
-            let outcome = if reinstall {
-                reinstall_loader_with(
-                    &env.facade,
-                    &tasks,
-                    &locks,
-                    task_id,
-                    &game_dir,
-                    "读不出",
-                    &sink,
-                )
-                .await
-            } else {
-                repair_instance_with(
-                    &env.facade,
-                    &tasks,
-                    &locks,
-                    task_id,
-                    &game_dir,
-                    "读不出",
-                    &sink,
-                )
-                .await
-            };
-            let err = outcome.unwrap_err();
-            assert_eq!(err.code, common::INSTANCE_FAILED, "{task_id}: {err:?}");
-            let detail = err.detail.as_ref().unwrap();
-            assert_eq!(detail["id"], json!("读不出"));
-            assert_eq!(detail["reason"], json!(listed), "{task_id}");
+        for id in ["读不出", "导到一半"] {
+            let (_, reason) = listed(id);
+            // 同一个实例连拒两次：第二轮报的仍是 instance_failed 而不是 instance_busy，说明第一次拒绝之后锁已放开。
+            for (task_id, reinstall) in [("r", false), ("l", true)] {
+                let outcome = if reinstall {
+                    reinstall_loader_with(
+                        &env.facade,
+                        &tasks,
+                        &locks,
+                        task_id,
+                        &game_dir,
+                        id,
+                        &sink,
+                    )
+                    .await
+                } else {
+                    repair_instance_with(&env.facade, &tasks, &locks, task_id, &game_dir, id, &sink)
+                        .await
+                };
+                let err = outcome.unwrap_err();
+                assert_eq!(err.code, common::INSTANCE_FAILED, "{id} {task_id}: {err:?}");
+                let detail = err.detail.as_ref().unwrap();
+                assert_eq!(detail["id"], json!(id));
+                assert_eq!(detail["reason"], json!(reason), "{id} {task_id}");
+            }
+            assert!(
+                locks.acquire(id, InstanceActivity::Repairing).is_ok(),
+                "{id} 第二次拒绝之后锁也放开了"
+            );
         }
-        // 两次都被拒：第一次拒绝之后锁已放开，否则第二次报的是实例正忙。
-        assert!(json.is_dir());
     }
 
     /// 导入中断留下的整合包标记在列表里报为 modpack，而不是「标记读不出来」。

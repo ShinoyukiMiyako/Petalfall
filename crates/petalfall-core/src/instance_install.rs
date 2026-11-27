@@ -761,6 +761,20 @@ fn unreadable_verdict(previous: Option<&IncompleteMarker>, detail: String) -> Un
     }
 }
 
+/// 补全开局读继承链时实例自己的版本 JSON 读盘出错（见 [`Petalfall::repair_chain`]）时的拒绝，与列表上给的同一句。
+/// `dir` 是实例目录，`detail` 是这一次读盘的错误连同系统给的原因；未完成标记照定补全怎么做时的口径读，读不出的
+/// 当作没有。
+pub(crate) async fn unreadable_repair_refusal(dir: &Path, id: &str, detail: String) -> CoreError {
+    let previous = match MarkerStore::for_version_dir(dir).load().await {
+        Ok(previous) => previous,
+        Err(err) => {
+            tracing::warn!(id, error = %err, "未完成标记损坏，当作没有标记");
+            None
+        }
+    };
+    unreadable_verdict(previous.as_ref(), detail).into_error(id)
+}
+
 /// 实例列表上一个版本 JSON 用不了的实例补全修不好的判定，原因与对它发起补全时报的逐字相同；修得好时为 `None`。
 /// 版本 JSON 读不出来时例外的只有系统给的那段原因：列表用的是扫描那一次读到的，补全时再读一次可能不同（见
 /// [`unreadable_refusal`]）。
