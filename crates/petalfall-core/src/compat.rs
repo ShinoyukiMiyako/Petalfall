@@ -169,11 +169,15 @@ impl BorrowedLoader {
     /// 同一发布分加载器各传一份时，版本号只差这个字样（`1.4.0-fabric` 与 `1.4.0-quilt`、`fabric-1.4.0` 与
     /// `quilt-1.4.0`、`1.4.0` 与 `1.4.0+quilt`、`1.4.0-forge` 与 `1.4.0-neoforge`），两份都不写字样的版本号
     /// 完全相同。按分隔符切开比删子串稳：字样前的分隔符各家不一，有的工程只有一份带字样。
+    ///
+    /// CurseForge 的版本号取的是文件名，字样写在末尾时最后一段连着扩展名（`2.1.0-forge.jar`），不先去掉就
+    /// 认不出。只去 `.jar`：会成对比较的是 Quilt 与 Fabric、1.20.1 的 NeoForge 与 Forge 的 Mod 构建，文件都是 jar。
     fn release_parts(self, version: &ModVersionInfo) -> Vec<String> {
         let names = [self.own.modrinth_facet(), self.borrowed.modrinth_facet()];
-        version
-            .version_number
-            .to_ascii_lowercase()
+        let number = version.version_number.to_ascii_lowercase();
+        number
+            .strip_suffix(".jar")
+            .unwrap_or(&number)
             .split(['-', '+', '_'])
             .filter(|part| !names.contains(part))
             .map(str::to_owned)
@@ -1369,6 +1373,10 @@ mod tests {
             ("6.3.29+1.19.2+fabric", "6.3.29+1.19.2+quilt"),
             ("1.1.0+1.20.1", "1.1.0+1.20.1-quilt"),
             ("7.5.3+1.20.1-Fabric", "7.5.3+1.20.1-Quilt"),
+            // CurseForge 的版本号是文件名，字样在末尾时连着扩展名。
+            ("examplemod-2.1.0-fabric.jar", "examplemod-2.1.0-quilt.jar"),
+            ("examplemod-2.1.0.jar", "examplemod-2.1.0-quilt.jar"),
+            ("ExampleMod-2.1.0-Fabric.JAR", "ExampleMod-2.1.0-Quilt.JAR"),
         ] {
             let versions = vec![
                 release("fabric", fabric, 2026, &[Fabric], &["1.20.1"]),
@@ -1447,6 +1455,14 @@ mod tests {
             (
                 "jei-1.20.1-forge-15.2.0.27.jar",
                 "jei-1.20.1-neoforge-15.2.0.27.jar",
+            ),
+            (
+                "examplemod-2.1.0-forge.jar",
+                "examplemod-2.1.0-neoforge.jar",
+            ),
+            (
+                "ExampleMod-2.1.0-Forge.JAR",
+                "ExampleMod-2.1.0-NeoForge.jar",
             ),
         ] {
             let versions = vec![

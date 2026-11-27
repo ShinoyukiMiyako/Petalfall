@@ -1878,6 +1878,103 @@ mod tests {
         assert_eq!(found[0].title.as_deref(), Some("JEI"));
     }
 
+    /// 一个 CurseForge 文件，加载器写在 `gameVersions` 里。
+    fn cf_file(
+        id: u32,
+        mod_id: u32,
+        file_name: &str,
+        date: &str,
+        loader: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "modId": mod_id, "displayName": file_name, "fileName": file_name,
+            "releaseType": 1, "fileDate": date, "gameVersions": ["1.20.1", loader]
+        })
+    }
+
+    /// 1.20.1 的 NeoForge 实例上的 CurseForge 来源：版本号是文件名，字样连着扩展名写在末尾。装着 neoforge
+    /// 那份时，同一发布晚几分钟传的 forge 文件不是更新；另一个 Mod 只标 forge 的新发布照报。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_neoforge_file_is_not_updated_to_its_later_forge_twin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "my-pack", NEOFORGE_1_20_1_JSON).await;
+        put_mod(mc, "my-pack", "examplemod.jar", b"examplemod").await;
+        put_mod(mc, "my-pack", "othermod.jar", b"othermod").await;
+
+        let server = MockServer::start().await;
+        for (mod_id, files) in [
+            (
+                300_001,
+                vec![
+                    cf_file(
+                        101,
+                        300_001,
+                        "examplemod-2.1.0-forge.jar",
+                        "2026-01-01T00:05:00Z",
+                        "Forge",
+                    ),
+                    cf_file(
+                        100,
+                        300_001,
+                        "examplemod-2.1.0-neoforge.jar",
+                        "2026-01-01T00:00:00Z",
+                        "NeoForge",
+                    ),
+                ],
+            ),
+            (
+                300_002,
+                vec![
+                    cf_file(
+                        202,
+                        300_002,
+                        "othermod-1.1.0-forge.jar",
+                        "2026-03-01T00:00:00Z",
+                        "Forge",
+                    ),
+                    cf_file(
+                        200,
+                        300_002,
+                        "othermod-1.0.0-neoforge.jar",
+                        "2026-01-01T00:00:00Z",
+                        "NeoForge",
+                    ),
+                ],
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/mods/{mod_id}/files")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": files })),
+                )
+                .mount(&server)
+                .await;
+        }
+        let petalfall = petalfall_at(mc, &server.uri()).with_curseforge_key("test-key");
+        let curseforge = |file_name: &str, project_id: &str, version_id: &str| LedgerEntry {
+            platform: Platform::CurseForge,
+            ..ledger_entry(file_name, project_id, version_id, None)
+        };
+        save_ledger(
+            &petalfall,
+            "my-pack",
+            vec![
+                curseforge("examplemod.jar", "300001", "100"),
+                curseforge("othermod.jar", "300002", "200"),
+            ],
+        )
+        .await;
+
+        let found = petalfall.check_updates("my-pack").await.unwrap();
+
+        let names: Vec<(&str, &str)> = found
+            .iter()
+            .map(|c| (c.file_name.as_str(), c.latest.version_id.as_str()))
+            .collect();
+        assert_eq!(names, vec![("othermod.jar", "202")]);
+    }
+
     /// 走版本列表的工程在平台上没了（CurseForge 来源、锁定了版本的 Modrinth 来源）：这一项没有更新可报，
     /// 别的 Mod 查到的更新照常给出。一个下架的 Mod 不能让整个实例查不了更新。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

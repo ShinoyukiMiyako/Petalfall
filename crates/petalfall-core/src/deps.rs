@@ -2920,6 +2920,24 @@ mod tests {
             Some("neoforge")
         );
         assert_eq!(id(vec![fabric]), None);
+
+        // CurseForge 的版本号是文件名，字样在末尾时连着扩展名，照样认得出是同一发布。
+        let curseforge_forge = build(
+            "cf-forge",
+            "examplemod-2.1.0-forge.jar",
+            ModLoader::Forge,
+            "2026-02-01T00:05:00Z",
+        );
+        let curseforge_neoforge = build(
+            "cf-neoforge",
+            "examplemod-2.1.0-neoforge.jar",
+            ModLoader::NeoForge,
+            "2026-02-01T00:00:00Z",
+        );
+        assert_eq!(
+            id(vec![curseforge_forge, curseforge_neoforge]).as_deref(),
+            Some("cf-neoforge")
+        );
     }
 
     /// 1.20.1 以后的 NeoForge 实例照旧不收 Forge 的前置。
