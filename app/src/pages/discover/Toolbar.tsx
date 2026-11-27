@@ -1,7 +1,7 @@
 // 搜索头图与吸顶工具条：搜索框、热门分类、类型标签、适配实例、筛选浮层、排序。
 
 import { AnimatePresence, motion, useReducedMotionConfig, type Variants } from "framer-motion";
-import { useMemo, useState, type Ref } from "react";
+import { useId, useMemo, useState, type Ref } from "react";
 import { BlossomBranch } from "../../art/illustrations/BlossomBranch";
 import { useDevicePixelRatio } from "../../art/illustrations/canvas";
 import { Icon } from "../../art/Icon";
@@ -147,6 +147,7 @@ export interface ToolbarProps {
 
 export function Toolbar({ tabsId, filters, onKind, onFit, onFilters, fitCandidates }: ToolbarProps) {
   const [anchor, setAnchor] = useState<Element | null>(null);
+  const panelId = useId();
   const count = popoverFilterCount(filters);
   const fitOptions: SelectOption<string>[] = [
     { value: FIT_ANY, label: SEARCH_COPY.fitAny },
@@ -183,7 +184,9 @@ export function Toolbar({ tabsId, filters, onKind, onFit, onFilters, fitCandidat
           size="sm"
           variant="secondary"
           icon="filter"
+          aria-haspopup="dialog"
           aria-expanded={anchor !== null}
+          aria-controls={anchor !== null ? panelId : undefined}
           aria-label={count > 0 ? SEARCH_COPY.filterWithCount(count) : SEARCH_COPY.filter}
           onClick={(e) => setAnchor(anchor === null ? e.currentTarget : null)}
         >
@@ -201,7 +204,7 @@ export function Toolbar({ tabsId, filters, onKind, onFit, onFilters, fitCandidat
         />
       </div>
       {/* 面板 portal 在文档末尾：焦点不进来的话 Tab 从筛选按钮走到排序下拉，面板一直开着，键盘到不了里面的条件 */}
-      <Popover open={anchor !== null} anchor={anchor} onClose={() => setAnchor(null)} placement="bottom-end" maxWidth="window" autoFocus aria-label={SEARCH_COPY.filterPanel} className={styles.filterPanel}>
+      <Popover open={anchor !== null} anchor={anchor} onClose={() => setAnchor(null)} placement="bottom-end" maxWidth="window" autoFocus id={panelId} aria-label={SEARCH_COPY.filterPanel} className={styles.filterPanel}>
         <FilterPanel filters={filters} onFilters={onFilters} />
       </Popover>
     </div>
