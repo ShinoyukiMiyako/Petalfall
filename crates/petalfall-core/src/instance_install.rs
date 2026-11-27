@@ -71,7 +71,7 @@ impl InstanceRequest {
 
     /// 从未完成标记里的安装内容还原；标记里的加载器键不认识时报不可补全。
     pub fn from_spec(id: &str, spec: &InstallSpec) -> Result<Self> {
-        Self::recognize(spec).map_err(|reason| {
+        Self::recognize(spec, SpecSource::Marker).map_err(|reason| {
             InstanceError::NotRepairable {
                 id: id.to_owned(),
                 reason,
@@ -81,12 +81,13 @@ impl InstanceRequest {
     }
 
     /// 同 [`from_spec`](Self::from_spec)，加载器键不认识时只交回原因：补全定方案时要把它连同种类一起交给实例列表。
-    fn recognize(spec: &InstallSpec) -> std::result::Result<Self, String> {
+    /// `source` 是 `spec` 读自哪份文件，原因里照实点出它。
+    fn recognize(spec: &InstallSpec, source: SpecSource) -> std::result::Result<Self, String> {
         let loader = match spec.loader.as_deref() {
             None => None,
             Some(key) => Some(
                 LoaderChoice::from_key(key)
-                    .ok_or_else(|| format!("未完成标记里记的加载器 {key} 不认识"))?,
+                    .ok_or_else(|| format!("{}里记的加载器 {key} 不认识", source.file_name()))?,
             ),
         };
         Ok(Self {
@@ -119,6 +120,24 @@ impl InstanceRequest {
             })?;
         }
         Ok(())
+    }
+}
+
+/// 记着当初安装内容的那份文件。两份都在实例的元数据目录里，加载器认不出来时原因里点出是哪一份，玩家才找得到。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpecSource {
+    /// 未完成标记：安装没有走完时留着。
+    Marker,
+    /// 安装记录：实例装好时留下。
+    Record,
+}
+
+impl SpecSource {
+    fn file_name(self) -> &'static str {
+        match self {
+            SpecSource::Marker => "未完成标记",
+            SpecSource::Record => "安装记录",
+        }
     }
 }
 
@@ -679,7 +698,7 @@ fn marker_verdict(
     previous: Option<&IncompleteMarker>,
 ) -> Option<std::result::Result<InstanceRequest, Unrepairable>> {
     match previous.map(|marker| &marker.kind) {
-        Some(IncompleteKind::Install { spec }) => Some(recorded_request(spec)),
+        Some(IncompleteKind::Install { spec }) => Some(recorded_request(spec, SpecSource::Marker)),
         // 导入写版本 JSON 在前、下载 Mod 与解出覆盖文件在后，中断时版本 JSON 往往已经可用；
         // 照它补全只会补齐库文件，再把标记清掉，缺的 Mod 与配置却补不回来，实例就被当成了完好的。
         Some(IncompleteKind::Modpack { .. }) => Some(Err(modpack_refusal())),
@@ -716,14 +735,17 @@ async fn broken_verdict(
         }
     };
     match record {
-        Some(spec) => recorded_request(&spec),
+        Some(spec) => recorded_request(&spec, SpecSource::Record),
         None => Err(no_record_refusal(game_dir, id, broken).await),
     }
 }
 
-/// 照未完成标记或安装记录里记下的内容重装。加载器认不出来时照它装不回去，与没有记录一样修不好。
-fn recorded_request(spec: &InstallSpec) -> std::result::Result<InstanceRequest, Unrepairable> {
-    InstanceRequest::recognize(spec).map_err(|reason| Unrepairable {
+/// 照未完成标记或安装记录（`source`）里记下的内容重装。加载器认不出来时照它装不回去，与没有记录一样修不好。
+fn recorded_request(
+    spec: &InstallSpec,
+    source: SpecSource,
+) -> std::result::Result<InstanceRequest, Unrepairable> {
+    InstanceRequest::recognize(spec, source).map_err(|reason| Unrepairable {
         kind: UnrepairableKind::NoRecord { rename_to: None },
         reason,
     })
@@ -2148,6 +2170,19 @@ mod tests {
             })
             .await
             .unwrap();
+        // 安装标记里的加载器认不出来：原因点出的是未完成标记，不是安装记录。
+        MarkerStore::for_version_dir(&versions.join("标记里认不出"))
+            .save(&IncompleteMarker::pending(
+                IncompleteKind::Install {
+                    spec: InstallSpec {
+                        loader: Some("rift".into()),
+                        ..fabric.spec()
+                    },
+                },
+                1_700_000_000_000,
+            ))
+            .await
+            .unwrap();
 
         let list = petalfall.list_instances().await.unwrap();
 
@@ -2174,6 +2209,10 @@ mod tests {
             ),
             (
                 "认不出加载器",
+                Err(no_record("安装记录里记的加载器 rift 不认识")),
+            ),
+            (
+                "标记里认不出",
                 Err(no_record("未完成标记里记的加载器 rift 不认识")),
             ),
         ];
@@ -3032,10 +3071,35 @@ mod tests {
             use_template: false,
         };
         let err = InstanceRequest::from_spec("x", &spec).unwrap_err();
-        assert!(matches!(
-            err,
-            CoreError::Instance(InstanceError::NotRepairable { .. })
-        ));
+        assert!(
+            matches!(
+                &err,
+                CoreError::Instance(InstanceError::NotRepairable { id, reason })
+                    if id == "x" && reason == "未完成标记里记的加载器 rift 不认识"
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// 加载器认不出来时原因照 spec 读自哪份文件说：未完成标记里的说未完成标记，安装记录里的说安装记录，种类都是
+    /// 照它装不回去的 no_record。
+    #[test]
+    fn an_unknown_loader_is_blamed_on_the_file_it_was_read_from() {
+        let key = format!("未来的加载器-{}", fastrand::u32(..));
+        let spec = InstallSpec {
+            mc_version: "1.21.1".into(),
+            loader: Some(key.clone()),
+            loader_version: Some("1.0".into()),
+            use_template: fastrand::bool(),
+        };
+        assert_eq!(
+            recorded_request(&spec, SpecSource::Marker),
+            Err(no_record(&format!("未完成标记里记的加载器 {key} 不认识")))
+        );
+        assert_eq!(
+            recorded_request(&spec, SpecSource::Record),
+            Err(no_record(&format!("安装记录里记的加载器 {key} 不认识")))
+        );
     }
 
     /// 加载器版本号来自远端版本列表，会拼进安装器地址、缓存文件名与版本 id：不是单个安全路径段时在动手之前
