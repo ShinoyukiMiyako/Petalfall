@@ -335,8 +335,10 @@ export function stubSpanAnimations(): SpanAnimationsStub {
 }
 
 /**
- * 一帧的时长。jsdom 的 requestAnimationFrame 用 setInterval(…, 1000 / 60) 排下一帧，假时钟按 parseInt 把间隔取成 16，
- * 帧又是一帧一排（回调跑完才排下一个），所以假定时器下每推进 16 ms 恰好走一帧，不会一步走两帧。
+ * 一帧的时长。jsdom 的 requestAnimationFrame 在排上第一个回调时起 setInterval(…, 1000 / 60)，排着的回调清空时撤掉它；
+ * 到点时先把回调摘下再调用，所以计时器在跑回调之前就撤了，framer-motion 在回调里排下一帧时再起一个新的。
+ * 假时钟只把间隔的首次到点按 parseInt 取成 16（重复到点才按 16.67 累加），而每一帧都是新起的计时器，
+ * 所以假定时器下每推进 16 ms 恰好走一帧，不会一步走两帧。
  */
 const FRAME_MS = 16;
 /** waitForFrames 的上限：远长于界面里最长的入场与退场，又短于默认的单例超时，没等到时报出的是哪条断言没过。 */
@@ -378,6 +380,11 @@ export async function waitForFrames(assertion: () => void): Promise<void> {
  * 假定时器下让 framer-motion 走 count 帧，每帧之后提交动画引起的重渲染。用来逐帧采样一段动画。
  * 限制：假定时器必须假了 setInterval（toFake 只列 setTimeout 的用例里帧仍走真实时间，这里推不动）；
  * 帧之间排着的别的假计时器（通知的自动消失、复制反馈）也会照常到点触发。
+ * 等画出第一帧才起步的入场（lib/usePaintedOnce，ui/Appear 等经它）推一帧看不到进度：放行排在产品代码现取的
+ * requestAnimationFrame 里（假定时器下是假时钟自己的那个，落在装上假时钟以来 16 ms 的整数倍上），回调里再排一个
+ * setTimeout(0)；假时钟推进途中排下的 0 ms 计时器顺延 1 ms 才到点，排到了这一步推进的终点之后，放行的状态更新又要等推进它的
+ * 那次 act 收尾才提交，入场到下一帧才走出第一步。所以挂上之后至少推两帧；只经这里按 16 ms 对齐推进时要三帧：
+ * 头一帧只跑 rAF，第二帧放行，第三帧起入场才有进度。
  */
 export async function stepFrames(count: number): Promise<void> {
   if (!vi.isFakeTimers()) throw new Error("stepFrames 要在假定时器下用：真实计时器下帧按真实时间来，用 waitForFrames 等");
