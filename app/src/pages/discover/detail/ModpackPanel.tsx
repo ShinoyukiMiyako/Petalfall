@@ -24,7 +24,7 @@ import { blockedFilesOf, useModpackSummary, type ModpackSummaryDto, type ModVers
 import type { ResourceResult } from "../../../state/resource";
 import { findInstance } from "../../../state/selectors";
 import type { BlockedFileDto } from "../../../state/store";
-import { progressTrack, retryRepeatsReason } from "../../../state/tasks";
+import { movingKeys, progressTrack, retryBlockedReason } from "../../../state/tasks";
 import { Appear } from "../../../ui/Appear";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
@@ -156,8 +156,11 @@ type Progress =
   | { kind: "downloading"; progress: number }
   | { kind: "ready" }
   | { kind: "cancelled" }
-  /** blocked：以需要手动下载的文件失败时的清单，其余失败为 null。repeats：原样重试必然同样失败时重试置灰的原因，其余为 null。 */
-  | { kind: "failed"; reason: string; taskId: string; blocked: readonly BlockedFileDto[] | null; repeats: string | null };
+  /**
+   * blocked：以需要手动下载的文件失败时的清单，其余失败为 null。retryBlocked：重试此刻被挡住时置灰的原因（见 retryBlockedReason：
+   * 原样重试必然同样失败、游戏目录对不上），不挡为 null。
+   */
+  | { kind: "failed"; reason: string; taskId: string; blocked: readonly BlockedFileDto[] | null; retryBlocked: string | null };
 
 export interface ModpackPanelProps {
   detail: ProjectDetail;
@@ -207,6 +210,8 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
   const instances = useLauncherSelector((s) => s.instances);
   // 设置还没读到时按关着算，与没有这个设置时一样按工程标记提前说明
   const restrictedDownloads = useLauncherSelector((s) => s.settings !== null && s.settings.downloadRestrictedCurseforgeFiles);
+  // 重试与任务行同一口径要比对当前游戏目录：状态层重试前按它拒绝，这里先置灰
+  const gameDir = useLauncherSelector((s) => (s.settings === null ? null : s.settings.gameDir));
   const actions = useLauncherActions();
   const run = useRunner();
   const nav = useNav();
@@ -263,7 +268,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
           reason: taskFailureReason(task.error),
           taskId: task.id,
           blocked: task.error.blocked_files === undefined ? null : task.error.blocked_files,
-          repeats: retryRepeatsReason(task),
+          retryBlocked: retryBlockedReason(task, gameDir, movingKeys(instances)),
         };
     }
   })();
@@ -337,8 +342,8 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
             {MODPACK_COPY.close}
           </Button>
           {failedBlocked === null ? (
-            // 原样重试必然同样失败时置灰并说明（见 retryRepeatsReason）；有出路的写在上面的失败原因里
-            <Button variant="primary" icon="refresh" disabledReason={progress.repeats === null ? undefined : progress.repeats} onClick={() => retry(progress.taskId)}>
+            // 状态层会拒绝的重试置灰并说明，与任务行同一口径（见 retryBlockedReason）；有出路的写在上面的失败原因里
+            <Button variant="primary" icon="refresh" disabledReason={progress.retryBlocked === null ? undefined : progress.retryBlocked} onClick={() => retry(progress.taskId)}>
               {MODPACK_COPY.retry}
             </Button>
           ) : (

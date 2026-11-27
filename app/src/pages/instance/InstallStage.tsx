@@ -8,11 +8,11 @@ import { INSTALL_STAGE_COPY } from "../../copy/install-stage";
 import { useReflow } from "../../lib/reflow";
 import { useNav } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncherActions } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useOnline } from "../../state/online";
 import type { InstanceTab } from "../../state/route";
 import type { BlockedFileDto } from "../../state/store";
-import { retryRepeatsReason } from "../../state/tasks";
+import { movingKeys, retryBlockedReason, retryRepeatsReason } from "../../state/tasks";
 import { BannerSlot } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
@@ -58,6 +58,14 @@ function StagePanel({ stage, banner }: { stage: InstallStageTabProps["stage"]; b
   const actions = useLauncherActions();
   const run = useRunner();
   const online = useOnline();
+  // 重试此刻被挡住的原因，与任务行、单条重试同一口径（见 retryBlockedReason）：游戏目录换过之后状态层拒绝重试，
+  // 这里先置灰并说明，不让点了再弹错误。失败阶段只带着任务 id，按 id 取任务本身
+  const retryBlocked = useLauncherSelector((s) => {
+    if (stage.kind !== "failed") return null;
+    const task = s.tasks.find((t) => t.id === stage.taskId);
+    if (task === undefined) throw new Error(`失败的新建或导入任务 ${stage.taskId} 已不在任务表里`);
+    return retryBlockedReason(task, s.settings === null ? null : s.settings.gameDir, movingKeys(s.instances));
+  });
   // 清单关掉、重排之后任务就不是失败态了，它得留在这一层才放得完退场动画
   const [blocked, setBlocked] = useState<{ open: boolean; files: readonly BlockedFileDto[]; taskId: string } | null>(null);
   const blockedModal = blocked !== null && (
@@ -100,8 +108,9 @@ function StagePanel({ stage, banner }: { stage: InstallStageTabProps["stage"]; b
             action={
               <>
                 {files === undefined ? (
-                  // 与下载任务页同一个口径：原样重试必然同样失败、断网时重试必然又失败一次，都置灰并说明；前者联网也不会变，先说它
-                  <Button icon="refresh" disabledReason={repeats !== null ? repeats : online ? undefined : TASKS_COPY.offline.retryReason} onClick={() => void run(() => actions.retryTask(taskId), ACTION_ERROR.install)}>
+                  // 与下载任务页同一个口径：原样重试必然同样失败、游戏目录对不上、断网时重试必然又失败一次，都置灰并说明；
+                  // 前两种联网也不会变，先说它们
+                  <Button icon="refresh" disabledReason={retryBlocked !== null ? retryBlocked : online ? undefined : TASKS_COPY.offline.retryReason} onClick={() => void run(() => actions.retryTask(taskId), ACTION_ERROR.install)}>
                     {INSTALL_STAGE_COPY.retry}
                   </Button>
                 ) : (

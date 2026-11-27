@@ -1407,6 +1407,51 @@ describe("实例详情：新建与导入还没装好", () => {
     expect(text()).not.toContain("安装没有完成");
   });
 
+  it("失败后换了游戏目录：失败说明里的重试置灰、聚焦写明发起于哪个目录，点了不重排；切回去后照常可点", async () => {
+    const other = "E:\\HMCL\\.minecraft";
+    let attempts = 0;
+    ipc.overrides.set("install_version", () => {
+      attempts += 1;
+      return attempts === 1 ? Promise.reject(new IpcError("network_failed", "连接超时")) : new Promise(() => undefined);
+    });
+    function KeptPlaceholder() {
+      const creation = useLauncherSelector((s) => creationRef(s.tasks, NAME), creationRefEqual);
+      if (creation === null) return null;
+      const stage = installStage({ id: NAME, placeholder: true, activity: "installing" }, creation);
+      return stage.kind === "none" ? null : <InstallStageTab tab="crash" instanceId={NAME} stage={stage} />;
+    }
+    view = render(
+      <Providers>
+        <Probe />
+        <KeptPlaceholder />
+      </Providers>,
+    );
+    await flush();
+    await create(NAME);
+    const origin = launcher.state.tasks.find((t) => t.instanceId === NAME)?.gameDir;
+    if (origin === undefined || origin === null) throw new Error("新建任务没有记下发起时的游戏目录");
+    expect(button("重试").getAttribute("aria-disabled")).toBeNull();
+
+    ipc.overrides.set("set_game_directory", () => null);
+    ipc.overrides.set("get_config", () => configDto({ game_dir: other, memory: { max_mb: 4096, min_mb: null, auto: false } }));
+    await act(() => launcher.actions.setGameDirectory(other));
+    await flush();
+    expect(text()).toContain("安装没有完成");
+    const retry = button("重试");
+    expect(retry.getAttribute("aria-disabled")).toBe("true");
+    focusByKeyboard(retry);
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(`这个任务发起于游戏目录 ${origin}，切回去再重试`);
+    click(retry);
+    await flush();
+    expect(attempts).toBe(1);
+    expect(launcher.state.tasks.filter((t) => t.instanceId === NAME).map((t) => [t.status, t.attempt])).toEqual([["failed", 1]]);
+
+    ipc.overrides.set("get_config", () => configDto({ game_dir: origin, memory: { max_mb: 4096, min_mb: null, auto: false } }));
+    await act(() => launcher.actions.setGameDirectory(origin));
+    await flush();
+    expect(button("重试").getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("导入撞上实例自己的版本文件：说明块只写原因、不说可以重试，重试置灰写明结果不会变，点了不重排", async () => {
     const message = `整合包里的 overrides/${NAME}.json 落在实例「${NAME}」自己的版本文件（版本 JSON、主 jar 或 natives 目录）上，换一个实例名再导入`;
     let attempts = 0;

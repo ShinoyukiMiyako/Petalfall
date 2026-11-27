@@ -1445,6 +1445,47 @@ describe("发现页：整合包", () => {
     expect(launcher.state.tasks.map((t) => [t.status, t.attempt])).toEqual([["failed", 1]]);
   });
 
+  it("平台整合包导入失败后换了游戏目录：面板里的重试置灰、聚焦写明发起于哪个目录，点了不重排；切回去后照常可点", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    const other = "E:\\HMCL\\.minecraft";
+    const pack = entry("M1", { title: "樱落", resource_type: "modpack", loaders: ["fabric"] });
+    const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });
+    pages = () => result([pack]);
+    ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
+    ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
+    ipc.overrides.set("install_modpack", () => {
+      throw new IpcError("network_failed", "连接超时");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    act(() => card("樱落").click());
+    await flush();
+    act(() => buttonByText("安装为新实例", dialog()).click());
+    await flush();
+    const origin = launcher.state.tasks.find((t) => t.spec.command === "install_modpack")?.gameDir;
+    if (origin === undefined || origin === null) throw new Error("导入任务没有记下发起时的游戏目录");
+    expect(buttonByText("重试", dialog()).getAttribute("aria-disabled")).toBeNull();
+
+    ipc.overrides.set("set_game_directory", () => null);
+    ipc.overrides.set("get_config", () => configDto({ game_dir: other }));
+    await act(() => launcher.actions.setGameDirectory(other));
+    await flush();
+    const retry = buttonByText("重试", dialog());
+    expect(retry.getAttribute("aria-disabled")).toBe("true");
+    focusByKeyboard(retry);
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(`这个任务发起于游戏目录 ${origin}，切回去再重试`);
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "install_modpack")).toHaveLength(1);
+    expect(launcher.state.tasks.map((t) => [t.status, t.attempt])).toEqual([["failed", 1]]);
+
+    ipc.overrides.set("get_config", () => configDto({ game_dir: origin }));
+    await act(() => launcher.actions.setGameDirectory(origin));
+    await flush();
+    expect(buttonByText("重试", dialog()).getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("平台整合包的名称按去掉首尾空格后的样子校验：前面多个空格撞上已有实例就报重名，末尾多个空格照常装、装成去掉空格的名字", async () => {
     const pack = entry("M1", { title: "樱落", resource_type: "modpack", loaders: ["fabric"] });
     const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });

@@ -582,9 +582,9 @@ export const REPEATS_ON_RETRY_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * 原样重试必然同样失败时重试被挡住的原因，不挡为 null。任务行的重试按钮、单条重试、「全部重试」与断网恢复的计数经
- * retryBlockedReason 按它；失败通知据此不给重试，发现页的安装面板与实例页的失败说明据此置灰重试。只看错误记录：
- * 实例页的失败说明手里只有它。
+ * 原样重试必然同样失败时重试被挡住的原因，不挡为 null。任务行的重试按钮、单条重试、「全部重试」与断网恢复的计数、
+ * 发现页安装面板与实例页失败说明里的重试按钮经 retryBlockedReason 按它；失败通知据此不给重试，实例页的失败说明据此
+ * 不说可以重试。只看错误记录：失败通知手里只有它。
  */
 export function retryRepeatsReason(task: Pick<Task, "error">): string | null {
   return task.error !== null && REPEATS_ON_RETRY_CODES.has(task.error.code) ? RETRY_REPEATS_REASON : null;
@@ -651,7 +651,7 @@ export function movingKeys(instances: readonly Pick<InstanceSummary, "id" | "act
  * 再看游戏目录（见 retryGameDirReason）：切回去之前一直成立，目录对上了，moving 里的才是这个目录里的那个实例。
  * 最后看实例在不在移动：重试的任务与移动互斥，只能排在它后面，移动成功时被取消（见 strandedByMove），移动期间重试没有意义；
  * 移动有了结局就不挡。新建与导入不看移动，它们不找移走的这个实例。
- * 单条重试、「全部重试」、断网恢复的计数与任务行的重试按钮都按它。
+ * 单条重试、「全部重试」、断网恢复的计数、任务行的重试按钮，以及发现页安装面板与实例页失败说明里的重试按钮都按它。
  */
 export function retryBlockedReason(task: Task, current: string | null, moving: ReadonlySet<string>): string | null {
   const repeats = retryRepeatsReason(task);
