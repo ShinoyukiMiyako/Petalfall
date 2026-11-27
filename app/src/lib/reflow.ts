@@ -96,6 +96,20 @@ interface Shift {
   ty: number;
 }
 
+/** 一趟里最低的那一项：顶边（与 Spot 同一坐标）与量到的下沿。 */
+interface Floor {
+  el: HTMLElement;
+  top: number;
+  bottom: number;
+}
+
+/** 顶边最低的那一项（一样低时取先量到的）；没有项时为 null。只走登记表，不读布局。 */
+function lowestOf(spots: Map<HTMLElement, Spot>): { el: HTMLElement; top: number } | null {
+  let lowest: { el: HTMLElement; top: number } | null = null;
+  for (const [el, spot] of spots) if (lowest === null || spot.top > lowest.top) lowest = { el, top: spot.top };
+  return lowest;
+}
+
 /**
  * 一段让位的轨迹：位移是 rest 加上弹簧从 (x0, vx)、(y0, vy) 起走了 t 秒的位移。
  * rest 只在途中接续、等新排布画出来的那一截不为 0：这一趟新挤出来的位移原样留着，旧轨迹接着走（见 observeReflow 的 launch）。
@@ -398,6 +412,9 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
   let width: number | null = null;
   // 容器上一趟的高度，只有传 morph 的才读：长高时认出新开的一行。超限的那几趟作废，回到上限以内的第一趟只记
   let height: number | null = null;
+  // 传 morph 的容器上一趟最低的那一项与它当时的下沿，没有项时为 null；作废的时机同 height。下沿每趟都量：
+  // 那一项在下一趟之前被移走时已离开文档，到时再量只得到 0
+  let floor: Floor | null = null;
   let viewport = { width: view.innerWidth, height: view.innerHeight };
   let scroll = readScroll();
   // 提交后挂上的等待：还没经过动画帧回调的，等容器的尺寸观察报到时改成只等一帧，见 HOLD_AFTER_MUTATION
@@ -542,6 +559,7 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     if (items.length > REFLOW_HARD_MAX_ITEMS) {
       spots = new Map();
       height = null;
+      floor = null;
       for (const item of items) land(item);
       return;
     }
@@ -569,6 +587,7 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     if (count > REFLOW_HARD_MAX_ITEMS) {
       spots = new Map();
       height = null;
+      floor = null;
       for (const item of items) land(item);
       return;
     }
@@ -583,6 +602,8 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     }
     const nextWidth = container.clientWidth;
     const nextHeight = morphSynced ? container.clientHeight : null;
+    const lowest = morphSynced ? lowestOf(next) : null;
+    const nextFloor = lowest === null ? null : { ...lowest, bottom: lowest.top + lowest.el.offsetHeight };
     const nextViewport = { width: view.innerWidth, height: view.innerHeight };
     const nextScroll = readScroll();
 
@@ -595,9 +616,11 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     const before = spots;
     const drift = { x: nextScroll.left - scroll.left, y: nextScroll.top - scroll.top };
     const grown = height === null || nextHeight === null ? 0 : nextHeight - height;
+    const floorBefore = floor;
     spots = next;
     width = nextWidth;
     height = nextHeight;
+    floor = nextFloor;
     viewport = nextViewport;
     scroll = nextScroll;
 
@@ -622,21 +645,20 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     // 起点不高于原有最低一项的下沿，也不高于 -Δh：不跟的话它从第一帧就在终点，下沿还没到，被外框裁掉半截；
     // 一律从 -Δh 起步又会从上一行的位置出发，行没有底色时两行字叠着画到淡入完。
     // 紧贴着上一项的（列表末尾追加一行）补不到 1px，就地淡入，由长高的外框下沿逐步露出。
-    // 下沿取上一趟最低一项的顶边加它此刻的高度：只在真有新行时多读这一次。
+    // 下沿取上一趟最低一项的顶边加它此刻的高度：同一次提交里它变高了，新行也不压到它长出来的那截上，这一次只在真有新行时多读。
+    // 它这一趟已被移走（或没了盒子）时取上一趟记下的下沿：离开文档的元素高度为 0，下沿会退成它的顶边，
+    // 同一次提交里删掉末行再追加两行，第二行就从第一行的位置起步、两行叠着滑下来。
     // settle 的容器（卡片、页面）下沿是一步到位的，新的一行就地淡入：滑下来只会压在上一行上
     const opened: typeof moved = [];
     if (grown >= MOVE_EPSILON_PX) {
-      let lowest: HTMLElement | null = null;
-      let lowestTop = -Infinity;
-      for (const [el, spot] of before) {
-        if (spot.top <= lowestTop) continue;
-        lowest = el;
-        lowestTop = spot.top;
-      }
+      const lowestTop = floorBefore === null ? -Infinity : floorBefore.top;
       let lowestBottom: number | null = null;
       for (const f of fresh) {
         if (f.top - lowestTop < MOVE_EPSILON_PX) continue;
-        if (lowestBottom === null) lowestBottom = lowest === null ? -Infinity : lowestTop + lowest.offsetHeight;
+        if (lowestBottom === null) {
+          if (floorBefore === null) lowestBottom = -Infinity;
+          else lowestBottom = next.has(floorBefore.el) ? floorBefore.top + floorBefore.el.offsetHeight : floorBefore.bottom;
+        }
         const rise = Math.min(grown, f.top - lowestBottom);
         if (rise >= MOVE_EPSILON_PX) opened.push({ el: f.el, top: f.top, dx: 0, dy: -rise });
       }

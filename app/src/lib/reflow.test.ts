@@ -1439,8 +1439,8 @@ describe("observeReflow：容器长高、新插入的项开了新的一行", () 
     // 容器长高 34，fix 的顶边在上一行下沿（26）之下 8：只补这 8，不从 -34 起步压到上一行上
     expect(start(ride)).toBe("0px -8px");
     expect(ride.frames[1].translate).toBe(`0px ${Math.round(springAt("morph", -8, 0, SAMPLE_S).x * 100) / 100}px`);
-    // 只为上一趟最低的那一项多读一次高度
-    expect(heightReads).toBe(1);
+    // 只读两次高度：这一趟最低的那一项（记下下沿，留给下一趟），与上一趟最低的那一项（它此刻的下沿）
+    expect(heightReads).toBe(2);
     expect(ride.frames[ride.frames.length - 1].translate).toBe("0px 0px");
     // 与外框的形变同一刻起步：起步时刻钉在这一趟里读到的时刻，同一趟的几段钉在同一刻，不随逐个建动画错开
     expect(ride.animation.pause).not.toHaveBeenCalled();
@@ -1496,6 +1496,39 @@ describe("observeReflow：容器长高、新插入的项开了新的一行", () 
     else expect(start(callsOn(c)[0])).toBe(from);
     expect(callsOn(a)).toHaveLength(0);
     expect(callsOn(b)).toHaveLength(0);
+    // 这一趟最低的 c 记下下沿，上一趟最低的 b 读它此刻的高度
+    expect(heightReads).toBe(2);
+  });
+
+  // 同一次提交里删掉末行 b、再追加 c 与 d 两行：c 顶上 b 的位置，d 开了新的一行。行间距取边界（紧贴、恰好 1px）与随机
+  it.each([0, 1, 2 + Math.floor(Math.random() * 40)])("同一次提交里删掉末行再追加两行（行间距 %ipx）：新的一行从被删那行记下的下沿起步，不退到它的顶边、与上一行叠着滑下来", async (gap) => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    place(document.body, {});
+    place(container, { parent: document.body, clientWidth: 300, clientHeight: 100 + gap });
+    const a = child(container, 0);
+    const b = child(container, 50 + gap);
+    place(a, { height: 50 });
+    place(b, { height: 50 });
+    stop = observeReflow(container, "morph");
+    sizes.resize(container, 300);
+    const c = document.createElement("div");
+    const d = document.createElement("div");
+    place(c, { top: 50 + gap, parent: container, height: 50 });
+    place(d, { top: 100 + 2 * gap, parent: container, height: 50 });
+    place(container, { clientHeight: 150 + 2 * gap });
+    b.remove();
+    // 离开文档的元素量不出高度：真机上 offsetHeight 为 0
+    place(b, { height: 0 });
+    container.append(c, d);
+    heightReads = 0;
+    await flushMutations();
+    // c 与被删的 b 同一行，就地出现；d 离 b 的下沿只差行间距：只补这一截，不从 c 的位置起步
+    expect(callsOn(c)).toHaveLength(0);
+    if (gap === 0) expect(callsOn(d)).toHaveLength(0);
+    else expect(start(callsOn(d)[0])).toBe(`0px -${gap}px`);
+    expect(callsOn(a)).toHaveLength(0);
+    // 只量这一趟最低的 d，不去读已离开文档的 b
     expect(heightReads).toBe(1);
   });
 
@@ -1527,7 +1560,8 @@ describe("observeReflow：容器长高、新插入的项开了新的一行", () 
     expect(start(callsOn(next)[0])).toBe("0px -8px");
     expect(callsOn(logs)).toHaveLength(0);
     expect(callsOn(big)).toHaveLength(0);
-    expect(heightReads).toBe(1);
+    // 这一趟最低的 next 记下下沿，上一趟最低的 big 读它此刻的高度
+    expect(heightReads).toBe(2);
   });
 
   it("插在中间（没有开新的一行）：新项就地出现，后面的兄弟照常让位", async () => {
@@ -1542,7 +1576,7 @@ describe("observeReflow：容器长高、新插入的项开了新的一行", () 
     expect(start(callsOn(b)[0])).toBe("0px -50px");
   });
 
-  it("容器没长高（定高）：落在原有各项之下的新项也不动，不另读高度", async () => {
+  it("容器没长高（定高）：落在原有各项之下的新项也不动，只量这一趟最低的那一项记下下沿", async () => {
     const { container } = stack();
     place(container, { clientHeight: 300 });
     sizes.resize(container, 300);
@@ -1552,7 +1586,7 @@ describe("observeReflow：容器长高、新插入的项开了新的一行", () 
     container.append(c);
     await flushMutations();
     expect(calls).toHaveLength(0);
-    expect(heightReads).toBe(0);
+    expect(heightReads).toBe(1);
   });
 
   it.each<[string, (container: HTMLElement) => void]>([
