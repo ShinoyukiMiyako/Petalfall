@@ -213,8 +213,8 @@ describe("mock：列表、内容与元数据", () => {
 
   it("列表按小写 id 排序，就绪与损坏的实例字段各自成立", async () => {
     const list = await listInstances();
-    // 码位顺序：数字 < 拉丁字母 < 汉字（旧 U+65E7、樱 U+6A31 在 没 U+6CA1 之前），与后端一致，不按语言区域排。
-    expect(list.map((i) => i.id)).toEqual(["1.20.1-Fabric", "1.20.1-Forge", "1.21", "1.21.1", "1.21.1-Fabric", "RLCraft", "旧电脑拷来的", "樱花生存", "没装完"]);
+    // 码位顺序：数字 < 拉丁字母 < 汉字（旧 U+65E7、朋 U+670B、樱 U+6A31、没 U+6CA1、网 U+7F51 依次排），与后端一致，不按语言区域排。
+    expect(list.map((i) => i.id)).toEqual(["1.20.1-Fabric", "1.20.1-Forge", "1.21", "1.21.1", "1.21.1-Fabric", "RLCraft", "旧电脑拷来的", "朋友发来的", "樱花生存", "没装完", "网盘同步的"]);
     // 游玩时长取自启动 mock 的种子：1.20.1-Fabric 玩过 95 + 30 + 55 分钟，1.21 玩过 40 + 120 + 15 分钟。
     expect(list.find((i) => i.id === "1.20.1-Fabric")?.playtime_min).toBe(180);
     expect(list.find((i) => i.id === "1.21")?.playtime_min).toBe(175);
@@ -250,10 +250,18 @@ describe("mock：列表、内容与元数据", () => {
     const broken = list.find((i) => i.id === "没装完");
     expect(broken).toMatchObject({ status: "broken", mod_count: null, world_count: null, resource_pack_count: null, isolated: null, mc_version: null });
     expect(broken?.incomplete).toMatchObject({ kind: "install", outcome: "failed", spec: { loader: "neoforge" } });
-    // 记着当初装的是什么，补全照着重装就能修好；没记下的那个补全修不好，就绪的实例一律不报
+    // 记着当初装的是什么，补全照着重装就能修好；没记下的、版本 JSON 读不出来的补全修不好，就绪的实例一律不报
     expect(broken).toMatchObject({ unrepairable_reason: null, unrepairable_kind: null, rename_to: null });
     expect(list.filter((i) => i.unrepairable_reason !== null).map((i) => [i.id, i.status, i.unrepairable_reason, i.unrepairable_kind, i.rename_to])).toEqual([
       ["旧电脑拷来的", "broken", "缺少版本 JSON，也没有记下当初装的是什么", "no_record", null],
+      ["朋友发来的", "broken", "缺少版本 JSON，也没有记下当初装的是什么；目录里有一份叫 1.20.1-NeoForge.json 的版本文件，把实例改名成 1.20.1-NeoForge 就能认出来", "no_record", "1.20.1-NeoForge"],
+      [
+        "网盘同步的",
+        "broken",
+        "版本 JSON 读不出来：文件 IO 失败: D:\\Games\\Launcher\\.minecraft\\versions\\网盘同步的\\网盘同步的.json：另一个程序正在使用此文件，进程无法访问。 (os error 32)",
+        "unreadable",
+        null,
+      ],
     ]);
     expect(list.filter((i) => i.unrepairable_reason === null).every((i) => i.unrepairable_kind === null && i.rename_to === null)).toBe(true);
   });
@@ -470,6 +478,65 @@ describe("mock：新建与补全", () => {
     expect((await listInstances()).find((i) => i.id === ID)).toMatchObject({ status: "broken", incomplete: null, activity: null, unrepairable_reason: listed?.unrepairable_reason });
     // 被拒后既不占着实例也不留下任务：同一个 taskId 再来一次还是同一个拒绝，不是 instance_busy 或 task_conflict
     expect((await rejection(repairInstance("t-lost", mockGameDir(), ID))).code).toBe("instance_failed");
+  });
+
+  it("版本 JSON 读不出来的实例：记着安装内容也修不好，补全与重新安装加载器都以 instance_failed 拒绝，原因就是读盘那句、不接没有记录的后缀", async () => {
+    const ID = "网盘同步的";
+    const reason = "版本 JSON 读不出来：文件 IO 失败: D:\\Games\\Launcher\\.minecraft\\versions\\网盘同步的\\网盘同步的.json：另一个程序正在使用此文件，进程无法访问。 (os error 32)";
+    const listed = (await listInstances()).find((i) => i.id === ID);
+    expect(listed).toMatchObject({
+      status: "broken",
+      broken_reason: reason,
+      unrepairable_reason: reason,
+      unrepairable_kind: "unreadable",
+      rename_to: null,
+      incomplete: { kind: "install", outcome: "pending", spec: { mc_version: "1.21.1", loader: "fabric", loader_version: "0.16.10" } },
+    });
+    expect(listed?.unrepairable_reason).not.toContain("也没有记下当初装的是什么");
+    for (const opts of [{}, { reinstallLoader: true as const }]) {
+      const error = await rejection(repairInstance("t-locked", mockGameDir(), ID, opts));
+      expect(error.code, JSON.stringify(opts)).toBe("instance_failed");
+      expect(error.message, JSON.stringify(opts)).toBe(`实例 ${ID} 无法补全：${reason}`);
+      expect(detail(error), JSON.stringify(opts)).toEqual({ id: ID, reason });
+    }
+    // 没有照着标记去重装：标记、状态与原因原样留着，也不占着实例
+    expect((await listInstances()).find((i) => i.id === ID)).toEqual(listed);
+  });
+
+  it("名字对不上的版本 JSON：列表给出改名目标、原因里带那句提示，补全照样拒绝；改成别的名字认不出，照提示改名后成了完好的实例", async () => {
+    const ID = "朋友发来的";
+    const TARGET = "1.20.1-NeoForge";
+    const hint = `缺少版本 JSON，也没有记下当初装的是什么；目录里有一份叫 ${TARGET}.json 的版本文件，把实例改名成 ${TARGET} 就能认出来`;
+    expect((await listInstances()).find((i) => i.id === ID)).toMatchObject({ status: "broken", unrepairable_reason: hint, unrepairable_kind: "no_record", rename_to: TARGET });
+    const refused = await rejection(repairInstance("t-moved", mockGameDir(), ID));
+    expect([refused.code, detail(refused)]).toEqual(["instance_failed", { id: ID, reason: hint }]);
+
+    expect(await renameInstance(ID, "别的名字")).toEqual({ id: "别的名字" });
+    expect((await listInstances()).find((i) => i.id === "别的名字")).toMatchObject({ status: "broken", unrepairable_reason: hint, unrepairable_kind: "no_record", rename_to: TARGET });
+
+    expect(await renameInstance("别的名字", TARGET)).toEqual({ id: TARGET });
+    const list = await listInstances();
+    expect(list.some((i) => i.id === "别的名字")).toBe(false);
+    expect(list.find((i) => i.id === TARGET)).toMatchObject({
+      status: "ready",
+      broken_reason: null,
+      mc_version: "1.20.1",
+      loaders: [{ kind: "neoforge", version: "47.1.106" }],
+      java_major: 17,
+      incomplete: null,
+      unrepairable_reason: null,
+      unrepairable_kind: null,
+      rename_to: null,
+    });
+  });
+
+  it("改名目标已被别的实例占了（不分大小写）就不提改名，原因只说没有记录", async () => {
+    addMockInstance("1.20.1-neoforge", "1.20.1", { kind: "neoforge", version: "47.1.106" }, null);
+    expect((await listInstances()).find((i) => i.id === "朋友发来的")).toMatchObject({
+      unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么",
+      unrepairable_kind: "no_record",
+      rename_to: null,
+    });
   });
 
   describe("重新安装加载器", () => {

@@ -150,6 +150,19 @@ interface MockInstance {
   fileCount: number;
   /** 实例卡面图片目录（.petalfall/cover/）里此刻在盘上的文件名：设置可以引用盘上没有的名字，列表给取图键只认在盘上的。 */
   coverFiles: string[];
+  /**
+   * 实例目录顶层一份名字对不上的版本 JSON（别人打包时把实例目录改了名，里面的文件还叫原来的名字），id 与文件名一致；没有为 null。
+   * 缺版本 JSON 又没有记录时补全的拒绝据此提改名，实例改成 name 后照它认出版本。
+   */
+  misnamedJson: MisnamedVersionJson | null;
+}
+
+interface MisnamedVersionJson {
+  /** 文件名去掉 .json，也是版本 JSON 里的 id。 */
+  name: string;
+  mcVersion: string;
+  loaders: InstanceDto["loaders"];
+  javaMajor: number;
 }
 
 function defaultSettings(): InstanceSettingsDto {
@@ -223,6 +236,7 @@ function seedInstances(): MockInstance[] {
       sizeBytes: 31 * MB,
       fileCount: 4,
       coverFiles: [],
+      misnamedJson: null,
     },
     {
       dto: readyDto("樱花生存", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, now - 12 * DAY),
@@ -263,6 +277,7 @@ function seedInstances(): MockInstance[] {
       sizeBytes: 420 * MB,
       fileCount: 1830,
       coverFiles: [],
+      misnamedJson: null,
     },
     // 下面四个实例是 Mod、发现与启动各自 mock 里种好数据的实例：浏览器里从实例列表点进去，各页看到的是同一批实例。
     {
@@ -274,6 +289,7 @@ function seedInstances(): MockInstance[] {
       sizeBytes: 96 * MB,
       fileCount: 410,
       coverFiles: [],
+      misnamedJson: null,
     },
     {
       dto: readyDto("1.20.1-Forge", "1.20.1", [{ kind: "forge", version: "47.2.0" }], 17, now - 55 * DAY),
@@ -284,6 +300,7 @@ function seedInstances(): MockInstance[] {
       sizeBytes: 120 * MB,
       fileCount: 520,
       coverFiles: [],
+      misnamedJson: null,
     },
     {
       dto: readyDto("1.21", "1.21", [], 21, now - 50 * DAY),
@@ -294,6 +311,7 @@ function seedInstances(): MockInstance[] {
       sizeBytes: 30 * MB,
       fileCount: 4,
       coverFiles: [],
+      misnamedJson: null,
     },
     {
       dto: readyDto("1.21.1-Fabric", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, now - 20 * DAY),
@@ -329,6 +347,7 @@ function seedInstances(): MockInstance[] {
       sizeBytes: 210 * MB,
       fileCount: 900,
       coverFiles: [],
+      misnamedJson: null,
     },
     {
       dto: readyDto("RLCraft", "1.12.2", [{ kind: "forge", version: "14.23.5.2860" }], 8, now - 90 * DAY),
@@ -339,6 +358,7 @@ function seedInstances(): MockInstance[] {
       sizeBytes: 1300 * MB,
       fileCount: 9200,
       coverFiles: [],
+      misnamedJson: null,
     },
     {
       dto: {
@@ -368,6 +388,7 @@ function seedInstances(): MockInstance[] {
       sizeBytes: 12 * MB,
       fileCount: 3,
       coverFiles: [],
+      misnamedJson: null,
     },
     // 从旧电脑拷过来时漏了版本 JSON，启动器也没记下当初装的是什么：补全修不好，与上面那个修得好的损坏实例对照着看
     {
@@ -392,6 +413,64 @@ function seedInstances(): MockInstance[] {
       sizeBytes: 640 * MB,
       fileCount: 2100,
       coverFiles: [],
+      misnamedJson: null,
+    },
+    // 朋友打包发来时把实例目录改了名，里面的版本 JSON 还叫原来的名字：补全修不好，列表给出改名目标，改回那个名字就认得出来
+    {
+      dto: {
+        id: "朋友发来的",
+        status: "broken",
+        broken_reason: "缺少版本 JSON",
+        mc_version: null,
+        loaders: [],
+        release_type: null,
+        is_release: false,
+        java_major: null,
+        quick_play: null,
+        settings_error: null,
+        incomplete: null,
+        created_at: now - 30 * DAY,
+      },
+      settings: defaultSettings(),
+      modpack: null,
+      inheritsFrom: null,
+      content: emptyContent(),
+      sizeBytes: 380 * MB,
+      fileCount: 1400,
+      coverFiles: [],
+      misnamedJson: { name: "1.20.1-NeoForge", mcVersion: "1.20.1", loaders: [{ kind: "neoforge", version: "47.1.106" }], javaMajor: 17 },
+    },
+    // 实例放在网盘的同步文件夹里，同步程序正锁着版本 JSON：读不出来，记着当初装的是什么也修不好；文件可能完好，放开占用后重新扫描就恢复。
+    // 路径是种子所在的默认游戏目录，与后端 Io 错误的写法一致。
+    {
+      dto: {
+        id: "网盘同步的",
+        status: "broken",
+        broken_reason: "版本 JSON 读不出来：文件 IO 失败: D:\\Games\\Launcher\\.minecraft\\versions\\网盘同步的\\网盘同步的.json：另一个程序正在使用此文件，进程无法访问。 (os error 32)",
+        mc_version: null,
+        loaders: [],
+        release_type: null,
+        is_release: false,
+        java_major: null,
+        quick_play: null,
+        settings_error: null,
+        incomplete: {
+          kind: "install",
+          outcome: "pending",
+          started_at: now - 6 * DAY,
+          spec: { mc_version: "1.21.1", loader: "fabric", loader_version: "0.16.10" },
+          error: null,
+        },
+        created_at: now - 6 * DAY,
+      },
+      settings: defaultSettings(),
+      modpack: null,
+      inheritsFrom: null,
+      content: emptyContent(),
+      sizeBytes: 260 * MB,
+      fileCount: 980,
+      coverFiles: [],
+      misnamedJson: null,
     },
   ];
 }
@@ -840,6 +919,7 @@ export function addMockInstance(
     sizeBytes: 0,
     fileCount: 0,
     coverFiles: [],
+    misnamedJson: null,
   });
 }
 
@@ -1204,6 +1284,7 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
     sizeBytes: 0,
     fileCount: 0,
     coverFiles: [],
+    misnamedJson: null,
   };
   instances.push(instance);
   // 与后端一样，名字下还留着的记录属于已经不在的同名旧实例（浏览器里刷新后游玩记录重新播种就会这样），新实例从零开始；
@@ -1325,7 +1406,18 @@ function mockRepairRefusal(instance: MockInstance): MockRepairRefusal | null {
   if (broken.startsWith(UNREADABLE_JSON_PREFIX)) return { reason: broken, kind: "unreadable", renameTo: null };
   const marked = instance.dto.incomplete?.kind === "install" ? instance.dto.incomplete.spec : null;
   if (marked !== null) return null;
-  return { reason: `${broken}，也没有记下当初装的是什么`, kind: "no_record", renameTo: null };
+  const reason = `${broken}，也没有记下当初装的是什么`;
+  const renameTo = broken === "缺少版本 JSON" ? renamableMisnamed(instance) : null;
+  if (renameTo === null) return { reason, kind: "no_record", renameTo: null };
+  return { reason: `${reason}；目录里有一份叫 ${renameTo}.json 的版本文件，把实例改名成 ${renameTo} 就能认出来`, kind: "no_record", renameTo };
+}
+
+/** 与后端 renamable_to 一致：名字对不上的那份版本 JSON 的名字过得了这个实例改名时的校验（含与别的实例不分大小写重名）才提。 */
+function renamableMisnamed(instance: MockInstance): string | null {
+  if (instance.misnamedJson === null) return null;
+  const { name } = instance.misnamedJson;
+  const existing = instances.map((i) => i.dto.id);
+  return checkInstanceName(name, existing, instance.dto.id) === null ? name : null;
 }
 
 async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
@@ -2117,7 +2209,14 @@ export const handlers: MockHandlers = {
       checkName(newName, id);
       if (id === newName) return { id };
       ensureNoDependents(id);
-      instance.dto = { ...instance.dto, id: newName };
+      const misnamed = instance.misnamedJson;
+      if (instance.dto.status === "broken" && instance.dto.broken_reason === "缺少版本 JSON" && misnamed !== null && misnamed.name === newName) {
+        // 改成那份版本 JSON 的名字后，后端按 <id>/<id>.json 就认得出它；未完成标记在实例目录里，照旧留着
+        instance.dto = { ...readyDto(newName, misnamed.mcVersion, misnamed.loaders, misnamed.javaMajor, instance.dto.created_at), incomplete: instance.dto.incomplete };
+        instance.misnamedJson = null;
+      } else {
+        instance.dto = { ...instance.dto, id: newName };
+      }
       renameMockMods(id, newName);
       renameMockLaunchRecords(id, newName);
       // 隔离实例的备份按实例 id 分目录，改名时并到新名字下；共用的那一层不动
@@ -2260,8 +2359,9 @@ interface InstancesSnapshot {
 
 // 实例此刻在做的事只在进程内有意义：刷新等于启动器重启，不存。默认设置在后端存于数据目录，跟着实例一起存。
 // 版本 4：实例多了直达能力，另存存档备份表与默认设置。版本 5：实例多了卡面图片目录里的文件。
+// 版本 6：实例多了目录里名字对不上的版本 JSON。
 export const persist: MockPersist = {
-  version: 5,
+  version: 6,
   snapshot: (): InstancesSnapshot => ({ instances, pins, template, backups }),
   restore: (data) => {
     const saved = data as InstancesSnapshot;
