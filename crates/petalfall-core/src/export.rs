@@ -10,7 +10,9 @@
 //!    的再一起按哈希反查（`/version_files`）。查到、且平台给的 sha512、大小与下载地址都能写进清单的，
 //!    只写索引，导入的人从 Modrinth 下载；其余的原样打包进文件。
 //! 3. 额外项（配置、资源包、光影、存档……）只从白名单目录收集，跳过启动器元数据目录、`.old` 备份、
-//!    存档的 `session.lock`、符号链接与目录联接；日志、崩溃报告、natives、版本 jar 与 JSON 不在白名单里，结构上就进不了包。
+//!    存档的 `session.lock`、下载没完成留下的续传分块与合并临时文件（见 [`is_download_scratch`]）、
+//!    存档根下恢复备份没完成留下的临时目录（以 [`RESTORE_SUFFIX`] 结尾）、符号链接与目录联接；日志、崩溃报告、
+//!    natives、版本 jar 与 JSON 不在白名单里，结构上就进不了包。
 //!    配置里模组的默认设置去掉启动器补进去的行再写（见 [`crate::game_lang::FilledLines`]），盘上的文件不动。
 //!
 //! 写包在阻塞线程里进行，先写到目标旁边的临时文件，回读校验通过后才换到目标位置。
@@ -24,7 +26,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use petalfall_instance::{DiscoveredVersion, MarkerStore, PETALFALL_META_DIR};
+use petalfall_download::is_download_scratch;
+use petalfall_instance::{DiscoveredVersion, MarkerStore, PETALFALL_META_DIR, RESTORE_SUFFIX};
 use petalfall_modpack::{
     ExportPack, IndexFile, OverrideFile, PackLoader, PackLoaderKind, SafeRelativePath,
     WriteProgress, is_export_download_url,
@@ -1163,13 +1166,20 @@ fn walk(
         }
         let child = format!("{relative}/{name}");
         if file_type.is_dir() {
+            // 恢复存档备份时在存档根下解压用的临时目录，恢复中途断电、被杀或就位失败时会留下。它不是存档，
+            // 启动器的存档列表也不认它；带进包里，导入的人的游戏里会多出一个与原存档同名的世界。
+            if relative == ExportExtra::Saves.relative() && name.ends_with(RESTORE_SUFFIX) {
+                continue;
+            }
             walk(&path, &child, excluded, out)?;
             continue;
         }
         // session.lock 是游戏打开存档时的锁文件：游戏开着时对它持有排他锁，读它会失败；导入的人也用不上。
+        // 下载没完成时引擎留在目标旁边等续传的分块文件与合并临时文件，是启动器自己的中间产物。
         if !file_type.is_file()
             || name.to_lowercase().ends_with(BACKUP_SUFFIX)
             || name.eq_ignore_ascii_case(SESSION_LOCK)
+            || is_download_scratch(&name)
             || excluded.contains(&path_key(&path))
         {
             continue;
@@ -1230,7 +1240,7 @@ mod tests {
     use crate::config::PetalfallConfig;
     use crate::ledger::{Ledger, LedgerEntry, UpdateHold};
     use crate::modpack::{InstanceModpack, ModpackSource};
-    use petalfall_download::CancellationToken;
+    use petalfall_download::{CancellationToken, SCRATCH_PART_SUFFIX, SCRATCH_TEMP_SUFFIX};
     use petalfall_instance::{IsolationOverride, VersionSettings, VersionSettingsStore};
     use petalfall_modpack::PackFormat;
     use sha1::{Digest, Sha1};
@@ -2451,6 +2461,89 @@ mod tests {
             vec![
                 "overrides/saves/World/level.dat",
                 "overrides/saves/World/region/r.0.0.mca",
+            ]
+        );
+        assert!(leftovers(&fixture.root).is_empty());
+    }
+
+    /// 下载没完成时引擎把续传分块与合并临时文件留在目标旁边（资源包、光影、存档的数据包目录），恢复存档备份
+    /// 中途断掉会在存档根下留下解压用的临时目录。它们是启动器自己的中间产物：不进包，也不算跳过，预览的计数
+    /// 同样不算；旁边正常的文件与存档照常带上。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn launcher_scratch_files_and_unfinished_restores_stay_out_of_the_pack() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        let staged = format!("saves/World{RESTORE_SUFFIX}");
+        fixture.write(
+            &format!("resourcepacks/pack.zip{SCRATCH_PART_SUFFIX}1"),
+            b"half a pack",
+        );
+        fixture.write("shaderpacks/s.zip", b"PK-shader");
+        fixture.write(
+            &format!("shaderpacks/s.zip{SCRATCH_TEMP_SUFFIX}"),
+            b"merging",
+        );
+        fixture.write(
+            &format!("saves/World/datapacks/dp.zip{SCRATCH_PART_SUFFIX}0"),
+            b"half a datapack",
+        );
+        fixture.write("saves/World/region/r.0.0.mca", b"region");
+        fixture.write(&format!("{staged}/level.dat"), b"staged level");
+        fixture.write(&format!("{staged}/region/r.0.0.mca"), b"staged region");
+        // 只有存档根这一层的才是恢复用的临时目录：存档里面叫这个名字的目录是玩家的，照常带上。
+        let inner = format!("saves/World/old{RESTORE_SUFFIX}/keep.txt");
+        fixture.write(&inner, b"inner");
+
+        let preview = fixture.petalfall.preview_modpack_export(ID).await.unwrap();
+        let stat = |extra: ExportExtra| {
+            let stat = preview.extras.iter().find(|s| s.extra == extra).unwrap();
+            (stat.files, stat.bytes, stat.skipped.clone())
+        };
+        assert_eq!(
+            stat(ExportExtra::ResourcePacks),
+            (1, b"PK-pack".len() as u64, Vec::<String>::new())
+        );
+        assert_eq!(
+            stat(ExportExtra::ShaderPacks),
+            (1, b"PK-shader".len() as u64, Vec::<String>::new())
+        );
+        assert_eq!(
+            stat(ExportExtra::Saves),
+            (
+                3,
+                (b"level".len() + b"region".len() + b"inner".len()) as u64,
+                Vec::<String>::new()
+            )
+        );
+
+        let target = ModpackExportTarget::new(fixture.root.join("中间产物.mrpack"));
+        let extras = vec![
+            ExportExtra::ResourcePacks,
+            ExportExtra::ShaderPacks,
+            ExportExtra::Saves,
+        ];
+        let outcome = fixture
+            .petalfall
+            .export_modpack(ID, &options(extras, false), &target, None)
+            .await
+            .unwrap();
+        assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+        assert_eq!(
+            outcome.override_files, 7,
+            "d、e 两个 jar，资源包、光影各一个，三个存档文件"
+        );
+        let extra_entries: Vec<String> = entry_names(target.destination())
+            .into_iter()
+            .filter(|n| n.starts_with("overrides/") && !n.starts_with("overrides/mods/"))
+            .collect();
+        assert_eq!(
+            extra_entries,
+            vec![
+                "overrides/resourcepacks/pack.zip",
+                "overrides/saves/World/level.dat",
+                format!("overrides/{inner}").as_str(),
+                "overrides/saves/World/region/r.0.0.mca",
+                "overrides/shaderpacks/s.zip",
             ]
         );
         assert!(leftovers(&fixture.root).is_empty());

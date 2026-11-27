@@ -1451,17 +1451,33 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(raw)
 }
 
+/// 合并临时文件的后缀。公开只为让上层用例能拼出这类名字；判断一个名字是不是中间文件用
+/// [`is_download_scratch`]，不要自己比后缀。
+pub const SCRATCH_TEMP_SUFFIX: &str = concat!(".", petalfall_base::app_slug!(), "-tmp");
+/// 分块文件的后缀，后面紧跟分块序号。公开的理由同 [`SCRATCH_TEMP_SUFFIX`]。
+pub const SCRATCH_PART_SUFFIX: &str = concat!(".", petalfall_base::app_slug!(), "-part");
+
 /// 合并临时文件路径：`<dest>.petalfall-tmp`。
 fn temp_path(dest: &Path) -> PathBuf {
-    append_suffix(dest, concat!(".", petalfall_base::app_slug!(), "-tmp"))
+    append_suffix(dest, SCRATCH_TEMP_SUFFIX)
 }
 
 /// 分片文件路径：`<dest>.petalfall-partN`（确定性命名，供断点续传定位）。
 fn part_path(dest: &Path, index: usize) -> PathBuf {
-    append_suffix(
-        dest,
-        &format!(".{}-part{index}", petalfall_base::brand::APP_SLUG),
-    )
+    append_suffix(dest, &format!("{SCRATCH_PART_SUFFIX}{index}"))
+}
+
+/// 文件名是不是下载引擎留在目标旁边的合并临时文件或分块文件。下载把重试用完仍没成、或进程被杀时，
+/// 分块文件留在资源包、光影等目录里供下次续传，进程被杀时合并临时文件也可能留下；导出整合包这类按目录
+/// 收文件的地方要靠它把它们挑出去。判断与上面的命名放在一处，命名改了判断跟着改，别的 crate 不必知道
+/// 后缀长什么样。
+pub fn is_download_scratch(file_name: &str) -> bool {
+    file_name.ends_with(SCRATCH_TEMP_SUFFIX)
+        || file_name
+            .rsplit_once(SCRATCH_PART_SUFFIX)
+            .is_some_and(|(_, index)| {
+                !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit())
+            })
 }
 
 #[cfg(test)]
@@ -1674,5 +1690,29 @@ mod tests {
             part_path(dest, 3),
             PathBuf::from("C:/data/lib.jar.petalfall-part3")
         );
+    }
+
+    /// 上层（导出整合包）靠它认出引擎留在目标旁边的中间文件：命名函数写出的名字都要认，
+    /// 正常文件和只是长得像的名字都不能认，否则导出会漏掉用户自己的文件。
+    #[test]
+    fn download_scratch_matches_exactly_the_names_the_engine_writes() {
+        let dest = Path::new("C:/data/Foo.zip");
+        let name = |path: PathBuf| path.file_name().unwrap().to_str().unwrap().to_owned();
+        assert!(is_download_scratch(&name(temp_path(dest))));
+        for index in [0usize, 1, 37, usize::MAX] {
+            assert!(
+                is_download_scratch(&name(part_path(dest, index))),
+                "part{index}"
+            );
+        }
+        for kept in [
+            "Foo.zip".to_owned(),
+            format!("Foo.zip{SCRATCH_PART_SUFFIX}x"),
+            format!("Foo.zip{SCRATCH_PART_SUFFIX}"),
+            format!("Foo.zip{SCRATCH_PART_SUFFIX}1x"),
+            format!("Foo.zip{SCRATCH_TEMP_SUFFIX}.zip"),
+        ] {
+            assert!(!is_download_scratch(&kept), "{kept}");
+        }
     }
 }
