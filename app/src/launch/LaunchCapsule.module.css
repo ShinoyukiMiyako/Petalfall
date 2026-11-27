@@ -464,5 +464,5 @@
 
 .iconAction[aria-disabled="true"] {
   cursor: default;
-  opacity: 0.5;
+  opacity: var(--sk-disabled);
 }

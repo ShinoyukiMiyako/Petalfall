@@ -54,6 +54,11 @@ describe("按压", () => {
     expect(declaration(ruleOf(".go"), "transition")).toContain("opacity var(--sk-dur-hover) var(--sk-ease)");
   });
 
+  it("不可用的启动按钮与图标键都按禁用令牌降不透明度，不写字面量", () => {
+    expect(declaration(ruleOf(".go[data-disabled]"), "opacity")).toBe("var(--sk-disabled)");
+    expect(declaration(ruleOf('.iconAction[aria-disabled="true"]'), "opacity")).toBe("var(--sk-disabled)");
+  });
+
   it("减少动画时启动按钮不留透明度过渡：松开后即时回到不透明，不按 150 ms 补间，与胶囊内其它按钮一致", () => {
     expect(declaration(ruleOf(":global([data-sk-reduced]) .go"), "transition")).toBe("none");
     for (const selector of [".pill", ".iconAction"]) expect(declaration(ruleOf(selector), "transition")).not.toContain("opacity");
