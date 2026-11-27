@@ -182,7 +182,8 @@ fn has_line(options: &[u8], key: &[u8]) -> bool {
 
 /// 文件里有没有内容，只有空白的不算。空文件里没有谁调过的东西，也没有要迁移的内容，补语言时与新文件一样
 /// 处理（见 [`fill_options`]）。YOSBR 每次启动都会建一份空的默认设置，整合包常把它原样带进来，模组铺过去的
-/// 也是一份空文件：在场的几份全是这样时不为它们让路，另有一份有内容或读不了的时才连它一起补（见 [`fill`]）。
+/// 也是一份空文件：在场的几份全是这样时不为它们让路，另有一份有内容或读不了的时才连它一起补（见 [`fill`]；
+/// 它要是在链接后面就补不了，只记一条说明）。
 ///
 /// 开头的一个 UTF-8 BOM 也不算：Windows 上的编辑器存成 UTF-8 时常带上它，只有它（或它加空白）的文件里同样
 /// 一行设置都没有。
@@ -388,6 +389,70 @@ async fn is_regular_file(path: &Path) -> Result<bool> {
     }
 }
 
+/// 路径本身是不是符号链接或目录联接（Windows 上 `is_symlink` 对两者都为真）；不存在时为 `false`。
+async fn is_link(path: &Path) -> Result<bool> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(meta) => Ok(meta.file_type().is_symlink()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(petalfall_base::Error::Io {
+            path: path.to_owned(),
+            source,
+        }
+        .into()),
+    }
+}
+
+/// 一份模组默认设置在盘上的情形，见 [`read_mod_defaults`]。
+enum ModDefaults {
+    Absent,
+    /// 工作目录之下的 `level` 这一级（正斜杠相对路径）是链接，链接后面这个位置上有东西；`blank` 为真时它是
+    /// 一份空文件（见 [`has_content`]），为假时是一份有内容的文件，或是个目录。
+    Linked {
+        level: &'static str,
+        blank: bool,
+    },
+    /// 路径上没有链接，带着现有内容。
+    Present(Vec<u8>),
+}
+
+/// 读一份模组默认设置（`relative` 见 [`MOD_DEFAULT_OPTIONS`]），不透过链接去补：工作目录之下的哪一级（`config`、
+/// `config/yosbr`，直到文件本身）是符号链接或目录联接，就只透过链接看这份文件在不在、是不是空的，不带回内容。
+/// 后面没有的当它不在，后面是空文件的标出来：两种模组铺过去都没有作者的设置，options.txt 照常建在实例自己的
+/// 目录里，不为一个与此无关的联接（比如几个实例共用整合包配置，YOSBR 每次启动都在里面留一份空文件）放弃补全。
+/// 工作目录本身及其上级不看：整个实例在链接后面时，补的行仍落在这个实例自己的文件里。
+async fn read_mod_defaults(working_dir: &Path, relative: &'static str) -> Result<ModDefaults> {
+    let levels = relative
+        .match_indices('/')
+        .map(|(end, _)| &relative[..end])
+        .chain(std::iter::once(relative));
+    for level in levels {
+        if is_link(&working_dir.join(level)).await? {
+            let path = working_dir.join(relative);
+            let meta = match tokio::fs::metadata(&path).await {
+                Ok(meta) => meta,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(ModDefaults::Absent);
+                }
+                Err(source) => return Err(petalfall_base::Error::Io { path, source }.into()),
+            };
+            // 链接后面是目录的读不了，与路径上没有链接时读不了的一样按有内容算。
+            let blank = if meta.is_file() {
+                match read_optional(&path).await? {
+                    Some(existing) => !has_content(&existing),
+                    None => return Ok(ModDefaults::Absent),
+                }
+            } else {
+                false
+            };
+            return Ok(ModDefaults::Linked { level, blank });
+        }
+    }
+    Ok(match read_optional(&working_dir.join(relative)).await? {
+        Some(existing) => ModDefaults::Present(existing),
+        None => ModDefaults::Absent,
+    })
+}
+
 /// 决定要补哪些行所需的启动时状态。
 pub(crate) struct OptionsInputs<'a> {
     /// 系统显示语言的 BCP 47 标签；读不出来时为 `None`。
@@ -429,6 +494,12 @@ pub(crate) async fn fill_missing_options(
 /// 只要有一份有内容（读不了的也按有内容算），在场的每一份连同空的都补：哪一份先被铺成 options.txt 由模组
 /// 说了算（YOSBR 在加载器初始化时就铺，早于 Default Options），漏掉的恰是先铺的那份时，铺出来的
 /// options.txt 里就没有语言。补进模组那份文件的行记进记账（见 [`FilledLines`]）。
+///
+/// 玩家在实例里建的符号链接与目录联接不跟随，与导出、移动、备份、套默认设置同一口径：原子写入落在链接的位置上，
+/// 会把链接换成一份普通文件，从此不再与链接后面的文件同步；路径上有一级是链接时，补的行又会写进链接后面别的
+/// 实例的文件，记账却记在这里。所以 options.txt 是链接时整份不动；模组默认设置的路径上有链接时不往上写，链接后面
+/// 有内容的按读不了算，空的与路径上没有链接的空文件一样参与「全是空的」那次判断（见 [`read_mod_defaults`]）。
+/// 已知局限：硬链接认不出来，照普通文件补，补完这一处就与别处的那份分开了。
 async fn fill(
     inputs: &OptionsInputs<'_>,
     layout: &GameLayout,
@@ -436,17 +507,31 @@ async fn fill(
     report: &mut OptionsReport,
 ) -> Result<()> {
     let path = working_dir.join(OPTIONS_FILE);
+    // options.txt 在（哪怕是链接），模组就不会再铺默认设置，那几份也不必去看。
+    if is_link(&path).await? {
+        report.notes.push(
+            "options.txt 是符号链接或目录联接，启动器不改链接后面的文件，缺的行没有补".to_owned(),
+        );
+        return Ok(());
+    }
     if let Some(existing) = read_optional(&path).await? {
         fill_file(&path, Some(&existing), inputs, layout, report, false).await?;
         return Ok(());
     }
     let mut pending = Vec::new();
+    let mut linked = Vec::new();
     let mut unreadable = false;
     for relative in MOD_DEFAULT_OPTIONS {
         let defaults = working_dir.join(relative);
-        match read_optional(&defaults).await {
-            Ok(Some(existing)) => pending.push((relative, defaults, existing)),
-            Ok(None) => {}
+        match read_mod_defaults(working_dir, relative).await {
+            Ok(ModDefaults::Present(existing)) => pending.push((relative, defaults, existing)),
+            Ok(ModDefaults::Absent) => {}
+            // 链接后面的那份不往上写：有内容的也就与读不了的一样按有内容算。空的铺过去也没有作者的设置，新建的
+            // options.txt 落在实例自己的目录里、不经过链接，所以与路径上没有链接的空文件一样不为它让路。
+            Ok(ModDefaults::Linked { level, blank }) => {
+                unreadable |= !blank;
+                linked.push((relative, level));
+            }
             // 读不了的说不清有没有内容，按有算：不新建 options.txt，读得了的几份照补。
             Err(err) => {
                 unreadable = true;
@@ -455,10 +540,21 @@ async fn fill(
         }
     }
     if !unreadable && !pending.iter().any(|(_, _, existing)| has_content(existing)) {
-        // 在场的几份全是空的：不新建 options.txt 的话，模组会把其中一份空文件铺过去。
-        let blank_defaults_pending = !pending.is_empty();
+        // 在场的几份全是空的（链接后面的也算）：不新建 options.txt 的话，模组会把其中一份空文件铺过去。
+        let blank_defaults_pending = !pending.is_empty() || !linked.is_empty();
         fill_file(&path, None, inputs, layout, report, blank_defaults_pending).await?;
         return Ok(());
+    }
+    // 不新建 options.txt 时链接后面的那几份（连同空的）都补不了；链接是玩家有意建的，记说明而不记失败。
+    for (relative, level) in linked {
+        let what = if level == relative {
+            relative.to_owned()
+        } else {
+            format!("{relative} 路径上的 {level}")
+        };
+        report.notes.push(format!(
+            "{what} 是符号链接或目录联接，启动器不改链接后面的文件，也不新建 options.txt，由模组照常铺过去"
+        ));
     }
     let mut filled = Vec::new();
     for (relative, defaults, existing) in &pending {
@@ -2473,6 +2569,276 @@ mod tests {
             assert_eq!(scene.read(pending).unwrap(), b"fov:0.8\n", "{pending}");
         }
         assert_eq!(notes, ["游戏语言设为 zh_cn，跟随系统语言 zh-CN", SKIPPED]);
+    }
+
+    // ---- 链接 ----
+
+    #[cfg(windows)]
+    const LINKED_OPTIONS: &str =
+        "options.txt 是符号链接或目录联接，启动器不改链接后面的文件，缺的行没有补";
+
+    #[cfg(windows)]
+    fn linked_note(pending: &str, level: &str) -> String {
+        format!(
+            "{pending} 路径上的 {level} 是符号链接或目录联接，启动器不改链接后面的文件，也不新建 options.txt，由模组照常铺过去"
+        )
+    }
+
+    /// 正斜杠相对路径换成本机分隔符：mklink 会把参数里的正斜杠当成开关。
+    #[cfg(windows)]
+    fn native(relative: &str) -> PathBuf {
+        relative.split('/').collect()
+    }
+
+    /// 目录联接不要管理员权限，玩家让几个实例共用配置时常这样建。
+    #[cfg(windows)]
+    fn junction(link: &Path, target: &Path) {
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+    }
+
+    /// 玩家把 options.txt 做成指向共享文件的符号链接，让几个实例共用设置：链接后面的文件不改，链接也不被换成
+    /// 一份普通文件。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn an_options_file_that_is_a_symlink_is_left_alone() {
+        let scene = scene(V1_21_1);
+        let shared = scene
+            .working_dir
+            .parent()
+            .unwrap()
+            .join("shared-options.txt");
+        let original = b"version:3955\r\nfov:0.5\r\n";
+        std::fs::write(&shared, original).unwrap();
+        let link = scene.working_dir.join(OPTIONS_FILE);
+        // 文件符号链接要开发者模式或管理员。
+        if let Err(err) = std::os::windows::fs::symlink_file(&shared, &link) {
+            eprintln!("建不出文件符号链接（{err}），跳过这条用例的断言");
+            return;
+        }
+
+        let notes = scene.fill(Some("zh-CN")).await;
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), shared);
+        assert_eq!(std::fs::read(&shared).unwrap(), original);
+        assert_eq!(notes, [LINKED_OPTIONS]);
+    }
+
+    /// 目录联接与符号链接一样不跟随。options.txt 在（哪怕是链接），模组就不再铺默认设置，那几份也不补。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn an_options_file_that_is_a_junction_is_left_alone_with_the_mod_defaults() {
+        let scene = scene(V1_21_1);
+        let target = scene.working_dir.parent().unwrap().join("elsewhere");
+        std::fs::create_dir_all(&target).unwrap();
+        let pending = "config/yosbr/options.txt";
+        scene.write(pending, b"fov:0.8\n");
+        let link = scene.working_dir.join(OPTIONS_FILE);
+        junction(&link, &target);
+
+        let notes = scene.fill(Some("zh-CN")).await;
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+        assert_eq!(scene.read(pending).unwrap(), b"fov:0.8\n");
+        assert_eq!(scene.record_bytes(), None);
+        assert_eq!(notes, [LINKED_OPTIONS]);
+    }
+
+    /// config 或它下面的一级是指向别的实例的联接（共用整合包配置）时，补的行会穿过联接写进别人的文件，记账却记在
+    /// 这里：不补，也不新建 options.txt 抢在模组前面。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn mod_defaults_behind_a_junction_are_left_alone() {
+        let cases = [
+            ("config", "config/yosbr/options.txt"),
+            (
+                "config/defaultoptions",
+                "config/defaultoptions/extra/options.txt",
+            ),
+        ];
+        for (level, pending) in cases {
+            let scene = scene(V1_21_1);
+            let target = scene.working_dir.parent().unwrap().join("other-config");
+            let behind = target.join(native(&pending[level.len() + 1..]));
+            std::fs::create_dir_all(behind.parent().unwrap()).unwrap();
+            let original = b"version:3955\nfov:0.8\n";
+            std::fs::write(&behind, original).unwrap();
+            junction(&scene.working_dir.join(native(level)), &target);
+
+            let notes = scene.fill(Some("zh-CN")).await;
+
+            assert_eq!(std::fs::read(&behind).unwrap(), original, "{pending}");
+            assert_eq!(scene.options(), None, "{pending}");
+            assert_eq!(scene.record_bytes(), None, "{pending}");
+            assert_eq!(notes, [linked_note(pending, level)], "{pending}");
+        }
+    }
+
+    /// 模组默认设置自己就是链接时同样不碰，说明里不重复路径。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_mod_defaults_file_that_is_a_link_itself_is_left_alone() {
+        let scene = scene(V1_21_1);
+        let pending = "config/defaultoptions/options.txt";
+        let target = scene.working_dir.parent().unwrap().join("elsewhere");
+        std::fs::create_dir_all(&target).unwrap();
+        junction(&scene.working_dir.join(native(pending)), &target);
+
+        let notes = scene.fill(Some("zh-CN")).await;
+
+        assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+        assert_eq!(scene.options(), None);
+        assert_eq!(
+            notes,
+            [format!(
+                "{pending} 是符号链接或目录联接，启动器不改链接后面的文件，也不新建 options.txt，由模组照常铺过去"
+            )]
+        );
+    }
+
+    /// 联接后面没有模组的默认设置，模组也就没有东西可铺：options.txt 照常建在实例自己的目录里，联接后面一个文件
+    /// 都不加。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_junction_without_mod_defaults_behind_it_does_not_hold_the_options_file_back() {
+        let scene = scene(V1_21_1);
+        let target = scene.working_dir.parent().unwrap().join("other-config");
+        std::fs::create_dir_all(target.join("jei")).unwrap();
+        std::fs::write(target.join("jei").join("jei.cfg"), b"x").unwrap();
+        junction(&scene.working_dir.join("config"), &target);
+
+        let notes = scene.fill(Some("zh-CN")).await;
+
+        assert_eq!(
+            scene.options().unwrap(),
+            b"lang:zh_cn\nonboardAccessibility:false\n"
+        );
+        let behind: Vec<_> = std::fs::read_dir(&target)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(behind, ["jei"]);
+        assert_eq!(notes, ["游戏语言设为 zh_cn，跟随系统语言 zh-CN", SKIPPED]);
+    }
+
+    /// 几个实例共用的配置里只要有一个跑过 YOSBR，联接后面就有一份空的 config/yosbr/options.txt。与实例自己
+    /// 目录里的空文件一样不为它让路：options.txt 照常建在实例自己的目录里，联接后面的空文件一个字节都不动，也不
+    /// 记账；关着「跳过引导」又没有语言可写时，同样新建一份只写着数据版本的挡在模组前面。只有空白的、只有 BOM 或
+    /// BOM 加空白的同样算空。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn blank_mod_defaults_behind_a_junction_do_not_hold_the_options_file_back() {
+        const VERSION_ONLY_BEFORE_BLANK_DEFAULTS: &str = "模组的默认设置是空的，不新建 options.txt 的话模组会把空文件铺过去：已新建一份只写着数据版本的，免得游戏把首次无障碍引导标成走过";
+        let pending = "config/yosbr/options.txt";
+        /// 把 `level` 做成联接，指向实例外一份共用配置，`pending` 在联接后面的那份写成 `blank`，返回它的位置。
+        fn shared(scene: &Scene, level: &str, pending: &str, blank: &[u8]) -> PathBuf {
+            let target = scene.working_dir.parent().unwrap().join("other-config");
+            let behind = target.join(native(&pending[level.len() + 1..]));
+            std::fs::create_dir_all(behind.parent().unwrap()).unwrap();
+            std::fs::write(&behind, blank).unwrap();
+            junction(&scene.working_dir.join(native(level)), &target);
+            behind
+        }
+        for level in ["config", "config/yosbr"] {
+            for blank in [
+                &b""[..],
+                &b"\r\n \t\n"[..],
+                &b"\xef\xbb\xbf"[..],
+                &b"\xef\xbb\xbf\r\n"[..],
+            ] {
+                let skipping = scene(V1_21_1);
+                let behind = shared(&skipping, level, pending, blank);
+                let notes = skipping.fill(Some("zh-CN")).await;
+                assert_eq!(
+                    skipping.options().unwrap(),
+                    b"lang:zh_cn\nonboardAccessibility:false\n",
+                    "{level} {blank:?}"
+                );
+                assert_eq!(std::fs::read(&behind).unwrap(), blank, "{level} {blank:?}");
+                assert_eq!(skipping.record_bytes(), None, "{level} {blank:?}");
+                assert_eq!(
+                    notes,
+                    ["游戏语言设为 zh_cn，跟随系统语言 zh-CN", SKIPPED],
+                    "{level} {blank:?}"
+                );
+
+                let showing = scene(V1_21_1);
+                let behind = shared(&showing, level, pending, blank);
+                let report = showing
+                    .fill_with(Some("en-US"), Some("lang-test"), false)
+                    .await;
+                assert!(report.failures.is_empty(), "{:?}", report.failures);
+                assert_eq!(
+                    showing.options().unwrap(),
+                    b"version:3319\n",
+                    "{level} {blank:?}"
+                );
+                assert_eq!(std::fs::read(&behind).unwrap(), blank, "{level} {blank:?}");
+                assert_eq!(showing.record_bytes(), None, "{level} {blank:?}");
+                assert_eq!(
+                    report.notes,
+                    [VERSION_ONLY_BEFORE_BLANK_DEFAULTS],
+                    "{level} {blank:?}"
+                );
+            }
+        }
+    }
+
+    /// 联接后面那份空的与实例自己目录里有内容的那份同在时，有内容的照补、照记账，不新建 options.txt；空的那份在
+    /// 联接后面补不了，一个字节都不动，记一条说明。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_blank_mod_defaults_file_behind_a_junction_next_to_a_real_one_is_left_alone() {
+        const YOSBR: &str = "config/yosbr/options.txt";
+        const OWN: &str = "config/defaultoptions/options.txt";
+        let scene = scene(V1_21_1);
+        let target = scene.working_dir.parent().unwrap().join("shared-yosbr");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join(OPTIONS_FILE), b"").unwrap();
+        junction(&scene.working_dir.join(native("config/yosbr")), &target);
+        scene.write(OWN, b"fov:0.6\n");
+
+        let notes = scene.fill(Some("zh-CN")).await;
+
+        assert_eq!(std::fs::read(target.join(OPTIONS_FILE)).unwrap(), b"");
+        assert_eq!(
+            scene.read(OWN).unwrap(),
+            b"fov:0.6\nlang:zh_cn\nonboardAccessibility:false\n"
+        );
+        assert_eq!(scene.options(), None);
+        assert_eq!(
+            scene.record(),
+            serde_json::json!({"files": {
+                OWN: ["lang:zh_cn", "onboardAccessibility:false"],
+            }})
+        );
+        assert_eq!(
+            notes,
+            [
+                linked_note(YOSBR, "config/yosbr"),
+                pending_note(OWN),
+                "游戏语言设为 zh_cn，跟随系统语言 zh-CN".to_owned(),
+                SKIPPED.to_owned(),
+            ]
+        );
     }
 
     /// 索引读不出来只算语言这一项没做成：报给调用方，引导那一行不受牵连。
