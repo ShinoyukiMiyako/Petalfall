@@ -7728,6 +7728,178 @@ mod tests {
         );
     }
 
+    /// 早期 Forge 的旧式安装器：install_profile 声明通用 jar 的坐标与它在安装器里的路径，versionInfo 内联版本
+    /// JSON（继承原版 `mc`）。没有处理器，装的时候不拉起 Java。
+    fn legacy_forge_installer(mc: &str, forge: &str) -> Vec<u8> {
+        let coordinate = format!("net.minecraftforge:forge:{mc}-{forge}");
+        let profile = serde_json::json!({
+            "install": { "path": coordinate, "filePath": "/forge-universal.jar" },
+            "versionInfo": {
+                "id": format!("{mc}-forge-{forge}"),
+                "inheritsFrom": mc,
+                "mainClass": "net.minecraft.launchwrapper.Launch",
+                "libraries": [{ "name": coordinate }]
+            }
+        });
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("install_profile.json", stored).unwrap();
+        writer.write_all(profile.to_string().as_bytes()).unwrap();
+        writer.start_file("forge-universal.jar", stored).unwrap();
+        writer.write_all(b"universal-jar").unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    /// 导入 Forge 包走真实的安装链路（旧式安装器，见 [`legacy_forge_installer`]）：读包一步带预排的表，之后带确切的
+    /// 表从装原版一路报到套默认设置，Forge 的 Java、安装器、库、处理器四步排在原版四步之后、解覆盖文件之前；实例的
+    /// 版本 JSON 抄自装出的 Forge 版本，通用 jar 落在库目录里。安装器的 Maven 地址经下载源方案落到 mock；设置里固定的
+    /// 假 Java 8 预先记进识别缓存，取 Java 时不拉起它。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn importing_a_forge_pack_reports_every_step_through_the_installer() {
+        use InstallPhase::*;
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/net/minecraftforge/forge/test-1.0/forge-test-1.0-installer.jar",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(legacy_forge_installer("test", "1.0")),
+            )
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("jdk-8");
+        let java8 = petalfall_java::java_exe_in_home(&home);
+        for file in [
+            java8.clone(),
+            home.join("release"),
+            home.join("lib").join("rt.jar"),
+        ] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"stub").unwrap();
+        }
+        let config = PetalfallConfig {
+            default_java: Some(java8.clone()),
+            extra_java_paths: vec![java8],
+            auto_download_java: false,
+            ..PetalfallConfig::default()
+        };
+        let mc = tmp.path().join("mc");
+        let petalfall = Petalfall::for_test(config, tmp.path().join("data"), mc.clone())
+            .with_manifest_url(format!("{}/manifest.json", server.uri()))
+            .with_source_routes(
+                Arc::new(crate::sources::tests::Routes {
+                    official: server.uri(),
+                    mirror: server.uri(),
+                }),
+                Duration::from_secs(600),
+                Duration::from_secs(2),
+            );
+        let seeded = petalfall
+            .detect_java_with(&crate::java::JavaEnv::for_test(
+                |_: &Path| {
+                    Ok("java version \"1.8.0_51\"\nJava HotSpot(TM) 64-Bit Server VM (build 25.51-b03, mixed mode)\n".to_owned())
+                },
+                String::new(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            seeded
+                .iter()
+                .map(|java| (java.version.major, java.is_complete()))
+                .collect::<Vec<_>>(),
+            vec![(8, true)]
+        );
+        let pack = tmp.path().join("锻造包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test", "forge": "1.0"})),
+            &[("overrides/config/a.txt", b"cfg")],
+        );
+        let source = ModpackSource::File { path: pack };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = petalfall
+            .install_modpack(
+                &source,
+                Some("锻造"),
+                &ImportSelection::default(),
+                "task-forge",
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        drop(tx);
+        let phases = drain_phases(&mut rx);
+
+        let exact = vec![
+            ModpackRead,
+            Metadata,
+            Libraries,
+            Assets,
+            Natives,
+            Java,
+            LoaderInstaller,
+            LoaderLibraries,
+            LoaderProcessors,
+            ModpackOverrides,
+            Template,
+        ];
+        assert_eq!(phases[0], (import_prelude_plan(&source), 0));
+        assert!(
+            phases[1..].iter().all(|(plan, _)| *plan == exact),
+            "{phases:?}"
+        );
+        assert_eq!(
+            phases
+                .iter()
+                .map(|(plan, index)| plan[*index])
+                .collect::<Vec<_>>(),
+            exact
+        );
+        assert_phase_protocol(&phases);
+
+        assert_eq!(
+            outcome.modpack.loader,
+            Some(PackLoader {
+                kind: PackLoaderKind::Forge,
+                version: "1.0".to_owned(),
+            })
+        );
+        let dir = outcome.version_dir;
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("锻造.json")).unwrap()).unwrap();
+        assert_eq!(
+            (&json["id"], &json["inheritsFrom"], &json["mainClass"]),
+            (
+                &serde_json::json!("锻造"),
+                &serde_json::json!("test"),
+                &serde_json::json!("net.minecraft.launchwrapper.Launch")
+            )
+        );
+        assert!(
+            mc.join("versions")
+                .join("test-forge-1.0")
+                .join("test-forge-1.0.json")
+                .is_file()
+        );
+        assert_eq!(
+            std::fs::read(
+                mc.join("libraries")
+                    .join("net/minecraftforge/forge/test-1.0/forge-test-1.0.jar")
+            )
+            .unwrap(),
+            b"universal-jar"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("config").join("a.txt")).unwrap(),
+            b"cfg"
+        );
+    }
+
     /// 准备与落盘用的是同一游戏目录上两个配置不同的门面：报不报套默认设置只看准备时排定的表，套不套照旧看落盘
     /// 时的配置。准备时关、落盘时开：表里没有这一步，一路不报（不崩），默认设置照样补上；准备时开、落盘时关：
     /// 这一步照表报到，默认设置不补。
