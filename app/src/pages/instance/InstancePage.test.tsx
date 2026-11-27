@@ -2269,6 +2269,29 @@ describe("实例详情：补全修不好的损坏实例", () => {
       // 点击漏下去的话改名与删除预览照常发出（没占用时同一按钮会发，见上面的用例）；也不该多出错误通知
       expect(errorToasts()).toEqual(errorsBefore);
     });
+
+    it("改名目标已被排队中的新建占着（盘上还没有它的目录）：「改名为」带重名的原因禁用，点了不改名、不弹错误；删除照常能按", async () => {
+      instances = instances.map((i) => (i.id === ID ? renamable() : i));
+      ipc.overrides.set("install_version", () => new Promise(() => undefined));
+      await open("overview");
+      await act(async () => {
+        await launcher.actions.createInstance({ name: "1.20.1-NeoForge", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "cherry_planks" });
+        await settle();
+      });
+      expect(launcher.state.instances.find((i) => i.id === "1.20.1-NeoForge")?.placeholder).toBe(true);
+      const banner = bannerOf("实例文件不完整，补全修不好");
+      const rename = button("改名为「1.20.1-NeoForge」", banner);
+      // 带原因的禁用仍可聚焦，读屏读出不可用
+      expect([rename.disabled, rename.getAttribute("aria-disabled")]).toEqual([false, "true"]);
+      expect(await tipOf(rename)).toBe("已经有同名的实例了，换一个吧");
+      const errorsBefore = errorToasts();
+      click(rename);
+      await flush();
+      expect(callsOf(ipc, "rename_instance")).toEqual([]);
+      // 状态层改名前的校验同样拦得住，但会弹「没能重命名实例」：没有新的错误通知才说明点击在按钮上就被拦下了
+      expect(errorToasts()).toEqual(errorsBefore);
+      expect(button("删除实例", banner).getAttribute("aria-disabled")).toBeNull();
+    });
   });
 
   it("头图菜单的「补全游戏文件」带原因禁用，悬停写后端给的原因；点了不发补全、不留任务", async () => {

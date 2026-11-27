@@ -252,6 +252,11 @@ function BrokenBanner({ inst, reason, exit, ops }: { inst: InstanceSummary; reas
     }
     // 目录里有一份改个名就认得出的版本 JSON：改名不丢数据，排在前面；删除会把存档一起移进回收站，退到次一级的样式
     const to = exit.kind === "rename" ? exit.to : null;
+    // 改名目标是后端按盘上的目录查重给的，排队中还没建出目录的新建、导入占位项它看不到：与设置页、头图的改名同一份校验，
+    // 此刻改不成就带原因禁用，不让玩家点了才弹错误；锁住的原因排在前面
+    const renameLock = lockReason(ops.locks.rename, "rename");
+    const toError = to === null ? null : ops.nameError(to);
+    const renameReason = renameLock !== undefined ? renameLock : toError !== null ? toError : undefined;
     const rename = (name: string) => {
       setRenaming(true);
       void ops.rename(name).then(() => setRenaming(false));
@@ -264,7 +269,7 @@ function BrokenBanner({ inst, reason, exit, ops }: { inst: InstanceSummary; reas
         actions={
           <>
             {to !== null && (
-              <Button icon="edit" loading={renaming} disabledReason={lockReason(ops.locks.rename, "rename")} onClick={() => rename(to)}>
+              <Button icon="edit" loading={renaming} disabledReason={renameReason} onClick={() => rename(to)}>
                 {REPAIR_EXIT_COPY.rename(to)}
               </Button>
             )}
