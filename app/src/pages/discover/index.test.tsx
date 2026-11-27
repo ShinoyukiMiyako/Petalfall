@@ -501,6 +501,18 @@ describe("发现页：搜索", () => {
     expect(document.activeElement).toBe(filter);
   });
 
+  it("筛选浮层的宽度上限放到窗口内：不受浮层默认 360 的上限，加载器一行排满五项时最后一项不被面板裁掉", async () => {
+    await mount({ page: "discover", kind: "mod" });
+    const filter = document.querySelector<HTMLButtonElement>('button[aria-label="筛选"]');
+    if (filter === null) throw new Error("找不到筛选按钮");
+    act(() => filter.click());
+    await flush();
+    const panel = document.querySelector<HTMLElement>('[role="dialog"][aria-label="筛选条件"]');
+    if (panel === null) throw new Error("筛选浮层没有打开");
+    expect([...panel.querySelectorAll('[role="radiogroup"][aria-label="加载器"] [role="radio"]')].map((item) => item.textContent)).toEqual(["不限", "Fabric", "Forge", "NeoForge", "Quilt"]);
+    expect(panel.getAttribute("data-max-width")).toBe("window");
+  });
+
   /** 触发器里叠着撑宽的候选文案（不进文字内容）。 */
   const reserved = (label: string) => {
     const trigger = document.querySelector(`button[role="combobox"][aria-label="${label}"]`);

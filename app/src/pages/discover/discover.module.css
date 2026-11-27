@@ -196,14 +196,22 @@
   right: calc(var(--sk-space-6) * -1);
 }
 
+/*
+ * 面板按内容取宽，不定宽：加载器一行是五项分段（不限、Fabric、Forge、NeoForge、Quilt），sm 号下约 341px，
+ * 加上两侧内边距超过原先定的 320，也超过浮层默认 360 的上限，最后一项 Quilt 被面板裁掉。分段控件不折行，
+ * 宽度又随字体度量变，定一个数总有放不下的时候；面板里的选项都有长度上限，上限放到窗口内（maxWidth="window"）。
+ * 下限放在主体上：没有加载器一行的资源类型，面板仍是原来的 320（主体加两侧 1px 描边）
+ */
 .filterPanel {
-  width: 320px;
+  width: max-content;
 }
 
 .filterBody {
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-14);
+  box-sizing: border-box;
+  min-width: 318px;
   padding: var(--sk-space-14) var(--sk-space-16);
 }
 

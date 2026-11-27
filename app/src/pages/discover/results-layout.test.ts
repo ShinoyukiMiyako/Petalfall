@@ -54,6 +54,13 @@ describe("说明行与工具条不被晚到的文字挤动", () => {
     expect(value(".filterBadge", "position")).toBe("absolute");
   });
 
+  it("筛选浮层按内容取宽、不定宽：加载器一行五项分段比 320 宽也排得下；下限仍是 320（主体 318 加两侧 1px 描边）", () => {
+    expect(value(".filterPanel", "width")).toBe("max-content");
+    expect(declarations(".filterPanel").has("max-width")).toBe(false);
+    expect(value(".filterBody", "box-sizing")).toBe("border-box");
+    expect(value(".filterBody", "min-width")).toBe("318px");
+  });
+
   it("角标的描边随工具条吸住与否取工具条此刻的底色：伸出按钮的那半圈落在底色上，不多出一圈异色的环", () => {
     expect(value(".toolbarWrap", "--badge-ring")).toBe("var(--sk-bg)");
     expect(value(".toolbarWrap", "--badge-ring")).toBe(value(".toolbarWrap", "background"));
