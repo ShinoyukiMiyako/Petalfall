@@ -17,8 +17,9 @@
 //!
 //! 写包在阻塞线程里进行，先写到目标旁边的临时文件，回读校验通过后才换到目标位置。
 //!
-//! 导出按固定的四步报步骤（`CoreEvent::Phase`）：解析实例并算哈希、向 Modrinth 认 Mod、收集要打包的文件并
-//! 写包、回读校验，每次都报全。预览不属于任何任务，同一次规划走下来不报步骤。
+//! 导出按固定的四步报步骤（`CoreEvent::Phase`）：读取 Mod 文件并算哈希、向 Modrinth 认 Mod、收集要打包的文件并
+//! 写包、回读校验，每次都报全。实例找不到、导不出这类动手前就拒绝的一步都不报：第一步在这些检查都过了之后才进。
+//! 预览不属于任何任务，同一次规划走下来不报步骤。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
@@ -463,7 +464,7 @@ impl Petalfall {
     /// 先按此刻的盘面重新规划，再在阻塞线程里写到临时文件并回读校验，通过后改名到目标位置。取消在
     /// 算哈希时按文件、联网时立即、写包时按 64 KiB 观察。失败时临时文件已删，目标文件不动。
     ///
-    /// 步骤按 `EXPORT_PHASES` 四步报全；开工前就已取消的不报任何一步。
+    /// 步骤按 `EXPORT_PHASES` 四步报全；开工前就已取消的，实例找不到、导不出这类动手前就拒绝的，不报任何一步。
     pub async fn export_modpack(
         &self,
         id: &str,
@@ -474,7 +475,6 @@ impl Petalfall {
         self.ensure_not_cancelled()?;
         // 校验那一步是在写包的阻塞线程里进入的，播报器要能带过去。
         let phases = Arc::new(PhaseAnnouncer::new(events, EXPORT_PHASES.to_vec()));
-        phases.enter(InstallPhase::ExportHash);
         let plan = self
             .plan_export(
                 id,
@@ -651,9 +651,8 @@ impl Petalfall {
         }
     }
 
-    /// `extras` 是要遍历的额外项，别的额外项不碰盘。`phases` 是导出任务的步骤播报器，第一步（算哈希）由导出在
-    /// 开工时报，这里报认 Mod 与凑包两步；预览不属于任何任务，传 `None`。`previewing` 为真时是给预览规划，
-    /// 记账读不出来不让它失败（见下）。
+    /// `extras` 是要遍历的额外项，别的额外项不碰盘。`phases` 是导出任务的步骤播报器，这里报算哈希、认 Mod 与凑包
+    /// 三步；预览不属于任何任务，传 `None`。`previewing` 为真时是给预览规划，记账读不出来不让它失败（见下）。
     async fn plan_export(
         &self,
         id: &str,
@@ -676,6 +675,11 @@ impl Petalfall {
         let dirs = self.instance_dirs(&version).await?;
         let listing = list_mods(&dirs.mods_dir).await?;
 
+        // 实例找不到、导不出这类拒绝都在上面报出：被拒的导出一步都不报，与恢复存档同一约定，前端不会先看到
+        // 第一步再看到拒绝。
+        if let Some(phases) = phases {
+            phases.enter(InstallPhase::ExportHash);
+        }
         emit(
             events,
             CoreEvent::stage(format!("读取 {} 个 Mod 文件", listing.enabled.len())),
@@ -2960,6 +2964,64 @@ mod tests {
 
         assert!(err.is_cancelled(), "{err:?}");
         assert_eq!(drain(rx).await, Vec::<CoreEvent>::new());
+    }
+
+    /// 动手之前就拒绝的导出（实例不在、带光影、没装完整）连第一步都不报，一条事件都没有，也不留文件。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_rejected_export_announces_no_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = bare_petalfall(tmp.path());
+        bare_instance(
+            tmp.path(),
+            "带光影",
+            r#"{"id":"带光影","inheritsFrom":"1.20.1","type":"release","mainClass":"M",
+                "libraries":[{"name":"optifine:OptiFine:1.20.1_HD_U_I6"}]}"#,
+        );
+        let unfinished = bare_instance(
+            tmp.path(),
+            "装了一半",
+            r#"{"id":"装了一半","inheritsFrom":"1.21.1","type":"release","mainClass":"M"}"#,
+        );
+        MarkerStore::for_version_dir(&unfinished)
+            .save(&petalfall_instance::IncompleteMarker::pending(
+                petalfall_instance::IncompleteKind::Repair,
+                1,
+            ))
+            .await
+            .unwrap();
+
+        for id in ["没有这个", "带光影", "装了一半"] {
+            let target = ModpackExportTarget::new(tmp.path().join(format!("{id}.mrpack")));
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+            let err = petalfall
+                .export_modpack(id, &options(Vec::new(), false), &target, Some(&tx))
+                .await
+                .unwrap_err();
+            drop(tx);
+
+            let expected = match id {
+                "没有这个" => matches!(err, CoreError::VersionNotInstalled { .. }),
+                "带光影" => matches!(
+                    err,
+                    CoreError::ModpackExportUnsupported {
+                        reason: ExportBlock::LoaderUnsupported,
+                        ..
+                    }
+                ),
+                _ => matches!(
+                    err,
+                    CoreError::ModpackExportUnsupported {
+                        reason: ExportBlock::Incomplete,
+                        ..
+                    }
+                ),
+            };
+            assert!(expected, "{id}: {err:?}");
+            assert_eq!(drain(rx).await, Vec::<CoreEvent>::new(), "{id}");
+            assert!(!target.destination().exists(), "{id}");
+            assert!(!target.part_path().exists(), "{id}");
+        }
     }
 
     /// 没有事件出口时播报器照样按表推进、只是不发：校验那一步在阻塞线程里进入也不出错，导出照常成功。

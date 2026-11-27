@@ -812,9 +812,9 @@ function exportModpack(args: MockArgs): Promise<ModpackExportOutcomeDto> {
     }
   }
   return runMockTask(taskId, async () => {
-    // 与后端同一规则：任务一开工就报第一步，排在规划与读 Mod 文件之前
-    phase(taskId, EXPORT_PLAN, "export_hash");
+    // 与后端同一规则：实例不在、导不出这类拒绝在规划时报出，过了才报第一步，被拒的导出一步都不报
     const plan = planExport(id);
+    phase(taskId, EXPORT_PLAN, "export_hash");
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `读取 ${plan.indexed.length + plan.bundled.length} 个 Mod 文件` });
     await idleStep(taskId);
     phase(taskId, EXPORT_PLAN, "export_identify");

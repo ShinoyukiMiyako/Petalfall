@@ -812,6 +812,23 @@ describe("导出整合包 mock", () => {
     });
   });
 
+  it("导出动手前就被拒（实例不存在、没装完）：以同样的错误结束，一步都不报", async () => {
+    for (const [id, code] of [
+      ["不存在", "version_not_installed"],
+      ["没装完", "modpack_export_unsupported"],
+    ] as const) {
+      const taskId = `t-rejected-${id}`;
+      const events: CoreEvent[] = [];
+      const off = await listen<CoreEvent>(CORE_EVENT, (e) => {
+        if (e.task_id === taskId) events.push(e);
+      });
+      const error = await errorOf(exportModpack(taskId, mockGameDir(), id, base));
+      off();
+      expect(error, id).toMatchObject({ code });
+      expect(phasesOf(events), id).toEqual([]);
+    }
+  });
+
   it("参数非法时报 invalid_argument，detail 给出 field 与 rule，不登记任务也不占实例", async () => {
     const cases: [Partial<ModpackExportOptions>, Record<string, unknown>][] = [
       [{ name: "   " }, { field: "name", rule: "empty" }],
