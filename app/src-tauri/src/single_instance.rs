@@ -17,6 +17,10 @@
 //! 后来者唤醒之前先把它清掉，免得把上一回的应答当成这一回的。除了先来者叫到窗口，还有两种情况会置上它：
 //! 等着的后来者里有一个接手了，其余的由它的窗口兑现，不该在它关掉之后再各开一个；先来者退出时要拉起安装程序，
 //! 安装完由安装程序重新打开落樱，等着的后来者抢先接手的话，安装程序替换文件时它就挡在那里。
+//!
+//! 拉起安装程序这一种是放行，另置一个放行事件，后来者不清它：放行之后、先来者退出之前才到的后来者照常清应答
+//! 的话，先前在等的后来者读不到放行，它自己也等不到应答，先来者一退出就有人接手开窗口。放行事件只由新占到
+//! 占位的进程清掉，那时上一代的先来者已经不在了。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -81,32 +85,67 @@ fn open_event(name: &str, manual_reset: bool) -> windows_core::Result<(Event, bo
     Ok((event, existed))
 }
 
-/// 应答事件：置上它，在等的后来者就都退出。
+/// 应答事件与放行事件：置上应答，在等的后来者就都退出；置上放行，之后才到的后来者也不再接手。
 #[derive(Clone)]
-pub struct Answer(Arc<Event>);
+pub struct Answer {
+    answer: Arc<Event>,
+    released: Arc<Event>,
+}
 
 impl Answer {
-    /// 让在等的后来者都退出。
+    /// 先来者要拉起安装程序、就此退出：让在等的后来者都退出，放行之后、先来者退出之前才到的也一样。应答照样
+    /// 置上：不认放行事件的旧版本后来者只看应答。
     pub fn release_waiting(&self) {
         // SAFETY: 句柄由本结构持有，活到最后一个克隆放下
-        if let Err(err) = unsafe { SetEvent(self.0 .0) } {
+        if let Err(err) = unsafe { SetEvent(self.released.0) } {
+            tracing::error!(
+                error = %err,
+                "置放行事件失败，放行之后才到的后来者可能赶在安装程序之前接手"
+            );
+        }
+        self.acknowledge();
+    }
+
+    /// 应答这一回在等的后来者：叫到了窗口，或者接手之后由自己的窗口兑现其余的。
+    fn acknowledge(&self) {
+        // SAFETY: 同上
+        if let Err(err) = unsafe { SetEvent(self.answer.0) } {
             tracing::error!(error = %err, "置应答事件失败，在等的后来者要等到超时才退出");
         }
     }
 
-    /// 最多等 `within`，看应答有没有置上。
+    /// 最多等 `within`，看应答有没有置上；放行过的也算。
     fn is_set(&self, within: Duration) -> windows_core::Result<bool> {
-        // SAFETY: 同上
-        match unsafe { WaitForSingleObject(self.0 .0, within.as_millis() as u32) } {
-            WAIT_OBJECT_0 => Ok(true),
-            WAIT_TIMEOUT => Ok(false),
-            _ => Err(windows_core::Error::from_win32()),
+        if wait_event(&self.released, Duration::ZERO)? {
+            return Ok(true);
         }
+        wait_event(&self.answer, within)
     }
 
+    fn is_released(&self) -> windows_core::Result<bool> {
+        wait_event(&self.released, Duration::ZERO)
+    }
+
+    /// 只清应答，不清放行。
     fn clear(&self) -> windows_core::Result<()> {
         // SAFETY: 同上
-        unsafe { ResetEvent(self.0 .0) }
+        unsafe { ResetEvent(self.answer.0) }
+    }
+
+    /// 新占到占位时清掉上一代先来者的放行：等它的后来者还没走完时，放行事件跟着它们的句柄还在。
+    fn clear_release(&self) -> windows_core::Result<()> {
+        // SAFETY: 同上
+        unsafe { ResetEvent(self.released.0) }
+    }
+}
+
+/// 最多等 `within`，看事件有没有置上。
+fn wait_event(event: &Event, within: Duration) -> windows_core::Result<bool> {
+    // SAFETY: 句柄由调用方持有的 Event 保有，调用期间有效
+    match unsafe { WaitForSingleObject(event.0, within.as_millis() as u32) } {
+        WAIT_OBJECT_0 => Ok(true),
+        WAIT_TIMEOUT => Ok(false),
+        _ => Err(windows_core::Error::from_win32()),
     }
 }
 
@@ -142,7 +181,7 @@ impl Instance {
                     return;
                 }
                 if on_request() {
-                    self.answer.release_waiting();
+                    self.answer.acknowledge();
                 }
             })?;
         Ok(())
@@ -172,6 +211,11 @@ fn answer_name(claim: &str) -> String {
     format!("{claim}|answer")
 }
 
+/// 放行事件名，同应答事件名的规则。
+fn released_name(claim: &str) -> String {
+    format!("{claim}|released")
+}
+
 /// 占位；已被占着就唤醒先来者，等它应答或退出，最多等 `wait`。
 fn claim_name(name: &str, wait: Duration) -> windows_core::Result<Claim> {
     match ask(name)? {
@@ -197,16 +241,24 @@ struct Waiting {
 fn ask(name: &str) -> windows_core::Result<Asked> {
     // 先于唤醒打开：先来者收到唤醒时，应答要落在后来者也拿着的这个对象上。
     let (answer, _) = open_event(&answer_name(name), true)?;
-    let answer = Answer(Arc::new(answer));
+    let (released, _) = open_event(&released_name(name), true)?;
+    let answer = Answer {
+        answer: Arc::new(answer),
+        released: Arc::new(released),
+    };
     let (claim, existed) = open_event(name, false)?;
     if !existed {
+        answer.clear_release()?;
         return Ok(Asked::Free(Instance {
             claim,
             answer,
             waited_for_exit: None,
         }));
     }
-    answer.clear()?;
+    // 先来者放行过就不清应答：先前在等的后来者可能还没读到它，不认放行事件的旧版本后来者也只看它。
+    if !answer.is_released()? {
+        answer.clear()?;
+    }
     // SAFETY: claim 是上面拿到的有效句柄
     unsafe { SetEvent(claim.0) }?;
     // 不拿着占位等（函数返回时 claim 随之关掉）：先来者退出时，只有所有句柄都关了系统才回收这个对象，
@@ -230,7 +282,7 @@ impl Waiting {
                     return Ok(Claim::Forwarded);
                 }
                 // 其余还在等的后来者由这个进程的窗口兑现。
-                self.answer.release_waiting();
+                self.answer.acknowledge();
                 return Ok(Claim::First(Instance {
                     claim,
                     answer: self.answer,
@@ -395,9 +447,54 @@ mod tests {
     fn a_stale_answer_does_not_send_a_later_start_away() {
         let name = unique("stale");
         let owner = first(&name);
-        owner.answer().release_waiting();
+        owner.answer().acknowledge();
         let _woken = listening(owner, false);
         assert_eq!(outcome(claim_name(&name, BRIEF).unwrap()), "unanswered");
+    }
+
+    /// 先来者放行之后、退出之前又来了一个后来者：它不能清掉放行，先前在等的那个与它自己都要走，谁也不赶在安装
+    /// 程序之前接手。清应答之前不看放行的话，先等的那个占到占位后读不到应答，就接手了。
+    #[test]
+    fn a_start_after_the_hand_over_does_not_undo_it_for_one_already_waiting() {
+        let name = unique("handover-late");
+        let owner = first(&name);
+        let early = waiting(&name);
+        owner.answer().release_waiting();
+        let late = waiting(&name);
+        assert!(
+            wait_event(&early.answer.answer, Duration::ZERO).unwrap(),
+            "后到的不清应答：不认放行事件的旧版本后来者只看它"
+        );
+        drop(owner);
+        assert_eq!(outcome(early.wait(ENOUGH).unwrap()), "forwarded");
+        assert_eq!(outcome(late.wait(ENOUGH).unwrap()), "forwarded");
+    }
+
+    /// 放行之后才到的后来者，先来者已叫不到窗口、也还没退出：它照样靠放行走，不等到时限。只看应答的话，它刚把
+    /// 应答清掉，等不到就落成没人应答。
+    #[test]
+    fn a_start_after_the_hand_over_leaves_on_it_while_the_owner_is_still_exiting() {
+        let name = unique("handover-exiting");
+        let owner = first(&name);
+        let answer = owner.answer();
+        let _woken = listening(owner, false);
+        answer.release_waiting();
+        assert_eq!(outcome(claim_name(&name, BRIEF).unwrap()), "forwarded");
+    }
+
+    /// 上一代先来者放行退出后，放行事件跟着还没走的后来者的句柄还在；新占到占位的进程清掉它，自己的后来者不被
+    /// 上一代的放行打发走。
+    #[test]
+    fn a_new_owner_is_not_bound_by_the_previous_owners_hand_over() {
+        let name = unique("handover-next");
+        let owner = first(&name);
+        let lingering = waiting(&name);
+        owner.answer().release_waiting();
+        drop(owner);
+        let successor = first(&name);
+        let _woken = listening(successor, false);
+        assert_eq!(outcome(claim_name(&name, BRIEF).unwrap()), "unanswered");
+        drop(lingering);
     }
 
     #[test]
@@ -451,7 +548,7 @@ mod tests {
     }
 
     /// 不同版本靠同一个名字在同一个数据目录上互斥。拼法一变，新旧版本就互不排斥，会同时写同一份数据，
-    /// 所以把整串钉成字面量：前缀、分隔符与应答后缀都不能动。
+    /// 所以把整串钉成字面量：前缀、分隔符与应答、放行两个后缀都不能动。
     #[test]
     fn the_name_is_spelled_the_way_released_versions_spell_it() {
         let name = event_name(&PathBuf::from(r"D:\Games\Petalfall"));
@@ -459,6 +556,10 @@ mod tests {
         assert_eq!(
             answer_name(&name),
             r"Local\Petalfall-d:/games/petalfall|answer"
+        );
+        assert_eq!(
+            released_name(&name),
+            r"Local\Petalfall-d:/games/petalfall|released"
         );
     }
 
