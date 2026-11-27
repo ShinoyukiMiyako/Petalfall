@@ -142,13 +142,16 @@ export function brokenInstances(list: readonly InstanceSummary[]): BrokenInstanc
 /**
  * 修复横幅的标题。有修得好的时只数它们，修不好的留给正文各说各的。数的是需要修复的实例：此刻被锁着（被当作基底、在备份、
  * 在移动）的也算，「全部修复」这一轮跳过它们，它们留在横幅上，锁放开后照样能修。
- * 一个都修不好时不说需要修复；全是版本 JSON 读不出来的，文件可能完好、放开占用就恢复，说暂时无法启动而不说修不好。
+ * 一个都修不好时不说需要修复；全是版本 JSON 读不出来的，文件可能完好、放开占用就恢复，说暂时无法启动而不说修不好；
+ * 没有读不出来的说补全修不好；两样掺着时哪种说法都只对一部分，换成中性的无法启动。
  */
 export function repairBannerTitle(broken: BrokenInstances): string {
   if (broken.repairable.length > 0) return LIBRARY_COPY.repairTitle(broken.repairable.length);
   const count = broken.unrepairable.length;
   if (count === 0) throw new Error("修复横幅没有要列的实例");
-  return broken.unrepairable.every((u) => u.exit.kind === "rescan") ? LIBRARY_COPY.unreadableTitle(count) : LIBRARY_COPY.unrepairableTitle(count);
+  const unreadable = broken.unrepairable.filter((u) => u.exit.kind === "rescan").length;
+  if (unreadable === count) return LIBRARY_COPY.unreadableTitle(count);
+  return unreadable === 0 ? LIBRARY_COPY.unrepairableTitle(count) : LIBRARY_COPY.mixedTitle(count);
 }
 
 /**

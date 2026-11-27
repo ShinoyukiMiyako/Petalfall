@@ -1466,7 +1466,7 @@ describe("实例库：动作", () => {
     expect(banner.querySelector("button")).toBeNull();
   });
 
-  it("修不好的不止一个：全是读不出来的标题说暂时无法启动、各自成句；掺着只能删除的标题说补全修不好；都不给按钮", async () => {
+  it("修不好的不止一个：全是读不出来的标题说暂时无法启动、各自成句；掺着只能删除的标题说无法启动；都不给按钮", async () => {
     instances = [...instances.filter((i) => i.id !== "坏掉的"), unreadable("网盘甲"), unreadable("网盘乙")];
     await mount();
     const banner = () => {
@@ -1482,7 +1482,7 @@ describe("实例库：动作", () => {
       await launcher.actions.refreshInstances();
       await settle();
     });
-    expect(banner().textContent).toBe(`2 个实例补全修不好「网盘甲」暂时无法启动：${unreadableReason("网盘甲")}。${hint}「旧电脑拷来的」补全修不好：${UNREPAIRABLE}。`);
+    expect(banner().textContent).toBe(`2 个实例无法启动「网盘甲」暂时无法启动：${unreadableReason("网盘甲")}。${hint}「旧电脑拷来的」补全修不好：${UNREPAIRABLE}。`);
     expect(banner().querySelector("button")).toBeNull();
   });
 

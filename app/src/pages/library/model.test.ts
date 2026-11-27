@@ -198,15 +198,19 @@ describe("统计与签名", () => {
     expect(repairBannerTitle(brokenInstances(list))).toBe(`${fixable.length} 个实例需要修复`);
   });
 
-  it("修复横幅的标题：一个都修不好时，全是读不出来的说暂时无法启动，掺着别的说补全修不好", () => {
+  it("修复横幅的标题：一个都修不好时，全是读不出来的说暂时无法启动，没有读不出来的说补全修不好，两样掺着说无法启动", () => {
     const unreadable = (id: string) => {
       const reason = `版本 JSON 读不出来：文件 IO 失败: D:\\v\\${id}\\${id}.json：拒绝访问。 (os error 5)`;
       return inst(id, { status: "broken", brokenReason: reason, unrepairableReason: reason, unrepairableKind: "unreadable", mcVersion: null });
     };
     const lost = inst("旧档", { status: "broken", brokenReason: "缺少版本 JSON", unrepairableReason: "缺少版本 JSON，也没有记下当初装的是什么", unrepairableKind: "no_record", mcVersion: null });
+    const hinted = "缺少版本 JSON，也没有记下当初装的是什么；目录里有一份叫 1.20.1.json 的版本文件，把实例改名成 1.20.1 就能认出来";
+    const renamable = inst("拷来的", { status: "broken", brokenReason: "缺少版本 JSON", unrepairableReason: hinted, unrepairableKind: "no_record", renameTo: "1.20.1", mcVersion: null });
     expect(repairBannerTitle(brokenInstances([unreadable("甲")]))).toBe("1 个实例暂时无法启动");
     expect(repairBannerTitle(brokenInstances([unreadable("甲"), inst("好的"), unreadable("乙")]))).toBe("2 个实例暂时无法启动");
-    expect(repairBannerTitle(brokenInstances([unreadable("甲"), lost]))).toBe("2 个实例补全修不好");
+    expect(repairBannerTitle(brokenInstances([unreadable("甲"), lost]))).toBe("2 个实例无法启动");
+    expect(repairBannerTitle(brokenInstances([lost, unreadable("甲"), renamable, unreadable("乙")]))).toBe("4 个实例无法启动");
+    expect(repairBannerTitle(brokenInstances([lost, renamable]))).toBe("2 个实例补全修不好");
     expect(repairBannerTitle(brokenInstances([lost]))).toBe("1 个实例补全修不好");
     expect(() => repairBannerTitle(brokenInstances([inst("好的")]))).toThrow("修复横幅没有要列的实例");
   });
@@ -416,10 +420,11 @@ describe("文案", () => {
     ).toBe(`「坏掉的」缺少游戏文件，补全后就能启动。「甲」暂时无法启动：${same}${REPAIR_EXIT_COPY.unreadableHint}「乙」暂时无法启动：${same}${REPAIR_EXIT_COPY.unreadableHint}`);
   });
 
-  it("修复横幅的标题：一个都修不好时说补全修不好，全是读不出来的说暂时无法启动，不说需要修复；有修得好的照旧", () => {
+  it("修复横幅的标题：一个都修不好时说补全修不好，全是读不出来的说暂时无法启动，两样掺着说无法启动，不说需要修复；有修得好的照旧", () => {
     expect(LIBRARY_COPY.unrepairableTitle(1)).toBe("1 个实例补全修不好");
     expect(LIBRARY_COPY.unrepairableTitle(3)).toBe("3 个实例补全修不好");
     expect(LIBRARY_COPY.unreadableTitle(2)).toBe("2 个实例暂时无法启动");
+    expect(LIBRARY_COPY.mixedTitle(2)).toBe("2 个实例无法启动");
     expect(LIBRARY_COPY.repairTitle(2)).toBe("2 个实例需要修复");
   });
 
