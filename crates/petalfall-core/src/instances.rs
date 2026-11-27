@@ -1006,8 +1006,8 @@ pub(crate) fn inheritance_root(scan: &VersionScan, id: &str) -> String {
 }
 
 impl Petalfall {
-    /// `id` 继承链上除它自己以外的版本 id，由近及远，最后一个是客户端 jar 与 natives 所在的链根。
-    /// 没有 `inheritsFrom` 时为空。
+    /// `id` 继承链上除它自己以外的版本 id，由近及远；链完整时最后一个是客户端 jar 与 natives 所在的链根，
+    /// 链断开时最后一个是断开的那一环（见下文）。没有 `inheritsFrom` 时为空。
     ///
     /// 只读链上各环的版本 JSON，不扫整个 `versions/`：启动、接回游戏、补全与移动在开局就要它，用来在任务
     /// 期间占住这些基底版本。某一环的 JSON 不在或解析不了时停在那一环（它的 id 已经收进结果）：链断在哪、
