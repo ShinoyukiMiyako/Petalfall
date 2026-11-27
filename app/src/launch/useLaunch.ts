@@ -24,9 +24,10 @@ export interface LaunchEntry {
   /** failed 视图的文案与修复动作；其余视图为 null。 */
   failure: FailureCopy | null;
   /**
-   * 此刻不能启动的原因：存档正在备份、恢复或导出，或者别的实例正以它为基底，后端会以 instance_busy 拒绝；失败、已结束的会话
-   * 视图下实例已被重扫成补全修不好时，是 rules 的 repairRefusal 那一句。入口据此带原因禁用启动与重新启动，取消、结束、
-   * 查看诊断不受影响；能启动为 null。
+   * 此刻不能启动的原因：存档正在备份、恢复或导出，或者别的实例正以它为基底，后端会以 instance_busy 拒绝。失败、已结束的会话
+   * 视图下按实例此刻的状态算：还在安装是 LAUNCH_COPY.stillInstalling；已被重扫成损坏时点下去排的是补全，与 repairBlocked
+   * 同一份原因（修不好的那一句，或者挡住补全的锁）。入口据此带原因禁用启动与重新启动，取消、结束、查看诊断不受影响；
+   * 能启动为 null。
    */
   blocked: string | null;
   /**
@@ -119,13 +120,16 @@ export function useLaunch(instanceId: string): LaunchEntry {
   // 启动入口只在这个实例没有活动会话时才问这两项，损坏视图同样，会话这一项恒为 false
   const locks = locksOf(inst, false);
   const lockBlocked = busySaves ? LAUNCH_COPY.savesBusy : locks.launch === null ? null : locks.launch === "moving" ? LAUNCH_COPY.moving : INSTANCE_IN_USE_COPY.launch(locks.launch.usedBy);
-  // 失败、已结束的会话视图排在实例自身的损坏之前（见 launchView），入口照样给「启动」「重新启动」；实例此刻已被重扫成补全修不好时，
-  // 点下去只会被启动拦截以同一句原因拒绝，所以带着它禁用。排在锁之前：锁放开了照样起不来
-  const sessionRefusal = (view.kind === "failed" || view.kind === "stopped") && inst.status === "broken" ? repairRefusal(inst) : null;
-  const blocked = sessionRefusal !== null ? sessionRefusal : lockBlocked;
-  const repairReason = isBroken && !reimport ? lockReason(locks.repair, "repair") : undefined;
+  // 损坏实例上点启动，启动拦截排的是补全：损坏视图的「修复并启动」与会话视图下的「启动」「重新启动」都按这一份禁用。
   // 修不好的说后端给的原因，排在锁之前：锁放开了照样修不好，「完成后才能补全」是兑现不了的话
-  const unrepairable = isBroken && !reimport ? repairRefusal(inst) : null;
-  const repairBlocked = unrepairable !== null ? unrepairable : repairReason === undefined ? null : repairReason;
+  const unrepairable = inst.status === "broken" ? repairRefusal(inst) : null;
+  const repairLock = inst.status === "broken" ? lockReason(locks.repair, "repair") : undefined;
+  const repairGate = unrepairable !== null ? unrepairable : repairLock === undefined ? null : repairLock;
+  // 失败、已结束的会话视图排在实例自身的状态之前（见 launchView），入口照样给「启动」「重新启动」，点下去却由启动拦截按实例此刻的
+  // 状态分路：还在安装的以同一句拒绝，损坏的转成修复并启动。所以按实际要走的那条路禁用，这两种都不再看启动的锁：
+  // 前者锁放开了照样起不来，后者排的是补全，挡它的是补全的锁（含改动 Mod 与继承链上的基底正忙）
+  const sessionView = view.kind === "failed" || view.kind === "stopped";
+  const blocked = sessionView && inst.status === "installing" ? LAUNCH_COPY.stillInstalling : sessionView && inst.status === "broken" ? repairGate : lockBlocked;
+  const repairBlocked = isBroken && !reimport ? repairGate : null;
   return { instance: inst, view, stopping, failure, blocked, repairBlocked, launch, cancel, stop, dismiss, openCrash, openLogs, fix };
 }

@@ -212,6 +212,9 @@ describe("命令面板", () => {
     ["实例照旧完好：照常给出启动", null, true],
     ["实例被重扫成补全修不好：不给启动", { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: "缺少版本 JSON，也没有记下当初装的是什么", mc_version: null }, false],
     ["实例被重扫成整合包没导入完：不给启动", { incomplete: { kind: "modpack", outcome: "pending", started_at: 1_699_000_000_000, spec: null, error: null } }, false],
+    ["实例被重扫成修得好的损坏、没有被挡住：照常给出启动", { status: "broken", broken_reason: "缺少客户端 jar" }, true],
+    ["实例被重扫成修得好的损坏、它依赖的实例正在运行：不给启动", { status: "broken", broken_reason: "缺少客户端 jar", base_busy: { id: "创造", activity: "running" } }, false],
+    ["实例被重扫成修得好的损坏、后端正在改动它的 Mod：不给启动", { status: "broken", broken_reason: "缺少客户端 jar", activity: "modifying" }, false],
   ])("当前实例启动失败后，%s", async (_name, rescanned, offered) => {
     ipc.overrides.set("launch_game", () => {
       throw new IpcError("files_offline", "还缺文件", { count: 3 });
@@ -232,6 +235,34 @@ describe("命令面板", () => {
     act(() => shell.openPalette());
     await flush();
     expect(options().some((o) => o.textContent?.startsWith(LAUNCH_COPY.group("生存")))).toBe(offered);
+  });
+
+  it("当前实例启动失败后点了修复实例、补全进行中：不给启动，失败会话仍在", async () => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("version_broken", "版本 JSON 读不出来");
+    });
+    // 补全一直不返回：实例停在安装中
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await mount();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+      await settle();
+    });
+    const target = launcher.actions.failureFix("repair");
+    if (!("run" in target)) throw new Error("修复实例应是命令类修复动作");
+    await act(async () => {
+      await target.run();
+      await settle();
+    });
+    expect(callsOf(ipc, "repair_instance")).toHaveLength(1);
+    expect(launcher.state.instances.find((i) => i.id === "生存")?.status).toBe("installing");
+    expect(launcher.state.session).toMatchObject({ instanceId: "生存", phase: "failed" });
+    act(() => shell.openPalette());
+    await flush();
+    const labels = options().map((o) => o.textContent);
+    expect(labels.some((l) => l?.startsWith(LAUNCH_COPY.group("生存")))).toBe(false);
+    // 「生存」确实是当前实例：不是因为面板没有当前实例才不给
+    expect(labels.some((l) => l !== null && l.startsWith("生存") && l.includes(PALETTE_COPY.currentHint))).toBe(true);
   });
 
   it("Tab 不把焦点带出输入框；Esc 关闭并把焦点还给打开前的元素", async () => {

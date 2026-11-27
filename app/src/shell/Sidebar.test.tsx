@@ -1460,6 +1460,88 @@ describe("侧栏", () => {
       expect(callsOf(ipc, "launch_game")).toHaveLength(2);
     });
 
+    it.each<[string, () => unknown, (repair: () => Promise<void>) => Promise<void>, string]>([
+      [
+        "启动失败后点了失败卡上的修复实例",
+        () => new IpcError("version_broken", "版本 JSON 读不出来"),
+        async () => {
+          const target = launcher.failureFix("repair");
+          if (!("run" in target)) throw new Error("修复实例应是命令类修复动作");
+          await target.run();
+        },
+        LAUNCH_COPY.relaunch,
+      ],
+      ["启动被取消后补全了实例", () => cancelledError(), (repair) => repair(), LAUNCH_COPY.launch],
+    ])("%s、补全进行中：第一项带「实例还在安装」禁用，按下不启动、不多报错", async (_name, failure, startRepair, label) => {
+      ipc.overrides.set("launch_game", () => {
+        throw failure();
+      });
+      // 补全一直不返回：实例停在安装中，会话视图仍排在它前面
+      ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+      await mount();
+      await act(async () => {
+        await launcher.launch("生存");
+      });
+      await flush();
+      await act(async () => {
+        await startRepair(() => launcher.repairInstance("生存"));
+      });
+      await flush();
+      expect(callsOf(ipc, "repair_instance")).toHaveLength(1);
+      await openMenu("生存");
+      const first = menuOf("生存")?.querySelector<HTMLElement>("[role='menuitem']");
+      if (first === null || first === undefined) throw new Error("菜单里没有条目");
+      expect(first.textContent).toBe(label);
+      expect(first.getAttribute("aria-disabled")).toBe("true");
+      const tipId = first.getAttribute("aria-describedby");
+      if (tipId === null) throw new Error("键盘高亮着的禁用项没有关联原因");
+      expect(document.getElementById(tipId)?.textContent).toBe("实例还在安装");
+      const errorsBefore = errorToasts();
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement)) throw new Error("菜单打开后焦点不在元素上");
+      keydown(active, "Enter");
+      await flush();
+      expect(callsOf(ipc, "launch_game")).toHaveLength(1);
+      // 按键漏到状态容器的话，启动拦截会以「实例还在安装」报一条错：没有新的错误通知才说明按键在菜单项上就被拦下了
+      expect(errorToasts()).toEqual(errorsBefore);
+    });
+
+    it.each<[string, Partial<InstanceDto>, string]>([
+      ["它依赖的实例正在运行", { base_busy: { id: "创造", activity: "running" } }, "它依赖的实例「创造」正在运行，结束后才能补全"],
+      ["后端正在改动它的 Mod", { activity: "modifying" }, "正在改动这个实例的 Mod、资源或设置，完成后才能补全"],
+    ])("启动失败后实例被重扫成修得好的损坏、%s：第一项带补全的锁原因禁用，按下不排补全、不启动", async (_name, busy, reason) => {
+      ipc.overrides.set("launch_game", () => {
+        throw new IpcError("files_offline", "还缺文件", { count: 3 });
+      });
+      await mount();
+      await act(async () => {
+        await launcher.launch("生存");
+      });
+      await flush();
+      ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "缺少客户端 jar", ...busy }), instanceDto("创造"), instanceDto("空岛")]);
+      await act(async () => {
+        await launcher.refreshInstances();
+      });
+      await flush();
+      await openMenu("生存");
+      const first = menuOf("生存")?.querySelector<HTMLElement>("[role='menuitem']");
+      if (first === null || first === undefined) throw new Error("菜单里没有条目");
+      expect(first.textContent).toBe(LAUNCH_COPY.relaunch);
+      expect(first.getAttribute("aria-disabled")).toBe("true");
+      const tipId = first.getAttribute("aria-describedby");
+      if (tipId === null) throw new Error("键盘高亮着的禁用项没有关联原因");
+      expect(document.getElementById(tipId)?.textContent).toBe(reason);
+      const errorsBefore = errorToasts();
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement)) throw new Error("菜单打开后焦点不在元素上");
+      keydown(active, "Enter");
+      await flush();
+      // 按键漏到状态容器的话，启动拦截会把它转成修复并启动、排上补全
+      expect(callsOf(ipc, "repair_instance")).toEqual([]);
+      expect(callsOf(ipc, "launch_game")).toHaveLength(1);
+      expect(errorToasts()).toEqual(errorsBefore);
+    });
+
     it("焦点交给侧栏里原来的下一项", async () => {
       await mount();
       await openMenu("创造");
