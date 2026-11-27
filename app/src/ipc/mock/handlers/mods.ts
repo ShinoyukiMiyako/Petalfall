@@ -271,11 +271,23 @@ function isModLoader(name: string): name is ModLoader {
   return name in LOADER_NAMES;
 }
 
+/**
+ * 装着这些加载器的实例能跑哪些加载器的 Mod，与后端 compat.rs 的 runnable_loaders 同一条规则：Quilt 借 Fabric，
+ * 1.20.1 的 NeoForge 借 Forge，被借的那一家实例自己装着时不算借。不照做的话，预览里搜得到的版本在落位时判成装不上。
+ */
+function runnableKinds(kinds: readonly ModLoader[], mcVersion: string | null): ModLoader[] {
+  const runnable = [...kinds];
+  if (kinds.includes("quilt") && !kinds.includes("fabric")) runnable.push("fabric");
+  if (kinds.includes("neoforge") && !kinds.includes("forge") && mcVersion === "1.20.1") runnable.push("forge");
+  return runnable;
+}
+
 function classify(v: ModVersionInfo, mcVersion: string | null, instanceLoaders: string[]): Compatibility {
   const kinds = instanceLoaders.filter(isModLoader);
   if (v.loaders.length > 0) {
     if (kinds.length === 0) return { kind: "mismatch", reason: "该实例未安装 Mod 加载器" };
-    if (!v.loaders.some((l) => kinds.includes(l))) {
+    const runnable = runnableKinds(kinds, mcVersion);
+    if (!v.loaders.some((l) => runnable.includes(l))) {
       return {
         kind: "mismatch",
         reason: `需要 ${v.loaders.map((l) => LOADER_NAMES[l]).join("/")}，该实例装的是 ${kinds.map((l) => LOADER_NAMES[l]).join("/")}`,
@@ -873,9 +885,12 @@ function starterLoader(value: unknown): StarterLoader {
   throw new IpcError("invalid_argument", `未知加载器 ${raw}`, { field: "loader", reason: "unknown" });
 }
 
-/** 与发现页同一口径只认完全匹配的版本（Quilt 实例不收只标了 fabric 的版本），再按发布通道挑最好那一档里最新的。 */
+/**
+ * 只收标了实例自己那个加载器、判定为完全匹配的版本，再按发布通道挑最好那一档里最新的。比落位判定严一档，与后端的开局表
+ * 同一口径：开局 Mod 是替玩家决定要装的，Quilt 实例不收只标了 fabric 的版本，1.20.1 的 NeoForge 也不收只标 forge 的。
+ */
 function starterPick(versions: ModVersionInfo[], mcVersion: string, loader: StarterLoader): ModVersionInfo | null {
-  const matching = newestFirst(versions).filter((v) => classify(v, mcVersion, [loader]).kind === "match");
+  const matching = newestFirst(versions).filter((v) => v.loaders.includes(loader) && classify(v, mcVersion, [loader]).kind === "match");
   let best: ModVersionInfo | null = null;
   for (const v of matching) if (best === null || CHANNEL_RANK[v.release_channel] < CHANNEL_RANK[best.release_channel]) best = v;
   return best;

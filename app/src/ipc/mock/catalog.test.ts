@@ -141,6 +141,16 @@ describe("工程目录：搜得到就打得开、装得上", () => {
     await expect(mockInvoke("match_instances", { platform: "modrinth", projectId: "1KVo5zza", resourceType: "modpack", modVersionId: null })).rejects.toMatchObject({ code: "invalid_argument" });
   });
 
+  it("1.20.1 的 NeoForge 实例收得下只标 forge 的版本，别的加载器照旧对不上（与后端同一条借用规则）", async () => {
+    // 「朋友发来的」照改名提示改名后是 1.20.1 的 NeoForge 47.1.106
+    await renameInstance("朋友发来的", "1.20.1-NeoForge");
+    const create = await matchInstances("modrinth", "LNytGWDc", "mod", null);
+    expect(create.find((m) => m.version_id === "1.20.1-NeoForge")).toMatchObject({ state: "compatible", best_version: { version_id: "create-051", loaders: ["forge"] } });
+    // Sodium 有 1.20.1 的构建，但只标 fabric：借的只有 Forge
+    const sodium = await matchInstances("modrinth", "AANobbMI", "mod", null);
+    expect(sodium.find((m) => m.version_id === "1.20.1-NeoForge")).toMatchObject({ state: "incompatible", best_version: null });
+  });
+
   it("装 Mod：主项与缺的必需前置一起落进 mods/，卷宗记下来源，之后矩阵判为已安装", async () => {
     const plan = await planInstall("1.21.1-Fabric", "modrinth", "YL57xq9U", "iris-181");
     expect(plan.items.map((i) => [i.version.version_id, i.required_by, i.already_satisfied])).toEqual([
