@@ -3495,6 +3495,20 @@ describe("实例详情：设置", () => {
     expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
   });
 
+  it("全局关了自动下载 Java、本机又没有要求的版本：自动选择项的提示写自动下载已关闭，与下面的说明一致，不说启动时下载", async () => {
+    bootOverrides(ipc, { instances, config: configDto({ auto_download_java: false, memory: { max_mb: 4096, min_mb: null, auto: false } }) });
+    ipc.overrides.set("list_instances", () => instances);
+    ipc.overrides.set("detect_java", () => [java("D:/Portable/jdk-17/bin/java.exe", 17, { source: "manual" })]);
+    await open("settings");
+    expect(text()).toContain("本机没有 Java 21，自动下载已关闭");
+    click(byRole("combobox", "Java 运行时"));
+    await flush();
+    const auto = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((o) => textOf(o).startsWith("自动选择"));
+    if (auto === undefined) throw new Error("Java 下拉里没有「自动选择」");
+    expect(textOf(auto)).toContain("本机没有 Java 21，自动下载已关闭");
+    expect(textOf(auto)).not.toContain("启动时自动下载");
+  });
+
   it("Java 下拉：实例已经固定成不完整的 Java 时照常显示为当前值", async () => {
     settings = { ...settings, java: "C:/Java/jdk-21/bin/java.exe" };
     ipc.overrides.set("detect_java", () => [java("C:/Java/jdk-21/bin/java.exe", 21, { missing_files: ["release", "lib/modules"] })]);

@@ -465,7 +465,7 @@ function JavaBody({ editor, java }: { editor: SettingsEditor; java: ReturnType<t
     const info: JavaInfo = java.value;
     const value = editor.value.java;
     const options: SelectOption<string>[] = [
-      { value: JAVA_AUTO, label: SETTINGS_COPY.javaAuto, icon: "sparkle", hint: autoHint(info) },
+      { value: JAVA_AUTO, label: SETTINGS_COPY.javaAuto, icon: "sparkle", hint: autoHint(info, global.autoDownloadJava) },
       ...info.runtimes.map((r) => {
         const fit = javaFit(r.version.major, info.required);
         const label = SETTINGS_COPY.javaOption(r.version.major, r.vendor);
@@ -496,12 +496,15 @@ function JavaBody({ editor, java }: { editor: SettingsEditor; java: ReturnType<t
   return <div className={styles.cardBody}>{body}</div>;
 }
 
-/** 「自动选择」项的提示：会用哪个、跟随全局指定的、或启动时下载。实例固定了 Java 时也照实写出自动会选谁。 */
-function autoHint(info: JavaInfo): string {
+/**
+ * 「自动选择」项的提示：会用哪个、跟随全局指定的、或启动时下载。实例固定了 Java 时也照实写出自动会选谁。
+ * 本机没有合适的 Java 时看全局的自动下载：关着就不会下载，与下面说明块的结论同一句。
+ */
+function autoHint(info: JavaInfo, autoDownload: boolean): string {
   const pick = info.autoPick;
   if (pick.kind === "global") return SETTINGS_COPY.javaAutoGlobal;
   if (pick.kind === "local") return SETTINGS_COPY.javaAutoPick(pick.runtime.version.major, pick.runtime.vendor);
-  return SETTINGS_COPY.javaAutoDownload(info.required);
+  return autoDownload ? SETTINGS_COPY.javaAutoDownload(info.required) : SETTINGS_COPY.fitNoDownload(info.required);
 }
 
 function JavaState({ info, autoDownload, locked, onUseAuto }: { info: JavaInfo; autoDownload: boolean; locked: string | undefined; onUseAuto(): void }) {
