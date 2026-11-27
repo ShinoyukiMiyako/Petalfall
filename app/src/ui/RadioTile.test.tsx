@@ -15,8 +15,8 @@ import styles from "./RadioTile.module.css";
 const reflowed = vi.hoisted(() => new Map<Element, { observed: number; stopped: number }>());
 vi.mock("../lib/reflow", async (orig) => {
   const real = await orig<typeof import("../lib/reflow")>();
-  const { useCallback } = await import("react");
-  const track = (el: Element, stop: () => void) => {
+  const { spyUseReflow } = await import("../test/reflow-spy");
+  const track = (el: Element) => {
     let record = reflowed.get(el);
     if (record === undefined) {
       record = { observed: 0, stopped: 0 };
@@ -26,24 +26,19 @@ vi.mock("../lib/reflow", async (orig) => {
     const counted = record;
     return () => {
       counted.stopped += 1;
-      stop();
     };
   };
   return {
     ...real,
-    observeReflow: (container: HTMLElement, spring?: SpringName) => track(container, real.observeReflow(container, spring)),
-    useReflow: <T extends HTMLElement>(spring?: SpringName) => {
-      const ref = real.useReflow<T>(spring);
-      return useCallback(
-        (el: T | null) => {
-          if (el === null) return;
-          const stop = ref(el);
-          if (typeof stop !== "function") throw new Error("useReflow 挂上之后没有给出停止函数");
-          return track(el, stop);
-        },
-        [ref],
-      );
+    observeReflow: (container: HTMLElement, spring?: SpringName) => {
+      const stop = real.observeReflow(container, spring);
+      const untrack = track(container);
+      return () => {
+        stop();
+        untrack();
+      };
     },
+    useReflow: spyUseReflow(real, track),
   };
 });
 

@@ -18,13 +18,18 @@ import { replay } from "../model";
 import { DIR_CHECK_DEBOUNCE_MS, Location, type LocationProps } from "./Location";
 import { presentHeading, TestChrome } from "./test-chrome";
 
-// jsdom 不做布局也没有 Web Animations，让位本身测不了；这里只记下挂了让位的容器，核对它圈住的是哪几块
+// jsdom 不做布局也没有 Web Animations，让位本身测不了；这里只记下挂了让位的容器，核对它圈住的是哪几块；挂载照常交给真实现
 const reflowed = vi.hoisted(() => new Set<HTMLElement>());
-vi.mock("../../lib/reflow", () => ({
-  useReflow: () => (el: HTMLElement | null) => {
-    if (el !== null) reflowed.add(el);
-  },
-}));
+vi.mock("../../lib/reflow", async (orig) => {
+  const real = await orig<typeof import("../../lib/reflow")>();
+  const { spyUseReflow } = await import("../../test/reflow-spy");
+  return {
+    ...real,
+    useReflow: spyUseReflow(real, (el) => {
+      reflowed.add(el);
+    }),
+  };
+});
 
 const copy = COPY.zh;
 const text = copy.location;

@@ -71,19 +71,12 @@ vi.mock("../ui/Popover", async (orig) => {
 const reflowed = vi.hoisted(() => new Map<Element, string>());
 vi.mock("../lib/reflow", async (orig) => {
   const mod = await orig<typeof import("../lib/reflow")>();
-  const { useCallback } = await import("react");
+  const { spyUseReflow } = await import("../test/reflow-spy");
   return {
     ...mod,
-    useReflow: <T extends HTMLElement>(spring: Parameters<typeof mod.useReflow>[0] = "settle") => {
-      const real = mod.useReflow<T>(spring);
-      return useCallback(
-        (el: T | null) => {
-          if (el !== null) reflowed.set(el, spring);
-          return real(el);
-        },
-        [real, spring],
-      );
-    },
+    useReflow: spyUseReflow(mod, (el, spring) => {
+      reflowed.set(el, spring);
+    }),
   };
 });
 

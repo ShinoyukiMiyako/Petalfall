@@ -27,19 +27,16 @@ import s from "./home.module.css";
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
-// 记下每个让位容器挂的是哪条弹簧；实际的观察照常交给 lib/reflow（jsdom 里它什么也不做）
+// 记下每个让位容器挂的是哪条弹簧；挂载与游玩卡交给启动胶囊的 sync 都照常交给 lib/reflow（jsdom 里它什么也不做）
 const reflowSprings = vi.hoisted(() => new Map<Element, string>());
 vi.mock("../../lib/reflow", async (orig) => {
   const actual = await orig<typeof import("../../lib/reflow")>();
+  const { spyUseReflow } = await import("../../test/reflow-spy");
   return {
     ...actual,
-    useReflow: <T extends HTMLElement>(spring: Parameters<typeof actual.useReflow>[0] = "settle") => {
-      const ref = actual.useReflow<T>(spring);
-      return (el: T | null) => {
-        if (el !== null) reflowSprings.set(el, spring);
-        return ref(el);
-      };
-    },
+    useReflow: spyUseReflow(actual, (el, spring) => {
+      reflowSprings.set(el, spring);
+    }),
   };
 });
 
