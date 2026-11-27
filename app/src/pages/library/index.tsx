@@ -36,7 +36,7 @@ import { Skeleton } from "../../ui/Skeleton";
 import { useDeleteInstance } from "../instance/delete";
 import { switchSuggestion } from "../shared/switch-suggestion";
 import { useSwitchDirectory } from "../shared/useSwitchDirectory";
-import { LIBRARY_COPY } from "./copy";
+import { LIBRARY_COPY, type UnrepairableLine } from "./copy";
 import { CARD_COVER_HEIGHT, InstanceCard } from "./InstanceCard";
 import styles from "./library.module.css";
 import {
@@ -317,7 +317,9 @@ export default function LibraryPage() {
               {() =>
                 LIBRARY_COPY.repairBody(
                   broken.repairable.map((inst) => inst.name),
-                  broken.unrepairable.map(({ inst, reason, exit }) => ({ name: inst.name, reason, exit: exit.kind })),
+                  broken.unrepairable.map(({ inst, reason, exit, pending }): UnrepairableLine =>
+                    exit.kind === "rescan" ? { name: inst.name, reason, exit: exit.kind, pending } : { name: inst.name, reason, exit: exit.kind },
+                  ),
                 )
               }
             </Loadable>

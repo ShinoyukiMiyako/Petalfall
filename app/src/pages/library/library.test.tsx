@@ -1408,7 +1408,8 @@ describe("实例库：动作", () => {
   });
 
   it("唯一修不好的实例是版本 JSON 读不出来：标题说暂时无法启动，正文接上怎么恢复，按钮位给「重新扫描」；占用放开后重读列表，横幅随之淡出", async () => {
-    instances = [...instances.filter((i) => i.id !== "坏掉的"), unreadable("网盘同步的")];
+    // 没有未完成标记：版本 JSON 重新读得出来就是好的
+    instances = [...instances.filter((i) => i.id !== "坏掉的"), unreadable("网盘同步的", { incomplete: null })];
     await mount();
     const banner = document.querySelector<HTMLElement>(`.${bannerStyles.banner}`);
     if (banner === null) throw new Error("没有修复横幅");
@@ -1427,6 +1428,43 @@ describe("实例库：动作", () => {
     expect(document.querySelector(`.${bannerStyles.banner}`)).toBeNull();
     expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
     expect(callsOf(ipc, "repair_instance")).toEqual([]);
+  });
+
+  it("读不出来的实例还带着安装没做完的标记：提示说扫描后还要再修复一次，不说扫描就能恢复；扫完版本 JSON 读得出来了，横幅换成要修复", async () => {
+    instances = [...instances.filter((i) => i.id !== "坏掉的"), unreadable("网盘同步的")];
+    await mount();
+    const banner = document.querySelector<HTMLElement>(`.${bannerStyles.banner}`);
+    if (banner === null) throw new Error("没有修复横幅");
+    expect(banner.textContent).toBe(`1 个实例暂时无法启动「网盘同步的」暂时无法启动：${unreadableReason("网盘同步的")}。关掉占用它的程序或修好读取权限后重新扫描，扫描后还要再修复一次。${REPAIR_EXIT_COPY.rescan}`);
+    expect(banner.textContent).not.toContain("重新扫描就能恢复");
+    // 网盘同步程序放开了版本 JSON：扫描读得出它，安装没做完的标记还在
+    const marker = instances.find((i) => i.id === "网盘同步的")?.incomplete;
+    if (marker === undefined || marker === null) throw new Error("读不出来的实例应当带着未完成标记");
+    instances = instances.map((i) => (i.id === "网盘同步的" ? instanceDto("网盘同步的", { incomplete: marker }) : i));
+    click(byText<HTMLButtonElement>("button", REPAIR_EXIT_COPY.rescan, banner));
+    await flush();
+    expect(banner.closest("[inert]")).toBeNull();
+    expect(banner.textContent).toBe(`1 个实例需要修复「网盘同步的」缺少游戏文件，补全后就能启动。${LIBRARY_COPY.repairOne}`);
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+  });
+
+  it("读不出来的有的带未完成标记、有的不带：两种提示各说各的，各自只说一次", async () => {
+    instances = [
+      ...instances.filter((i) => i.id !== "坏掉的"),
+      unreadable("网盘甲"),
+      unreadable("网盘乙", { incomplete: null }),
+      unreadable("网盘丙"),
+      unreadable("网盘丁", { incomplete: null }),
+    ];
+    await mount();
+    const banner = document.querySelector<HTMLElement>(`.${bannerStyles.banner}`);
+    if (banner === null) throw new Error("没有修复横幅");
+    const line = (id: string) => `「${id}」暂时无法启动：${unreadableReason(id)}。`;
+    expect(banner.textContent).toBe(
+      `4 个实例暂时无法启动${line("网盘甲")}${line("网盘丙")}关掉占用它的程序或修好读取权限后重新扫描，扫描后还要再修复一次。` +
+        `${line("网盘乙")}${line("网盘丁")}关掉占用它的程序或修好读取权限后，重新扫描就能恢复。${REPAIR_EXIT_COPY.rescan}`,
+    );
+    expect([...banner.querySelectorAll("button")].map((b) => b.textContent)).toEqual([REPAIR_EXIT_COPY.rescan]);
   });
 
   it("「重新扫描」读不出列表：按刷新失败报一条错误通知，实例列表与横幅都留着，不换成读取失败的整页", async () => {

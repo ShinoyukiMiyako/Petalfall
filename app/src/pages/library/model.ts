@@ -109,6 +109,11 @@ export interface UnrepairableInstance {
   inst: InstanceSummary;
   reason: string;
   exit: UnrepairableExit;
+  /**
+   * 实例还带着未完成标记（装到一半，或上次补全没做完）。读不出来的重新扫描只让版本 JSON 重新读得出来，标记还在，
+   * 扫完还要再修复一次，正文的提示不能说扫描就恢复。
+   */
+  pending: boolean;
 }
 
 /** 修复横幅列出的实例，按补全修不修得好分两拨，各自保持列表顺序；横幅在不在看两拨之和。 */
@@ -134,7 +139,7 @@ export function brokenInstances(list: readonly InstanceSummary[]): BrokenInstanc
     // 整合包没导入完的上面已排掉，剩下的修不好只能是后端报的；没有原因就是两边对修不修得好的判定错开了
     const reason = inst.unrepairableReason;
     if (reason === null) throw new Error(`实例 ${inst.id} 补全修不好，却没有原因`);
-    unrepairable.push({ inst, reason, exit });
+    unrepairable.push({ inst, reason, exit, pending: inst.incomplete !== null });
   }
   return { repairable, unrepairable };
 }

@@ -188,6 +188,20 @@ describe("统计与签名", () => {
     ]);
   });
 
+  it("修不好的一拨带上有没有未完成标记：读不出来的扫描后要不要再修复一次看它，安装与补全的标记都算", () => {
+    const unreadable = (id: string, incomplete: InstanceSummary["incomplete"]) => {
+      const reason = `版本 JSON 读不出来：文件 IO 失败: D:\\v\\${id}\\${id}.json：拒绝访问。 (os error 5)`;
+      return inst(id, { status: "broken", brokenReason: reason, unrepairableReason: reason, unrepairableKind: "unreadable", incomplete, mcVersion: null });
+    };
+    const marker = (kind: "install" | "repair", outcome: "pending" | "failed") => ({ kind, outcome, startedAt: null, spec: null, error: null });
+    const list = [unreadable("没标记", null), unreadable("装到一半", marker("install", "pending")), unreadable("补全失败", marker("repair", "failed"))];
+    expect(brokenInstances(list).unrepairable.map((u) => [u.inst.id, u.exit.kind, u.pending])).toEqual([
+      ["没标记", "rescan", false],
+      ["装到一半", "rescan", true],
+      ["补全失败", "rescan", true],
+    ]);
+  });
+
   it("修复横幅的标题：有修得好的只数修得好的，此刻被锁着、修复按钮这一轮跳过的也算", () => {
     const lost = "缺少版本 JSON，也没有记下当初装的是什么";
     // 第一个正在备份存档：「全部修复」这一轮不排它，标题照样数它
@@ -405,7 +419,7 @@ describe("文案", () => {
 
   it("修复横幅：读不出来的说暂时无法启动，原因句末补上句号后接怎么恢复；同一句原因也不合并", () => {
     const reason = "版本 JSON 读不出来：文件 IO 失败: D:\\Games\\Launcher\\.minecraft\\versions\\网盘同步的\\网盘同步的.json：另一个程序正在使用此文件，进程无法访问。 (os error 32)";
-    expect(LIBRARY_COPY.repairBody([], [{ name: "网盘同步的", reason, exit: "rescan" }])).toBe(
+    expect(LIBRARY_COPY.repairBody([], [{ name: "网盘同步的", reason, exit: "rescan", pending: false }])).toBe(
       `「网盘同步的」暂时无法启动：${reason}。关掉占用它的程序或修好读取权限后，重新扫描就能恢复。`,
     );
     const same = "版本 JSON 读不出来：拒绝访问。";
@@ -413,8 +427,8 @@ describe("文案", () => {
       LIBRARY_COPY.repairBody(
         ["坏掉的"],
         [
-          { name: "甲", reason: same, exit: "rescan" },
-          { name: "乙", reason: same, exit: "rescan" },
+          { name: "甲", reason: same, exit: "rescan", pending: false },
+          { name: "乙", reason: same, exit: "rescan", pending: false },
         ],
       ),
     ).toBe(`「坏掉的」缺少游戏文件，补全后就能启动。「甲」暂时无法启动：${same}「乙」暂时无法启动：${same}${REPAIR_EXIT_COPY.unreadableHint}`);
@@ -426,13 +440,35 @@ describe("文案", () => {
     const names = Array.from({ length: 2 + Math.floor(Math.random() * 4) }, (_, i) => `网盘${i}`);
     // 每个读不出来的后面都夹一个只能删除的：读不出来的仍按第一次出现的位置排成一段
     const lines = names.flatMap((name, i) => [
-      { name, reason: locked(name), exit: "rescan" as const },
+      { name, reason: locked(name), exit: "rescan" as const, pending: false },
       { name: `旧档${i}`, reason: lost, exit: "delete" as const },
     ]);
     const body = LIBRARY_COPY.repairBody([], lines);
     const unreadable = names.map((name) => `「${name}」暂时无法启动：${locked(name)}。`).join("");
     expect(body).toBe(`${unreadable}${REPAIR_EXIT_COPY.unreadableHint}${names.map((_, i) => `「旧档${i}」`).join("")}补全修不好：${lost}。`);
     expect(body.split(REPAIR_EXIT_COPY.unreadableHint)).toHaveLength(2);
+  });
+
+  it("修复横幅：读不出来的还带着未完成标记时提示说扫描后还要再修复一次；与不带标记的各成一段、各说一次，按第一次出现的先后排", () => {
+    const reason = (id: string) => `版本 JSON 读不出来：文件 IO 失败: D:\\v\\${id}\\${id}.json：拒绝访问。 (os error 5)`;
+    expect(LIBRARY_COPY.repairBody([], [{ name: "装到一半的", reason: reason("装到一半的"), exit: "rescan", pending: true }])).toBe(
+      `「装到一半的」暂时无法启动：${reason("装到一半的")}。关掉占用它的程序或修好读取权限后重新扫描，扫描后还要再修复一次。`,
+    );
+    const body = LIBRARY_COPY.repairBody(
+      [],
+      [
+        { name: "甲", reason: reason("甲"), exit: "rescan", pending: false },
+        { name: "乙", reason: reason("乙"), exit: "rescan", pending: true },
+        { name: "丙", reason: reason("丙"), exit: "rescan", pending: false },
+        { name: "丁", reason: reason("丁"), exit: "rescan", pending: true },
+      ],
+    );
+    expect(body).toBe(
+      `「甲」暂时无法启动：${reason("甲")}。「丙」暂时无法启动：${reason("丙")}。关掉占用它的程序或修好读取权限后，重新扫描就能恢复。` +
+        `「乙」暂时无法启动：${reason("乙")}。「丁」暂时无法启动：${reason("丁")}。关掉占用它的程序或修好读取权限后重新扫描，扫描后还要再修复一次。`,
+    );
+    expect(body.split(REPAIR_EXIT_COPY.unreadableHint)).toHaveLength(2);
+    expect(body.split(REPAIR_EXIT_COPY.unreadablePendingHint)).toHaveLength(2);
   });
 
   it("修复横幅的标题：一个都修不好时说补全修不好，全是读不出来的说暂时无法启动，两样掺着说无法启动，不说需要修复；有修得好的照旧", () => {

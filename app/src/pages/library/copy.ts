@@ -1,21 +1,22 @@
 // 实例库页面自己的文案。跨页面共用的（加载器名、启动入口、删除确认、通知目录）从 copy/flows 引用，这里不重复。
 
-import { joinMixed, LOADER_NAME, PAGE_LABEL, REPAIR_EXIT_COPY, sentence } from "../../copy/flows";
+import { joinMixed, LOADER_NAME, PAGE_LABEL, sentence, unreadableHint } from "../../copy/flows";
 import { formatPlaytime } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import type { SortKey, UnrepairableExit } from "./model";
 
-/** 横幅正文里一个补全修不好的实例：名字、后端给的原因原文与它剩下的出路。 */
-export interface UnrepairableLine {
-  name: string;
-  reason: string;
-  exit: UnrepairableExit["kind"];
-}
+/**
+ * 横幅正文里一个补全修不好的实例：名字、后端给的原因原文与它剩下的出路。读不出来的另带 pending（还带着未完成标记）：
+ * 扫描之后还要再修复一次，接在原因后面的提示据此换一句。
+ */
+export type UnrepairableLine =
+  | { name: string; reason: string; exit: Exclude<UnrepairableExit["kind"], "rescan"> }
+  | { name: string; reason: string; exit: "rescan"; pending: boolean };
 
 const quoted = (names: readonly string[]) => names.map((n) => `「${n}」`).join("");
 
 /**
- * 正文里修不好的一段：只能删除或改名的一句；或者几个读不出来的实例，各自一句原因，末尾共用一句怎么恢复。
+ * 正文里修不好的一段：只能删除或改名的一句；或者几个读不出来、提示相同的实例，各自一句原因，末尾共用一句怎么恢复。
  * 读不出来的文件可能完好，说暂时无法启动，不说补全修不好。
  */
 type BodyPart = { kind: "unrepairable"; names: string[]; reason: string } | { kind: "unreadable"; hint: string; lines: { name: string; reason: string }[] };
@@ -57,18 +58,20 @@ export const LIBRARY_COPY = {
    * 横幅正文：补全修得好的合成一句；修不好的另起，写明后端给的原因，不承诺补全后就能启动。只能删除的实例原因相同时并成一句
    * （从旧电脑拷来的一批实例往往是同一个原因）。带改名目标的不并：原因里那句改名提示只核对过这一个实例改不改得成，
    * 实例名不分大小写唯一，几个实例最多一个能照做。读不出来的各自带着自己的路径，各自成句，但排在一起、怎么恢复只在末尾说一次：
-   * 同一句提示跟在每个实例后面重复，读着像复读。按各段第一次出现的先后排，只有一拨时只出那一拨。
+   * 同一句提示跟在每个实例后面重复，读着像复读。还带着未完成标记的扫描之后还要再修复一次，提示换成那一句，与不带标记的各成一段。
+   * 按各段第一次出现的先后排，只有一拨时只出那一拨。
    */
   repairBody: (repairable: readonly string[], unrepairable: readonly UnrepairableLine[]) => {
     if (repairable.length === 0 && unrepairable.length === 0) throw new Error("修复横幅没有要列的实例");
     const fixable = repairable.length === 0 ? "" : `${quoted(repairable)}缺少游戏文件，补全后就能启动。`;
     const parts: BodyPart[] = [];
     const mergeable = new Map<string, string[]>();
-    // 读不出来的按接在后面的那句提示归拢：同一句提示只说一次
+    // 读不出来的按接在后面的那句提示归拢：同一句提示只说一次，带着未完成标记的与不带的各说各的
     const unreadable = new Map<string, { name: string; reason: string }[]>();
-    for (const { name, reason, exit } of unrepairable) {
-      if (exit === "rescan") {
-        const hint = REPAIR_EXIT_COPY.unreadableHint;
+    for (const line of unrepairable) {
+      const { name, reason, exit } = line;
+      if (line.exit === "rescan") {
+        const hint = unreadableHint(line.pending);
         const lines = unreadable.get(hint);
         if (lines !== undefined) {
           lines.push({ name, reason });
