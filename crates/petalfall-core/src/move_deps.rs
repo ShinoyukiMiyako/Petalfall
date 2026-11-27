@@ -627,7 +627,8 @@ mod tests {
     }
 
     /// 1.20.4 之前的 Forge：补丁 jar 与反混淆产物不在库清单里，按 `--fml.*` 参数推出的目录整个带上（递归），
-    /// 库清单里也有的 universal jar 只列一次，目标已有的跳过。没写 `--fml.forgeGroup` 时按 net.minecraftforge。
+    /// 库清单里也有的 universal jar 只列一次，目标已有的跳过。没写 `--fml.forgeGroup` 时看版本带的是哪一家的
+    /// FML：Forge 的按 net.minecraftforge，NeoForge 自己的 FML 按 net.neoforged。
     #[tokio::test]
     async fn forge_1_20_1_brings_the_processor_output_dirs() {
         let (_tmp, source, target) = game_dirs();
