@@ -2868,17 +2868,8 @@ export class LauncherStore {
     if (occupant !== null && occupant.instanceId === id) return;
     // 这几项拒绝与此刻谁占着游戏进程无关，排在替换确认之前：失败通知会一直留着，另一个实例在跑时点它的重试，
     // 先问替换的话，玩家确认后那一局已被结束，这里才报出起不来，两头落空
-    if (inst.status === "installing") throw new Error(LAUNCH_COPY.stillInstalling);
-    if (inst.status === "broken") {
-      // 入口都按原因禁用了修复并启动，还走到这里的是边角路径：失败通知上的重试点下去时实例已重扫成修不好、补全完成后
-      // 接着启动时仍修不好。排上补全也只会被后端拒，不排任务，与「修复实例」一样把原因交给调用方的错误处理。
-      // 排在直达之前，直达的重试也走到这里
-      const refusal = repairRefusal(inst);
-      if (refusal !== null) throw new Error(refusal);
-      // 修复完成后的自动启动是普通启动，带不上直达目标：入口按损坏禁用直达。直达失败后点重试、实例已重扫成修得好的
-      // 损坏时会走到这里，报给玩家的是先修复，标题沿用调用方的启动失败
-      if (quickPlay !== null) throw new Error(LAUNCH_COPY.needsRepair);
-    }
+    const refusal = this.launchRefusal(inst, quickPlay);
+    if (refusal !== null) throw new Error(refusal);
     if (occupant !== null) {
       this.set({ launchPrompt: { instanceId: id, occupantId: occupant.instanceId, occupantPhase: occupant.phase === "running" ? "running" : "loading", quickPlay } });
       return;
@@ -2893,6 +2884,23 @@ export class LauncherStore {
       return;
     }
     await this.startLaunch(id, account, quickPlay, false);
+  }
+
+  /**
+   * 启动拦截里与谁占着游戏进程无关的拒绝，能往下走为 null。替换确认挂出之前判一次，玩家点了确认、结束那一局之前
+   * 再判一次：确认框开着的工夫实例可能开始重装，或被重扫成修不好。
+   */
+  private launchRefusal(inst: InstanceSummary, quickPlay: launchIpc.QuickPlayArg | null): string | null {
+    if (inst.status === "installing") return LAUNCH_COPY.stillInstalling;
+    if (inst.status !== "broken") return null;
+    // 入口都按原因禁用了修复并启动，还走到这里的是边角路径：失败通知上的重试点下去时实例已重扫成修不好、补全完成后
+    // 接着启动时仍修不好。排上补全也只会被后端拒，不排任务，与「修复实例」一样把原因交给调用方的错误处理。
+    // 排在直达之前，直达的重试也走到这里
+    const refusal = repairRefusal(inst);
+    if (refusal !== null) return refusal;
+    // 修复完成后的自动启动是普通启动，带不上直达目标：入口按损坏禁用直达。直达失败后点重试、实例已重扫成修得好的
+    // 损坏时会走到这里，报给玩家的是先修复，标题沿用调用方的启动失败
+    return quickPlay !== null ? LAUNCH_COPY.needsRepair : null;
   }
 
   /** offlineFallback：失败卡上的「以离线方式进单人」，这一局不刷新登录；能否放行由后端凭它记下的上一次失败判定。 */
@@ -3508,6 +3516,9 @@ export class LauncherStore {
         if (prompt === null) return;
         store.set({ launchPrompt: null });
         if (!accept) return;
+        // 先结束那一局、再由启动拦截报起不来的话两头落空，所以结束之前按此刻的实例再判一次
+        const refusal = store.launchRefusal(store.instance(prompt.instanceId), prompt.quickPlay);
+        if (refusal !== null) throw new Error(refusal);
         await actions.stop();
         // 替换时不等已结束会话的 1500 ms 停留，直接开始新的
         store.set({ session: null });

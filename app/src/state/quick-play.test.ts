@@ -206,6 +206,53 @@ describe("直达走与启动相同的拦截链", () => {
       // 补全还没完成，接着的启动还没开始
       expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["生存", "创造"]);
     });
+
+    it.each<[string, QuickPlayArg | null, (s: LauncherStore) => Promise<void>, string]>([
+      [
+        "实例被重扫成补全修不好",
+        null,
+        async (s) => {
+          instances = instances.map((i) => (i.id === "生存" ? unrepairable : i));
+          await s.actions.refreshInstances();
+        },
+        "缺少版本 JSON，也没有记下当初装的是什么",
+      ],
+      [
+        "实例开始补全",
+        null,
+        async (s) => {
+          ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+          await s.actions.repairInstance("生存");
+        },
+        "实例还在安装",
+      ],
+      [
+        "带着直达、实例被重扫成修得好的损坏",
+        WORLD,
+        async (s) => {
+          instances = instances.map((i) => (i.id === "生存" ? repairable : i));
+          await s.actions.refreshInstances();
+        },
+        "实例需要先修复",
+      ],
+    ])("替换确认框开着的工夫%s：点确认报出原因，不结束正在跑的那一局", async (_name, quickPlay, change, reason) => {
+      const s = await boot();
+      ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+      await s.actions.launch("创造");
+      await (quickPlay === null ? s.actions.launch("生存") : s.actions.quickPlay("生存", quickPlay));
+      expect(s.getState().launchPrompt).toEqual({ instanceId: "生存", occupantId: "创造", occupantPhase: "running", quickPlay });
+      await change(s);
+      await settle();
+      const repairsBefore = callsOf(ipc, "repair_instance").length;
+
+      await expect(s.actions.resolveLaunchPrompt(true)).rejects.toMatchObject({ message: reason });
+      await settle();
+      expect(s.getState().launchPrompt).toBeNull();
+      expect(callsOf(ipc, "stop_game")).toEqual([]);
+      expect(s.getState().session).toMatchObject({ instanceId: "创造", phase: "running" });
+      expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["创造"]);
+      expect(callsOf(ipc, "repair_instance")).toHaveLength(repairsBefore);
+    });
   });
 
   it("损坏的实例不提供直达：报给玩家先修复，不启动也不排补全；普通启动照旧转成修复并启动", async () => {
