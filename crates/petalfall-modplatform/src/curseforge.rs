@@ -213,40 +213,15 @@ impl CurseForgeClient {
         loader: Option<crate::model::ModLoader>,
         game_version: Option<&str>,
     ) -> Result<CurseForgeFileList> {
-        let mut filters: Vec<(&str, String)> = Vec::new();
-        if let Some(version) = game_version {
-            filters.push(("gameVersion", version.to_string()));
-        }
-        if let Some(loader) = loader {
-            filters.push(("modLoaderType", loader.curseforge_loader_type().to_string()));
-        }
-        let url = format!("{}/v1/mods/{}/files", self.base_url, mod_id);
+        let (url, filters) = self.mod_files_request(mod_id, loader, game_version);
         let mut files = Vec::new();
         let mut seen = HashSet::new();
         let mut index: u64 = 0;
         for _ in 0..MOD_FILES_MAX_PAGES {
-            let mut params = filters.clone();
-            params.push(("index", index.to_string()));
-            params.push(("pageSize", MOD_FILES_PAGE_SIZE.to_string()));
-            let envelope: ListEnvelope<CurseForgeFile> =
-                send_json(&self.retry, "curseforge.mod_files", || {
-                    self.get(url.as_str()).query(&params)
-                })
-                .await?;
-            let fetched = u64::try_from(envelope.data.len()).expect("一页的文件数放得进 u64");
-            index += fetched;
-            let more = fetched > 0
-                && match &envelope.pagination {
-                    Some(pagination) => index < pagination.total_count,
-                    None => fetched >= u64::from(MOD_FILES_PAGE_SIZE),
-                };
-            files.extend(
-                envelope
-                    .data
-                    .into_iter()
-                    .filter(|file| seen.insert(file.id)),
-            );
-            if !more {
+            let page = self.mod_files_page(&url, &filters, index).await?;
+            index = page.next_index;
+            files.extend(page.files.into_iter().filter(|file| seen.insert(file.id)));
+            if !page.more {
                 return Ok(CurseForgeFileList {
                     files,
                     truncated: false,
@@ -261,6 +236,71 @@ impl CurseForgeClient {
         Ok(CurseForgeFileList {
             files,
             truncated: true,
+        })
+    }
+
+    /// 只取 [`Self::mod_files`] 的首页，`truncated` 为真表示首页之后平台那边还有。
+    ///
+    /// 给想先用一次请求看工程在宽一些的条件下装不装得进一页的调用方：装得下就不必换更窄的条件分几套去翻。
+    /// 「后面还有没有」与 [`Self::mod_files`] 翻页时走同一段判断。
+    pub async fn mod_files_first_page(
+        &self,
+        mod_id: u32,
+        loader: Option<ModLoader>,
+        game_version: Option<&str>,
+    ) -> Result<CurseForgeFileList> {
+        let (url, filters) = self.mod_files_request(mod_id, loader, game_version);
+        let page = self.mod_files_page(&url, &filters, 0).await?;
+        Ok(CurseForgeFileList {
+            files: page.files,
+            truncated: page.more,
+        })
+    }
+
+    fn mod_files_request(
+        &self,
+        mod_id: u32,
+        loader: Option<ModLoader>,
+        game_version: Option<&str>,
+    ) -> (String, Vec<(&'static str, String)>) {
+        let mut filters = Vec::new();
+        if let Some(version) = game_version {
+            filters.push(("gameVersion", version.to_string()));
+        }
+        if let Some(loader) = loader {
+            filters.push(("modLoaderType", loader.curseforge_loader_type().to_string()));
+        }
+        let url = format!("{}/v1/mods/{}/files", self.base_url, mod_id);
+        (url, filters)
+    }
+
+    /// 取文件列表从 `index` 起的一页。后面还有没有只在这里判：响应带了 `pagination.totalCount` 时按它，
+    /// 没带分页信息时只能凭满页判断；空页一律算完，免得平台给错总数时空转到页数上限。
+    async fn mod_files_page(
+        &self,
+        url: &str,
+        filters: &[(&'static str, String)],
+        index: u64,
+    ) -> Result<ModFilesPage> {
+        let mut params = filters.to_vec();
+        params.push(("index", index.to_string()));
+        params.push(("pageSize", MOD_FILES_PAGE_SIZE.to_string()));
+        let envelope: ListEnvelope<CurseForgeFile> =
+            send_json(&self.retry, "curseforge.mod_files", || {
+                self.get(url).query(&params)
+            })
+            .await?;
+        let fetched = u64::try_from(envelope.data.len()).expect("一页的文件数放得进 u64");
+        let next_index = index + fetched;
+        let more = fetched > 0
+            && match &envelope.pagination {
+                Some(pagination) => next_index < pagination.total_count,
+                None => fetched >= u64::from(MOD_FILES_PAGE_SIZE),
+            };
+        Ok(ModFilesPage {
+            files: envelope.data,
+            next_index,
+            more,
         })
     }
 
@@ -599,7 +639,14 @@ struct ListEnvelope<T> {
     pagination: Option<CurseForgePagination>,
 }
 
-/// 一个工程的文件列表：翻页取齐，或者翻到 [`MOD_FILES_MAX_PAGES`] 页为止。
+struct ModFilesPage {
+    files: Vec<CurseForgeFile>,
+    next_index: u64,
+    more: bool,
+}
+
+/// 一个工程的文件列表：翻页取齐，或者翻到页数上限为止（[`CurseForgeClient::mod_files`] 是
+/// [`MOD_FILES_MAX_PAGES`] 页，[`CurseForgeClient::mod_files_first_page`] 是一页）。
 #[derive(Debug, Clone)]
 pub struct CurseForgeFileList {
     /// 各页拼起来的文件，按平台给的先后，同一文件只留第一次出现的那个。
@@ -1823,6 +1870,64 @@ mod tests {
             .unwrap();
         let ids: Vec<u32> = list.files.iter().map(|file| file.id).collect();
         assert_eq!(ids, (7000..7090).collect::<Vec<_>>());
+        assert!(!list.truncated);
+    }
+
+    /// 只取首页：后面不论还有多少都只发 `index` 为 0 的一个请求。后面还有没有与翻页同一个判据：有总数按总数
+    /// （正好 50 个不算还有），没有分页信息时满页就算还有。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mod_files_first_page_sends_one_request_and_tells_whether_more_remain() {
+        for (total, paginated, more) in [
+            (0, true, false),
+            (30, true, false),
+            (50, true, false),
+            (51, true, true),
+            (2000, true, true),
+            (30, false, false),
+            (50, false, true),
+            (70, false, true),
+        ] {
+            let server = files_server(total, paginated).await;
+            let list = client(&server)
+                .mod_files_first_page(238222, None, None)
+                .await
+                .unwrap();
+            let ids: Vec<u32> = list.files.iter().map(|file| file.id).collect();
+            let case = format!("共 {total} 个，带分页信息：{paginated}");
+            assert_eq!(
+                ids,
+                (7000..7000 + total.min(50) as u32).collect::<Vec<_>>(),
+                "{case}"
+            );
+            assert_eq!(list.truncated, more, "{case}");
+            assert_eq!(requested_indexes(&server).await, vec![0], "{case}");
+        }
+    }
+
+    /// 首页同样带上游戏版本与加载器；没带上时 mock 对不上、回 404，这里就拿不到结果。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mod_files_first_page_keeps_the_filters() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .and(query_param("gameVersion", "1.20.1"))
+            .and(query_param("modLoaderType", "6"))
+            .and(query_param("index", "0"))
+            .and(query_param("pageSize", "50"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [numbered_file(1)],
+                "pagination": {"index": 0, "pageSize": 50, "resultCount": 1, "totalCount": 1}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let list = client(&server)
+            .mod_files_first_page(238222, Some(ModLoader::NeoForge), Some("1.20.1"))
+            .await
+            .unwrap();
+        let ids: Vec<u32> = list.files.iter().map(|file| file.id).collect();
+        assert_eq!(ids, [7001]);
         assert!(!list.truncated);
     }
 
