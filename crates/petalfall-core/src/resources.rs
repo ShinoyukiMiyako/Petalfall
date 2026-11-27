@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use petalfall_download::DownloadTask;
+use petalfall_instance::is_dos_short_name;
 use petalfall_modplatform::{CurseForgeClient, ModrinthClient, Platform, ResourceType};
 
 use crate::blocked::{BlockedFile, ClaimedCopy, place_claimed, single_blocked};
@@ -366,7 +367,7 @@ pub(crate) fn join_landing(landing: &str, file_name: &str) -> String {
 
 /// 平台给的文件名只能是单个普通文件名，否则拒收。
 fn checked_file_name(platform: Platform, raw: &str) -> Result<String> {
-    if is_safe_file_name(raw) {
+    if is_safe_platform_file_name(raw) {
         Ok(raw.to_owned())
     } else {
         Err(CoreError::UnsafeFileName {
@@ -386,6 +387,13 @@ pub fn is_safe_file_name(name: &str) -> bool {
         && !name
             .chars()
             .any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
+}
+
+/// 平台（Modrinth、CurseForge）给的文件名能不能照原样落盘：[`is_safe_file_name`] 之外还不能是 8.3 短名的形状
+/// （[`is_dos_short_name`]）。这些名字由工程作者定，文件落进 `mods/` 这类已有别的文件的目录，按短名写下去会盖掉
+/// 短名恰好是它的兄弟文件。存档名、版本 id 不走这一条：它们是本机已有的名字，不是外来的落盘名。
+pub(crate) fn is_safe_platform_file_name(name: &str) -> bool {
+    is_safe_file_name(name) && !is_dos_short_name(name)
 }
 
 #[cfg(test)]
@@ -625,6 +633,48 @@ mod tests {
         );
         assert!(!mc.join("evil.zip").exists());
         assert!(!mc.join("versions/evil.zip").exists());
+    }
+
+    /// 平台给的文件名是 8.3 短名的形状时同样拒收：按它写下去可能落到同目录里短名恰好是它的已有文件上。
+    /// 目录里原有的文件不动。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn platform_file_name_shaped_like_a_short_name_is_rejected() {
+        let server = MockServer::start().await;
+        mount_modrinth_version(&server, "alias", "FAITHF~1.ZIP", b"x").await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21.1").await;
+        let packs = mc.join("versions/1.21.1/resourcepacks");
+        std::fs::create_dir_all(&packs).unwrap();
+        std::fs::write(packs.join("faithful-32x.zip"), b"old").unwrap();
+        let petalfall = petalfall(mc, IsolationPolicy::All, &server.uri());
+        let err = petalfall
+            .install_resource(
+                ResourceTarget {
+                    version_id: "1.21.1",
+                    resource_type: ResourceType::ResourcePack,
+                    world: None,
+                },
+                Platform::Modrinth,
+                "p",
+                "alias",
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::UnsafeFileName { file_name, .. } if file_name == "FAITHF~1.ZIP"),
+            "实际：{err:?}"
+        );
+        assert_eq!(
+            std::fs::read(packs.join("faithful-32x.zip")).unwrap(),
+            b"old"
+        );
+        let names: Vec<_> = std::fs::read_dir(&packs)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["faithful-32x.zip"]);
     }
 
     /// Mod 也不行：直接下到 mods/ 会绕过 Mod 管理，同名 jar 被无备份地覆盖。目录里原有的文件不动。
@@ -1557,6 +1607,35 @@ mod tests {
         for bad in ["", ".", "..", "a/b", "a\\b", "C:x", "x.", "x ", "a\u{0}b"] {
             assert!(!is_safe_file_name(bad), "{bad:?}");
         }
+    }
+
+    /// 平台给的文件名另拒 8.3 短名的形状，形状对上的真实长文件名（`foo~1.jar`）同样拒收，这是代价；带「~」而
+    /// 形状不对的照收。存档名、版本 id 走的 is_safe_file_name 不受影响。
+    #[test]
+    fn platform_file_names_also_refuse_dos_short_name_shapes() {
+        for alias in [
+            "SODIUM~1.JAR",
+            "sodium~1.jar",
+            "foo~1.jar",
+            "资源包~2.zip",
+            "~WEEKE~1.JSO",
+            "LONGFI~12",
+        ] {
+            assert!(!is_safe_platform_file_name(alias), "{alias}");
+            assert!(is_safe_file_name(alias), "{alias}");
+        }
+        for plain in [
+            "sodium-0.6.jar",
+            "~backup.jar",
+            "a~b.jar",
+            "abcdefg~1.jar",
+            "notes~draft~2026.txt",
+            "foo~.jar",
+            "foo~1a.jar",
+        ] {
+            assert!(is_safe_platform_file_name(plain), "{plain}");
+        }
+        assert!(!is_safe_platform_file_name("../evil.jar"));
     }
 
     /// 记号比这一版新或读不懂时，资源在定位目录、取平台文件之前就被挡下：带出记号的结论与游戏目录，游戏

@@ -10,6 +10,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use petalfall_instance::is_dos_short_name;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// 已通过词法安全校验的实例根相对路径。
@@ -199,21 +200,6 @@ fn has_drive_prefix(path: &str) -> bool {
 /// 记账的元数据目录。Windows 不区分大小写，比较也不区分。
 fn is_protected_top_level(component: &str) -> bool {
     component.eq_ignore_ascii_case(petalfall_instance::PETALFALL_META_DIR)
-}
-
-/// 名字是不是 8.3 短名的形状：第一个点之前的那一截以「~数字」结尾，「~」前面有一到六个字符。
-///
-/// 前面那一截里可以再有「~」：长名里的「~」在短名里原样留着，「~Weekend.json」的短名是「~WEEKE~1.JSO」。
-/// 把它当成普通名字放行，包里的文件就能按短名落到别的文件上。
-fn is_dos_short_name(component: &str) -> bool {
-    let stem = component.split('.').next().unwrap_or(component);
-    let Some((prefix, suffix)) = stem.rsplit_once('~') else {
-        return false;
-    };
-    !prefix.is_empty()
-        && prefix.chars().count() <= 6
-        && !suffix.is_empty()
-        && suffix.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn is_reserved_windows_name(component: &str) -> bool {

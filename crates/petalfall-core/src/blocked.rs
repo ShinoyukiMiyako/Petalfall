@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
-use crate::resources::is_safe_file_name;
+use crate::resources::is_safe_platform_file_name;
 
 /// 缓存根下放整合包相关内容的目录：下载来的包与认领暂存位都在它下面。
 pub(crate) const PACK_CACHE_DIR: &str = "modpacks";
@@ -156,7 +156,7 @@ fn io_error(path: &Path, source: std::io::Error) -> CoreError {
 }
 
 fn ensure_safe_name(file: &BlockedFile) -> Result<()> {
-    if is_safe_file_name(&file.file_name) {
+    if is_safe_platform_file_name(&file.file_name) {
         Ok(())
     } else {
         Err(CoreError::UnsafeFileName {
@@ -544,6 +544,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, CoreError::UnsafeFileName { .. }), "{err:?}");
+
+        let alias = blocked(9, "EVILMO~1.JAR", b"x");
+        let err = petalfall
+            .claim_blocked_files(&folder, &[alias])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::UnsafeFileName { file_name, .. } if file_name == "EVILMO~1.JAR"),
+            "{err:?}"
+        );
     }
 
     /// 暂存位里的副本被改过、对不上哈希时不算认领。

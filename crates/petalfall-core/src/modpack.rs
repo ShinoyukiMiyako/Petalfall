@@ -61,7 +61,8 @@ use crate::instance_install::{
     MarkerSettlement, PhaseAnnouncer, PhaseCursor, now_millis, template_stage,
 };
 use crate::resources::{
-    curseforge_fallback_url, is_safe_file_name, join_landing, task_for_file_url,
+    curseforge_fallback_url, is_safe_file_name, is_safe_platform_file_name, join_landing,
+    task_for_file_url,
 };
 
 /// 实例目录里的整合包信息文件名（在启动器元数据目录下）。
@@ -1520,7 +1521,7 @@ impl CurseForgeIndex {
                     project_id: reference.project_id.to_string(),
                     version_id: reference.file_id.to_string(),
                 })?;
-        if !is_safe_file_name(&file.file_name) {
+        if !is_safe_platform_file_name(&file.file_name) {
             return Err(CoreError::UnsafeFileName {
                 platform: Platform::CurseForge.display_name(),
                 file_name: file.file_name.clone(),
@@ -4748,6 +4749,54 @@ mod tests {
 
     fn cf_mod(id: u32, class_id: u32) -> serde_json::Value {
         serde_json::json!({"id": id, "name": "m", "slug": "m", "summary": "", "classId": class_id})
+    }
+
+    /// CurseForge 给的文件名是 8.3 短名的形状时拒收：它要落进 mods/ 这类已有别的文件的目录，按短名写下去可能
+    /// 盖掉短名恰好是它的兄弟文件。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_file_name_shaped_like_a_short_name_is_rejected() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    cf_file(11, 1, "SODIUM~1.JAR", Some(format!("{uri}/f/11"))),
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": [cf_mod(1, 6)]})),
+            )
+            .mount(&server)
+            .await;
+        let client = CurseForgeClient::new(petalfall_base::http::build_client().unwrap(), "k")
+            .with_base_url(&uri);
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall(tmp.path(), &server).with_curseforge_key("k");
+        let refs = [CurseForgeFileRef {
+            project_id: 1,
+            file_id: 11,
+        }];
+        let Err(err) = petalfall
+            .curseforge_downloads(
+                &client,
+                &refs,
+                &HashSet::new(),
+                Path::new("D:/mc/versions/包"),
+            )
+            .await
+        else {
+            panic!("短名形状的文件名应被拒收");
+        };
+        assert!(
+            matches!(&err, CoreError::UnsafeFileName { file_name, .. } if file_name == "SODIUM~1.JAR"),
+            "{err:?}"
+        );
     }
 
     /// CurseForge 文件按所属工程的大类落进对应目录，文件对象自带地址的任务都挂 CurseForge 下载凭据；禁止

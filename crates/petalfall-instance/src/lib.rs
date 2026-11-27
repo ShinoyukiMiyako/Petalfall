@@ -57,7 +57,7 @@ pub use discovery::{
 
 pub use naming::{
     ILLEGAL_NAME_CHARS, MAX_NAME_UNITS, NameViolation, check_instance_name, check_name_format,
-    is_safe_instance_id,
+    is_dos_short_name, is_safe_instance_id,
 };
 
 pub use settings::{

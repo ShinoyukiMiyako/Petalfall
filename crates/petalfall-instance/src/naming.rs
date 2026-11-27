@@ -121,6 +121,25 @@ pub fn is_safe_instance_id(id: &str) -> bool {
             .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
+/// 单个路径段是不是 8.3 短名的形状：第一个点之前的那一截以「~数字」结尾，「~」前面有一到六个字符。
+///
+/// 开着 8.3 的卷（系统盘默认开着）上，按这样的名字打开会落到同目录里短名恰好是它的另一个文件上：往已有别的
+/// 文件的目录里按外来的名字写，就可能盖掉兄弟文件。形状对上的真实长文件名（如 `foo~1.jar`）也算，拒收它们是
+/// 这条判断的代价。
+///
+/// 前面那一截里可以再有「~」：长名里的「~」在短名里原样留着，「~Weekend.json」的短名是「~WEEKE~1.JSO」。
+/// 把它当成普通名字放行，按短名就能落到别的文件上。
+pub fn is_dos_short_name(component: &str) -> bool {
+    let stem = component.split('.').next().unwrap_or(component);
+    let Some((prefix, suffix)) = stem.rsplit_once('~') else {
+        return false;
+    };
+    !prefix.is_empty()
+        && prefix.chars().count() <= 6
+        && !suffix.is_empty()
+        && suffix.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
