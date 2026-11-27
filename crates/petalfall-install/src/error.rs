@@ -243,7 +243,8 @@ impl std::fmt::Display for JavaExecutable {
 ///
 /// 命令层不另带详情，玩家与「复制错误原文」看到的就是正文这一句，而实例卡片与任务行只显示一行、超出的截掉。
 /// 所以结论与该做什么排在前面：哪个处理器用哪个 Java（只写主版本）生成的哪个文件（只写文件名）不符，又换了哪个
-/// Java 重跑、或为什么没能换；产物与 Java 的完整路径、两边的 sha1 放在最后，截掉的只是细节。
+/// Java 重跑（与先用的写法相同时点明是另一个）、或为什么没能换；产物与 Java 的完整路径、两边的 sha1 放在最后，截掉的
+/// 只是细节。
 #[derive(Debug)]
 pub struct ProcessorOutputMismatch {
     /// 处理器的 maven 坐标。
@@ -270,7 +271,15 @@ impl std::fmt::Display for ProcessorOutputMismatch {
             file_label(&self.path)
         )?;
         if let Some(second) = &self.retried_with {
-            write!(f, "；又换 {} 重跑，两次都对不上", java_label(second))?;
+            let label = java_label(second);
+            // 两个 Java 主版本相同（或都只写得出同一个文件名）时，结论里两处写法一样，单行截断后看着像拿同一个 Java
+            // 白跑了一遍：点明换的是另一个，分得清是哪两个的完整路径在句末。
+            let another = if label == java_label(&self.java) {
+                "另一个"
+            } else {
+                ""
+            };
+            write!(f, "；又换{another} {label} 重跑，两次都对不上")?;
         }
         if let Some(reason) = &self.fallback_error {
             write!(f, "；想换一个 Java 重跑，但没能取到：{reason}")?;
@@ -452,8 +461,9 @@ mod tests {
         assert!(err.is_retryable());
     }
 
-    /// 产物对不上的正文先说结论：哪个处理器用哪个 Java（只写主版本）生成的哪个文件不符，再按换过 Java、没能换各接
-    /// 一句；产物与 Java 的完整路径、两边的 sha1 用分号另起放在最后，取不到的原因以括号收尾时也不与细节挤在一起。
+    /// 产物对不上的正文先说结论：哪个处理器用哪个 Java（只写主版本）生成的哪个文件不符，再按换过 Java（换上的与先用的
+    /// 写法相同时点明是另一个）、没能换各接一句；产物与 Java 的完整路径、两边的 sha1 用分号另起放在最后，取不到的原因
+    /// 以括号收尾时也不与细节挤在一起。
     /// 取不到的原因原文写进正文，原因链只交出正文里没有的更深一层。
     #[test]
     fn processor_output_mismatch_puts_the_verdict_first_and_the_details_last() {
@@ -497,6 +507,17 @@ mod tests {
         );
         assert!(std::error::Error::source(&retried).is_none());
         assert!(!retried.is_retryable());
+
+        // 先用的与重跑用的是两个主版本相同的 Java：结论里点明换的是另一个，单看结论也不像拿同一个 Java 白跑一遍。
+        let pinned17 = JavaExecutable {
+            path: PathBuf::from(r"D:\jdk\temurin-17\bin\java.exe"),
+            major: Some(17),
+        };
+        let same_major = mismatch(pinned17, Some(java17.clone()), None);
+        assert_eq!(
+            same_major.to_string(),
+            r"处理器 net.minecraftforge:jarsplitter:1.1.0 用 Java 17 生成的 client-1.13.2-20190213.203750-extra.jar 与安装器声明的不符；又换另一个 Java 17 重跑，两次都对不上；文件 D:\mc\libraries\net\minecraft\client\1.13.2-20190213.203750\client-1.13.2-20190213.203750-extra.jar，期望 sha1 938487f2，实际 2f9435b4；先用的 Java 在 D:\jdk\temurin-17\bin\java.exe，重跑用的在 D:\data\runtime\17\bin\java.exe"
+        );
 
         // 原因本身就是最底层：正文里有它，原因链上什么都不剩。它以自己的括号收尾，后面的细节照样用分号另起。
         let reason = "未找到匹配 Java 17 的运行时，且自动下载已关闭（开启 auto_download_java 或手动安装对应 Java）";
@@ -545,6 +566,23 @@ mod tests {
         assert_eq!(
             unknown.to_string(),
             r"处理器 net.minecraftforge:jarsplitter:1.1.0 用 java.exe 生成的 client-1.13.2-20190213.203750-extra.jar 与安装器声明的不符；又换 javaw.exe 重跑，两次都对不上；文件 D:\mc\libraries\net\minecraft\client\1.13.2-20190213.203750\client-1.13.2-20190213.203750-extra.jar，期望 sha1 938487f2，实际 2f9435b4；先用的 Java 在 E:\jdk\bin\java.exe，重跑用的在 F:\jdk-21\bin\javaw.exe"
+        );
+
+        // 都不知道主版本、文件名又相同：结论里两处写法一样，同样点明是另一个。
+        let same_name = mismatch(
+            JavaExecutable {
+                path: PathBuf::from(r"E:\jdk\bin\java.exe"),
+                major: None,
+            },
+            Some(JavaExecutable {
+                path: PathBuf::from(r"F:\jdk-21\bin\java.exe"),
+                major: None,
+            }),
+            None,
+        );
+        assert_eq!(
+            same_name.to_string(),
+            r"处理器 net.minecraftforge:jarsplitter:1.1.0 用 java.exe 生成的 client-1.13.2-20190213.203750-extra.jar 与安装器声明的不符；又换另一个 java.exe 重跑，两次都对不上；文件 D:\mc\libraries\net\minecraft\client\1.13.2-20190213.203750\client-1.13.2-20190213.203750-extra.jar，期望 sha1 938487f2，实际 2f9435b4；先用的 Java 在 E:\jdk\bin\java.exe，重跑用的在 F:\jdk-21\bin\java.exe"
         );
     }
 
