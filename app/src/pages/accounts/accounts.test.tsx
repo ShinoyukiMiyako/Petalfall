@@ -291,7 +291,7 @@ describe("账户页：当前账户与列表", () => {
 });
 
 describe("账户页：皮肤", () => {
-  it("聚光卡与账户卡用全身立绘（聚光卡 6 倍 96 x 192，账户卡 4 倍 64 x 128）；离线账户没有远程皮肤，画人偶", async () => {
+  it("聚光卡与账户卡用全身立绘（聚光卡 6 倍 96 x 192，账户卡 4 倍 64 x 128）；没有材质源时离线账户的默认皮肤取不到图，画人偶", async () => {
     await mount();
     const figures = [...page().querySelectorAll<HTMLElement>('[data-sk-art="skin"]')];
     expect(figures.map((f) => [f.style.width, f.style.height])).toEqual([
