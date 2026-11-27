@@ -206,7 +206,7 @@ impl BorrowedLoader {
             return false;
         }
         let parts = self.release_parts(other);
-        parts == self.release_parts(own_build) && names_a_release(&parts, other, own_build)
+        parts == self.release_parts(own_build) && same_release(&parts, other, own_build)
     }
 }
 
@@ -217,7 +217,27 @@ enum Side {
     Borrowed,
 }
 
-/// 去掉字样后各段同为 `parts` 的两份构建 `a`、`b` 能不能认成同一发布：各段里要有 Mod 自己的版本号。
+/// 去掉字样后各段同为 `parts` 的两份构建 `a`、`b` 能不能认成同一发布：两份要能跑在同一个 MC 版本上，各段里
+/// 还要有 Mod 自己的版本号。
+///
+/// 版本号不带 MC 版本的工程，同一个 Mod 版本号在不同 MC 版本上各有构建（只支持 1.21.1 的 `2.0.0-neoforge`、回移到
+/// 1.20.1 的 `2.0.0-forge`）。落位矩阵拿的是不分 MC 版本的整份列表，这两份配成同一发布的话，实例能用的那份的
+/// 发布时间被拉到另一份的上传时间，更新的发布反排到旧发布后面。
+fn same_release(parts: &[String], a: &ModVersionInfo, b: &ModVersionInfo) -> bool {
+    share_a_game_version(a, b) && names_a_release(parts, a, b)
+}
+
+/// 两份构建声明的 MC 版本有没有交集。有一份没声明时不拿这个挡：平台没给的不当成对不上，与
+/// [`classify_game_version`] 把缺失归到「不知道」同一口径。
+fn share_a_game_version(a: &ModVersionInfo, b: &ModVersionInfo) -> bool {
+    a.game_versions.is_empty()
+        || b.game_versions.is_empty()
+        || a.game_versions
+            .iter()
+            .any(|game| b.game_versions.contains(game))
+}
+
+/// 去掉字样后各段同为 `parts` 的两份构建 `a`、`b` 的版本号认不认得出同一发布：各段里要有 Mod 自己的版本号。
 fn names_a_release(parts: &[String], a: &ModVersionInfo, b: &ModVersionInfo) -> bool {
     parts.iter().any(|part| names_mod_version(part, a, b))
 }
@@ -336,7 +356,7 @@ fn release_times<'v, V: Borrow<ModVersionInfo>>(
             for &b in borrowed {
                 for &o in own {
                     let (other, own_build) = (versions[b].borrow(), versions[o].borrow());
-                    if !names_a_release(parts, other, own_build) {
+                    if !same_release(parts, other, own_build) {
                         continue;
                     }
                     times[b].borrowed_twin = true;
@@ -1837,6 +1857,102 @@ mod tests {
         assert!(!is_borrowed_twin(&wider(Fabric, "1.20.2-fabric"), &quilt));
         assert!(!is_borrowed_twin(&fabric, &wider(Quilt, "1.20.2-quilt")));
         assert!(is_borrowed_twin(&fabric, &quilt));
+    }
+
+    /// 版本号与 MC 版本都由调用方给的 [`uploaded`]：同一版本号的几份构建靠 `id` 区分。
+    fn uploaded_for(
+        id: &str,
+        number: &str,
+        date: &str,
+        loaders: &[ModLoader],
+        mc: &[&str],
+    ) -> ModVersionInfo {
+        ModVersionInfo {
+            version_number: number.to_owned(),
+            game_versions: mc.iter().map(|v| (*v).to_owned()).collect(),
+            ..uploaded(id, date, loaders)
+        }
+    }
+
+    /// 版本号不带 MC 版本的工程：只支持 1.21.1 的 2.0.0 自家构建与回移到 1.20.1 的 2.0.0 被借构建跑不到同一个 MC
+    /// 版本上，不算同一发布。回移那份照它自己的上传时间排在 1.9.1 前面，1.20.1 的实例挑中它。
+    #[test]
+    fn a_same_numbered_build_for_another_game_version_is_not_a_twin() {
+        use ModLoader::{Fabric, Forge, NeoForge, Quilt};
+        for (borrowed, own, instance) in [(Forge, NeoForge, "neoforge"), (Fabric, Quilt, "quilt")] {
+            let (b, o) = (borrowed.modrinth_facet(), own.modrinth_facet());
+            let build = |number: String, date: &str, loader: ModLoader, mc: &str| {
+                uploaded_for(&number, &number, date, &[loader], &[mc])
+            };
+            let versions = vec![
+                build(
+                    format!("2.0.0-{b}"),
+                    "2026-03-01T00:00:00Z",
+                    borrowed,
+                    "1.20.1",
+                ),
+                build(
+                    format!("1.9.1-{b}"),
+                    "2026-02-01T00:00:00Z",
+                    borrowed,
+                    "1.20.1",
+                ),
+                build(format!("2.0.0-{o}"), "2026-01-15T00:00:00Z", own, "1.21.1"),
+            ];
+            assert_eq!(
+                best_for(&versions, "1.20.1", instance),
+                Some(format!("2.0.0-{b}"))
+            );
+            assert!(!is_borrowed_twin(&versions[0], &versions[2]));
+            assert_eq!(
+                release_dates(&versions),
+                [
+                    "2026-03-01T00:00:00Z",
+                    "2026-02-01T00:00:00Z",
+                    "2026-01-15T00:00:00Z"
+                ]
+            );
+        }
+    }
+
+    /// 两份构建声明的 MC 版本有交集、或有一份没声明时照旧是同一发布：补传那份取它自家构建的时间。
+    #[test]
+    fn twins_sharing_a_game_version_or_missing_one_still_pair() {
+        use ModLoader::{Fabric, Forge, NeoForge, Quilt};
+        let none: &[&str] = &[];
+        for (borrowed, own) in [(Forge, NeoForge), (Fabric, Quilt)] {
+            let (b, o) = (borrowed.modrinth_facet(), own.modrinth_facet());
+            for (borrowed_mc, own_mc) in [
+                (&["1.20.1", "1.20.2"][..], &["1.20.1"][..]),
+                (&["1.20.1"][..], &["1.19.4", "1.20.1"][..]),
+                (none, &["1.20.1"][..]),
+                (&["1.20.1"][..], none),
+            ] {
+                let late = uploaded_for(
+                    "late",
+                    &format!("1.5.0-{b}"),
+                    "2026-04-01T00:00:00Z",
+                    &[borrowed],
+                    borrowed_mc,
+                );
+                let own_build = uploaded_for(
+                    "own",
+                    &format!("1.5.0-{o}"),
+                    "2026-02-01T00:00:00Z",
+                    &[own],
+                    own_mc,
+                );
+                assert!(
+                    is_borrowed_twin(&late, &own_build),
+                    "{borrowed_mc:?} 与 {own_mc:?}"
+                );
+                assert_eq!(
+                    release_dates(&[late, own_build]),
+                    ["2026-02-01T00:00:00Z"; 2],
+                    "{borrowed_mc:?} 与 {own_mc:?}"
+                );
+            }
+        }
     }
 
     /// 工程压根没有这个 MC 版本的文件时，说「需要 NeoForge」等于让玩家去换加载器，换了也没得装。
