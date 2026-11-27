@@ -7,6 +7,7 @@ import { APPEARANCES, contrast, declarationOf, readCss, resolveColor, tokensOf, 
 const css = readCss(new URL("./export.module.css", import.meta.url));
 const modalCss = readCss(new URL("../../ui/Modal.module.css", import.meta.url));
 const insetCss = readCss(new URL("../../ui/Inset.module.css", import.meta.url));
+const checkboxCss = readCss(new URL("../../ui/Checkbox.module.css", import.meta.url));
 
 /** 弹窗正文、预览统计的 Inset 两种底。 */
 type Ground = "dialog" | "panel";
@@ -41,6 +42,10 @@ describe("导出整合包弹窗里的说明文字", () => {
   it("全部取次要文字 text-2", () => {
     expect(declarationOf(css, ".extraHint", "color")).toBe("var(--sk-text-2)");
     expect(declarationOf(css, ".kvHint", "color")).toBe("var(--sk-text-2)");
+  });
+
+  it("所属的复选框禁用时，说明与复选框降到同一个禁用不透明度，不比变淡的标签还深", () => {
+    expect(declarationOf(css, ".extraHint[data-disabled]", "opacity")).toBe(declarationOf(checkboxCss, ".root[data-disabled]", "opacity"));
   });
 
   it.each(EXPECTED)("%s：勾选项说明对弹窗正文 %f、统计说明对 Inset %f，都不低于 4.5:1", (appearance, onDialog, onPanel) => {

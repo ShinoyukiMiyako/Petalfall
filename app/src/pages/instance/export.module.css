@@ -83,6 +83,11 @@
   color: var(--sk-text-2);
 }
 
+/* 说明属于上面的复选框：复选框禁用时整个按钮降到禁用不透明度，说明跟着降，不比变淡的标签还深 */
+.extraHint[data-disabled] {
+  opacity: var(--sk-disabled);
+}
+
 .disabledBlock {
   display: flex;
   flex-direction: column;

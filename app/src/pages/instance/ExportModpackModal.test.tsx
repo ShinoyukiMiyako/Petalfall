@@ -143,6 +143,13 @@ function checkbox(label: string): HTMLElement {
   return found;
 }
 
+/** 存档那一项复选框下的说明。 */
+function savesHint(): HTMLElement {
+  const found = [...dialog().querySelectorAll<HTMLElement>("li span")].find((el) => textOf(el) === "地图类整合包才需要，体积可能很大");
+  if (found === undefined) throw new Error("存档项下面没有说明");
+  return found;
+}
+
 function click(el: HTMLElement) {
   act(() => el.click());
 }
@@ -529,6 +536,7 @@ describe("导出整合包弹窗", () => {
     await openExport();
     const saves = checkbox("存档（saves）");
     expect(saves.getAttribute("aria-disabled")).toBe("true");
+    expect(savesHint().hasAttribute("data-disabled")).toBe(true);
     act(() => {
       saves.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
     });
@@ -555,6 +563,7 @@ describe("导出整合包弹窗", () => {
     await openExport();
     click(checkbox("存档（saves）"));
     expect(bundledValue()).toMatch(/^44 个文件 · /);
+    expect(savesHint().hasAttribute("data-disabled")).toBe(false);
     instances = instances.map((i) => ({ ...i, activity: "running" }));
     await act(async () => {
       await launcher.actions.refreshInstances();
@@ -562,6 +571,8 @@ describe("导出整合包弹窗", () => {
     });
     expect(checkbox("存档（saves）").getAttribute("aria-checked")).toBe("false");
     expect(bundledValue()).toMatch(/^42 个文件 · /);
+    // 存档说明随复选框一起变淡
+    expect(savesHint().hasAttribute("data-disabled")).toBe(true);
     instances = instances.map((i) => ({ ...i, activity: null }));
     await act(async () => {
       await launcher.actions.refreshInstances();
@@ -569,6 +580,7 @@ describe("导出整合包弹窗", () => {
     });
     expect(checkbox("存档（saves）").getAttribute("aria-checked")).toBe("true");
     expect(bundledValue()).toMatch(/^44 个文件 · /);
+    expect(savesHint().hasAttribute("data-disabled")).toBe(false);
   });
 
   it("跳过的文件全在没勾的额外项里：不显示说明，勾上才出现，再取消又消失", async () => {

@@ -271,16 +271,21 @@ function ExportForm({ preview, draft, savesReason, skipped, listOpen, onListOpen
             const present = stat.files > 0;
             const missing = extra === "options" ? EXPORT_COPY.missingOptions : EXPORT_COPY.missingFolder;
             const held = extra === "saves" ? savesReason : undefined;
+            const disabledReason = present ? held : missing;
             return (
               <li key={extra} className={styles.extraRow} data-compact={compact ? "" : undefined}>
                 <Checkbox
                   checked={present && extras.has(extra)}
                   onChange={(on) => toggleExtra(extra, on)}
                   label={EXPORT_COPY.extra[extra]}
-                  disabledReason={present ? held : missing}
+                  disabledReason={disabledReason}
                 />
                 <span className={styles.extraStat}>{present ? EXPORT_COPY.fileStat(stat.files, stat.bytes) : EXPORT_COPY.none}</span>
-                {extra === "saves" && <span className={styles.extraHint}>{EXPORT_COPY.savesHint}</span>}
+                {extra === "saves" && (
+                  <span className={styles.extraHint} data-disabled={disabledReason === undefined ? undefined : ""}>
+                    {EXPORT_COPY.savesHint}
+                  </span>
+                )}
               </li>
             );
           })}
