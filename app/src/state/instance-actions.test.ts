@@ -1881,6 +1881,84 @@ describe("装到一半被重扫扫到半成品目录", () => {
   });
 });
 
+describe("带着 install 标记、没有任务在跑的实例", () => {
+  // 重装 Forge 途中确认退出：盘上留着只合并了原版的版本 JSON，旁边是记着这次要装 Forge 的 install 标记
+  const pending = { kind: "install" as const, outcome: "pending" as const, started_at: 1_700_000_000_000, spec: { mc_version: "1.20.1", loader: "forge" as const, loader_version: "47.4.29" }, error: null };
+  const find = (id: string) => store.getState().instances.find((i) => i.id === id);
+
+  beforeEach(async () => {
+    instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", { mc_version: "1.20.1", loaders: [], incomplete: pending }) : i));
+    await store.actions.reload("instances");
+    await settle();
+    expect(store.getState().tasks).toEqual([]);
+  });
+
+  it("照扫到的显示成原版，不按标记显示成 Forge：Mod 入口按显示的加载器放开，后端却按盘上的原版 JSON 解析到共用的 mods 目录", () => {
+    expect(find("生存")).toMatchObject({ status: "broken", mcVersion: "1.20.1", loader: "vanilla", loaderVersion: null });
+  });
+
+  it("从它排补全：任务详情写标记里的版本与加载器，即后端照标记装回的内容，不是扫到的原版", async () => {
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await store.actions.repairInstance("生存");
+    await settle();
+    expect(store.getState().tasks.map((t) => [t.kind, t.instanceId, t.title, t.detail])).toEqual([["repair", "生存", "补全「生存」的游戏文件", "1.20.1 · Forge 47.4.29"]]);
+    // 补全在跑时 Mod 的改动按安装上锁，这时才按标记显示
+    expect(find("生存")).toMatchObject({ status: "installing", mcVersion: "1.20.1", loader: "forge", loaderVersion: "47.4.29" });
+  });
+
+  it("新建失败、还没写下版本 JSON：照扫到的显示成没有版本的原版；补全详情写标记里的", async () => {
+    const failed = { kind: "install" as const, outcome: "failed" as const, started_at: 1_700_000_000_000, spec: { mc_version: "1.21.4", loader: "neoforge" as const, loader_version: "21.4.120" }, error: { code: "network_failed", message: "连接超时" } };
+    instances = [...instances, instanceDto("新世界", { status: "broken", broken_reason: "缺少版本 JSON", mc_version: null, loaders: [], incomplete: failed })];
+    await store.actions.reload("instances");
+    await settle();
+    expect(find("新世界")).toMatchObject({ status: "broken", mcVersion: null, loader: "vanilla", loaderVersion: null });
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await store.actions.repairInstance("新世界");
+    await settle();
+    expect(store.getState().tasks.map((t) => [t.instanceId, t.detail])).toEqual([["新世界", "1.21.4 · NeoForge 21.4.120"]]);
+  });
+});
+
+describe("install 标记里的加载器这一版认不出（降级后读到新版写下的标记）", () => {
+  const marker: InstanceDto["incomplete"] = {
+    kind: "install",
+    outcome: "pending",
+    started_at: 1_700_000_000_000,
+    spec: { mc_version: "1.20.1", loader: "legacyfabric" as never, loader_version: "1.0.0" },
+    error: null,
+  };
+  const find = () => store.getState().instances.find((i) => i.id === "生存");
+
+  beforeEach(async () => {
+    instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", { mc_version: "1.20.1", loaders: [{ kind: "fabric", version: "0.15.11" }], incomplete: marker }) : i));
+    await store.actions.reload("instances");
+    await settle();
+  });
+
+  it("排补全：详情写扫到的版本与加载器，补全在跑时也显示扫到的，不把认不出的键带进实例", async () => {
+    expect(find()).toMatchObject({ status: "broken", mcVersion: "1.20.1", loader: "fabric", loaderVersion: "0.15.11" });
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await store.actions.repairInstance("生存");
+    await settle();
+    expect(store.getState().tasks.map((t) => [t.instanceId, t.detail])).toEqual([["生存", "1.20.1 · Fabric 0.15.11"]]);
+    expect(find()).toMatchObject({ status: "installing", mcVersion: "1.20.1", loader: "fabric", loaderVersion: "0.15.11" });
+  });
+
+  it("重新安装加载器期间重扫到这个标记：照旧显示扫到的", async () => {
+    instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", { mc_version: "1.20.1", loaders: [{ kind: "fabric", version: "0.15.11" }] }) : i));
+    await store.actions.reload("instances");
+    await settle();
+    const repair = deferred<unknown>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    await store.actions.repairInstance("生存", { reinstallLoader: true });
+    await settle();
+    instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", { mc_version: "1.20.1", loaders: [{ kind: "fabric", version: "0.15.11" }], activity: "repairing", incomplete: marker }) : i));
+    await store.actions.reload("instances");
+    await settle();
+    expect(find()).toMatchObject({ status: "installing", mcVersion: "1.20.1", loader: "fabric", loaderVersion: "0.15.11" });
+  });
+});
+
 describe("补全失败的通知", () => {
   it("标题说的是补全，不是下载", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);

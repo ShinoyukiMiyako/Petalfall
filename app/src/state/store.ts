@@ -697,10 +697,17 @@ function nullableStrArg(args: Record<string, unknown>, key: string, command: str
   return value;
 }
 
+/**
+ * 后端原样下发的加载器键（命令参数、未完成标记里记下的安装内容）这一版认不认得；null 是原版。类型上只有这几种，盘上的标记却可能是
+ * 新版写下的（降级后读到），渲染期的派生不能为它抛错，要先问这一句。
+ */
+function isKnownLoaderKey(value: string | null): value is Exclude<LoaderKind, "vanilla"> | null {
+  return value === null || value === "fabric" || value === "quilt" || value === "forge" || value === "neoforge";
+}
+
 function loaderOfArg(value: string | null): LoaderKind {
-  if (value === null) return "vanilla";
-  if (value === "fabric" || value === "quilt" || value === "forge" || value === "neoforge") return value;
-  throw new Error(`未知的加载器：${value}`);
+  if (!isKnownLoaderKey(value)) throw new Error(`未知的加载器：${value}`);
+  return value === null ? "vanilla" : value;
 }
 
 /** 重启后恢复的任务没有入队时的上下文，按命令参数推出能推出的部分。 */
@@ -1067,21 +1074,38 @@ type TaskEffect = "installing" | "moving" | "backing_up" | "modifying" | null;
 type CreationMeta = Extract<TaskMeta, { type: "create" | "modpack" }>;
 
 /**
+ * install 标记里记下的这次要装的内容，换成实例摘要的说法。别的种类的标记、没有标记或标记里没记安装内容时为 null；标记里的加载器
+ * 这一版认不出时（降级后读到新版写下的标记）也为 null，由调用方用扫到的内容，不把类型之外的键带进实例摘要。
+ */
+function markedInstall(inst: InstanceSummary): { mcVersion: string; loader: LoaderKind; loaderVersion: string | null } | null {
+  if (inst.incomplete === null || inst.incomplete.kind !== "install" || inst.incomplete.spec === null) return null;
+  const spec = inst.incomplete.spec;
+  if (!isKnownLoaderKey(spec.loader)) return null;
+  return { mcVersion: spec.mcVersion, loader: spec.loader === null ? "vanilla" : spec.loader, loaderVersion: spec.loaderVersion };
+}
+
+/**
  * creation：正在新建或导入这个实例的任务的入队上下文。装到一半被重扫扫到的目录里，版本 JSON 说的不是这个实例装好后的样子：
  * 新建时还没写，扫出来既没有版本也没有加载器；装 Forge、NeoForge 期间盘上是只合并了原版的那份（给安装器的处理器读的），
  * 扫出来是原版。新建安装中一律沿用入队时的内容，与占位项说的一致，不写成「原版 · 版本未知」，也不在装到半路时变成原版。
  * 导入整合包不经换原版 JSON 那一步，版本 JSON 在下载 Mod 之前就写成了真实内容，入队上下文反而不一定准（重启后恢复的导入不知道
  * 版本与加载器，发现页没读到清单摘要时不知道加载器版本），所以只在扫描项还没有版本时沿用。
- * 补全里照记录重装、重新安装加载器没有入队上下文，沿用未完成标记里记下的这次要装的内容。
+ * 补全里照记录重装、重新安装加载器没有入队上下文，沿用未完成标记里记下的这次要装的内容；标记里的加载器认不出时保持扫到的。
+ *
+ * 没有任务在跑（以及别的 effect）时，版本与加载器一律是扫到的，即便带着 install 标记、盘上是装到一半留下的原版 JSON 也不按标记显示。
+ * 实例页与设置页的 Mod 列表、拖放、启停、删除、检查更新、重新安装加载器等入口按这里的 loader 是不是原版放开，后端的 Mod 命令却按
+ * 盘上的版本 JSON 解析实例目录：那份原版 JSON 在默认隔离档位下解析到游戏根目录共用的 mods，版本 JSON 还没写下时直接报未安装。
+ * 显示成标记里的加载器会让这些入口去列、删、放别的实例的文件，所以空闲时两边要看同一份盘上的事实；补全会装回什么，由排补全时的
+ * 任务详情去说。安装中 Mod 的改动按安装上锁（见 instance-locks），按要装的内容显示不会放开它们。
  */
 function applyTaskEffect(base: InstanceSummary, pinned: boolean, effect: TaskEffect, creation: CreationMeta | null): InstanceSummary {
   if (effect === "installing") {
-    const spec = base.incomplete !== null && base.incomplete.kind === "install" ? base.incomplete.spec : null;
+    const marked = markedInstall(base);
     const facts =
       creation !== null && (creation.type === "create" || base.mcVersion === null)
         ? { mcVersion: creation.mcVersion, loader: creation.loader, loaderVersion: creation.loaderVersion }
-        : spec !== null
-          ? { mcVersion: spec.mcVersion, loader: spec.loader === null ? ("vanilla" as const) : spec.loader, loaderVersion: spec.loaderVersion }
+        : marked !== null
+          ? marked
           : {};
     return { ...base, ...facts, pinned, status: "installing", brokenReason: null, unrepairableReason: null, unrepairableKind: null, renameTo: null };
   }
@@ -3991,17 +4015,24 @@ export class LauncherStore {
   /**
    * 排一个补全任务；同一件事已在队列里时提示重复并返回 null。starter 为补全好之后接着装的开局 Mod。reinstallLoader 记在命令
    * 参数里，任务重试、重启后恢复都原样带着；不重装时不写这个键，后端按缺省的补全处理。
+   *
+   * 详情先取 install 标记里记下的安装内容：后端补全见到 install 标记就照它记下的内容重装，而空闲时的实例摘要是扫到的
+   * （可能是装到一半留下的原版，见 applyTaskEffect），照它写会说成原版。标记里的加载器认不出时后端照它装不回去，不取它。
+   * 没有这样的标记时，扫到版本就写扫到的，扫不到再看标记里记下的，都没有时写读不出来。
    */
   private enqueueRepair(id: string, launchAfter: boolean, starter: StarterPick[], reinstallLoader: boolean): Task | null {
     const inst = this.instance(id);
+    const marked = markedInstall(inst);
     const spec = inst.incomplete === null ? null : inst.incomplete.spec;
     const mcVersion = inst.mcVersion !== null ? inst.mcVersion : spec === null ? null : spec.mcVersion;
     const detail =
-      mcVersion === null
-        ? TASK_TEXT.repairDetailUnknown
-        : inst.mcVersion !== null
-          ? TASK_TEXT.repairDetail(mcVersion, inst.loader, inst.loaderVersion)
-          : TASK_TEXT.repairDetail(mcVersion, loaderOfArg(spec === null ? null : spec.loader), spec === null ? null : spec.loaderVersion);
+      marked !== null
+        ? TASK_TEXT.repairDetail(marked.mcVersion, marked.loader, marked.loaderVersion)
+        : mcVersion === null
+          ? TASK_TEXT.repairDetailUnknown
+          : inst.mcVersion !== null
+            ? TASK_TEXT.repairDetail(mcVersion, inst.loader, inst.loaderVersion)
+            : TASK_TEXT.repairDetail(mcVersion, loaderOfArg(spec === null ? null : spec.loader), spec === null ? null : spec.loaderVersion);
     return this.enqueue(
       {
         kind: "repair",
