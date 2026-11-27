@@ -59,6 +59,12 @@ describe("文案表", () => {
     expect(COPY.en.done.open).toBe(`Open ${APP_NAME_EN}`);
   });
 
+  it("提权时的提示只说不直接打开，不说从开始菜单打开就是普通权限", () => {
+    // UAC 关着的电脑上所有进程都带管理员权限，从开始菜单打开也一样
+    expect(COPY.zh.done.elevated).toBe(`安装程序是以管理员身份运行的，这里不直接打开${APP_NAME}，请从开始菜单打开。`);
+    expect(COPY.en.done.elevated).toBe(`Setup is running as administrator, so it won't open ${APP_NAME_EN} for you. Open it from the Start menu.`);
+  });
+
   it("法律声明写明代码与素材各自的协议、无担保和可转发", () => {
     expect(COPY.zh.welcome.legalNote).toBe(`${APP_NAME}的代码按 ${APP_LICENSE} 及其附加条款开源，美术素材按 ${ASSET_LICENSE} 授权，不提供任何担保，你可以按协议转发。`);
     expect(COPY.en.welcome.legalNote).toBe(
