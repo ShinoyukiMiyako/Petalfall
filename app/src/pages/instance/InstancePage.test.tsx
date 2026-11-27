@@ -2195,16 +2195,25 @@ describe("实例详情：补全修不好的损坏实例", () => {
       expect(errorToasts()).toEqual(errorsBefore);
     });
 
-    it("「重新扫描」读取失败：按实例列表没能刷新报错，横幅留着，按钮又能按", async () => {
+    it("「重新扫描」读取失败：没回来时按钮转圈、再按不多扫一次；失败后按实例列表没能刷新报错，横幅留着，按钮又能按", async () => {
       instances = instances.map((i) => (i.id === ID ? unreadable() : i));
       await open("overview");
       const errorsBefore = errorToasts();
-      ipc.overrides.set("list_instances", () => {
-        throw new IpcError("io", "游戏目录读不出来");
-      });
+      const scans = callsOf(ipc, "list_instances").length;
+      const pending = deferred<InstanceDto[]>();
+      ipc.overrides.set("list_instances", () => pending.promise);
       const rescan = button("重新扫描", bannerOf("版本 JSON 读不出来，暂时无法启动"));
       click(rescan);
       await flush();
+      expect(rescan.getAttribute("aria-busy")).toBe("true");
+      click(rescan);
+      await flush();
+      // 状态层的重读不合并并发请求：点击漏过去的话这里会是两次
+      expect(callsOf(ipc, "list_instances")).toHaveLength(scans + 1);
+      await act(async () => {
+        pending.reject(new IpcError("io", "游戏目录读不出来"));
+        await settle(20);
+      });
       expect(errorToasts()).toEqual([...errorsBefore, ["实例列表没能刷新", "游戏目录读不出来"]]);
       expect(button("重新扫描", bannerOf("版本 JSON 读不出来，暂时无法启动"))).toBe(rescan);
       expect(rescan.getAttribute("aria-busy")).toBeNull();
@@ -2233,17 +2242,23 @@ describe("实例详情：补全修不好的损坏实例", () => {
       expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
     });
 
-    it("改名失败：按没能重命名实例报错，横幅留着，改名按钮又能按", async () => {
+    it("改名失败：没回来时按钮转圈、再按不多发一次改名；失败后按没能重命名实例报错，横幅留着，改名按钮又能按", async () => {
       instances = instances.map((i) => (i.id === ID ? renamable() : i));
-      ipc.overrides.set("rename_instance", () => {
-        throw new IpcError("io", "目标文件夹被占用");
-      });
+      const pending = deferred<{ id: string }>();
+      ipc.overrides.set("rename_instance", () => pending.promise);
       await open("overview");
       const errorsBefore = errorToasts();
       const rename = button("改名为「1.20.1-NeoForge」", bannerOf("实例文件不完整，补全修不好"));
       click(rename);
       await flush();
+      expect(rename.getAttribute("aria-busy")).toBe("true");
+      click(rename);
+      await flush();
       expect(callsOf(ipc, "rename_instance")).toEqual([{ id: ID, newName: "1.20.1-NeoForge" }]);
+      await act(async () => {
+        pending.reject(new IpcError("io", "目标文件夹被占用"));
+        await settle(20);
+      });
       expect(errorToasts()).toEqual([...errorsBefore, ["没能重命名实例", "目标文件夹被占用"]]);
       expect(rename.isConnected).toBe(true);
       expect(rename.getAttribute("aria-busy")).toBeNull();
