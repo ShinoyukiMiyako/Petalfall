@@ -1050,15 +1050,23 @@ fn remove_dir_logged(path: &Path) {
 /// 全部备份（自动与手动一起算）总量超过 `max_total_bytes` 时，按全局 `created_at` 从旧到新继续删自动备份，
 /// 直到不超或没有自动备份可删。手动备份永远不进清单。`keep` 是刚写成的那一份，两步都不删它：第一步它占保留
 /// 份数里的一份（保留 0 份时也留下它），第二步不参与，否则单个存档比上限还大时，新备份刚写完就会被删。
+/// 认 `keep` 时文件名按原样比，目录不分大小写比：`keep` 的目录是调用方按实例与存档名拼出来的，`indices`
+/// 里的是扫描到的盘上实际大小写，存档文件夹只改过大小写、或删掉实例后又建了只差大小写的同名实例时，两者在
+/// Windows 上是同一个目录，按原样比会把刚写成的那份当成普通候选删掉。
 /// 清单里文件名不安全的条目不是本工程写的，不碰。
 pub fn plan_prune(
     indices: &[(PathBuf, BackupIndex)],
     policy: RetentionPolicy,
     keep: Option<(&Path, &str)>,
 ) -> Vec<(PathBuf, String)> {
+    let is_keep = |dir: &Path, file: &str| {
+        keep.is_some_and(|(keep_dir, keep_file)| {
+            keep_file == file && same_path_ignoring_case(keep_dir, dir)
+        })
+    };
     let mut doomed: Vec<(&Path, &BackupEntry)> = Vec::new();
     for (dir, index) in indices {
-        let is_fresh = |entry: &BackupEntry| keep == Some((dir.as_path(), entry.file.as_str()));
+        let is_fresh = |entry: &BackupEntry| is_keep(dir.as_path(), entry.file.as_str());
         let mut autos: Vec<&BackupEntry> = index
             .entries
             .iter()
@@ -1104,7 +1112,7 @@ pub fn plan_prune(
             .filter(|(dir, entry)| {
                 entry.kind == BackupKind::Auto
                     && is_backup_file_name(&entry.file)
-                    && keep != Some((*dir, entry.file.as_str()))
+                    && !is_keep(dir, entry.file.as_str())
                     && !is_doomed(dir, entry, &doomed)
             })
             .collect();
@@ -1815,6 +1823,37 @@ mod tests {
             Some((&dir, "2-auto.zip")),
         );
         assert_eq!(plan, vec![(dir, "1-auto.zip".to_owned())]);
+    }
+
+    /// 存档文件夹在资源管理器里只改过大小写时，调用方用新名字拼出的备份目录与扫描到的盘上目录只差大小写，
+    /// 在 Windows 上是同一个目录；总量超上限时刚写成的那份仍不能被删。
+    #[test]
+    fn over_the_cap_the_fresh_backup_is_kept_when_its_dir_differs_only_in_case() {
+        let dir = PathBuf::from("new world");
+        let plan = plan_prune(
+            &[(dir.clone(), index(autos(1..=2, 1000)))],
+            RetentionPolicy {
+                keep_per_world: 5,
+                max_total_bytes: 500,
+            },
+            Some((Path::new("New World"), "2-auto.zip")),
+        );
+        assert_eq!(plan, vec![(dir, "1-auto.zip".to_owned())]);
+    }
+
+    /// 同样只差大小写，时钟回拨过、旧备份的时刻比刚写成的还晚时，每个存档只留 N 份那一步也要先留下刚写成的那份。
+    #[test]
+    fn the_per_world_cut_keeps_the_fresh_backup_when_its_dir_differs_only_in_case() {
+        let dir = PathBuf::from("new world");
+        let plan = plan_prune(
+            &[(dir.clone(), index(autos(1..=3, 10)))],
+            RetentionPolicy {
+                keep_per_world: 2,
+                max_total_bytes: UNLIMITED,
+            },
+            Some((Path::new("New World"), "1-auto.zip")),
+        );
+        assert_eq!(plan, vec![(dir, "2-auto.zip".to_owned())]);
     }
 
     #[test]
