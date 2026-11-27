@@ -291,7 +291,7 @@ impl PackManifest {
         let minecraft = raw
             .dependencies
             .get("minecraft")
-            .map(|v| required_text(MODRINTH_DOCUMENT, "dependencies.minecraft", v))
+            .map(|v| game_version(MODRINTH_DOCUMENT, "dependencies.minecraft", v))
             .transpose()?
             .ok_or_else(|| Error::invalid(MODRINTH_DOCUMENT, "dependencies 里没有 minecraft"))?;
         let loader = modrinth_loader(&raw.dependencies)?;
@@ -383,7 +383,7 @@ impl PackManifest {
             ));
         }
         let name = required_text(CURSEFORGE_DOCUMENT, "name", &raw.name)?;
-        let minecraft = required_text(
+        let minecraft = game_version(
             CURSEFORGE_DOCUMENT,
             "minecraft.version",
             &raw.minecraft.version,
@@ -452,6 +452,20 @@ fn required_text(document: &'static str, field: &str, value: &str) -> Result<Str
         return Err(Error::invalid(document, format!("{field} 为空")));
     }
     Ok(trimmed.to_owned())
+}
+
+/// 游戏版本号会原样拼成版本目录与版本 JSON 的路径（`versions/<版本号>/<版本号>.json`），导入的准备阶段就按
+/// 它去读盘，必须是单个安全的路径段：绝对路径拼上去会把前面的游戏目录整个换掉，写成网络路径的读一下就连
+/// 到别人的机器上了。
+fn game_version(document: &'static str, field: &str, value: &str) -> Result<String> {
+    let version = required_text(document, field, value)?;
+    petalfall_version::check_path_segment(&version).map_err(|problem| {
+        Error::invalid(
+            document,
+            format!("{field} 的游戏版本号「{version}」不能用：{problem}"),
+        )
+    })?;
+    Ok(version)
 }
 
 /// 加载器版本号会原样拼进安装器的下载地址、缓存文件名与版本 id，必须是单个安全的路径段。
@@ -1000,6 +1014,70 @@ mod tests {
         ))
         .unwrap_err();
         assert!(matches!(duplicate, Error::DuplicatePath { path } if path == "mods/a.jar"));
+    }
+
+    /// 游戏版本号会拼成 `versions/<版本号>/<版本号>.json` 去读、去装：写成网络路径（`\\主机\共享\x`）时
+    /// Windows 上整条路径会被它替换，读一下就连出去了；带 `..` 的走出游戏目录。读清单时就拒掉。带空格的
+    /// 版本号是真有的（1.14 的几个预发布版、愚人节版本），照常放行。多段的相对路径不带 `..` 也不行：要的是
+    /// 单个路径段。
+    #[test]
+    fn game_versions_that_are_not_a_single_path_segment_are_rejected() {
+        for version in [
+            r"\\attacker.example\share\x",
+            "//attacker.example/share/x",
+            r"1.20.1\..\..\x",
+            "../../x",
+            "1.20.1/x",
+            "..",
+            "C:1.20.1",
+            "1.20.1.",
+        ] {
+            let err = PackManifest::parse_modrinth(&index(
+                serde_json::json!([]),
+                serde_json::json!({"minecraft": version}),
+            ))
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    Error::ManifestInvalid { document, reason }
+                        if *document == MODRINTH_DOCUMENT
+                            && reason.contains("dependencies.minecraft")
+                            && reason.contains(version)
+                ),
+                "{version}：{err:?}"
+            );
+
+            let mut doc: serde_json::Value =
+                serde_json::from_slice(&curseforge(serde_json::json!([]), serde_json::json!([])))
+                    .unwrap();
+            doc["minecraft"]["version"] = version.into();
+            let err =
+                PackManifest::parse_curseforge(&serde_json::to_vec(&doc).unwrap()).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    Error::ManifestInvalid { document, reason }
+                        if *document == CURSEFORGE_DOCUMENT
+                            && reason.contains("minecraft.version")
+                            && reason.contains(version)
+                ),
+                "{version}：{err:?}"
+            );
+        }
+
+        let pack = PackManifest::parse_modrinth(&index(
+            serde_json::json!([]),
+            serde_json::json!({"minecraft": " 3D Shareware v1.34 "}),
+        ))
+        .unwrap();
+        assert_eq!(pack.minecraft, "3D Shareware v1.34");
+        let pack = PackManifest::parse_modrinth(&index(
+            serde_json::json!([]),
+            serde_json::json!({"minecraft": "1.14.2 Pre-Release 4"}),
+        ))
+        .unwrap();
+        assert_eq!(pack.minecraft, "1.14.2 Pre-Release 4");
     }
 
     fn curseforge(loaders: serde_json::Value, files: serde_json::Value) -> Vec<u8> {
