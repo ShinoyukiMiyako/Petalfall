@@ -2336,6 +2336,9 @@ mod tests {
 
     impl ReleaseOnCleanupError {
         fn new(dir: &Path) -> Self {
+            // 先过收日志的闸门（见 crate::tests::Captured::new）：只登记了这一个调度器时，并行的用例先在别的线程走到
+            // core 那条错误日志，它就被全局缓存成不启用，这里收不到、占用一直不放。
+            crate::tests::Captured::new();
             Self {
                 dir: dir.to_path_buf(),
                 held: std::sync::Arc::default(),
