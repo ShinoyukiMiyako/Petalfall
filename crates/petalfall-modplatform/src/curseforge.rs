@@ -124,7 +124,8 @@ impl CurseForgeClient {
             .header("x-api-key", self.api_key.as_str())
     }
 
-    /// 按 [`search_plan`] 搜索工程。CurseForge 单次仅支持一个加载器与一个游戏版本，故取查询列表首项。
+    /// 按 [`search_plan`] 搜索工程。CurseForge 单次仅支持一个游戏版本，故取查询列表首项；加载器整份下推，
+    /// 见 [`build_search_params`]。
     ///
     /// 多类型搜索不带 classId，CurseForge 会把世界、附加包等发现页不收的 class 一并返回，这里不筛，
     /// 由调用方按 [`CurseForgeSearchPlan::accepts`] 过滤（被筛掉的条目仍计入分页偏移）。
@@ -564,8 +565,22 @@ fn build_search_params(
     if let Some(version) = query.game_versions.first() {
         params.push(("gameVersion", version.clone()));
     }
-    if let Some(loader) = query.loaders.first() {
-        params.push(("modLoaderType", loader.curseforge_loader_type().to_string()));
+    // 「适配实例」下推的是实例能跑的全部加载器（1.20.1 的 NeoForge 实例还带 Forge），只取首项会漏掉
+    // 只标借来那一家的工程。文档写明 modLoaderTypes 会盖过 modLoaderType、最多 5 项；去重后至多是
+    // ModLoader 的全部取值，碰不到上限。单个加载器照旧发数值的 modLoaderType，列表写法只在需要「或」时用。
+    let mut loaders: Vec<ModLoader> = Vec::new();
+    for loader in &query.loaders {
+        if !loaders.contains(loader) {
+            loaders.push(*loader);
+        }
+    }
+    match loaders.as_slice() {
+        [] => {}
+        [only] => params.push(("modLoaderType", only.curseforge_loader_type().to_string())),
+        many => {
+            let names: Vec<&str> = many.iter().map(|l| l.curseforge_loader_name()).collect();
+            params.push(("modLoaderTypes", format!("[{}]", names.join(","))));
+        }
     }
     params
 }
@@ -1117,6 +1132,89 @@ mod tests {
         assert_eq!(search_plan(&query), None);
         let unknown = SearchQuery::default().with_category("not-a-category");
         assert_eq!(search_plan(&unknown), None);
+    }
+
+    #[test]
+    fn several_loaders_go_out_as_one_named_list_in_query_order() {
+        let query = SearchQuery::default()
+            .with_loader(ModLoader::Quilt)
+            .with_loader(ModLoader::Fabric)
+            .with_loader(ModLoader::Quilt);
+        let params = params_of(&query).unwrap();
+        assert_eq!(param(&params, "modLoaderTypes"), Some("[Quilt,Fabric]"));
+        assert_eq!(
+            params
+                .iter()
+                .filter(|(k, _)| *k == "modLoaderTypes")
+                .count(),
+            1
+        );
+        assert_eq!(param(&params, "modLoaderType"), None);
+        // 同一个加载器重复给出，去重后只剩一个，按单个发数值。
+        let repeated = SearchQuery::default()
+            .with_loader(ModLoader::Forge)
+            .with_loader(ModLoader::Forge);
+        let params = params_of(&repeated).unwrap();
+        assert_eq!(param(&params, "modLoaderType"), Some("1"));
+        assert_eq!(param(&params, "modLoaderTypes"), None);
+        let unfiltered = params_of(&SearchQuery::default()).unwrap();
+        assert_eq!(param(&unfiltered, "modLoaderType"), None);
+        assert_eq!(param(&unfiltered, "modLoaderTypes"), None);
+    }
+
+    fn query_values(request: &wiremock::Request, name: &str) -> Vec<String> {
+        request
+            .url
+            .query_pairs()
+            .filter(|(key, _)| key == name)
+            .map(|(_, value)| value.into_owned())
+            .collect()
+    }
+
+    /// 发出去的请求本身：两个加载器只带 modLoaderTypes 列表，一个加载器只带数值的 modLoaderType。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn search_request_sends_loader_list_or_single_code() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/search"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .mount(&server)
+            .await;
+        let c = client(&server);
+        let both = SearchQuery::default()
+            .with_loader(ModLoader::NeoForge)
+            .with_loader(ModLoader::Forge)
+            .with_game_version("1.20.1");
+        c.search(&both, &search_plan(&both).unwrap()).await.unwrap();
+        let single = SearchQuery::default()
+            .with_loader(ModLoader::NeoForge)
+            .with_game_version("1.21.1");
+        c.search(&single, &search_plan(&single).unwrap())
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let (both, single) = (&requests[0], &requests[1]);
+        assert_eq!(
+            query_values(both, "modLoaderTypes"),
+            vec!["[NeoForge,Forge]"]
+        );
+        assert!(
+            query_values(both, "modLoaderType").is_empty(),
+            "{}",
+            both.url
+        );
+        assert_eq!(query_values(both, "gameVersion"), vec!["1.20.1"]);
+        assert_eq!(query_values(single, "modLoaderType"), vec!["6"]);
+        assert!(
+            query_values(single, "modLoaderTypes").is_empty(),
+            "{}",
+            single.url
+        );
+        assert_eq!(query_values(single, "gameVersion"), vec!["1.21.1"]);
     }
 
     #[test]

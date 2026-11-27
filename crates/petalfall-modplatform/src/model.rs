@@ -167,6 +167,18 @@ impl ModLoader {
         }
     }
 
+    /// CurseForge `ModLoaderType` 枚举名。搜索的 `modLoaderTypes` 列表参数按文档写枚举名，
+    /// 不是 `modLoaderType` 用的数值。
+    pub fn curseforge_loader_name(self) -> &'static str {
+        match self {
+            ModLoader::Forge => "Forge",
+            ModLoader::LiteLoader => "LiteLoader",
+            ModLoader::Fabric => "Fabric",
+            ModLoader::Quilt => "Quilt",
+            ModLoader::NeoForge => "NeoForge",
+        }
+    }
+
     /// 由 CurseForge `modLoaderType` 数值还原；0（Any）、2（Cauldron）与未知编码返回 `None`。
     pub fn from_curseforge_loader_type(code: u8) -> Option<Self> {
         match code {
@@ -273,7 +285,7 @@ pub struct SearchQuery {
     /// 分类条件，取 Modrinth 的分类键（如 `optimization`）；CurseForge 侧经
     /// [`crate::category_map`] 换成分类 id，换不到时该次搜索不发往 CurseForge。
     pub category: Option<String>,
-    /// 目标加载器过滤。多个之间为「或」；CurseForge 单次仅支持一个加载器，取列表首个。
+    /// 目标加载器过滤。多个之间为「或」，两个平台都整份下推。
     pub loaders: Vec<ModLoader>,
     /// 目标游戏版本过滤。多个之间为「或」；CurseForge 单次仅支持一个版本，取列表首个。
     pub game_versions: Vec<String>,
@@ -473,6 +485,19 @@ mod tests {
         assert_eq!(ModLoader::NeoForge.curseforge_loader_type(), 6);
         assert_eq!(ModLoader::Forge.curseforge_loader_type(), 1);
         assert_eq!(ModLoader::Quilt.curseforge_loader_type(), 5);
+    }
+
+    #[test]
+    fn curseforge_loader_names_follow_the_documented_enum() {
+        for (loader, name) in [
+            (ModLoader::Forge, "Forge"),
+            (ModLoader::LiteLoader, "LiteLoader"),
+            (ModLoader::Fabric, "Fabric"),
+            (ModLoader::Quilt, "Quilt"),
+            (ModLoader::NeoForge, "NeoForge"),
+        ] {
+            assert_eq!(loader.curseforge_loader_name(), name);
+        }
     }
 
     #[test]
