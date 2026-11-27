@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use petalfall_core::folders::validate_game_dir;
+use petalfall_core::instance_install::{Unrepairable, UnrepairableKind};
 use petalfall_core::{
     is_safe_instance_id, BackupKind, CoreError, CoverBackground, CoverImageSlot, DeletionPreview,
     Disposer, EventSink, GameSlot, IncompleteKind, IncompleteMarker, IncompleteOutcome,
@@ -600,9 +601,17 @@ pub struct InstanceDto {
     pub status: &'static str,
     pub broken_reason: Option<String>,
     /// 补全修不好的原因，与对它发起补全时报的 `detail.reason` 逐字相同；只有 broken 且补全会被拒绝时非空，
-    /// 修得好的 broken 实例与 ready 实例为 null。版本 JSON 读不出来时有没有安装记录都非空，是「版本 JSON 读不出来：」
-    /// 后接读盘错误与系统给的原因；补全时再读一次，系统给的原因可能与列表那一次不同，两边只在这一段可能差开。
+    /// 修得好的 broken 实例与 ready 实例为 null。未完成标记是 repair 或没有标记时，版本 JSON 读不出来的有没有安装
+    /// 记录都非空，是「版本 JSON 读不出来：」后接读盘错误与系统给的原因（标记是 install 时照标记重装、为 null，是
+    /// modpack 时是重新导入那句）；补全时再读一次，系统给的原因可能与列表那一次不同，两边只在这一段可能差开。
     pub unrepairable_reason: Option<String>,
+    /// 补全为什么修不好，与 unrepairable_reason 同有同无：unreadable（版本 JSON 读盘出错，文件可能完好，放开占用或
+    /// 修好权限后重新扫描就恢复）/ no_record（版本 JSON 缺失或损坏，又没有安装记录可照着重装）/ modpack（整合包
+    /// 没有导入完）。界面按它分支，不解析原因的文字。
+    pub unrepairable_kind: Option<&'static str>,
+    /// 原因里点出的改名目标：只在 unrepairable_kind 为 no_record、实例目录里恰有一份名字对不上的版本 JSON、实例又
+    /// 改得成那个名字时非空，把实例改成它就能认出那份文件。
+    pub rename_to: Option<String>,
     /// 原版版本号；识别不出或 broken 时为 null。
     pub mc_version: Option<String>,
     pub loaders: Vec<LoaderDto>,
@@ -1124,11 +1133,24 @@ fn instance_dto(
         ),
         Readable::Unreadable(error) => (None, None, Some(error)),
     };
+    let (unrepairable_reason, unrepairable_kind, rename_to) = match summary.unrepairable {
+        Some(Unrepairable { kind, reason }) => {
+            let (kind, rename_to) = match kind {
+                UnrepairableKind::Unreadable => ("unreadable", None),
+                UnrepairableKind::NoRecord { rename_to } => ("no_record", rename_to),
+                UnrepairableKind::Modpack => ("modpack", None),
+            };
+            (Some(reason), Some(kind), rename_to)
+        }
+        None => (None, None, None),
+    };
     let mut dto = InstanceDto {
         id: summary.id,
         status: "ready",
         broken_reason: None,
-        unrepairable_reason: summary.unrepairable_reason,
+        unrepairable_reason,
+        unrepairable_kind,
+        rename_to,
         mc_version: None,
         loaders: Vec::new(),
         release_type: None,
@@ -5643,7 +5665,7 @@ mod tests {
             dir_error: None,
             modpack,
             last_crash_at,
-            unrepairable_reason: None,
+            unrepairable: None,
         };
         let pack = petalfall_core::InstanceModpack {
             schema: 1,
@@ -5694,6 +5716,8 @@ mod tests {
             json!({ "singleplayer": true, "multiplayer": true })
         );
         assert_eq!(value["unrepairable_reason"], json!(null));
+        assert_eq!(value["unrepairable_kind"], json!(null));
+        assert_eq!(value["rename_to"], json!(null));
 
         let broken = instance_dto(
             summary(
@@ -5729,16 +5753,55 @@ mod tests {
             Readable::Read(VersionSettings::default()),
         );
         missing_json.version = InstanceVersion::Broken(petalfall_core::BrokenReason::MissingJson);
-        missing_json.unrepairable_reason = Some("缺少版本 JSON，也没有记下当初装的是什么".into());
-        let value =
-            serde_json::to_value(instance_dto(missing_json, None, Readable::Read(None))).unwrap();
+        let value = serde_json::to_value(instance_dto(
+            missing_json.clone(),
+            None,
+            Readable::Read(None),
+        ))
+        .unwrap();
         assert_eq!(value["status"], json!("broken"));
         assert_eq!(value["quick_play"], json!(null));
         assert_eq!(value["resource_pack_count"], json!(null));
-        assert_eq!(
-            value["unrepairable_reason"],
-            json!("缺少版本 JSON，也没有记下当初装的是什么")
-        );
+
+        // 修不好的判定摊成三个键：原因原文、种类与改名目标，改名目标只跟着带改名提示的那一种。
+        let hinted = "缺少版本 JSON，也没有记下当初装的是什么；目录里有一份叫 All the Mods 10.json 的版本文件，把实例改名成 All the Mods 10 就能认出来";
+        let unreadable =
+            "版本 JSON 读不出来：文件 IO 失败: versions/整合包/整合包.json：拒绝访问。";
+        let pack = "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入";
+        for (kind, reason, expected) in [
+            (
+                UnrepairableKind::NoRecord { rename_to: None },
+                "缺少版本 JSON，也没有记下当初装的是什么",
+                json!(["no_record", null]),
+            ),
+            (
+                UnrepairableKind::NoRecord {
+                    rename_to: Some("All the Mods 10".into()),
+                },
+                hinted,
+                json!(["no_record", "All the Mods 10"]),
+            ),
+            (
+                UnrepairableKind::Unreadable,
+                unreadable,
+                json!(["unreadable", null]),
+            ),
+            (UnrepairableKind::Modpack, pack, json!(["modpack", null])),
+        ] {
+            let mut summary = missing_json.clone();
+            summary.unrepairable = Some(Unrepairable {
+                kind,
+                reason: reason.to_owned(),
+            });
+            let value =
+                serde_json::to_value(instance_dto(summary, None, Readable::Read(None))).unwrap();
+            assert_eq!(value["unrepairable_reason"], json!(reason));
+            assert_eq!(
+                json!([value["unrepairable_kind"], value["rename_to"]]),
+                expected,
+                "{reason}"
+            );
+        }
     }
 
     /// 列表上说的修不好的原因就是补全命令报的 `detail.reason`：前端照着它提前说清楚，不用等点了补全才知道。
@@ -5769,16 +5832,27 @@ mod tests {
             .await
             .unwrap();
         let entry = |id: &str| list.iter().find(|i| i.id == id).unwrap();
-        assert_eq!(entry("1.21.1").status, "ready");
-        assert_eq!(entry("1.21.1").unrepairable_reason, None);
-        assert_eq!(entry("装到一半").status, "broken");
-        assert_eq!(entry("装到一半").unrepairable_reason, None);
-        let empty = serde_json::to_value(entry("空的")).unwrap();
-        assert_eq!(empty["status"], json!("broken"));
+        let verdict = |id: &str| {
+            let value = serde_json::to_value(entry(id)).unwrap();
+            json!([
+                value["status"],
+                value["unrepairable_reason"],
+                value["unrepairable_kind"],
+                value["rename_to"]
+            ])
+        };
+        assert_eq!(verdict("1.21.1"), json!(["ready", null, null, null]));
+        assert_eq!(verdict("装到一半"), json!(["broken", null, null, null]));
         assert_eq!(
-            empty["unrepairable_reason"],
-            json!("缺少版本 JSON，也没有记下当初装的是什么")
+            verdict("空的"),
+            json!([
+                "broken",
+                "缺少版本 JSON，也没有记下当初装的是什么",
+                "no_record",
+                null
+            ])
         );
+        let empty = serde_json::to_value(entry("空的")).unwrap();
 
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let err = repair_instance_with(
@@ -5817,6 +5891,10 @@ mod tests {
             .unwrap();
         let entry = list.iter().find(|i| i.id == "读不出").unwrap();
         assert_eq!(entry.status, "broken");
+        assert_eq!(
+            (entry.unrepairable_kind, entry.rename_to.as_deref()),
+            (Some("unreadable"), None)
+        );
         let listed = entry.unrepairable_reason.clone().unwrap();
         assert!(
             listed.starts_with(&format!(

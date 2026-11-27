@@ -34,6 +34,7 @@ use crate::data_format::{GameDirCheck, GuardMode, is_missing};
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
 use crate::folders::same_path;
+use crate::instance_install::Unrepairable;
 use crate::modfs::try_exists;
 use crate::modpack::{InstanceModpack, read_instance_modpack};
 use crate::workdir::read_version_json;
@@ -87,14 +88,15 @@ pub struct InstanceSummary {
     pub modpack: Readable<Option<InstanceModpack>>,
     /// 最近一次崩溃的时刻（Unix 毫秒）；`Read(None)` 表示没崩溃过。
     pub last_crash_at: Readable<Option<u64>>,
-    /// 补全修不好的原因：只有版本 JSON 用不了（`version` 为 [`InstanceVersion::Broken`]）且补全会被拒绝时才有，
-    /// 与补全报的 [`InstanceError::NotRepairable`] 里的 `reason` 逐字相同；修得好的损坏实例为 `None`。版本 JSON
-    /// 可用的实例不看，一律为 `None`（整合包没导入完这类拒绝从 `incomplete` 就看得出）。
+    /// 补全修不好的判定：只有版本 JSON 用不了（`version` 为 [`InstanceVersion::Broken`]）且补全会被拒绝时才有，
+    /// 其中的原因与补全报的 [`InstanceError::NotRepairable`] 里的 `reason` 逐字相同；修得好的损坏实例为 `None`。
+    /// 版本 JSON 可用的实例不看，一律为 `None`（整合包没导入完这类拒绝从 `incomplete` 就看得出）。
     ///
-    /// 版本 JSON 读不出来（[`BrokenReason::Unreadable`]）时有没有安装记录都修不好，原因是「版本 JSON 读不出来：」
-    /// 后接读盘错误连同系统给的原因。这一段是列表扫描那一次读到的，补全时再读一次，系统给的原因可能不同（这一刻被
+    /// 未完成标记是 repair 或没有标记时，版本 JSON 读不出来（[`BrokenReason::Unreadable`]）的有没有安装记录都修不好，
+    /// 原因是「版本 JSON 读不出来：」后接读盘错误连同系统给的原因；标记是 install 时照标记重装，为 `None`，是
+    /// modpack 时给的是重新导入那句。这一段是列表扫描那一次读到的，补全时再读一次，系统给的原因可能不同（这一刻被
     /// 占用、下一刻没有权限），两边只在这里可能差开。
-    pub unrepairable_reason: Option<String>,
+    pub unrepairable: Option<Unrepairable>,
 }
 
 /// 实例的版本状态。
@@ -769,7 +771,7 @@ async fn summarize(
         }
     };
 
-    let mut unrepairable_reason = None;
+    let mut unrepairable = None;
     let version = match entry {
         Entry::Broken(broken) => {
             // 这一项只对版本 JSON 用不了的实例给出，所以只在这里多读安装记录：列表是热路径，完好的实例一个文件也
@@ -778,10 +780,9 @@ async fn summarize(
                 Some(Readable::Read(marker)) => Some(marker),
                 Some(Readable::Unreadable(_)) | None => None,
             };
-            let reason = broken.reason.clone();
-            unrepairable_reason =
-                crate::instance_install::unrepairable_reason(game_dir, &id, previous, broken).await;
-            InstanceVersion::Broken(reason)
+            unrepairable =
+                crate::instance_install::unrepairable(game_dir, &id, previous, &broken).await;
+            InstanceVersion::Broken(broken.reason)
         }
         Entry::Found(version, java_major, quick_play, bases) => {
             let workdir = match &settings {
@@ -823,7 +824,7 @@ async fn summarize(
         dir_error,
         modpack,
         last_crash_at,
-        unrepairable_reason,
+        unrepairable,
     }
 }
 

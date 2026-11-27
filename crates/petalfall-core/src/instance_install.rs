@@ -71,16 +71,24 @@ impl InstanceRequest {
 
     /// 从未完成标记里的安装内容还原；标记里的加载器键不认识时报不可补全。
     pub fn from_spec(id: &str, spec: &InstallSpec) -> Result<Self> {
-        let loader =
-            match spec.loader.as_deref() {
-                None => None,
-                Some(key) => Some(LoaderChoice::from_key(key).ok_or_else(|| {
-                    InstanceError::NotRepairable {
-                        id: id.to_owned(),
-                        reason: format!("未完成标记里记的加载器 {key} 不认识"),
-                    }
-                })?),
-            };
+        Self::recognize(spec).map_err(|reason| {
+            InstanceError::NotRepairable {
+                id: id.to_owned(),
+                reason,
+            }
+            .into()
+        })
+    }
+
+    /// 同 [`from_spec`](Self::from_spec)，加载器键不认识时只交回原因：补全定方案时要把它连同种类一起交给实例列表。
+    fn recognize(spec: &InstallSpec) -> std::result::Result<Self, String> {
+        let loader = match spec.loader.as_deref() {
+            None => None,
+            Some(key) => Some(
+                LoaderChoice::from_key(key)
+                    .ok_or_else(|| format!("未完成标记里记的加载器 {key} 不认识"))?,
+            ),
+        };
         Ok(Self {
             mc_version: spec.mc_version.clone(),
             loader,
@@ -488,14 +496,7 @@ impl Petalfall {
                 None
             }
         };
-        let plan = decide_repair(
-            self.game_dir(),
-            id,
-            previous.as_ref(),
-            None,
-            reinstall_loader,
-        )
-        .await?;
+        let plan = decide_repair(self.game_dir(), id, previous.as_ref(), reinstall_loader).await?;
         let kind = match &plan {
             RepairPlan::Reinstall(request) => IncompleteKind::Install {
                 spec: request.spec(),
@@ -592,85 +593,144 @@ impl Petalfall {
     }
 }
 
-/// 照未完成标记、版本 JSON 与安装记录定补全方案，不写盘。补全与实例列表共用这一处：列表上说的修不好的原因
-/// 就是真去补全时报的那句，两边不各写一套判断，不会一边说修得好、一边又拒绝。
+/// 补全修不好的判定：实例列表提前给出，对它发起补全时报的就是其中的原因。种类与原因由同一段判断一起定下，界面按
+/// 种类分支，不去解析原因的文字。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unrepairable {
+    pub kind: UnrepairableKind,
+    /// 与补全报的 [`InstanceError::NotRepairable`] 里的 `reason` 逐字相同。
+    pub reason: String,
+}
+
+/// 补全为什么修不好。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnrepairableKind {
+    /// 版本 JSON 读盘出错（被占用、没有权限、那个位置是个目录）：文件可能完好，放开占用或修好权限后重新扫描就恢复。
+    Unreadable,
+    /// 版本 JSON 缺失或损坏，又没有安装记录可照着重装（记录里的加载器认不出来也算：照它装不回去）。
+    NoRecord {
+        /// 原因里点出的改名目标：实例目录里恰有一份名字对不上的版本 JSON、实例又改得成那个名字时才有，把实例改成
+        /// 它就能认出那份文件。与原因里的提示出自同一处，两者同有同无。
+        rename_to: Option<String>,
+    },
+    /// 整合包没有导入完：缺的 Mod 与配置补不回来，只能删掉重新导入。
+    Modpack,
+}
+
+impl Unrepairable {
+    fn into_error(self, id: &str) -> CoreError {
+        InstanceError::NotRepairable {
+            id: id.to_owned(),
+            reason: self.reason,
+        }
+        .into()
+    }
+}
+
+/// 照未完成标记、版本 JSON 与安装记录定补全方案，不写盘。版本 JSON 用不了时的那一段（[`broken_verdict`]）与实例
+/// 列表共用：列表上说的修不好的原因就是真去补全时报的那句，两边不各写一套判断，不会一边说修得好、一边又拒绝。
 ///
-/// `previous` 是读到的未完成标记，读不出的当作没有。`probe` 是调用方已经探测过的版本 JSON（实例列表扫描时就有），
-/// 为 `None` 时用到才现探：标记里记着安装内容或整合包时用不到它，补全不为此多读一次。
+/// `previous` 是读到的未完成标记，读不出的当作没有。标记里记着安装内容或整合包时用不到版本 JSON，不为此多读一次。
 pub(crate) async fn decide_repair(
     game_dir: &Path,
     id: &str,
     previous: Option<&IncompleteMarker>,
-    probe: Option<VersionProbe>,
     reinstall_loader: bool,
 ) -> Result<RepairPlan> {
     // 上次补全已经查实加载器自带的库只能重装补回：再照版本 JSON 补一遍只会原样失败，实例库、启动胶囊
     // 与任务重试的入口都带不上「重装」这个意思，所以由看标记定方案的这一步替它们换掉。装不回的照旧补全：
     // 玩家可能已经把文件放回去了，这是清掉标记的唯一办法；没放回去时照样报缺失。
     let stuck = previous.is_some_and(lost_loader_library);
-    match previous.map(|marker| &marker.kind) {
-        Some(IncompleteKind::Install { spec }) => {
-            Ok(RepairPlan::Reinstall(InstanceRequest::from_spec(id, spec)?))
+    if let Some(verdict) = marker_verdict(previous) {
+        return verdict
+            .map(RepairPlan::Reinstall)
+            .map_err(|refusal| refusal.into_error(id));
+    }
+    let version = match probe_version(game_dir, id).await {
+        Ok(VersionProbe::Found(version)) => version,
+        Ok(VersionProbe::Broken(broken)) => {
+            return broken_verdict(game_dir, id, previous, &broken)
+                .await
+                .map(RepairPlan::Reinstall)
+                .map_err(|refusal| refusal.into_error(id));
         }
+        // 全量扫描把同样的读盘故障记成 `BrokenReason::Unreadable`，原因同样取 `error_with_causes`（见
+        // `discover_versions`）：照这个口径拼原因，列表上说的与这里报的才是同一句。
+        Err(err) => {
+            let detail = error_with_causes(&err);
+            tracing::warn!(id, error = %detail, "版本 JSON 读不出来");
+            return Err(unreadable_refusal(detail).into_error(id));
+        }
+    };
+    if reinstall_loader || (stuck && reinstallable_loader(&version.loaders).is_ok()) {
+        Ok(RepairPlan::Reinstall(
+            loader_reinstall_request(game_dir, &version).await?,
+        ))
+    } else {
+        Ok(RepairPlan::Complete)
+    }
+}
+
+/// 未完成标记自己就定得下的结论：照安装标记里记下的内容重装，或整合包没导入完修不好。标记是 repair 或没有标记时
+/// 为 `None`，要看版本 JSON 与安装记录。
+fn marker_verdict(
+    previous: Option<&IncompleteMarker>,
+) -> Option<std::result::Result<InstanceRequest, Unrepairable>> {
+    match previous.map(|marker| &marker.kind) {
+        Some(IncompleteKind::Install { spec }) => Some(recorded_request(spec)),
         // 导入写版本 JSON 在前、下载 Mod 与解出覆盖文件在后，中断时版本 JSON 往往已经可用；
         // 照它补全只会补齐库文件，再把标记清掉，缺的 Mod 与配置却补不回来，实例就被当成了完好的。
-        Some(IncompleteKind::Modpack { .. }) => Err(InstanceError::NotRepairable {
-            id: id.to_owned(),
-            reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入".to_owned(),
+        Some(IncompleteKind::Modpack { .. }) => Some(Err(modpack_refusal())),
+        Some(IncompleteKind::Repair) | None => None,
+    }
+}
+
+/// 版本 JSON 用不了（`broken`）时补全的结论：照未完成标记或安装记录重装的内容，或修不好的判定。实例列表与
+/// [`decide_repair`] 都经这里。
+///
+/// 不读版本 JSON；会读的只有安装记录（读不出来的不读），没有记录、缺的又是版本 JSON 时再看一眼实例目录顶层，在那里
+/// 找到一份名字对不上的版本 JSON 时再列一次 `versions/` 查重。这几样读不出都不报错：读不出的记录当作没有，改名
+/// 提示说不准就不提，所以列表拿到的一定是一个结论。
+async fn broken_verdict(
+    game_dir: &Path,
+    id: &str,
+    previous: Option<&IncompleteMarker>,
+    broken: &BrokenVersion,
+) -> std::result::Result<InstanceRequest, Unrepairable> {
+    if let Some(verdict) = marker_verdict(previous) {
+        return verdict;
+    }
+    if let BrokenReason::Unreadable(detail) = &broken.reason {
+        return Err(unreadable_refusal(detail.clone()));
+    }
+    let record = match InstallRecordStore::for_version_dir(&broken.dir)
+        .load()
+        .await
+    {
+        Ok(record) => record,
+        Err(err) => {
+            tracing::warn!(id, error = %err, "安装记录损坏，当作没有记录");
+            None
         }
-        .into()),
-        Some(IncompleteKind::Repair) | None => {
-            let probe = match probe {
-                Some(probe) => probe,
-                None => match probe_version(game_dir, id).await {
-                    Ok(probe) => probe,
-                    // 全量扫描把同样的读盘故障记成 `BrokenReason::Unreadable`，原因同样取 `error_with_causes`（见
-                    // `discover_versions`）：照这个口径拼原因，列表上说的与这里报的才是同一句。
-                    Err(err) => {
-                        let detail = error_with_causes(&err);
-                        tracing::warn!(id, error = %detail, "版本 JSON 读不出来");
-                        return Err(unreadable_refusal(id, detail));
-                    }
-                },
-            };
-            match probe {
-                VersionProbe::Found(version)
-                    if reinstall_loader
-                        || (stuck && reinstallable_loader(&version.loaders).is_ok()) =>
-                {
-                    Ok(RepairPlan::Reinstall(
-                        loader_reinstall_request(game_dir, &version).await?,
-                    ))
-                }
-                VersionProbe::Found(_) => Ok(RepairPlan::Complete),
-                VersionProbe::Broken(BrokenVersion {
-                    reason: BrokenReason::Unreadable(detail),
-                    ..
-                }) => Err(unreadable_refusal(id, detail)),
-                VersionProbe::Broken(broken) => {
-                    let record = match InstallRecordStore::for_version_dir(&broken.dir)
-                        .load()
-                        .await
-                    {
-                        Ok(record) => record,
-                        Err(err) => {
-                            tracing::warn!(id, error = %err, "安装记录损坏，当作没有记录");
-                            None
-                        }
-                    };
-                    match record {
-                        Some(spec) => Ok(RepairPlan::Reinstall(InstanceRequest::from_spec(
-                            id, &spec,
-                        )?)),
-                        None => Err(InstanceError::NotRepairable {
-                            id: id.to_owned(),
-                            reason: no_record_reason(game_dir, id, &broken).await,
-                        }
-                        .into()),
-                    }
-                }
-            }
-        }
+    };
+    match record {
+        Some(spec) => recorded_request(&spec),
+        None => Err(no_record_refusal(game_dir, id, broken).await),
+    }
+}
+
+/// 照未完成标记或安装记录里记下的内容重装。加载器认不出来时照它装不回去，与没有记录一样修不好。
+fn recorded_request(spec: &InstallSpec) -> std::result::Result<InstanceRequest, Unrepairable> {
+    InstanceRequest::recognize(spec).map_err(|reason| Unrepairable {
+        kind: UnrepairableKind::NoRecord { rename_to: None },
+        reason,
+    })
+}
+
+fn modpack_refusal() -> Unrepairable {
+    Unrepairable {
+        kind: UnrepairableKind::Modpack,
+        reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入".to_owned(),
     }
 }
 
@@ -679,58 +739,49 @@ pub(crate) async fn decide_repair(
 ///
 /// 原因只由 `detail`（读盘错误连同系统给的原因）拼出，列表与补全都经这里。两边各读一次盘，系统给的原因在两次读取
 /// 之间可能不同（这一刻被占用、下一刻没有权限），那时两句只差在冒号后面的那段，照实给出，不为凑成一句丢掉它。
-fn unreadable_refusal(id: &str, detail: String) -> CoreError {
-    InstanceError::NotRepairable {
-        id: id.to_owned(),
+fn unreadable_refusal(detail: String) -> Unrepairable {
+    Unrepairable {
+        kind: UnrepairableKind::Unreadable,
         reason: broken_reason_text(&BrokenReason::Unreadable(detail)),
     }
-    .into()
 }
 
-/// 实例列表上一个版本 JSON 用不了的实例补全修不好的原因，与对它发起补全时报的逐字相同；修得好时为 `None`。
+/// 实例列表上一个版本 JSON 用不了的实例补全修不好的判定，原因与对它发起补全时报的逐字相同；修得好时为 `None`。
 /// 版本 JSON 读不出来时例外的只有系统给的那段原因：列表用的是扫描那一次读到的，补全时再读一次可能不同（见
 /// [`unreadable_refusal`]）。
 ///
-/// `previous` 与 `broken` 是列表已经读到的未完成标记与探测结果，不再读一遍；会多读的只有安装记录（读不出来的
-/// 不读），没有记录、缺的又是版本 JSON 时再看一眼实例目录顶层，在那里找到一份名字对不上的版本 JSON 时再列一次
-/// `versions/` 查重。
-pub(crate) async fn unrepairable_reason(
+/// `previous` 与 `broken` 是列表已经读到的未完成标记与探测结果，不再读一遍；还会读的见 [`broken_verdict`]。
+pub(crate) async fn unrepairable(
     game_dir: &Path,
     id: &str,
     previous: Option<&IncompleteMarker>,
-    broken: BrokenVersion,
-) -> Option<String> {
-    let probe = Some(VersionProbe::Broken(broken));
-    match decide_repair(game_dir, id, previous, probe, false).await {
-        Ok(_) => None,
-        Err(CoreError::Instance(InstanceError::NotRepairable { reason, .. })) => Some(reason),
-        // 探测结果交进去以后，定方案时还会读的安装记录与实例目录读不出都不报错，眼下走不到这里。真走到了，补全会以
-        // 这个错误失败，列表照样说它修不好，不当成修得好。
-        Err(err) => {
-            tracing::warn!(id, error = %err, "定不出补全方案");
-            Some(err.to_string())
-        }
-    }
+    broken: &BrokenVersion,
+) -> Option<Unrepairable> {
+    broken_verdict(game_dir, id, previous, broken).await.err()
 }
 
-/// 版本 JSON 用不了、也没有安装记录时补全报的原因。缺的是版本 JSON 时顺带看一眼实例目录：别人打包时把实例目录
+/// 版本 JSON 用不了、也没有安装记录时补全的拒绝。缺的是版本 JSON 时顺带看一眼实例目录：别人打包时把实例目录
 /// 改了名，里面的版本 JSON 还叫原来的名字，只说「缺少版本 JSON」的话，玩家想不到文件其实就在目录里。实例改不成那个
-/// 名字时不提（见 [`renamable_to`]）。
-async fn no_record_reason(game_dir: &Path, id: &str, broken: &BrokenVersion) -> String {
+/// 名字时不提（见 [`renamable_to`]）。提了的话，改名目标连同原因一起交回。
+async fn no_record_refusal(game_dir: &Path, id: &str, broken: &BrokenVersion) -> Unrepairable {
     let reason = format!(
         "{}，也没有记下当初装的是什么",
         broken_reason_text(&broken.reason)
     );
+    let unhinted = || Unrepairable {
+        kind: UnrepairableKind::NoRecord { rename_to: None },
+        reason: reason.clone(),
+    };
     if broken.reason != BrokenReason::MissingJson {
-        return reason;
+        return unhinted();
     }
     // 只是附带的提示：目录没读全就说不准是不是恰好一份、改不改得成，宁可不提，修不好的原因照样报。
     let name = match misnamed_version_json(&broken.dir).await {
         Ok(Some(name)) => name,
-        Ok(None) => return reason,
+        Ok(None) => return unhinted(),
         Err(err) => {
             tracing::warn!(id, dir = %broken.dir.display(), error = %err, "查找名字对不上的版本 JSON 失败");
-            return reason;
+            return unhinted();
         }
     };
     // 查重的名单与改名时的同一份（`Petalfall::instance_names`）：`versions/` 下全部目录名，含版本 JSON 用不了的。
@@ -738,14 +789,19 @@ async fn no_record_reason(game_dir: &Path, id: &str, broken: &BrokenVersion) -> 
         Ok(names) => names.unwrap_or_default(),
         Err(err) => {
             tracing::warn!(id, error = %error_with_causes(&err), "列不出实例名，不提改名");
-            return reason;
+            return unhinted();
         }
     };
     match renamable_to(id, name, &existing) {
-        Some(name) => format!(
-            "{reason}；目录里有一份叫 {name}.json 的版本文件，把实例改名成 {name} 就能认出来"
-        ),
-        None => reason,
+        Some(name) => Unrepairable {
+            reason: format!(
+                "{reason}；目录里有一份叫 {name}.json 的版本文件，把实例改名成 {name} 就能认出来"
+            ),
+            kind: UnrepairableKind::NoRecord {
+                rename_to: Some(name),
+            },
+        },
+        None => unhinted(),
     }
 }
 
@@ -2051,6 +2107,14 @@ mod tests {
         write_version(&game, "完好", &vanilla_json("完好"));
         std::fs::create_dir_all(versions.join("空的")).unwrap();
         write_version(&game, "写坏了", "{ not json");
+        // 安装记录里的加载器这一版认不出来：照它装不回去，与没有记录一样修不好。
+        InstallRecordStore::for_version_dir(&versions.join("认不出加载器"))
+            .save(&InstallSpec {
+                loader: Some("rift".into()),
+                ..fabric.spec()
+            })
+            .await
+            .unwrap();
 
         let list = petalfall.list_instances().await.unwrap();
 
@@ -2059,28 +2123,49 @@ mod tests {
             ("装到一半", Ok(RepairPlan::Reinstall(fabric.clone()))),
             (
                 "导到一半",
-                Err("整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入"),
+                Err(refusal(
+                    UnrepairableKind::Modpack,
+                    "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入",
+                )),
             ),
             ("完好", Ok(RepairPlan::Complete)),
-            ("空的", Err("缺少版本 JSON，也没有记下当初装的是什么")),
+            (
+                "空的",
+                Err(no_record("缺少版本 JSON，也没有记下当初装的是什么")),
+            ),
             (
                 "写坏了",
-                Err(
+                Err(no_record(
                     "版本 JSON 损坏：key must be a string at line 1 column 3，也没有记下当初装的是什么",
-                ),
+                )),
+            ),
+            (
+                "认不出加载器",
+                Err(no_record("未完成标记里记的加载器 rift 不认识")),
             ),
         ];
         assert_eq!(list.len(), expected.len());
         for (id, verdict) in expected {
-            let verdict = verdict.map_err(str::to_owned);
             let listed = list.iter().find(|i| i.id == id).unwrap();
+            assert_eq!(listed.unrepairable, verdict.clone().err(), "{id} 在列表上");
             assert_eq!(
-                listed.unrepairable_reason,
-                verdict.clone().err(),
-                "{id} 在列表上"
+                repair_verdict(&petalfall, id).await,
+                verdict.map_err(|refusal| refusal.reason),
+                "{id} 去补全"
             );
-            assert_eq!(repair_verdict(&petalfall, id).await, verdict, "{id} 去补全");
         }
+    }
+
+    fn refusal(kind: UnrepairableKind, reason: &str) -> Unrepairable {
+        Unrepairable {
+            kind,
+            reason: reason.to_owned(),
+        }
+    }
+
+    /// 没有安装记录、原因里也不带改名提示的那一种。
+    fn no_record(reason: &str) -> Unrepairable {
+        refusal(UnrepairableKind::NoRecord { rename_to: None }, reason)
     }
 
     /// 版本 JSON 读不出来（这里让 `<id>.json` 是个目录，读文件必报 IO 错）：有没有安装记录都修不好。列表上的原因与
@@ -2120,8 +2205,8 @@ mod tests {
                 listed.version
             );
             assert_eq!(
-                listed.unrepairable_reason.as_deref(),
-                Some(expected.as_str()),
+                listed.unrepairable,
+                Some(refusal(UnrepairableKind::Unreadable, &expected)),
                 "{id} 在列表上"
             );
             assert_eq!(
@@ -2169,30 +2254,36 @@ mod tests {
         let expected = [
             (
                 "atm10",
-                format!(
-                    "{missing}；目录里有一份叫 All the Mods 10.json 的版本文件，把实例改名成 All the Mods 10 就能认出来"
+                refusal(
+                    UnrepairableKind::NoRecord {
+                        rename_to: Some("All the Mods 10".to_owned()),
+                    },
+                    &format!(
+                        "{missing}；目录里有一份叫 All the Mods 10.json 的版本文件，把实例改名成 All the Mods 10 就能认出来"
+                    ),
                 ),
             ),
-            ("一份也没有", missing.to_owned()),
-            ("两份", missing.to_owned()),
+            ("一份也没有", no_record(missing)),
+            ("两份", no_record(missing)),
             (
                 "写坏了",
-                "版本 JSON 损坏：key must be a string at line 1 column 3，也没有记下当初装的是什么"
-                    .to_owned(),
+                no_record(
+                    "版本 JSON 损坏：key must be a string at line 1 column 3，也没有记下当初装的是什么",
+                ),
             ),
         ];
         let list = petalfall.list_instances().await.unwrap();
         assert_eq!(list.len(), expected.len());
-        for (id, reason) in expected {
+        for (id, unrepairable) in expected {
             let listed = list.iter().find(|i| i.id == id).unwrap();
             assert_eq!(
-                listed.unrepairable_reason.as_deref(),
-                Some(reason.as_str()),
+                listed.unrepairable.as_ref(),
+                Some(&unrepairable),
                 "{id} 在列表上"
             );
             assert_eq!(
                 repair_verdict(&petalfall, id).await,
-                Err(reason),
+                Err(unrepairable.reason),
                 "{id} 去补全"
             );
         }
@@ -2220,30 +2311,35 @@ mod tests {
         std::fs::create_dir_all(versions.join("ATM10")).unwrap();
 
         let missing = "缺少版本 JSON，也没有记下当初装的是什么";
-        let hinted = format!(
-            "{missing}；目录里有一份叫 All the Mods 10.json 的版本文件，把实例改名成 All the Mods 10 就能认出来"
+        let hinted = refusal(
+            UnrepairableKind::NoRecord {
+                rename_to: Some("All the Mods 10".to_owned()),
+            },
+            &format!(
+                "{missing}；目录里有一份叫 All the Mods 10.json 的版本文件，把实例改名成 All the Mods 10 就能认出来"
+            ),
         );
         let expected = [
-            ("改得成", hinted.as_str()),
-            ("太长", missing),
-            ("段尾空格", missing),
-            ("段尾点", missing),
-            ("点开头", missing),
-            ("撞名", missing),
-            ("ATM10", missing),
+            ("改得成", hinted),
+            ("太长", no_record(missing)),
+            ("段尾空格", no_record(missing)),
+            ("段尾点", no_record(missing)),
+            ("点开头", no_record(missing)),
+            ("撞名", no_record(missing)),
+            ("ATM10", no_record(missing)),
         ];
         let list = petalfall.list_instances().await.unwrap();
         assert_eq!(list.len(), expected.len());
-        for (id, reason) in expected {
+        for (id, unrepairable) in expected {
             let listed = list.iter().find(|i| i.id == id).unwrap();
             assert_eq!(
-                listed.unrepairable_reason.as_deref(),
-                Some(reason),
+                listed.unrepairable.as_ref(),
+                Some(&unrepairable),
                 "{id} 在列表上"
             );
             assert_eq!(
                 repair_verdict(&petalfall, id).await,
-                Err(reason.to_owned()),
+                Err(unrepairable.reason),
                 "{id} 去补全"
             );
         }
