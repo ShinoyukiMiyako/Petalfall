@@ -480,7 +480,9 @@ impl Petalfall {
 
     /// 定补全方案并写下新的未完成标记，返回方案与标记。
     ///
-    /// 标记文件损坏时当作没有标记：版本 JSON 可用就照它补全，缺失或损坏时照安装记录重装，连记录也没有才报不可补全。
+    /// 标记文件读不出来（写坏了、这一版不认识的格式、读盘出错）时不照它定方案：版本 JSON 缺失或损坏时照安装记录重装，
+    /// 连记录也没有才报不可补全；版本 JSON 可用就照它补全，只有安装记录里记着加载器、版本 JSON 里却没有这种加载器时照
+    /// 记录重装：重装加载器途中被打断时盘上是只合并了原版的那份，照它补全会把实例补成原版。
     /// 版本 JSON 读不出来（被占用、没有权限、那个位置是个目录）时，除了整合包没导入完的照旧报重新导入，不论标记与
     /// 安装记录都报不可补全，标记不动。
     ///
@@ -509,14 +511,20 @@ impl Petalfall {
     ) -> Result<(RepairPlan, IncompleteMarker)> {
         let dir = self.existing_instance_dir(id).await?;
         let store = MarkerStore::for_version_dir(&dir);
-        let previous = match store.load().await {
-            Ok(previous) => previous,
+        let loaded = store.load().await;
+        let previous = match &loaded {
+            Ok(Some(marker)) => PreviousMarker::Found(marker),
+            Ok(None) => PreviousMarker::Absent,
             Err(err) => {
-                tracing::warn!(id, error = %err, "未完成标记损坏，按现有版本 JSON 补全并覆盖标记");
-                None
+                tracing::warn!(
+                    id,
+                    error = %err,
+                    "未完成标记读不出来，按版本 JSON 与安装记录定方案，定下后覆盖它"
+                );
+                PreviousMarker::Unreadable
             }
         };
-        let plan = decide_repair(self.game_dir(), id, previous.as_ref(), reinstall_loader).await?;
+        let plan = decide_repair(self.game_dir(), id, previous, reinstall_loader).await?;
         let kind = match &plan {
             RepairPlan::Reinstall(request) => IncompleteKind::Install {
                 spec: request.spec(),
@@ -652,22 +660,25 @@ impl Unrepairable {
 /// 照未完成标记、版本 JSON 与安装记录定补全方案，不写盘。版本 JSON 用不了时的那一段（[`broken_verdict`]）与实例
 /// 列表共用：列表上说的修不好的原因就是真去补全时报的那句，两边不各写一套判断，不会一边说修得好、一边又拒绝。
 ///
-/// `previous` 是读到的未完成标记，读不出的当作没有。标记是 install 时也要先探一次版本 JSON：读不出来的话，照标记
-/// 重装最后也要把版本 JSON 写回那个位置（见 [`unreadable_verdict`]）。
+/// `previous` 是读未完成标记的结果。读不出来的标记给不出结论：版本 JSON 用不了时与没有标记一样看安装记录；版本 JSON
+/// 读得出、本来要照它补全时还要对一眼安装记录（见 [`reinstall_over_unreadable_marker`]），没有标记时不看。标记是
+/// install 时也要先探一次版本 JSON：读不出来的话，照标记重装最后也要把版本 JSON 写回那个位置（见
+/// [`unreadable_verdict`]）。
 pub(crate) async fn decide_repair(
     game_dir: &Path,
     id: &str,
-    previous: Option<&IncompleteMarker>,
+    previous: PreviousMarker<'_>,
     reinstall_loader: bool,
 ) -> Result<RepairPlan> {
+    let marker = previous.marker();
     // 上次补全已经查实加载器自带的库只能重装补回：再照版本 JSON 补一遍只会原样失败，实例库、启动胶囊
     // 与任务重试的入口都带不上「重装」这个意思，所以由看标记定方案的这一步替它们换掉。装不回的照旧补全：
     // 玩家可能已经把文件放回去了，这是清掉标记的唯一办法；没放回去时照样报缺失。
-    let stuck = previous.is_some_and(lost_loader_library);
+    let stuck = marker.is_some_and(lost_loader_library);
     let version = match probe_version(game_dir, id).await {
         Ok(VersionProbe::Found(version)) => version,
         Ok(VersionProbe::Broken(broken)) => {
-            return broken_verdict(game_dir, id, previous, &broken)
+            return broken_verdict(game_dir, id, marker, &broken)
                 .await
                 .map(RepairPlan::Reinstall)
                 .map_err(|refusal| refusal.into_error(id));
@@ -677,10 +688,10 @@ pub(crate) async fn decide_repair(
         Err(err) => {
             let detail = error_with_causes(&err);
             tracing::warn!(id, error = %detail, "版本 JSON 读不出来");
-            return Err(unreadable_verdict(previous, detail).into_error(id));
+            return Err(unreadable_verdict(marker, detail).into_error(id));
         }
     };
-    if let Some(verdict) = marker_verdict(previous) {
+    if let Some(verdict) = marker_verdict(marker) {
         return verdict
             .map(RepairPlan::Reinstall)
             .map_err(|refusal| refusal.into_error(id));
@@ -689,8 +700,74 @@ pub(crate) async fn decide_repair(
         Ok(RepairPlan::Reinstall(
             loader_reinstall_request(game_dir, &version).await?,
         ))
+    } else if matches!(previous, PreviousMarker::Unreadable)
+        && let Some(request) = reinstall_over_unreadable_marker(id, &version).await
+    {
+        Ok(RepairPlan::Reinstall(request))
     } else {
         Ok(RepairPlan::Complete)
+    }
+}
+
+/// 补全定方案时读未完成标记的结果。
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PreviousMarker<'a> {
+    Found(&'a IncompleteMarker),
+    /// 没有标记文件。
+    Absent,
+    /// 有标记文件却读不出来：写坏了、是这一版不认识的格式，或读盘出错。
+    Unreadable,
+}
+
+impl<'a> PreviousMarker<'a> {
+    /// 读到的标记；读不出来的与没有一样为 `None`。
+    fn marker(self) -> Option<&'a IncompleteMarker> {
+        match self {
+            PreviousMarker::Found(marker) => Some(marker),
+            PreviousMarker::Absent | PreviousMarker::Unreadable => None,
+        }
+    }
+}
+
+/// 未完成标记读不出来、版本 JSON 读得出时照安装记录重装的内容：记录里记着加载器、版本 JSON 里却探不出这种加载器时
+/// 才有，其余为 `None`，照旧按版本 JSON 补全。
+///
+/// 重装 Forge、NeoForge 途中进程被结束时，盘上是只合并了原版的那份版本 JSON 加 install 标记（处理器要读原版那份，
+/// 见 `place_json_for_processors`）；标记又读不出来的话，照版本 JSON 补全会把加载器实例静默补成原版，这时说得出
+/// 当初装的是什么的只剩安装记录。只比加载器种类、不比版本号：被打断时盘上那份里根本没有加载器。读不出的记录当作
+/// 没有；记录里的加载器认不出来时照它装不回去，同样按版本 JSON 补全，不因此拒掉一个补得了的实例。
+async fn reinstall_over_unreadable_marker(
+    id: &str,
+    version: &DiscoveredVersion,
+) -> Option<InstanceRequest> {
+    let spec = match InstallRecordStore::for_version_dir(&version.dir)
+        .load()
+        .await
+    {
+        Ok(spec) => spec?,
+        Err(err) => {
+            tracing::warn!(id, error = %err, "安装记录损坏，当作没有记录");
+            return None;
+        }
+    };
+    let request = match recorded_request(&spec, SpecSource::Record) {
+        Ok(request) => request,
+        Err(refusal) => {
+            tracing::warn!(id, reason = %refusal.reason, "照安装记录装不回去，按版本 JSON 补全");
+            return None;
+        }
+    };
+    let kind = loader_kind(request.loader?);
+    (!version.loaders.iter().any(|loader| loader.kind == kind)).then_some(request)
+}
+
+/// 安装时选的加载器在版本 JSON 的探测结果里是哪一种。
+fn loader_kind(choice: LoaderChoice) -> LoaderKind {
+    match choice {
+        LoaderChoice::Fabric => LoaderKind::Fabric,
+        LoaderChoice::Quilt => LoaderKind::Quilt,
+        LoaderChoice::Forge => LoaderKind::Forge,
+        LoaderChoice::NeoForge => LoaderKind::NeoForge,
     }
 }
 
@@ -2980,6 +3057,118 @@ mod tests {
             .unwrap();
         let (plan, _) = petalfall.begin_repair("光影").await.unwrap();
         assert_eq!(plan, RepairPlan::Complete);
+    }
+
+    /// 重装 Forge 途中被打断，盘上是只合并了原版的那份版本 JSON，未完成标记又读不出来（写坏了，或是这一版不认识的
+    /// 格式）：安装记录里记着 Forge、版本 JSON 里没有，照安装记录重装，不照原版那份补全把实例补成原版。标记读不出来时
+    /// 版本 JSON 里有记录里的加载器、没有记录、记录读不出或记录里的加载器认不出来，都照旧补全；没有标记时不看安装记录，
+    /// 记录与版本 JSON 对不上也照旧补全。
+    #[tokio::test]
+    async fn an_unreadable_marker_reinstalls_from_the_record_only_when_its_loader_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        let forge_version = format!("47.2.{}", fastrand::u16(..));
+        let recorded = request(
+            "1.20.1",
+            Some(LoaderChoice::Forge),
+            Some(forge_version.as_str()),
+        );
+        let vanilla_only = |id: &str| {
+            format!(r#"{{"id":"{id}","type":"release","clientVersion":"1.20.1","mainClass":"M"}}"#)
+        };
+        let with_forge = |id: &str| {
+            format!(
+                r#"{{"id":"{id}","type":"release","clientVersion":"1.20.1","mainClass":"M",
+                    "libraries":[{{"name":"net.minecraftforge:forge:1.20.1-{forge_version}:client"}}]}}"#
+            )
+        };
+        let put_marker = |dir: &Path, bytes: &[u8]| {
+            let path = marker_path(dir);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        };
+        let unreadable: [&[u8]; 2] = [
+            b"{ not json",
+            br#"{"kind":"migrate","outcome":"pending","started_at":1700000000000,"error":null}"#,
+        ];
+
+        let dir = write_version(&game, "重装到一半", &vanilla_only("重装到一半"));
+        InstallRecordStore::for_version_dir(&dir)
+            .save(&recorded.spec())
+            .await
+            .unwrap();
+        for bytes in unreadable {
+            put_marker(&dir, bytes);
+            let (plan, marker) = petalfall.begin_repair("重装到一半").await.unwrap();
+            assert_eq!(plan, RepairPlan::Reinstall(recorded.clone()));
+            assert_eq!(
+                marker.kind,
+                IncompleteKind::Install {
+                    spec: recorded.spec()
+                }
+            );
+            assert_eq!(
+                MarkerStore::for_version_dir(&dir).load().await.unwrap(),
+                Some(marker)
+            );
+        }
+
+        let forge_kept = write_version(&game, "Forge 还在", &with_forge("Forge 还在"));
+        put_marker(&forge_kept, unreadable[0]);
+        InstallRecordStore::for_version_dir(&forge_kept)
+            .save(&recorded.spec())
+            .await
+            .unwrap();
+        let no_record = write_version(&game, "没有记录", &vanilla_only("没有记录"));
+        put_marker(&no_record, unreadable[0]);
+        let bad_record = write_version(&game, "记录写坏了", &vanilla_only("记录写坏了"));
+        put_marker(&bad_record, unreadable[0]);
+        std::fs::write(
+            bad_record
+                .join(PETALFALL_META_DIR)
+                .join("install-record.json"),
+            b"{ not json",
+        )
+        .unwrap();
+        assert!(
+            InstallRecordStore::for_version_dir(&bad_record)
+                .load()
+                .await
+                .is_err(),
+            "夹具里的安装记录要读不出来"
+        );
+        let unknown = write_version(&game, "记录认不出", &vanilla_only("记录认不出"));
+        put_marker(&unknown, unreadable[0]);
+        InstallRecordStore::for_version_dir(&unknown)
+            .save(&InstallSpec {
+                loader: Some("rift".into()),
+                ..recorded.spec()
+            })
+            .await
+            .unwrap();
+        let no_marker = write_version(&game, "没有标记", &vanilla_only("没有标记"));
+        InstallRecordStore::for_version_dir(&no_marker)
+            .save(&recorded.spec())
+            .await
+            .unwrap();
+
+        for (id, dir) in [
+            ("Forge 还在", forge_kept),
+            ("没有记录", no_record),
+            ("记录写坏了", bad_record),
+            ("记录认不出", unknown),
+            ("没有标记", no_marker),
+        ] {
+            let (plan, marker) = petalfall.begin_repair(id).await.unwrap();
+            assert_eq!(plan, RepairPlan::Complete, "{id}");
+            assert_eq!(marker.kind, IncompleteKind::Repair, "{id}");
+            assert_eq!(
+                MarkerStore::for_version_dir(&dir).load().await.unwrap(),
+                Some(marker),
+                "{id}"
+            );
+        }
     }
 
     /// 安装器在本机生成的文件（这里是 NeoForge 补丁后的客户端 jar）补全下不回来：缺了它补全就照加载器文件缺失
