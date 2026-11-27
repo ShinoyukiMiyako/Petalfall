@@ -499,8 +499,9 @@ struct PlannedEntry {
 /// 从备份 `zip` 解出存档到同级临时目录 `<saves_dir>/<world><RESTORE_SUFFIX>`，返回这个目录。
 ///
 /// 写出第一个字节之前先校验全部条目：只能用正斜杠；不能是绝对路径、不能带盘符；不能有空的路径段、`.`
-/// 或 `..`；路径段不能以点或空格结尾、不能含 Windows 非法字符或控制字符、不能是保留设备名；不能是符号
-/// 链接；全部条目必须在同一个顶层目录下（解出时去掉这一层）。不合格报 [`Error::BackupEntryUnsafe`]，
+/// 或 `..`；路径段不能以点或空格结尾、不能含 Windows 不允许的字符（包括 0x00 到 0x1F 的控制字符）、不能是
+/// 这台机器的系统会当成设备的名字；不能是符号链接；全部条目必须在同一个顶层目录下（解出时去掉这一层）。
+/// 不合格报 [`Error::BackupEntryUnsafe`]，
 /// `reason` 取 `parent_traversal`、`absolute`、`drive_prefix`、`backslash`、`empty_component`、
 /// `current_dir`、`invalid_character`、`reserved_name`、`trailing_dot_or_space`、`symlink`、
 /// `multiple_roots` 之一。解完读临时目录里的 level.dat，没有或读不懂报 [`Error::BackupLevelUnreadable`]。
@@ -592,7 +593,7 @@ fn plan_extraction(
     Ok(plan)
 }
 
-/// zip 条目名的词法检查，通过时返回各路径段。
+/// zip 条目名的检查，通过时返回各路径段。除了设备名要问这台机器的系统，其余都按字面判断。
 fn check_entry_name(name: &str) -> std::result::Result<Vec<&str>, &'static str> {
     if name.starts_with('/') || name.starts_with('\\') {
         return Err("absolute");
@@ -624,12 +625,15 @@ fn check_component(component: &str) -> std::result::Result<(), &'static str> {
     if component == ".." {
         return Err("parent_traversal");
     }
+    // 系统会悄悄去掉结尾的点和空格，解出来的不是原名，只能按字面拒；也必须排在问系统之前，否则规整时去掉
+    // 它们会被误报成设备名。
     if component.ends_with('.') || component.ends_with(' ') {
         return Err("trailing_dot_or_space");
     }
-    if component.chars().any(|c| {
-        c <= '\u{1f}' || c == '\u{7f}' || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*')
-    }) {
+    if component
+        .chars()
+        .any(|c| c <= '\u{1f}' || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+    {
         return Err("invalid_character");
     }
     if is_reserved_name(component) {
@@ -638,27 +642,24 @@ fn check_component(component: &str) -> std::result::Result<(), &'static str> {
     Ok(())
 }
 
-/// Windows 保留的设备名（带扩展名也算，按第一个点之前的部分判断，不分大小写）。
+/// 这台机器的系统会不会把这个路径段当成设备（比如 `NUL`），而不是普通文件名。
+///
+/// 不用写死的保留名名单：各版本 Windows 对保留名的处理不一样，较新的 Windows 11 上 `aux.lua`、`con.txt` 乃至
+/// 不带扩展名的 `aux` 都是普通文件，按名单拒收会让存档里有这类文件（比如电脑类模组里玩家建的 `aux.lua`）的
+/// 每一份备份都恢复不了。所以把名字接在一个固定的绝对目录后面交给系统规整：`std::path::absolute` 在 Windows
+/// 上就是 `GetFullPathNameW`，只按字面处理、不碰盘，目录不必存在；系统当成设备的名字会被改写成 `\\.\NUL`
+/// 这样的设备路径，与原样不再相等。规整失败同样说明系统不会原样认下这个名字，一并拒收。调用前必须已挡掉
+/// 冒号、斜杠与反斜杠，否则拼出来的不是「目录下的一个名字」。
+#[cfg(windows)]
 fn is_reserved_name(component: &str) -> bool {
-    let stem = component
-        .split('.')
-        .next()
-        .unwrap_or(component)
-        .trim_end_matches(' ')
-        .to_ascii_uppercase();
-    let numbered = |prefix: &str| {
-        stem.strip_prefix(prefix).is_some_and(|n| {
-            matches!(
-                n,
-                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-            )
-        })
-    };
-    matches!(
-        stem.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
-    ) || numbered("COM")
-        || numbered("LPT")
+    let joined = Path::new(r"C:\name-check").join(component);
+    !std::path::absolute(&joined).is_ok_and(|full| full.as_os_str() == joined.as_os_str())
+}
+
+/// 别的系统上这些名字没有特殊含义。
+#[cfg(not(windows))]
+fn is_reserved_name(_component: &str) -> bool {
+    false
 }
 
 /// [`Error::BackupEntryUnsafe`] 的规则码对应的说明。
@@ -1369,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_names_are_checked_lexically() {
+    fn entry_names_are_checked_lexically_and_device_names_by_the_system() {
         for (name, reason) in [
             ("../evil.txt", "parent_traversal"),
             ("w/../x", "parent_traversal"),
@@ -1387,9 +1388,6 @@ mod tests {
             ("w/a?b", "invalid_character"),
             ("w/a\u{1}b", "invalid_character"),
             ("w/a:b", "invalid_character"),
-            ("w/con.txt", "reserved_name"),
-            ("w/LPT9", "reserved_name"),
-            ("w/COM\u{b9}", "reserved_name"),
         ] {
             assert_eq!(check_entry_name(name), Err(reason), "{name:?}");
         }
@@ -1398,9 +1396,89 @@ mod tests {
             check_entry_name("新的世界/region/r.0.0.mca"),
             Ok(vec!["新的世界", "region", "r.0.0.mca"])
         );
-        // 只是以保留名开头、或不在清单里的编号，不拦。
+        // DEL 在 NTFS 上是合法的文件名字符。
+        assert_eq!(check_entry_name("w/a\u{7f}b"), Ok(vec!["w", "a\u{7f}b"]));
+        // 只是以保留名开头的名字不是保留名。
         assert_eq!(check_entry_name("w/CONSOLE"), Ok(vec!["w", "CONSOLE"]));
-        assert_eq!(check_entry_name("w/COM0"), Ok(vec!["w", "COM0"]));
+
+        // 保留名在各版本 Windows 上的待遇不一样，以跑用例的这台机器为准：真建一个同名文件，建得出来且目录里
+        // 列得到同名项的必须放行，否则必须以 reserved_name 拒收。每个名字一个目录，免得大小写不同的名字撞在一起。
+        let tmp = tempfile::tempdir().unwrap();
+        for (index, name) in [
+            "con.txt",
+            "aux.lua",
+            "nul.dat",
+            "com1.cfg",
+            "aux",
+            "con",
+            "nul",
+            "NUL",
+            "prn",
+            "LPT9",
+            "COM0",
+            "COM\u{b9}",
+            "CLOCK$",
+            "CONIN$",
+            "CONOUT$",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir = tmp.path().join(index.to_string());
+            fs::create_dir_all(&dir).unwrap();
+            let plain_file = File::create(dir.join(name)).is_ok()
+                && fs::read_dir(&dir)
+                    .unwrap()
+                    .any(|entry| entry.unwrap().file_name() == name);
+            let entry = format!("w/{name}");
+            if plain_file {
+                assert_eq!(check_entry_name(&entry), Ok(vec!["w", name]), "{name:?}");
+            } else {
+                assert_eq!(check_entry_name(&entry), Err("reserved_name"), "{name:?}");
+            }
+        }
+    }
+
+    /// 较新的 Windows 11 上 aux.lua 是普通文件（电脑类模组里玩家建的脚本就可能叫这个），DEL 在 NTFS 上一直
+    /// 合法。存档里有这样的文件时，备份必须能原样恢复，而不是整份报坏。
+    #[test]
+    fn names_the_system_accepts_survive_a_backup_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let probe = tmp.path().join("probe");
+        fs::create_dir_all(&probe).unwrap();
+        let aux_is_plain = File::create(probe.join("aux.lua")).is_ok()
+            && fs::read_dir(&probe)
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name() == "aux.lua");
+        let world = sample_world(&tmp.path().join("src"), "w", "w", b"region");
+        let script = world
+            .join("computercraft")
+            .join("computer")
+            .join("0")
+            .join("aux.lua");
+        // 含 DEL 的文件不挑系统，总是测；aux.lua 只在这台机器的系统当它是普通文件时才放进存档。
+        if aux_is_plain {
+            write(&script, b"print('aux')");
+        } else {
+            println!("这台机器的系统把 aux.lua 当成设备，建不出同名的普通文件，这一份不测");
+        }
+        let del = world.join("data").join("a\u{7f}b.dat");
+        write(&del, &[0x7f, 0, 0xff]);
+        let mut expected = snapshot(&world);
+        expected.remove("session.lock");
+        expected.remove("DIM-1\\session.lock");
+        expected.remove("DIM-1/session.lock");
+        let zip = tmp.path().join("1-manual.zip");
+        pack(&world, &zip);
+
+        let saves = tmp.path().join("saves");
+        let staged = stage_restore(&zip, &saves, "w", &|| false, &mut |_| {}).unwrap();
+        let restored = |path: &Path| fs::read(staged.join(path.strip_prefix(&world).unwrap()));
+        if aux_is_plain {
+            assert_eq!(restored(&script).unwrap(), b"print('aux')");
+        }
+        assert_eq!(restored(&del).unwrap(), [0x7f, 0, 0xff]);
+        assert_eq!(snapshot(&staged), expected);
     }
 
     #[test]
