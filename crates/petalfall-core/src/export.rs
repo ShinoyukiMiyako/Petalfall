@@ -3328,4 +3328,57 @@ mod tests {
             b"lang:zh_cn"
         );
     }
+
+    /// 记账读盘就出错（位置上是个目录，Windows 上与没有读权限一样报拒绝访问）时与读不懂一样：带配置的导出照实
+    /// 报读盘的错，预览照常出统计，不带配置的导出照常。只容忍读不懂的话，这种情形下导出弹窗又打不开了。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_record_that_fails_to_read_fails_only_exports_that_take_the_config() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        fixture.write(YOSBR, b"fov:0.8\nlang:zh_cn\nonboardAccessibility:false\n");
+        let record = crate::game_lang::filled_lines_path(&fixture.dir);
+        std::fs::create_dir_all(&record).unwrap();
+
+        let preview = fixture.petalfall.preview_modpack_export(ID).await.unwrap();
+        let config = preview
+            .extras
+            .iter()
+            .find(|stat| stat.extra == ExportExtra::Config)
+            .unwrap();
+        // sodium-options.json 13 字节、sub/deep.toml 11 字节；YOSBR 那份按盘上整份的 46 字节算，不扣补的两行。
+        assert_eq!((config.files, config.bytes), (3, 13 + 11 + 46));
+
+        let with_config = ModpackExportTarget::new(fixture.root.join("带配置.mrpack"));
+        let err = fixture
+            .petalfall
+            .export_modpack(
+                ID,
+                &options(vec![ExportExtra::Config], false),
+                &with_config,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::Base(petalfall_base::Error::Io { path, .. }) if path == &record),
+            "{err:?}"
+        );
+        assert!(!with_config.destination().exists());
+
+        let without = ModpackExportTarget::new(fixture.root.join("不带配置.mrpack"));
+        fixture
+            .petalfall
+            .export_modpack(
+                ID,
+                &options(vec![ExportExtra::Options], false),
+                &without,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            read_entry(without.destination(), "overrides/options.txt"),
+            b"lang:zh_cn"
+        );
+    }
 }
