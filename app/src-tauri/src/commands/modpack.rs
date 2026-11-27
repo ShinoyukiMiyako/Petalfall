@@ -1141,8 +1141,8 @@ mod tests {
         assert_eq!(err.code, code::MODPACK_CORRUPT);
     }
 
-    /// 导入失败后按任务 id 清掉它留下的半成品实例，别的任务的半成品不动。
-    /// 还没定下实例名就失败的导入不碰游戏目录里的任何实例，哪怕别的目录带着整合包标记。
+    /// 导入失败后按实例名与这次导入建出目录的记号清掉半成品，不按标记里的任务 id 找。还没定下实例名就失败的导入
+    /// 不碰游戏目录里的任何实例，哪怕别的目录带着同一个任务 id 的整合包标记。
     #[tokio::test]
     async fn import_failing_before_reserving_a_name_touches_no_instance() {
         let dir = tempfile::tempdir().unwrap();

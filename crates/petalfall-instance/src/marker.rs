@@ -38,8 +38,9 @@ pub enum IncompleteKind {
     Install { spec: InstallSpec },
     /// 对已有实例补全文件。
     Repair,
-    /// 整合包导入为新实例。`task_id` 是导入任务的 id：任务被强行放弃、导入自己的清理没机会跑时，
-    /// 按它找回并删掉这次建出的目录，不误删别的导入。
+    /// 整合包导入为新实例。`task_id` 是导入任务的 id，写标记与半成品删不掉时落结局都记下它，标明这份标记出自
+    /// 哪次导入。清理半成品不按它找：按实例名与这次导入建出目录的记号删（core 的 `discard_modpack_import`），
+    /// 标记可能还没写下或读不出来。
     Modpack { task_id: String },
 }
 
