@@ -23,13 +23,55 @@ function sideOf(style: CSSStyleDeclaration): ToastSide {
 }
 
 /**
+ * 能引起换角的只有三种变化：浮层根的直接子项（弹窗层）增删、弹窗层开始退场（data-exiting）、外壳根的直接子项（首次启动向导）增删。
+ * 跟踪落点的观察者都按这个范围挂、按这个判据筛。
+ */
+function observePlacement(observer: MutationObserver, root: HTMLElement, host: HTMLElement | null): void {
+  observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-exiting"] });
+  if (host !== null) observer.observe(host, { childList: true });
+}
+
+function movesPlacement(records: MutationRecord[], root: HTMLElement, host: HTMLElement | null): boolean {
+  return records.some((r) => r.type === "attributes" || r.target === root || r.target === host);
+}
+
+/**
  * 落点写在样式表里，判据是有没有没在退场的弹窗、首次启动向导在不在文档里，脚本不再判断一遍，只读样式表给的方向。
  * 读的是上一次提交之后的文档，所以通知的增删要晚一拍上屏（见 Toasts 里的 shown）。
- * 容器还没挂上时没有入场动画（AnimatePresence 的 initial 是 false），方向用不上。
+ * 上一次提交刚动过文档时，读样式表就是一次强制样式计算：读到的方向缓存下来，只在会改落点的变化之后重读，
+ * 悬停暂停、通知增删引起的重渲染不再逼浏览器算样式。
  */
-function slideSide(region: HTMLElement | null): ToastSide {
-  if (region === null) return 1;
-  return sideOf(getComputedStyle(region));
+class PlacementSide {
+  private side: ToastSide | null = null;
+  private watch: { observer: MutationObserver; root: HTMLElement; host: HTMLElement | null } | null = null;
+
+  /** 开始跟踪会改落点的变化，返回撤掉跟踪的函数。 */
+  attach(root: HTMLElement): () => void {
+    const host = root.parentElement;
+    const observer = new MutationObserver((records) => {
+      if (movesPlacement(records, root, host)) this.side = null;
+    });
+    observePlacement(observer, root, host);
+    this.watch = { observer, root, host };
+    // 跟踪挂上之前的变化没有记录，缓存不可信
+    this.side = null;
+    return () => {
+      observer.disconnect();
+      this.watch = null;
+      this.side = null;
+    };
+  }
+
+  /** 容器还没挂上时没有入场动画（AnimatePresence 的 initial 是 false），方向用不上。 */
+  read(region: HTMLElement | null): ToastSide {
+    if (region === null) return 1;
+    const watch = this.watch;
+    // 观察者的回调要等这次任务末尾才跑，而晚一拍的那次重渲染就在这次提交的布局阶段里：先同步取走已排队的记录，不等回调。
+    // 还没挂上跟踪时没有记录可依，每次照读
+    if (watch === null || movesPlacement(watch.observer.takeRecords(), watch.root, watch.host)) this.side = null;
+    if (this.side === null) this.side = sideOf(getComputedStyle(region));
+    return this.side;
+  }
 }
 
 /** framer-motion 的 popLayout 把退场项抽出布局时打在它身上的标记。 */
@@ -59,15 +101,15 @@ function syncAnimations(original: Element, copy: Element): void {
  * 换角时旧角那一栈原地淡出。落点由样式表当场切换：容器一步到了新角并在那里淡入（--sk-dur-in 配 --sk-ease-out，即 fade.in，
  * 起点平时是 0，由这里经 --toasts-enter-from 给出），旧角那一份由这里补上。切换之后、浏览器画下一帧之前（MutationObserver 的回调在这次任务的末尾跑），
  * 把容器里此刻看得见的通知拷一份钉在旧角，淡完拿掉。拷贝只是一张会淡出的照片：不可交互、不进读屏。
- * 能引起换角的只有三种变化：浮层根的直接子项（弹窗层）增删、弹窗层开始退场（data-exiting）、外壳根的直接子项（首次启动向导）增删。
+ * 能引起换角的变化见 observePlacement；方向与渲染期读同一份缓存（PlacementSide）。
  * 运行环境不播动画（组件测试的 jsdom，没有 getAnimations）时不拷：拷贝要等它的淡出播完才拿掉。
  */
-function useCornerHandoff(regionRef: RefObject<HTMLElement | null>, root: HTMLElement | null): void {
+function useCornerHandoff(regionRef: RefObject<HTMLElement | null>, root: HTMLElement | null, placement: PlacementSide): void {
   useLayoutEffect(() => {
     const region = regionRef.current;
     if (region === null || root === null || typeof region.getAnimations !== "function") return;
     const host = root.parentElement;
-    let side = slideSide(region);
+    let side = placement.read(region);
     // 上一次换角的时刻，与容器在那个角淡入的起点透明度。弹窗异步接力（关一个、隔几拍再开下一个）会连换两次角：
     // 第二次时容器在新角的淡入还没走完，旧角的拷贝从淡入此刻走到的透明度起淡出，不先闪回全不透明
     let movedAt = Number.NEGATIVE_INFINITY;
@@ -76,9 +118,8 @@ function useCornerHandoff(regionRef: RefObject<HTMLElement | null>, root: HTMLEl
     const ghosts = new Map<HTMLElement, { from: number; at: number }>();
 
     const handOff = (records: MutationRecord[]) => {
-      if (!records.some((r) => r.type === "attributes" || r.target === root || r.target === host)) return;
-      const style = getComputedStyle(region);
-      const next = sideOf(style);
+      if (!movesPlacement(records, root, host)) return;
+      const next = placement.read(region);
       if (next === side) return;
       const from = side;
       side = next;
@@ -100,6 +141,8 @@ function useCornerHandoff(regionRef: RefObject<HTMLElement | null>, root: HTMLEl
         copy.style.opacity = getComputedStyle(child).opacity;
         pairs.push([child, copy]);
       }
+      // 拷贝的宽度照抄容器此刻的。同样赶在下面改文档之前读：改过之后再读，浏览器要把样式重算一遍
+      const width = getComputedStyle(region).getPropertyValue("--toasts-width");
 
       // 接力换回原角（甲角到乙角，几拍后又回甲角）：甲角上一次留下的拷贝还没淡完。同样的内容叠两层各自半透明，
       // 合起来先暗一下再亮回来：拿掉那份拷贝，容器从它此刻的透明度起淡入。栈里没有留下的通知时拷贝照常淡完，不一下子消失
@@ -121,7 +164,7 @@ function useCornerHandoff(regionRef: RefObject<HTMLElement | null>, root: HTMLEl
       ghost.dataset.corner = cornerOf(from);
       ghost.setAttribute("aria-hidden", "true");
       ghost.setAttribute("inert", "");
-      ghost.style.setProperty("--toasts-width", style.getPropertyValue("--toasts-width"));
+      ghost.style.setProperty("--toasts-width", width);
       ghost.style.setProperty("--toasts-ghost-from", String(shown));
       ghost.append(...pairs.map(([, copy]) => copy));
       // 拷贝里的 id 与原件重复，引用 id 的属性会对到它身上
@@ -147,14 +190,13 @@ function useCornerHandoff(regionRef: RefObject<HTMLElement | null>, root: HTMLEl
     };
 
     const observer = new MutationObserver(handOff);
-    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-exiting"] });
-    if (host !== null) observer.observe(host, { childList: true });
+    observePlacement(observer, root, host);
     return () => {
       observer.disconnect();
       for (const ghost of ghosts.keys()) ghost.remove();
       ghosts.clear();
     };
-  }, [regionRef, root]);
+  }, [regionRef, root, placement]);
 }
 
 export function Toasts() {
@@ -172,7 +214,13 @@ export function Toasts() {
   const focusedWithin = useRef(false);
   const regionRef = useRef<HTMLElement>(null);
   const root = useOverlayRoot();
-  useCornerHandoff(regionRef, root);
+  const [placement] = useState(() => new PlacementSide());
+  // 先于换角交接挂上：交接初始化时读的方向就能进缓存
+  useLayoutEffect(() => {
+    if (root === null) return;
+    return placement.attach(root);
+  }, [placement, root]);
+  useCornerHandoff(regionRef, root, placement);
 
   // 指针与焦点任一在栈内就保持暂停；两者都离开才恢复，免得指针移走时把键盘用户正在读的通知恢复计时
   const sync = () => {
@@ -206,7 +254,7 @@ export function Toasts() {
   };
 
   if (root === null) return null;
-  const side = slideSide(regionRef.current);
+  const side = placement.read(regionRef.current);
   // 谁会挪动只取决于栈里有哪几条、各自带不带动作（动作行占高度）。只在这变了时让通知量位置：
   // 悬停暂停、倒计时刷新、弹窗开合引起的重渲染都不量，落点换角时也就不会把跨屏的位置差当成让位去播
   const stack = shown.map((toast) => (toast.action === undefined ? toast.id : `${toast.id}+action`)).join(" ");

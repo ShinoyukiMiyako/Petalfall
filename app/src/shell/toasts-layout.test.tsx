@@ -275,6 +275,38 @@ describe("通知栈的落点", () => {
     act(() => void launcher.actions.toast("success", "已添加离线账户"));
     expect(enterShift("已添加离线账户")).toBe(-40);
   });
+
+  it("落点没变时通知进出不重读样式表，落点一变下一条就按新落点进", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    act(() => void launcher.actions.toast("error", "先来的"));
+    await flush();
+    const el = region();
+    const real = window.getComputedStyle.bind(window);
+    let reads = 0;
+    vi.spyOn(window, "getComputedStyle").mockImplementation((target, pseudo) => {
+      if (target === el) reads += 1;
+      return real(target, pseudo);
+    });
+    onTestFinished(() => {
+      vi.mocked(window.getComputedStyle).mockRestore();
+    });
+
+    let id = "";
+    act(() => {
+      id = launcher.actions.toast("error", "后来的");
+    });
+    expect(enterShift("后来的")).toBe(40);
+    act(() => launcher.actions.dismissToast(id));
+    await flush();
+    expect(reads).toBe(0);
+
+    act(() => shell.openCreateInstance());
+    await flush();
+    act(() => void launcher.actions.toast("error", "弹窗开着时来的"));
+    expect(enterShift("弹窗开着时来的")).toBe(-40);
+    expect(reads).toBeGreaterThan(0);
+  });
 });
 
 describe("换角时旧角那一栈原地淡出", () => {
