@@ -322,9 +322,15 @@ struct ReleaseTime<'v> {
 ///
 /// 平台只给每份构建的发布时间，没有可比的版本号。作者先发了新版、回头给旧发布补传另一家的构建时，补传那份的
 /// 时间说的不是它的发布有多新：按它比，补传的旧发布会排到更新的发布前面，更新检查把它报成更新（实为降级），
-/// 挑版本时更新的发布被挤下去。所以一个发布的时间取它最早传上来的那份：构建自己与它在列表里的孪生（
-/// [`BorrowedLoader::is_twin`] 配上的另一家构建）里最早的发布时间，没有孪生的就是它自己的时间。没有发布时间的
-/// 构建不参与取最早。
+/// 挑版本时更新的发布被挤下去。所以一个发布的时间取它最早传上来的那份：构建自己与它在列表里的孪生里最早的发布
+/// 时间，没有孪生的就是它自己的时间。没有发布时间的构建不参与取最早。
+///
+/// 孪生是一份被借构建与一份自家构建：各段相同、认得成同一发布（[`same_release`]），且两边在列表里都只有对方这一份
+/// 能配。版本号跨发布不变（每个发布都叫 `1.0-forge` / `1.0-neoforge`），或作者用同一个版本号重传了修正构建时，
+/// 一份构建能配上另一家的好几份，版本号认不出哪两份是同一发布；全配上的话各发布的时间都塌到最早那份上，彼此比
+/// 不出先后，真更新报不出来，所以这几份都不配，按各自的上传时间比。数的只是能配的：别的 MC 版本上的同号构建配
+/// 不上，不算在内，不分 MC 版本的落位矩阵与按 MC 版本筛过的更新检查才配得一样。[`BorrowedLoader::is_twin`] 只看
+/// 两份构建、看不到列表里还有几份能配，所以仍只按各段与 [`same_release`] 判。
 ///
 /// 列表可能有几百项：每份构建的各段只切一次，按各段分组后只在组内配对。
 fn release_times<'v, V: Borrow<ModVersionInfo>>(
@@ -352,18 +358,28 @@ fn release_times<'v, V: Borrow<ModVersionInfo>>(
                 Side::Own => builds.1.push(at),
             }
         }
+        // 先数清每份构建能配上几份另一家的构建：不止一份的不配，见上。
+        let mut partners = vec![0_usize; versions.len()];
+        let mut links = Vec::new();
         for (parts, (borrowed, own)) in &by_parts {
             for &b in borrowed {
                 for &o in own {
-                    let (other, own_build) = (versions[b].borrow(), versions[o].borrow());
-                    if !same_release(parts, other, own_build) {
-                        continue;
+                    if same_release(parts, versions[b].borrow(), versions[o].borrow()) {
+                        partners[b] += 1;
+                        partners[o] += 1;
+                        links.push((b, o));
                     }
-                    times[b].borrowed_twin = true;
-                    times[b].published = earliest(times[b].published, &own_build.date_published);
-                    times[o].published = earliest(times[o].published, &other.date_published);
                 }
             }
+        }
+        for (b, o) in links {
+            if partners[b] != 1 || partners[o] != 1 {
+                continue;
+            }
+            let (other, own_build) = (versions[b].borrow(), versions[o].borrow());
+            times[b].borrowed_twin = true;
+            times[b].published = earliest(times[b].published, &own_build.date_published);
+            times[o].published = earliest(times[o].published, &other.date_published);
         }
     }
     times
@@ -1952,6 +1968,113 @@ mod tests {
                     "{borrowed_mc:?} 与 {own_mc:?}"
                 );
             }
+        }
+    }
+
+    /// 每个发布都叫 1.0 时版本号认不出哪两份是同一发布，六份构建各按自己的上传时间算。全配上的话三个发布的时间都
+    /// 塌到最早那份上，装着 2 月那份自家构建时，3 月的新发布比不出更新。
+    #[test]
+    fn builds_sharing_one_number_across_releases_keep_their_own_times() {
+        use ModLoader::{Fabric, Forge, NeoForge, Quilt};
+        let dates = [
+            "2026-03-01T00:01:00Z",
+            "2026-03-01T00:00:00Z",
+            "2026-02-01T00:01:00Z",
+            "2026-02-01T00:00:00Z",
+            "2026-01-01T00:01:00Z",
+            "2026-01-01T00:00:00Z",
+        ];
+        for (borrowed, own) in [(Forge, NeoForge), (Fabric, Quilt)] {
+            let versions: Vec<ModVersionInfo> = dates
+                .iter()
+                .enumerate()
+                .map(|(at, date)| {
+                    let loader = if at % 2 == 0 { borrowed } else { own };
+                    let number = format!("1.0-{}", loader.modrinth_facet());
+                    uploaded_for(&format!("r{at}"), &number, date, &[loader], &["1.20.1"])
+                })
+                .collect();
+            assert_eq!(release_dates(&versions), dates);
+        }
+    }
+
+    /// 作者用同一个版本号重传了修正构建：被借那份能配上两份自家构建，认不出哪份与它同一发布，三份各按自己的上传时间
+    /// 算，重传的那份比先传的新。只有一对一时照旧取最早的那份。
+    #[test]
+    fn a_reuploaded_build_keeps_its_own_time() {
+        use ModLoader::{Fabric, Forge, NeoForge, Quilt};
+        for (borrowed, own) in [(Forge, NeoForge), (Fabric, Quilt)] {
+            let (b, o) = (borrowed.modrinth_facet(), own.modrinth_facet());
+            let build = |id: &str, number: String, date: &str, loader: ModLoader| {
+                uploaded_for(id, &number, date, &[loader], &["1.20.1"])
+            };
+            let reupload = build(
+                "reupload",
+                format!("2.1.0-{o}"),
+                "2026-01-10T00:00:00Z",
+                own,
+            );
+            let first = build("first", format!("2.1.0-{o}"), "2026-01-01T00:01:00Z", own);
+            let other = build(
+                "other",
+                format!("2.1.0-{b}"),
+                "2026-01-01T00:00:00Z",
+                borrowed,
+            );
+            assert_eq!(
+                release_dates(&[reupload, first.clone(), other.clone()]),
+                [
+                    "2026-01-10T00:00:00Z",
+                    "2026-01-01T00:01:00Z",
+                    "2026-01-01T00:00:00Z"
+                ]
+            );
+            assert_eq!(release_dates(&[first, other]), ["2026-01-01T00:00:00Z"; 2]);
+        }
+    }
+
+    /// 同号的自家构建分属不同 MC 版本时，数的只是能配的：被借构建只能与同在 1.20.1 上的那份配，照旧是同一发布，
+    /// 与按 1.20.1 筛过的列表配得一样，1.20.1 的实例拿自家那份。
+    #[test]
+    fn a_same_numbered_build_for_another_game_version_does_not_block_a_twin() {
+        use ModLoader::{Fabric, Forge, NeoForge, Quilt};
+        for (borrowed, own, instance) in [(Forge, NeoForge, "neoforge"), (Fabric, Quilt, "quilt")] {
+            let (b, o) = (borrowed.modrinth_facet(), own.modrinth_facet());
+            let late = uploaded_for(
+                "late",
+                &format!("2.0.0-{b}"),
+                "2026-03-01T00:00:00Z",
+                &[borrowed],
+                &["1.20.1"],
+            );
+            let own_build = uploaded_for(
+                "own",
+                &format!("2.0.0-{o}"),
+                "2026-02-01T00:00:00Z",
+                &[own],
+                &["1.20.1"],
+            );
+            let newer_game = uploaded_for(
+                "newer-game",
+                &format!("2.0.0-{o}"),
+                "2026-01-15T00:00:00Z",
+                &[own],
+                &["1.21.1"],
+            );
+            let all = [late.clone(), own_build.clone(), newer_game];
+            assert_eq!(
+                release_dates(&all),
+                [
+                    "2026-02-01T00:00:00Z",
+                    "2026-02-01T00:00:00Z",
+                    "2026-01-15T00:00:00Z"
+                ]
+            );
+            assert_eq!(
+                release_dates(&[late, own_build]),
+                ["2026-02-01T00:00:00Z"; 2]
+            );
+            assert_eq!(best_for(&all, "1.20.1", instance).as_deref(), Some("own"));
         }
     }
 
