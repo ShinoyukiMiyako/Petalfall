@@ -2071,6 +2071,135 @@ describe("实例详情：补全修不好的损坏实例", () => {
     expect(callsOf(ipc, "repair_instance")).toEqual([]);
   });
 
+  describe("修不好时按剩下的出路给按钮", () => {
+    const UNREADABLE = `版本 JSON 读不出来：文件 IO 失败: D:\\Games\\.minecraft\\versions\\${ID}\\${ID}.json：另一个程序正在使用此文件，进程无法访问。 (os error 32)`;
+    const RENAMABLE = "缺少版本 JSON，也没有记下当初装的是什么；目录里有一份叫 1.20.1-NeoForge.json 的版本文件，把实例改名成 1.20.1-NeoForge 就能认出来";
+    // 有安装记录也修不好：读不出来时补全不照记录重装
+    const INSTALL_RECORD: InstanceDto["incomplete"] = {
+      kind: "install",
+      outcome: "pending",
+      started_at: NOW - DAY,
+      spec: { mc_version: "1.21.1", loader: "fabric", loader_version: "0.16.10" },
+      error: null,
+    };
+    const unreadable = (over: Partial<InstanceDto> = {}) =>
+      instanceDto(ID, { status: "broken", broken_reason: UNREADABLE, unrepairable_reason: UNREADABLE, unrepairable_kind: "unreadable", incomplete: INSTALL_RECORD, mc_version: null, ...over });
+    const renamable = (over: Partial<InstanceDto> = {}) =>
+      instanceDto(ID, { status: "broken", broken_reason: "缺少版本 JSON", unrepairable_reason: RENAMABLE, unrepairable_kind: "no_record", rename_to: "1.20.1-NeoForge", mc_version: null, ...over });
+
+    /** 标题为 title、此刻在场（不在退场中）的横幅的标题节点；没有时报错。 */
+    const titleOf = (title: string): Element => {
+      const el = [...document.querySelectorAll("div")].find((d) => d.childElementCount === 0 && d.textContent === title && live(d));
+      if (el === undefined) throw new Error(`没有标题为「${title}」的横幅`);
+      return el;
+    };
+    const bannerOf = (title: string): HTMLElement => {
+      const banner = titleOf(title).closest<HTMLElement>('[class*="_banner_"]');
+      if (banner === null) throw new Error(`「${title}」不在横幅里`);
+      return banner;
+    };
+    const errorToasts = () => launcher.state.toasts.filter((t) => t.tone === "error").map((t) => [t.title, t.body]);
+
+    it("版本 JSON 读不出来：标题说暂时无法启动、不说文件不完整，正文是后端原因接上重新扫描的提示，只给「重新扫描」", async () => {
+      instances = instances.map((i) => (i.id === ID ? unreadable() : i));
+      await open("overview");
+      expect(titleOf("版本 JSON 读不出来，暂时无法启动").nextElementSibling?.textContent).toBe(`${UNREADABLE}。关掉占用它的程序或修好读取权限后，重新扫描就能恢复。`);
+      expect([...bannerOf("版本 JSON 读不出来，暂时无法启动").querySelectorAll("button")].map(textOf)).toEqual(["重新扫描"]);
+      expect(text()).not.toContain("实例文件不完整");
+      expect(text()).not.toContain("补全修不好");
+      expect(() => button("修复实例")).toThrow("找不到按钮");
+    });
+
+    it("「重新扫描」重读实例列表：占用放开后读得出来了，横幅撤下，不报错", async () => {
+      instances = instances.map((i) => (i.id === ID ? unreadable() : i));
+      await open("overview");
+      const scans = callsOf(ipc, "list_instances").length;
+      const errorsBefore = errorToasts();
+      instances = instances.map((i) => (i.id === ID ? instanceDto(ID) : i));
+      click(button("重新扫描", bannerOf("版本 JSON 读不出来，暂时无法启动")));
+      await flush();
+      expect(callsOf(ipc, "list_instances")).toHaveLength(scans + 1);
+      expect(() => titleOf("版本 JSON 读不出来，暂时无法启动")).toThrow("没有标题为");
+      expect(launcher.state.instances.find((i) => i.id === ID)?.status).toBe("ready");
+      expect(errorToasts()).toEqual(errorsBefore);
+    });
+
+    it("「重新扫描」读取失败：按实例列表没能刷新报错，横幅留着，按钮又能按", async () => {
+      instances = instances.map((i) => (i.id === ID ? unreadable() : i));
+      await open("overview");
+      const errorsBefore = errorToasts();
+      ipc.overrides.set("list_instances", () => {
+        throw new IpcError("io", "游戏目录读不出来");
+      });
+      const rescan = button("重新扫描", bannerOf("版本 JSON 读不出来，暂时无法启动"));
+      click(rescan);
+      await flush();
+      expect(errorToasts()).toEqual([...errorsBefore, ["实例列表没能刷新", "游戏目录读不出来"]]);
+      expect(button("重新扫描", bannerOf("版本 JSON 读不出来，暂时无法启动"))).toBe(rescan);
+      expect(rescan.getAttribute("aria-busy")).toBeNull();
+    });
+
+    it("目录里有一份改个名就认得出的版本 JSON：先给「改名为」，删除退到次一级；点了照改名流程改成那个名字，成了完好的实例", async () => {
+      instances = instances.map((i) => (i.id === ID ? renamable() : i));
+      ipc.overrides.set("rename_instance", (args) => {
+        const to = String(args.newName);
+        instances = instances.map((i) => (i.id === args.id ? instanceDto(to, { mc_version: "1.20.1", loaders: [{ kind: "neoforge", version: "47.1.106" }], java_major: 17 }) : i));
+        return { id: to };
+      });
+      await open("overview");
+      expect(titleOf("实例文件不完整，补全修不好").nextElementSibling?.textContent).toBe(RENAMABLE);
+      const banner = bannerOf("实例文件不完整，补全修不好");
+      expect([...banner.querySelectorAll("button")].map((b) => [textOf(b), b.dataset.variant])).toEqual([
+        ["改名为「1.20.1-NeoForge」", "secondary"],
+        ["删除实例", "ghost"],
+      ]);
+      click(button("改名为「1.20.1-NeoForge」", banner));
+      await flush();
+      expect(callsOf(ipc, "rename_instance")).toEqual([{ id: ID, newName: "1.20.1-NeoForge" }]);
+      expect(toastTitles()).toContain("已重命名为「1.20.1-NeoForge」");
+      expect(nav.route).toEqual({ page: "instance", id: "1.20.1-NeoForge", tab: "overview" });
+      expect(() => titleOf("实例文件不完整，补全修不好")).toThrow("没有标题为");
+      expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    });
+
+    it("改名失败：按没能重命名实例报错，横幅留着，改名按钮又能按", async () => {
+      instances = instances.map((i) => (i.id === ID ? renamable() : i));
+      ipc.overrides.set("rename_instance", () => {
+        throw new IpcError("io", "目标文件夹被占用");
+      });
+      await open("overview");
+      const errorsBefore = errorToasts();
+      const rename = button("改名为「1.20.1-NeoForge」", bannerOf("实例文件不完整，补全修不好"));
+      click(rename);
+      await flush();
+      expect(callsOf(ipc, "rename_instance")).toEqual([{ id: ID, newName: "1.20.1-NeoForge" }]);
+      expect(errorToasts()).toEqual([...errorsBefore, ["没能重命名实例", "目标文件夹被占用"]]);
+      expect(rename.isConnected).toBe(true);
+      expect(rename.getAttribute("aria-busy")).toBeNull();
+      expect(nav.route).toEqual({ page: "instance", id: ID, tab: "overview" });
+    });
+
+    it("被别的实例当作基底时：「改名为」与「删除实例」都带原因禁用，点了不改名、不开删除确认", async () => {
+      instances = instances.map((i) => (i.id === ID ? renamable({ activity: "inherited", used_by: "Fabric 整合" }) : i));
+      await open("overview");
+      const banner = bannerOf("实例文件不完整，补全修不好");
+      const rename = button("改名为「1.20.1-NeoForge」", banner);
+      const remove = button("删除实例", banner);
+      expect([rename.getAttribute("aria-disabled"), remove.getAttribute("aria-disabled")]).toEqual(["true", "true"]);
+      expect(await tipOf(rename)).toBe("实例「Fabric 整合」正在使用它，结束后才能重命名");
+      expect(await tipOf(remove)).toBe("实例「Fabric 整合」正在使用它，结束后才能删除");
+      const errorsBefore = errorToasts();
+      click(rename);
+      click(remove);
+      await flush();
+      expect(callsOf(ipc, "rename_instance")).toEqual([]);
+      expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      // 点击漏下去的话改名与删除预览照常发出（没占用时同一按钮会发，见上面的用例）；也不该多出错误通知
+      expect(errorToasts()).toEqual(errorsBefore);
+    });
+  });
+
   it("头图菜单的「补全游戏文件」带原因禁用，悬停写后端给的原因；点了不发补全、不留任务", async () => {
     await open("overview");
     click(button("更多操作"));

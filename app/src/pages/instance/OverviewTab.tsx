@@ -6,11 +6,23 @@ import { useLayoutEffect, useRef, useState, type ReactNode, type Ref, type RefOb
 import { Icon } from "../../art/Icon";
 import { KindTile, WorldModeTile, type WorldMode } from "../../art/illustrations/FeatureTile";
 import { hueOf } from "../../art/illustrations/seed";
-import { ACTION_ERROR, CRASH_COPY, crashCategoryLabel, INSTANCE_IN_USE_COPY, lockReason, MODPACK_REIMPORT_COPY, modpackLabel, REINSTALL_LOADER_LABEL, taskPhaseText } from "../../copy/flows";
+import {
+  ACTION_ERROR,
+  CRASH_COPY,
+  crashCategoryLabel,
+  INSTANCE_IN_USE_COPY,
+  lockReason,
+  MODPACK_REIMPORT_COPY,
+  modpackLabel,
+  REINSTALL_LOADER_LABEL,
+  REPAIR_EXIT_COPY,
+  sentence,
+  taskPhaseText,
+} from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed } from "../../domain/format";
 import type { TaskPhase } from "../../domain/types";
-import { canReinstallLoader, lostLoaderLibrary, needsReimport } from "../../domain/rules";
+import { canReinstallLoader, lostLoaderLibrary, repairExit, repairRefusal, type RepairExit } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
 import { useLaunch } from "../../launch/useLaunch";
 import { useMounted } from "../../lib/useMounted";
@@ -115,6 +127,8 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashAt, crashAct
   const install = useInstallingBanner(inst.id, banner === "installing" && view.kind === "installing");
   const holdInstall = install.holding && (banner === null || banner === "broken");
   const installing = (banner === "installing" && view.kind === "installing") || holdInstall;
+  // 修不好时剩下的出路：整合包没导入完的换一种横幅，其余由损坏横幅按出路给按钮
+  const exit = repairExit(inst);
 
   return (
     <div ref={stack} className={styles.stack}>
@@ -125,7 +139,11 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashAt, crashAct
         {banner === "broken" &&
           !holdInstall &&
           view.kind === "broken" &&
-          (needsReimport(inst) ? <ReimportBanner key="reimport" inst={inst} reason={view.reason} ops={ops} /> : <BrokenBanner key="broken" inst={inst} reason={view.reason} ops={ops} />)}
+          (exit !== null && exit.kind === "reimport" ? (
+            <ReimportBanner key="reimport" inst={inst} reason={view.reason} ops={ops} />
+          ) : (
+            <BrokenBanner key="broken" inst={inst} reason={view.reason} exit={exit} ops={ops} />
+          ))}
         {installing && <InstallingBanner key="installing" instanceId={inst.id} held={install.held} />}
       </BannerSlot>
       <StatsCard inst={inst} content={content} mods={mods} outdated={outdated} />
@@ -201,23 +219,62 @@ function CrashBanner({ at, report, onTab }: { at: number | null; report: CrashRe
   );
 }
 
-function BrokenBanner({ inst, reason, ops }: { inst: InstanceSummary; reason: string; ops: InstanceOps }) {
-  // 补全修不好：标题不说暂时，正文写后端给的原因，不给修复按钮。重装加载器走的也是补全，同样会被拒，所以排在它前面判。
-  // 删掉是剩下的出路，与整合包没导入完的横幅同一个删除入口
-  const unrepairable = inst.unrepairableReason;
-  if (unrepairable !== null) {
+/** exit：rules 的 repairExit，修得好为 null；整合包没导入完的由 ReimportBanner 画，不进这里。 */
+function BrokenBanner({ inst, reason, exit, ops }: { inst: InstanceSummary; reason: string; exit: Exclude<RepairExit, { kind: "reimport" }> | null; ops: InstanceOps }) {
+  const actions = useLauncherActions();
+  const run = useRunner();
+  const [rescanning, setRescanning] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  // 补全修不好：不给修复按钮，正文写补全被拒的那一句，按钮照剩下的出路给。重装加载器走的也是补全，同样会被拒，所以排在它前面判
+  if (exit !== null) {
+    const refusal = repairRefusal(inst);
+    if (refusal === null) throw new Error(`实例 ${inst.id} 补全修不好，却没有被拒的原因`);
+    if (exit.kind === "rescan") {
+      // 版本 JSON 读不出来时文件可能完好：放开占用或修好权限后重读列表就恢复，不在这里引人删除（删除照旧在头图菜单与设置页）
+      const rescan = () => {
+        setRescanning(true);
+        void run(() => actions.refreshInstances(), ACTION_ERROR.refreshInstances).then(() => setRescanning(false));
+      };
+      return (
+        <Banner
+          tone="warn"
+          icon="alert"
+          title={OVERVIEW_COPY.unreadableTitle}
+          actions={
+            <Button icon="refresh" loading={rescanning} onClick={rescan}>
+              {REPAIR_EXIT_COPY.rescan}
+            </Button>
+          }
+        >
+          {`${sentence(refusal)}${REPAIR_EXIT_COPY.unreadableHint}`}
+        </Banner>
+      );
+    }
+    // 目录里有一份改个名就认得出的版本 JSON：改名不丢数据，排在前面；删除会把存档一起移进回收站，退到次一级的样式
+    const to = exit.kind === "rename" ? exit.to : null;
+    const rename = (name: string) => {
+      setRenaming(true);
+      void ops.rename(name).then(() => setRenaming(false));
+    };
     return (
       <Banner
         tone="warn"
         icon="alert"
         title={OVERVIEW_COPY.unrepairableTitle}
         actions={
-          <Button variant="danger" icon="trash" disabledReason={lockReason(ops.locks.delete, "delete")} onClick={ops.remove}>
-            {HERO_COPY.delete}
-          </Button>
+          <>
+            {to !== null && (
+              <Button icon="edit" loading={renaming} disabledReason={lockReason(ops.locks.rename, "rename")} onClick={() => rename(to)}>
+                {REPAIR_EXIT_COPY.rename(to)}
+              </Button>
+            )}
+            <Button variant={to === null ? "danger" : "ghost"} icon="trash" disabledReason={lockReason(ops.locks.delete, "delete")} onClick={ops.remove}>
+              {HERO_COPY.delete}
+            </Button>
+          </>
         }
       >
-        {unrepairable}
+        {refusal}
       </Banner>
     );
   }

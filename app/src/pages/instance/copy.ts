@@ -202,6 +202,8 @@ export const OVERVIEW_COPY = {
   brokenTitle: "实例文件不完整，暂时无法启动",
   /** 后端说补全修不好：修复也起不来，不说暂时。 */
   unrepairableTitle: "实例文件不完整，补全修不好",
+  /** 版本 JSON 读不出来（被占用、没有权限）：文件可能完好，放开占用或修好权限后重新扫描就恢复，所以说暂时，也不说文件不完整。 */
+  unreadableTitle: "版本 JSON 读不出来，暂时无法启动",
   repair: "修复实例",
   repairStarted: (name: string) => `开始补全「${name}」`,
   repairStartedBody: "进度见下载任务",
