@@ -3282,18 +3282,22 @@ mod tests {
     const OUT_C: &str = "test:out:1:c";
     const OUTPUTS: [&str; 3] = [OUT_A, OUT_B, OUT_C];
 
-    /// 产物的字节：`good` 是安装器声明的那一份（新一些的 Java 生成的），否则是老的 Java 8 生成的那一份。
-    fn output_bytes(coordinate: &str, good: bool) -> Vec<u8> {
-        let made_by = if good { "java-17" } else { "java-8" };
-        format!("{coordinate} made by {made_by}").into_bytes()
+    /// 安装器声明的那一份产物字节。
+    fn declared_bytes(coordinate: &str) -> Vec<u8> {
+        format!("{coordinate} as declared").into_bytes()
+    }
+
+    /// 名为 `java` 的假 java 生成的、与声明不符的那一份。带上生成它的 Java：两个 Java 生成的坏字节各不相同，报错里
+    /// 的实际 sha1 才分得出是哪一次运行留下的。
+    fn wrong_bytes(coordinate: &str, java: &str) -> Vec<u8> {
+        format!("{coordinate} made by {java}").into_bytes()
     }
 
     /// 两个处理器的现代 installer：第一个生成 A、B（像 jarsplitter 拆出 slim 与 extra），第二个生成 C；期望 sha1
-    /// 都按 [`output_bytes`] 的好的那一份算。处理器的参数是 `first` / `second`，假 java 据此决定写哪几个产物。
+    /// 都按 [`declared_bytes`] 算。处理器的参数是 `first` / `second`，假 java 据此决定写哪几个产物。
     fn regeneration_installer(f: &Fixture) -> PathBuf {
         let sided = |value: String| serde_json::json!({ "client": value, "server": value });
-        let sha =
-            |coordinate: &str| sided(format!("'{}'", sha1_hex(&output_bytes(coordinate, true))));
+        let sha = |coordinate: &str| sided(format!("'{}'", sha1_hex(&declared_bytes(coordinate))));
         let profile = serde_json::json!({
             "version": "1.13.2-forge-25.0.223",
             "minecraft": "1.13.2",
@@ -3335,15 +3339,21 @@ mod tests {
         )
     }
 
-    /// 代替 java 的脚本：每跑一次往 `log` 里记一行 `name`，再按参数里的 `first` / `second` 把 `good` 那一份字节写进
-    /// 对应的产物。产物已在时不重写：jarsplitter 带着自己的缓存文件，产物不删就不会重新生成。
-    fn producing_java(f: &Fixture, name: &str, log: &Path, good: bool) -> PathBuf {
+    /// 代替 java 的脚本：每跑一次往 `log` 里记一行 `name`，再按参数里的 `first` / `second` 写对应的产物：`wrong` 里
+    /// 列出的写它自己的那份坏字节（[`wrong_bytes`]），其余写声明的那份。产物已在时不重写：jarsplitter 带着自己的
+    /// 缓存文件，产物不删就不会重新生成。
+    fn producing_java(f: &Fixture, name: &str, log: &Path, wrong: &[&str]) -> PathBuf {
         let [a, b, c] = OUTPUTS.map(|coordinate| {
             let source = f
                 .root
                 .join("produced")
                 .join(format!("{name}-{}", coordinate.replace(':', "-")));
-            put(&source, &output_bytes(coordinate, good));
+            let bytes = if wrong.contains(&coordinate) {
+                wrong_bytes(coordinate, name)
+            } else {
+                declared_bytes(coordinate)
+            };
+            put(&source, &bytes);
             (source, library(f, coordinate))
         });
         #[cfg(windows)]
@@ -3480,8 +3490,8 @@ mod tests {
         put_processor_jar(&f);
         let installer = regeneration_installer(&f);
         let log = f.root.join("java-runs.log");
-        let old = producing_java(&f, "java-8", &log, false);
-        let new = producing_java(&f, "java-17", &log, true);
+        let old = producing_java(&f, "java-8", &log, &OUTPUTS);
+        let new = producing_java(&f, "java-17", &log, &[]);
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let fallback = fallback_from(&calls, || Ok(java_of(&new, 17)));
 
@@ -3493,7 +3503,7 @@ mod tests {
         for coordinate in OUTPUTS {
             assert_eq!(
                 std::fs::read(library(&f, coordinate)).unwrap(),
-                output_bytes(coordinate, true),
+                declared_bytes(coordinate),
                 "{coordinate}"
             );
         }
@@ -3509,7 +3519,7 @@ mod tests {
         put_processor_jar(&f);
         let installer = regeneration_installer(&f);
         let log = f.root.join("java-runs.log");
-        let java = producing_java(&f, "java-17", &log, true);
+        let java = producing_java(&f, "java-17", &log, &[]);
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let fallback = fallback_from(&calls, || panic!("产物对得上，不该去取备用 Java"));
 
@@ -3529,7 +3539,7 @@ mod tests {
         put_processor_jar(&f);
         let installer = regeneration_installer(&f);
         let log = f.root.join("java-runs.log");
-        let old = producing_java(&f, "java-8", &log, false);
+        let old = producing_java(&f, "java-8", &log, &OUTPUTS);
 
         let err = install_with_fallback(&f, &java_of(&old, 8), &installer, None)
             .await
@@ -3537,8 +3547,8 @@ mod tests {
 
         // 产物按声明的键排序核对，`[坐标]` 写法的 B 排在 `{占位符}` 写法的 A 前面。
         let path = library(&f, OUT_B);
-        let expected = sha1_hex(&output_bytes(OUT_B, true));
-        let actual = sha1_hex(&output_bytes(OUT_B, false));
+        let expected = sha1_hex(&declared_bytes(OUT_B));
+        let actual = sha1_hex(&wrong_bytes(OUT_B, "java-8"));
         assert_eq!(
             mismatch_of(&err),
             (
@@ -3564,15 +3574,16 @@ mod tests {
         assert!(!f.layout.version_dir("1.13.2-forge-25.0.223").exists());
     }
 
-    /// 备用 Java 重跑之后仍对不上：报的是重跑之后的结果，两个 Java 都写进正文。
+    /// 备用 Java 重跑之后仍对不上：报的是重跑之后的结果，两个 Java 都写进正文。Java 8 把 A、B 都生成错了（先对不上
+    /// 的是 B），Java 17 只错了 A、生成的坏字节也与 Java 8 的不同：报出的是 A 与 Java 17 那份坏字节的 sha1。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_fallback_java_that_also_mismatches_reports_both_javas() {
         let f = fixture();
         put_processor_jar(&f);
         let installer = regeneration_installer(&f);
         let log = f.root.join("java-runs.log");
-        let old = producing_java(&f, "java-8", &log, false);
-        let new = producing_java(&f, "java-17", &log, false);
+        let old = producing_java(&f, "java-8", &log, &OUTPUTS);
+        let new = producing_java(&f, "java-17", &log, &[OUT_A]);
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let fallback = fallback_from(&calls, || Ok(java_of(&new, 17)));
 
@@ -3580,9 +3591,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        let path = library(&f, OUT_B);
-        let expected = sha1_hex(&output_bytes(OUT_B, true));
-        let actual = sha1_hex(&output_bytes(OUT_B, false));
+        let path = library(&f, OUT_A);
+        let expected = sha1_hex(&declared_bytes(OUT_A));
+        let actual = sha1_hex(&wrong_bytes(OUT_A, "java-17"));
+        assert_ne!(actual, sha1_hex(&wrong_bytes(OUT_A, "java-8")));
         assert_eq!(
             mismatch_of(&err),
             (
@@ -3597,7 +3609,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "处理器 {PROCESSOR_JAR} 用 Java 8（{}）生成的 out-1-b.jar 与安装器声明的不符；又换 Java 17（{}）重跑，两次都对不上（{}，期望 sha1 {expected}，实际 {actual}）",
+                "处理器 {PROCESSOR_JAR} 用 Java 8（{}）生成的 out-1-a.jar 与安装器声明的不符；又换 Java 17（{}）重跑，两次都对不上（{}，期望 sha1 {expected}，实际 {actual}）",
                 old.display(),
                 new.display(),
                 path.display()
@@ -3608,6 +3620,48 @@ mod tests {
         assert!(!petalfall_base::retry::RetryableError::is_retryable(&err));
     }
 
+    /// 一次安装最多取一次备用 Java：第一个处理器换上 Java 17 之后对上了，第二个处理器在 Java 17 上又对不上时不再去
+    /// 取，直接报错，报的 Java 是 Java 17、没有重跑。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_fallback_java_is_fetched_at_most_once_per_install() {
+        let f = fixture();
+        put_processor_jar(&f);
+        let installer = regeneration_installer(&f);
+        let log = f.root.join("java-runs.log");
+        let old = producing_java(&f, "java-8", &log, &OUTPUTS);
+        let new = producing_java(&f, "java-17", &log, &[OUT_C]);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let fallback = fallback_from(&calls, || Ok(java_of(&new, 17)));
+
+        let err = install_with_fallback(&f, &java_of(&old, 8), &installer, Some(fallback))
+            .await
+            .unwrap_err();
+
+        let path = library(&f, OUT_C);
+        let expected = sha1_hex(&declared_bytes(OUT_C));
+        let actual = sha1_hex(&wrong_bytes(OUT_C, "java-17"));
+        assert_eq!(
+            mismatch_of(&err),
+            (
+                PROCESSOR_JAR,
+                path.as_path(),
+                expected.as_str(),
+                actual.as_str(),
+                &java_of(&new, 17),
+                None
+            )
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(java_runs(&log), ["java-8", "java-17", "java-17"]);
+        for coordinate in [OUT_A, OUT_B] {
+            assert_eq!(
+                std::fs::read(library(&f, coordinate)).unwrap(),
+                declared_bytes(coordinate),
+                "{coordinate}"
+            );
+        }
+    }
+
     /// 取回的备用 Java 就是正在用的那个：不重跑，照报产物对不上。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_fallback_that_is_the_same_java_is_not_rerun() {
@@ -3615,7 +3669,7 @@ mod tests {
         put_processor_jar(&f);
         let installer = regeneration_installer(&f);
         let log = f.root.join("java-runs.log");
-        let old = producing_java(&f, "java-8", &log, false);
+        let old = producing_java(&f, "java-8", &log, &OUTPUTS);
         let calls = std::sync::atomic::AtomicUsize::new(0);
         // 认的是同一个可执行文件：来源报的主版本不同也不算换了 Java。
         let fallback = fallback_from(&calls, || Ok(java_of(&old, 17)));
@@ -3646,7 +3700,7 @@ mod tests {
         put_processor_jar(&f);
         let installer = regeneration_installer(&f);
         let log = f.root.join("java-runs.log");
-        let old = producing_java(&f, "java-8", &log, false);
+        let old = producing_java(&f, "java-8", &log, &OUTPUTS);
         let reason = "未找到匹配 Java 17 的运行时，且自动下载已关闭";
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let fallback = fallback_from(&calls, || {
@@ -3688,7 +3742,7 @@ mod tests {
         put_processor_jar(&f);
         let installer = regeneration_installer(&f);
         let log = f.root.join("java-runs.log");
-        let old = producing_java(&f, "java-8", &log, false);
+        let old = producing_java(&f, "java-8", &log, &OUTPUTS);
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let fallback = fallback_from(&calls, || Err(FallbackJavaError::Cancelled));
 
@@ -3723,7 +3777,7 @@ mod tests {
         for coordinate in [OUT_A, OUT_B] {
             assert_eq!(
                 std::fs::read(library(f, coordinate)).unwrap(),
-                output_bytes(coordinate, false),
+                wrong_bytes(coordinate, "java-8"),
                 "{coordinate}"
             );
         }
@@ -3736,7 +3790,7 @@ mod tests {
         put_processor_jar(&f);
         let installer = regeneration_installer(&f);
         let log = f.root.join("java-runs.log");
-        let old = producing_java(&f, "java-8", &log, false);
+        let old = producing_java(&f, "java-8", &log, &OUTPUTS);
         let token = CancellationToken::new();
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let fallback = fallback_from(&calls, || {
@@ -3763,8 +3817,8 @@ mod tests {
         put_processor_jar(&f);
         let installer = regeneration_installer(&f);
         let log = f.root.join("java-runs.log");
-        let old = producing_java(&f, "java-8", &log, false);
-        let new = producing_java(&f, "java-17", &log, true);
+        let old = producing_java(&f, "java-8", &log, &OUTPUTS);
+        let new = producing_java(&f, "java-17", &log, &[]);
         let token = CancellationToken::new();
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let fallback = fallback_from(&calls, || {
@@ -3810,7 +3864,7 @@ mod tests {
                 .root
                 .join("produced")
                 .join(format!("lingering-{}", coordinate.replace(':', "-")));
-            put(&source, &output_bytes(coordinate, false));
+            put(&source, &wrong_bytes(coordinate, "java-8"));
             copies.push_str(&format!(
                 "copy /y \"{}\" \"{}\" >nul\r\n",
                 here(&source),
