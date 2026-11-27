@@ -1443,6 +1443,36 @@ describe("实例库：动作", () => {
     expect(document.querySelector(`.${bannerStyles.banner}`)?.textContent).toContain("1 个实例暂时无法启动");
   });
 
+  it("「重新扫描」进行中：按钮转圈、连点不重复扫描；扫完复位，文件还锁着时照样能再扫一次", async () => {
+    instances = [...instances.filter((i) => i.id !== "坏掉的"), unreadable("网盘同步的", { incomplete: null })];
+    await mount();
+    const scan = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => scan.promise);
+    const rescan = () => byText<HTMLButtonElement>(`.${bannerStyles.banner} button`, REPAIR_EXIT_COPY.rescan);
+    const scans = callsOf(ipc, "list_instances").length;
+    expect(rescan().getAttribute("aria-busy")).toBeNull();
+    click(rescan());
+    await flush();
+    expect(rescan().getAttribute("aria-busy")).toBe("true");
+    expect(rescan().getAttribute("aria-disabled")).toBe("true");
+    click(rescan());
+    click(rescan());
+    await flush();
+    expect(callsOf(ipc, "list_instances")).toHaveLength(scans + 1);
+    // 扫回来还是读不出来：横幅原样，按钮复位
+    await act(async () => {
+      scan.resolve(instances);
+      await settle();
+    });
+    expect(rescan().getAttribute("aria-busy")).toBeNull();
+    expect(rescan().getAttribute("aria-disabled")).toBeNull();
+    ipc.overrides.set("list_instances", () => instances);
+    click(rescan());
+    await flush();
+    expect(callsOf(ipc, "list_instances")).toHaveLength(scans + 2);
+    expect(rescan().getAttribute("aria-busy")).toBeNull();
+  });
+
   it("唯一修不好的实例改个名就能认出来：正文照后端原因说改名，按钮位给「改名为「X」」，点了去它的详情页，不改名也不删", async () => {
     instances = [...instances.filter((i) => i.id !== "坏掉的"), renamable("朋友发来的", "1.20.1-NeoForge")];
     await mount();

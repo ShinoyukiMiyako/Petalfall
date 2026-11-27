@@ -5,7 +5,7 @@
 // 减少动画时直接重排。
 
 import { AnimatePresence, motion, useAnimate, useReducedMotionConfig, type Variants } from "framer-motion";
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { ACTION_ERROR, GAME_DIR_SWITCH_COPY, gameDirSwitchReason, LOADER_NAME, lockReason, REPAIR_EXIT_COPY, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
@@ -101,6 +101,15 @@ export default function LibraryPage() {
   const switchTo = useSwitchDirectory();
   const mounted = useMounted();
   const { shape, report } = useUiShape();
+  const [rescanning, setRescanning] = useState(false);
+  // 横幅上的动作回来时页面可能已经离开：卸载之后不再写状态
+  const alive = useRef(false);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
 
   // 目录列表是缓存的，盘上的版本却可能被别的启动器改过：回到这一页时后台重读一次
   const refreshDirs = dirs.refresh;
@@ -160,8 +169,16 @@ export default function LibraryPage() {
   // 读不出来的文件可能完好，占用放开或权限修好后重读一次列表就恢复。重新扫描重读的是整张列表，不是逐个实例的批量动作，
   // 横幅里有一个读不出来的就给，不论旁边还列着什么
   const unreadable = broken.unrepairable.some((u) => u.exit.kind === "rescan");
+  // 后端每扫一次都要把每个实例的设置、未完成标记、崩溃记录、工作目录读一遍，版本目录在网络盘或机械盘上时要几秒：进行中转圈并挡住
+  // 重复点击，扫完结果没变时玩家也看得出扫过了。状态记在页面上：扫描期间按钮在主次位之间换位置重挂，转圈不断
+  const rescan = () => {
+    setRescanning(true);
+    void run(() => actions.refreshInstances(), ACTION_ERROR.refreshInstances).then(() => {
+      if (alive.current) setRescanning(false);
+    });
+  };
   const rescanButton = (variant: "secondary" | "ghost") => (
-    <Button key="rescan" size="sm" variant={variant} icon="refresh" onClick={() => void run(() => actions.refreshInstances(), ACTION_ERROR.refreshInstances)}>
+    <Button key="rescan" size="sm" variant={variant} icon="refresh" loading={rescanning} onClick={rescan}>
       {REPAIR_EXIT_COPY.rescan}
     </Button>
   );
