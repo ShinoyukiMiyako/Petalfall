@@ -932,7 +932,8 @@ export const INSTALL_PHASE_LABEL: Readonly<Record<InstallPhase, string>> = {
   template: "沿用默认设置",
   modpack_download: "下载整合包",
   modpack_read: "读取整合包",
-  modpack_files: "下载 Mod 与其他文件",
+  // 这一步除了下载远程文件，也放入认领过的手动下载文件；全都认领过时一个都不下载
+  modpack_files: "获取 Mod 与其他文件",
   modpack_overrides: "解出包内自带的文件",
   move_dependencies: "补齐共用的游戏文件",
   move_copy: "复制实例与存档备份",

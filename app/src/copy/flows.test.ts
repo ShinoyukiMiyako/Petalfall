@@ -155,6 +155,12 @@ describe("分步任务的步骤", () => {
   it("各步的文案不含禁用词", () => {
     expect(bannedIn(Object.values(INSTALL_PHASE_LABEL))).toEqual([]);
   });
+
+  it("整合包文件这一步也放入认领过的手动下载文件，全认领时不下载任何东西：步骤名不说下载", () => {
+    const PACK = ["modpack_read", "metadata", "libraries", "assets", "natives", "modpack_files", "modpack_overrides"] as const;
+    expect(taskPhaseText({ plan: PACK, index: 5 }, "long")).toBe("第 6 步，共 7 步：获取 Mod 与其他文件");
+    expect(INSTALL_PHASE_LABEL.modpack_files).not.toContain("下载");
+  });
 });
 
 describe("插值贴着中文时的混排", () => {
