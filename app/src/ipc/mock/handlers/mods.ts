@@ -720,8 +720,9 @@ function admits(current: ReleaseChannel, candidate: ReleaseChannel): boolean {
 }
 
 /**
- * 与后端同一条挑选规则。versions 已按发布时间倒序；当前版本不在列表里就无从证明更新。
- * 锁定的版本以它的发布时间为上限，锁定版本不在列表里不报。
+ * 只按单份构建的发布时间挑，是后端挑选规则的简化：不模拟后端在借着别家跑的实例上对同一发布的判定（同一发布里给被借那一家
+ * 传的另一份构建不算更新），版本列表也只按实例自己装的加载器筛，不含借来的。versions 已按发布时间倒序；当前版本不在列表里
+ * 就无从证明更新。锁定的版本以它的发布时间为上限，锁定版本不在列表里不报。
  */
 function pickUpdate(versions: readonly ModVersionInfo[], currentId: string, hold: UpdateHold | null): ModVersionInfo | null {
   const current = versions.find((v) => v.version_id === currentId);
