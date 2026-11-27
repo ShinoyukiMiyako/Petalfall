@@ -342,8 +342,8 @@ impl Petalfall {
     /// 重复删除是幂等的。有别的实例依赖它时报 [`InstanceError::HasDependents`]；启动器自己落下、没人用的依赖
     /// 版本目录不算（`blocking_dependents`）。
     ///
-    /// 只处理文件；配置里的引用由调用方随后经 [`Petalfall::forget_instance`] 清掉。先核对游戏目录的数据格式
-    /// 记号，规则同 [`Petalfall::set_instance_settings`]。
+    /// 只处理文件（依赖版本记录里的这个名字随之去掉，见 [`forget_departed_base_version`]）；配置里的引用由调用方
+    /// 随后经 [`Petalfall::forget_instance`] 清掉。先核对游戏目录的数据格式记号，规则同 [`Petalfall::set_instance_settings`]。
     pub async fn delete_instance_files(
         &self,
         id: &str,
@@ -361,6 +361,7 @@ impl Petalfall {
         ensure_no_dependents(self.game_dir(), &scan, id).await?;
         tracing::info!(id, dir = %dir.display(), "删除实例：移入回收站");
         tokio::task::spawn_blocking(move || disposer.dispose(&dir)).await??;
+        forget_departed_base_version(self.game_dir(), id).await;
         Ok(true)
     }
 
@@ -473,6 +474,7 @@ impl Petalfall {
     ///
     /// 新名字按命名规则校验（不分大小写重名，自己除外）；有实例依赖它时拒绝，启动器自己落下、没人用的依赖版本
     /// 目录不算（`blocking_dependents`）。中途失败时把已经改掉的逐项改回去再报错。只处理文件；配置里的引用由调用方随后经 [`Petalfall::rename_instance_refs`] 同步。
+    /// 改成之后依赖版本记录里的旧名随之去掉（见 [`forget_departed_base_version`]），新名不记：改名后的实例是玩家的。
     /// 先核对游戏目录的数据格式记号，规则同 [`Petalfall::set_instance_settings`]。
     pub async fn rename_instance_files(&self, old: &str, new: &str) -> Result<()> {
         self.guard_game_dir(GuardMode::Use).await?;
@@ -492,8 +494,10 @@ impl Petalfall {
         let new_dir = self.instance_dir(new)?;
         let (old, new) = (old.to_owned(), new.to_owned());
         tracing::info!(%old, %new, "实例改名");
+        let departed = old.clone();
         tokio::task::spawn_blocking(move || rename_blocking(&old_dir, &new_dir, &old, &new))
             .await??;
+        forget_departed_base_version(self.game_dir(), &departed).await;
         Ok(())
     }
 
@@ -1176,6 +1180,20 @@ pub(crate) async fn forget_base_versions_in(game_dir: &Path, ids: &[String]) -> 
         versions.retain(|id| !ids.contains(id));
     })
     .await
+}
+
+/// 实例删掉或改了名之后，从 `game_dir` 的依赖版本记录里去掉它原来的名字：这个名字下已经没有目录了，留着的话，
+/// 日后别的启动器装出同名、没有实例痕迹的版本会被当成依赖版本藏起来。文件已经处理完，记录没改成不能让删除或
+/// 改名报失败（调用方随后还要改配置引用），只记日志。
+async fn forget_departed_base_version(game_dir: &Path, id: &str) {
+    if let Err(err) = forget_base_versions_in(game_dir, &[id.to_owned()]).await {
+        let error = error_with_causes(&err);
+        tracing::warn!(
+            id,
+            %error,
+            "依赖版本记录里没能去掉已不在的实例名，日后同名的版本可能被当成依赖版本藏起来"
+        );
+    }
 }
 
 /// 从扫描结果里去掉玩家没建过的依赖版本目录，列出来它们就像凭空多了实例。实例库、安装目标与侧栏固定都经这里取实例。
@@ -2449,6 +2467,61 @@ pub(crate) mod tests {
         let fresh = tmp.path().join("新盘").join(".minecraft");
         forget_base_versions_in(&fresh, &ids).await.unwrap();
         assert!(!base_record_path(&fresh).exists());
+    }
+
+    /// 记录里的名字下有个玩过的实例（带实例痕迹，所以列着），写一个这样的实例。
+    fn played_recorded_instance(game: &Path) {
+        let dir = write_version(game, "1.21.1", &vanilla_json("1.21.1"));
+        std::fs::create_dir_all(dir.join(PETALFALL_META_DIR)).unwrap();
+        write_base_record(game, &["1.21.1", NATURAL_NEOFORGE]);
+    }
+
+    /// 删掉记录里那个名字下的实例之后，记录里不再有这个名字，别的照留：日后别的启动器装出同名、没有实例痕迹的版本
+    /// 照常列出，不被当成依赖版本藏起来。
+    #[tokio::test]
+    async fn deleting_an_instance_drops_its_name_from_the_base_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        played_recorded_instance(&game);
+        assert_eq!(listed_ids(&petalfall).await, ["1.21.1"]);
+
+        assert!(
+            petalfall
+                .delete_instance_files("1.21.1", RecordingDisposer::default())
+                .await
+                .unwrap()
+        );
+
+        assert_eq!(
+            read_base_record(&game).await.unwrap().versions,
+            [NATURAL_NEOFORGE]
+        );
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        assert_eq!(listed_ids(&petalfall).await, ["1.21.1"]);
+    }
+
+    /// 改名之后记录里去掉旧名，新名不记，别的照留：旧名下日后别的启动器装出的版本照常列出，改了名的实例也照常列着。
+    #[tokio::test]
+    async fn renaming_an_instance_drops_its_old_name_from_the_base_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        played_recorded_instance(&game);
+
+        petalfall
+            .rename_instance_files("1.21.1", "生存服")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            read_base_record(&game).await.unwrap().versions,
+            [NATURAL_NEOFORGE]
+        );
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        let mut listed = listed_ids(&petalfall).await;
+        listed.sort();
+        assert_eq!(listed, ["1.21.1", "生存服"]);
     }
 
     /// 记录读不懂时认不出哪些是依赖版本：宁可多列一个，也不把看不清的目录藏起来；继承规则不看记录，列表照常返回。
