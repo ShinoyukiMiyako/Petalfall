@@ -677,15 +677,27 @@ impl<'a> ForgeInstaller<'a> {
         let Some(fetch) = java.fallback.take() else {
             return Err(mismatch.to_error(&processor.jar, &first, None, None));
         };
+        // 取消之后不再去取：取的时候要发阶段事件，还可能要探测、下载一个运行时。
+        if self.cx.cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(petalfall_download::Error::Cancelled.into());
+        }
         let fallback = match fetch().await {
-            Ok(path) => path,
+            Ok(java) => java,
             Err(FallbackJavaError::Cancelled) => {
                 return Err(petalfall_download::Error::Cancelled.into());
             }
             Err(FallbackJavaError::Unavailable(reason)) => {
+                // 取的途中被取消、来源报的却是取不到（探测被打断之类）：照样以取消结束，不报成产物不符。
+                if self.cx.cancel.is_some_and(CancellationToken::is_cancelled) {
+                    return Err(petalfall_download::Error::Cancelled.into());
+                }
                 return Err(mismatch.to_error(&processor.jar, &first, None, Some(reason)));
             }
         };
+        // 取 Java 可能花了几分钟：这期间取消了就不再删产物、不再起第二个处理器。
+        if self.cx.cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(petalfall_download::Error::Cancelled.into());
+        }
         // 取回的还是正在用的这个 Java 时，同一个 Java 再跑一遍只会生成同样的字节。
         if fallback.path == first.path {
             tracing::warn!(jar = %processor.jar, java = %first.path.display(), "取到的备用 Java 就是正在用的这个，处理器不重跑");
@@ -3687,6 +3699,163 @@ mod tests {
         assert!(err.is_cancelled(), "实际：{err:?}");
         assert_eq!(java_runs(&log), ["java-8"]);
         assert!(!f.layout.version_dir("1.13.2-forge-25.0.223").exists());
+    }
+
+    /// 带取消令牌跑 [`regeneration_installer`]，处理器先用 Java 8。
+    async fn install_cancellable<'a>(
+        f: &'a Fixture,
+        token: &'a CancellationToken,
+        java: &Path,
+        installer: &Path,
+        fallback: FallbackJava<'a>,
+    ) -> Result<ForgeSummary> {
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy)
+            .with_cancel(Some(token));
+        ForgeInstaller::new(cx, java)
+            .with_java_major(Some(8))
+            .with_fallback_java(Some(fallback))
+            .install_from_installer(installer)
+            .await
+    }
+
+    /// 第一次运行留下的、对不上的 A 与 B 原样还在：取消之后不删产物。
+    fn assert_first_run_outputs_kept(f: &Fixture) {
+        for coordinate in [OUT_A, OUT_B] {
+            assert_eq!(
+                std::fs::read(library(f, coordinate)).unwrap(),
+                output_bytes(coordinate, false),
+                "{coordinate}"
+            );
+        }
+    }
+
+    /// 取备用 Java 的途中被取消，来源报的却是取不到：以取消结束，不报成产物对不上。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unavailable_fallback_after_cancelling_ends_as_cancelled() {
+        let f = fixture();
+        put_processor_jar(&f);
+        let installer = regeneration_installer(&f);
+        let log = f.root.join("java-runs.log");
+        let old = producing_java(&f, "java-8", &log, false);
+        let token = CancellationToken::new();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let fallback = fallback_from(&calls, || {
+            token.cancel();
+            Err(FallbackJavaError::Unavailable(Box::new(
+                std::io::Error::other("探测被打断"),
+            )))
+        });
+
+        let err = install_cancellable(&f, &token, &old, &installer, fallback)
+            .await
+            .unwrap_err();
+
+        assert!(err.is_cancelled(), "实际：{err:?}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(java_runs(&log), ["java-8"]);
+        assert_first_run_outputs_kept(&f);
+    }
+
+    /// 取到备用 Java 时已经取消了：不删对不上的产物，也不再用它起处理器。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fallback_java_fetched_after_cancelling_is_not_run() {
+        let f = fixture();
+        put_processor_jar(&f);
+        let installer = regeneration_installer(&f);
+        let log = f.root.join("java-runs.log");
+        let old = producing_java(&f, "java-8", &log, false);
+        let new = producing_java(&f, "java-17", &log, true);
+        let token = CancellationToken::new();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let fallback = fallback_from(&calls, || {
+            token.cancel();
+            Ok(java_of(&new, 17))
+        });
+
+        let err = install_cancellable(&f, &token, &old, &installer, fallback)
+            .await
+            .unwrap_err();
+
+        assert!(err.is_cancelled(), "实际：{err:?}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(java_runs(&log), ["java-8"]);
+        assert_first_run_outputs_kept(&f);
+        assert!(!f.layout.version_dir("1.13.2-forge-25.0.223").exists());
+    }
+
+    /// 第一次运行结束、发现产物对不上之后才取消：不再去取备用 Java（取的时候要发阶段事件、可能要下载）。
+    ///
+    /// 处理器自己已经退出，留下的孙进程占着输出管道，读剩余输出要等满时限：在这段时间里取消，取消落在「处理器
+    /// 跑完之后、取备用 Java 之前」。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_after_the_first_run_does_not_fetch_the_fallback_java() {
+        use std::time::Duration;
+
+        let f = fixture();
+        put_processor_jar(&f);
+        let installer = regeneration_installer(&f);
+        let log = f.root.join("java-runs.log");
+        let here = |path: &Path| {
+            format!(
+                "%~dp0{}",
+                path.strip_prefix(&f.root)
+                    .expect("假 java 用到的文件都在夹具根目录下")
+                    .display()
+            )
+        };
+        let mut copies = String::new();
+        for coordinate in [OUT_A, OUT_B] {
+            let source = f
+                .root
+                .join("produced")
+                .join(format!("lingering-{}", coordinate.replace(':', "-")));
+            put(&source, &output_bytes(coordinate, false));
+            copies.push_str(&format!(
+                "copy /y \"{}\" \"{}\" >nul\r\n",
+                here(&source),
+                here(&library(&f, coordinate))
+            ));
+        }
+        let finished = f.root.join("first-run-finished");
+        let old = f.root.join("lingering-java-8.cmd");
+        std::fs::write(
+            &old,
+            format!(
+                "@echo off\r\n>>\"{}\" echo java-8\r\n{copies}start \"\" /b ping -n 6 127.0.0.1\r\necho done> \"{}\"\r\nexit /b 0\r\n",
+                here(&log),
+                here(&finished)
+            ),
+        )
+        .unwrap();
+        let token = CancellationToken::new();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let fallback = fallback_from(&calls, || {
+            Err(FallbackJavaError::Unavailable(Box::new(
+                std::io::Error::other("取消之后不该来取"),
+            )))
+        });
+        let attempt = install_cancellable(&f, &token, &old, &installer, fallback);
+        tokio::pin!(attempt);
+
+        // 一边等一边接着推进安装：处理器退出要被安装这边先看到，取消才落在它跑完之后。
+        let first_run_over = async {
+            while !finished.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        };
+        tokio::select! {
+            outcome = &mut attempt => panic!("输出管道还被占着，安装不该结束：{outcome:?}"),
+            () = first_run_over => {}
+        }
+        token.cancel();
+        let err = attempt.await.unwrap_err();
+
+        assert!(err.is_cancelled(), "实际：{err:?}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(java_runs(&log), ["java-8"]);
+        assert_first_run_outputs_kept(&f);
     }
 
     const OUTPUT_LINE_CAP: usize = 16 * 1024;
