@@ -3,20 +3,10 @@
 // 这时写成那种语言会让读屏用错语音去念中文。配置读到之前（以及读失败时）不动它，保持页面自带的 zh-CN。
 
 import { useLayoutEffect } from "react";
+import { textLanguage } from "../domain/ui-language";
 import type { UiLanguage } from "../ipc/config";
 import { useLauncherSelector } from "../state/launcher";
 import type { LauncherState } from "../state/store";
-
-/** 已有译文的界面语言。English 还在预览、没有译文；某种语言的译文落地后加进来，<html lang> 随之跟设置走。 */
-const TRANSLATED: ReadonlySet<UiLanguage> = new Set<UiLanguage>(["zh-CN"]);
-
-/** 没有译文时界面文案落回的语言，与 index.html 自带的 lang 一致。 */
-const SOURCE_TEXT_LANG: UiLanguage = "zh-CN";
-
-/** 设置为 language 时界面文案实际所用的语言。 */
-export function textLanguage(language: UiLanguage): UiLanguage {
-  return TRANSLATED.has(language) ? language : SOURCE_TEXT_LANG;
-}
 
 export function applyDocumentLang(language: UiLanguage, root: HTMLElement = document.documentElement): void {
   root.lang = language;

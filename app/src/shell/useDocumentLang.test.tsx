@@ -5,6 +5,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
+import { textLanguage } from "../domain/ui-language";
 import type { ConfigDto } from "../ipc/config";
 import { IpcError } from "../ipc/errors";
 import { DEFAULT_APPEARANCE, AppearanceProvider } from "../state/appearance";
@@ -18,7 +19,7 @@ import { AppShell } from "./AppShell";
 import type { PageTable } from "./nav";
 import { createPageRegistry } from "./pages";
 import { ShellProvider } from "./shell";
-import { applyDocumentLang, textLanguage, useDocumentLang } from "./useDocumentLang";
+import { applyDocumentLang, useDocumentLang } from "./useDocumentLang";
 import { WindowPortProvider, browserWindowPort } from "./window";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));

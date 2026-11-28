@@ -7,9 +7,9 @@ import { useState } from "react";
 import { INTERFACE_COPY, LANGUAGE_OPTIONS } from "../../../copy/settings";
 import type { Settings } from "../../../domain/adapt";
 import { autoBackupOutcome } from "../../../domain/rules";
+import { textLanguage } from "../../../domain/ui-language";
 import { springs } from "../../../lib/motion";
 import { useShell } from "../../../shell/shell";
-import { textLanguage } from "../../../shell/useDocumentLang";
 import { useRunner } from "../../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import type { LauncherState } from "../../../state/store";
@@ -113,7 +113,7 @@ function languageOption(value: Language) {
 
 /**
  * 下拉里只给有译文的语言。English 还没有译文，选了以后界面照旧是中文、<html lang> 也还是 zh-CN，给出来只像是切换坏了，
- * 所以先藏起来；译文落地、加进 useDocumentLang 的 TRANSLATED 之后它自己回到下拉里。
+ * 所以先藏起来；译文落地、加进 domain/ui-language 的 TRANSLATED 之后它自己回到下拉里。
  */
 const SHOWN_LANGUAGES = LANGUAGE_OPTIONS.filter((o) => textLanguage(o.value) === o.value).map((o) => ({ value: o.value, label: o.label, hint: o.hint }));
 
