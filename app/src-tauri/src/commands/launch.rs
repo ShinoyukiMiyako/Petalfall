@@ -849,8 +849,12 @@ async fn hold_reattached(
             .await
         {
             Ok(guard) => return Some(guard),
+            // 占实例自己与占基底冲突都报 instance_busy，原文里点名了被占的是哪一个；其余失败都出在读继承链上。
+            Err(err) if err.code == crate::commands::error::code::INSTANCE_BUSY => {
+                tracing::warn!(version = id, error = %err.message, "接回的实例或它的基底此刻被占用，改为只占实例自己");
+            }
             Err(err) => {
-                tracing::warn!(version = id, error = %err.message, "接回的实例读不出继承链，只占实例自己");
+                tracing::warn!(version = id, code = err.code, error = %err.message, "接回的实例读不出继承链，改为只占实例自己");
             }
         }
     }
