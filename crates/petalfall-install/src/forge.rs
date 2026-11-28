@@ -2183,9 +2183,11 @@ mod tests {
             ]
         );
         // 同一 crate 里别的用例也排这把锁，只能等它空出来，不能要求此刻就是空的。
-        tokio::time::timeout(std::time::Duration::from_secs(30), FORGE_INSTALL.lock())
-            .await
-            .expect("安装器放下后凭据应随之放下");
+        drop(
+            tokio::time::timeout(std::time::Duration::from_secs(30), FORGE_INSTALL.lock())
+                .await
+                .expect("安装器放下后凭据应随之放下"),
+        );
     }
 
     /// 按给定条目造一个 installer zip，写到 `dir/installer.jar`。
