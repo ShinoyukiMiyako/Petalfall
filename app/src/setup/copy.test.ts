@@ -76,7 +76,8 @@ describe("文案表", () => {
 
   it.each(["zh", "en"] as const)("%s 表的版本号落进标题和说明", (lang) => {
     const copy: SetupCopy = COPY[lang];
-    expect(copy.frame.versionLine("0.2.0")).toContain(`0.2.0 · ${APP_LICENSE}`);
+    // 左栏只写版本号：代码与素材许可不同，单写一个许可名会被读成整个程序都按它授权
+    expect(copy.frame.versionLine("0.2.0")).toBe(lang === "zh" ? "版本 0.2.0" : "Version 0.2.0");
     expect(copy.installing.title.upgrade("0.2.0")).toContain("0.2.0");
     expect(copy.done.title.upgrade("0.2.0")).toContain("0.2.0");
     expect(copy.installed.kind.upgrade.title("0.1.0")).toContain("0.1.0");

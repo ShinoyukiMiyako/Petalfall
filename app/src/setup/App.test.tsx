@@ -8,7 +8,7 @@ import { MotionGlobalConfig } from "framer-motion";
 import { StrictMode, type ReactElement } from "react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, stubPetalTokens } from "../art/petals/test-canvas";
-import { APP_NAME } from "../lib/app-info";
+import { APP_LICENSE, APP_NAME } from "../lib/app-info";
 import { renderWithoutAct, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import App, { BLOCKED_POLL_MS, MIN_INSTALLING_MS, UPDATE_EXIT_CHECKS, UPDATE_EXIT_POLL_MS, UPDATE_EXIT_WAIT_MS } from "./App";
 import type { DataBlock, Existing, ExistingKind, Failure, InstallPlan, Probe } from "./contract";
@@ -736,17 +736,21 @@ describe("窗口", () => {
     expect(document.documentElement.hasAttribute("data-sk-reduced")).toBe(true);
   });
 
-  it("左栏写载荷版本和协议，探测之前崩溃时只写协议", async () => {
+  it("左栏底部只写载荷版本、不写许可名，下面是协议与源代码；探测之前崩溃时没有版本，只剩那个链接", async () => {
+    /** 左栏底部那一块里依次挂着的元素的文字。 */
+    const foot = () => [...(button(copy.frame.legalLink).parentElement?.children ?? [])].map((el) => el.textContent);
     start();
     await seeHeading(copy.welcome.title);
-    expect(document.querySelector("aside")?.textContent).toContain(copy.frame.versionLine("0.2.0"));
+    expect(foot()).toEqual(["版本 0.2.0", copy.frame.legalLink]);
+    expect(document.querySelector("aside")?.textContent).not.toContain(APP_LICENSE);
     view?.unmount();
 
     const crashed = replay([{ type: "crashed", detail: "x" }]);
     start({}, crashed);
     await seeHeading(copy.fatal.title);
+    expect(foot()).toEqual([copy.frame.legalLink]);
     const side = document.querySelector("aside")?.textContent;
-    expect(side).toContain(copy.frame.license);
+    expect(side).not.toContain(APP_LICENSE);
     expect(side).not.toContain("0.2.0");
   });
 });

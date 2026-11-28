@@ -174,7 +174,8 @@ export function FrameShell({ step, direction, children }: FrameShellProps) {
         </div>
         <StageArt reduced={chrome.reduced} />
         <div className={styles.sideFoot}>
-          <span className={styles.sideMeta}>{version === null ? copy.license : copy.versionLine(version)}</span>
+          {/* 探测之前就崩溃时没有版本：整行不挂，不留一行空位，链接上方也就没有多出来的间距 */}
+          {version !== null && <span className={styles.sideMeta}>{copy.versionLine(version)}</span>}
           <button type="button" className={styles.legalLink} disabled={!chrome.canOpenLegal} onClick={chrome.onOpenLegal}>
             {copy.legalLink}
           </button>

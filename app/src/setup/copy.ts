@@ -54,10 +54,11 @@ export interface SetupCopy {
     minimize: string;
     close: string;
     closeBlocked: string;
-    /** 左栏底部一行：版本和协议。 */
+    /**
+     * 左栏底部一行，只写版本号。不跟许可名：代码与美术素材的许可不同，单写一个许可名读起来像整个程序都按它授权，
+     * 两份许可由下面的「协议与源代码」交代。
+     */
     versionLine(version: string): string;
-    /** 探测之前就崩溃时没有版本，只写协议。 */
-    license: string;
     legalLink: string;
   };
   welcome: {
@@ -243,8 +244,7 @@ const ZH: SetupCopy = {
     minimize: "最小化",
     close: "关闭",
     closeBlocked: "安装中不能关闭",
-    versionLine: (version) => `版本 ${version} · ${APP_LICENSE}`,
-    license: APP_LICENSE,
+    versionLine: (version) => `版本 ${version}`,
     legalLink: "协议与源代码",
   },
   welcome: {
@@ -424,8 +424,7 @@ const EN: SetupCopy = {
     minimize: "Minimize",
     close: "Close",
     closeBlocked: "Can't close while installing",
-    versionLine: (version) => `Version ${version} · ${APP_LICENSE}`,
-    license: APP_LICENSE,
+    versionLine: (version) => `Version ${version}`,
     legalLink: "License and source",
   },
   welcome: {
