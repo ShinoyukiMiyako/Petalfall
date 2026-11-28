@@ -3,7 +3,7 @@
 import type { InstanceSummary } from "./adapt";
 import type { BaseBlockingActivity } from "./types";
 
-/** 别的实例正以它为基底：那个实例启动到游戏退出、补全或导入整合包期间要读写这里的客户端 jar 与 natives，移到别的游戏目录期间要把这里的版本 JSON 与客户端 jar 带过去。 */
+/** 别的实例正以它为基底：那个实例启动到游戏退出、补全或导入整合包期间要读写这里的客户端 jar 与 natives，移到其他游戏目录期间要把这里的版本 JSON 与客户端 jar 带过去。 */
 export interface InheritedLock {
   kind: "inherited";
   /** 正在用它的实例。 */
@@ -18,7 +18,7 @@ export interface BaseBusyLock {
   activity: BaseBlockingActivity;
 }
 
-/** 锁的来源：本实例的游戏会话、安装或补全任务、正在移到别的游戏目录、后端正在改动 Mod、资源或设置，正在备份、恢复、导出存档，或别的实例正以它为基底。 */
+/** 锁的来源：本实例的游戏会话、安装或补全任务、正在移到其他游戏目录、后端正在改动 Mod、资源或设置，正在备份、恢复、导出存档，或别的实例正以它为基底。 */
 export type InstanceLock = "running" | "installing" | "moving" | "modifying" | "backing_up" | InheritedLock;
 
 /** 后端占着实例、又不挡 Mod 操作的两种活动。 */

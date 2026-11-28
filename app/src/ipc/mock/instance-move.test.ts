@@ -1,4 +1,4 @@
-// 假后端的「移到另一个游戏目录」：预检的数字与拦截项、执行的步骤事件与提交后的盘面。全部落在内存里的假磁盘上，不碰真实目录。
+// 假后端的「移到其他游戏目录」：预检的数字与拦截项、执行的步骤事件与提交后的盘面。全部落在内存里的假磁盘上，不碰真实目录。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { addGameDirectory, getConfig, listGameDirectories } from "../config";
 import { IpcError } from "../errors";

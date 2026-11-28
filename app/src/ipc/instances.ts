@@ -21,8 +21,8 @@ export type DetectedLoaderKind = LoaderChoice | "optifine" | "liteloader";
 
 /**
  * 实例此刻在做的事。inherited：别的实例正以它为基底（在那个实例的 inheritsFrom 链上），那个实例启动到游戏退出、
- * 补全、导入整合包或移到别的游戏目录期间，这个实例的启动、删除、改名、补全以 instance_busy 拒绝，detail.used_by 是正在用它的实例。
- * moving：正在移到另一个游戏目录，与一切互斥。
+ * 补全、导入整合包或移到其他游戏目录期间，这个实例的启动、删除、改名、补全以 instance_busy 拒绝，detail.used_by 是正在用它的实例。
+ * moving：正在移到其他游戏目录，与一切互斥。
  */
 export type InstanceActivity = "installing" | "repairing" | "renaming" | "deleting" | "launching" | "running" | "modifying" | "inherited" | "backing_up" | "moving";
 
@@ -477,7 +477,7 @@ export const templateInfo = (): Promise<TemplateInfoDto> => invoke<TemplateInfoD
 
 /**
  * 把实例工作目录里的白名单文件整份存为默认设置（实例没有的文件，新模板里也没有），返回存完之后的状态。
- * 实例正在安装、补全、改名、删除或移到别的游戏目录时以 instance_busy 拒绝；游戏运行中可以保存。工作目录里一个白名单文件都没有时
+ * 实例正在安装、补全、改名、删除或移到其他游戏目录时以 instance_busy 拒绝；游戏运行中可以保存。工作目录里一个白名单文件都没有时
  * 以 TEMPLATE_SOURCE_EMPTY_ERROR_CODE 拒绝，原来的默认设置不动。
  */
 export const saveInstanceAsTemplate = (id: string): Promise<TemplateInfoDto> => invoke<TemplateInfoDto>("save_instance_as_template", { id });
@@ -576,7 +576,7 @@ export const openFolder = (target: FolderTarget, id: string | null, world: strin
  */
 export const revealInFolder = (path: string): Promise<void> => invoke<void>("reveal_in_folder", { path });
 
-// ---------------------------------------------------------------- 移到另一个游戏目录
+// ---------------------------------------------------------------- 移到其他游戏目录
 
 /**
  * 拦着一次移动的问题。预检把它们全列出来；执行前后端重新预检，遇到的第一个以 instance_move_blocked 拒绝，

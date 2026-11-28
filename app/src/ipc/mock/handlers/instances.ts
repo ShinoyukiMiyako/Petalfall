@@ -669,7 +669,7 @@ const ACTIVITY_LABELS: Record<InstanceActivity, string> = {
  * 两件事能否同时在一个实例上进行，与后端 InstanceActivity::compatible_with 同一张表：Mod、资源与设置的改动彼此兼容，
  * 也与启动、运行中的游戏、存档备份兼容；被别的实例当作基底时，基底照样能改动、备份存档，几个实例也能同时以它为基底，基底自己的
  * 启动、运行与之互斥（游戏映射着 natives，用它的实例写不了）；备份要读整个存档，游戏开着会边写边打包，所以与启动、运行互斥，
- * 同一实例也只备份一份，兼容集合比运行宽，游戏退出后才能原地转过去；新建、补全、改名、删除、移到别的游戏目录会挪走或重写整个目录，
+ * 同一实例也只备份一份，兼容集合比运行宽，游戏退出后才能原地转过去；新建、补全、改名、删除、移到其他游戏目录会挪走或重写整个目录，
  * 与任何事都互斥。
  */
 function compatible(a: InstanceActivity, b: InstanceActivity): boolean {
@@ -1881,7 +1881,7 @@ function revealInFolder(args: MockArgs): void {
   mockRevealedPaths.push(path);
 }
 
-// ---------------------------------------------------------------- 移到另一个游戏目录（与后端 instance_move 同一套规则）
+// ---------------------------------------------------------------- 移到其他游戏目录（与后端 instance_move 同一套规则）
 
 /** 目标盘除了要写的字节，至少还要留出这么多，与后端一致。 */
 const MOVE_MARGIN_BYTES = 256 * MB;
