@@ -11,6 +11,7 @@ const USAGE = [
   "用法：",
   "  dev-distribution.mjs key <版本> <运行标识> <文件名>",
   "  dev-distribution.mjs upload-targets <R2 账户 ID>",
+  "  dev-distribution.mjs upload-targets --only <源名>[,<源名>...] [<R2 账户 ID>]",
   "  dev-distribution.mjs mirror-urls <对象键>",
   "  dev-distribution.mjs optional-mirrors <对象键>",
   "  dev-distribution.mjs build <版本> <运行标识> <引导程序> <仓库> <tag> <提交> <上传记录> <输出清单> [说明文件]",
@@ -18,6 +19,7 @@ const USAGE = [
   "  dev-distribution.mjs compare <版本 a> <版本 b>",
   "  dev-distribution.mjs next-beta <基础号> <tag 列表文件>",
   "运行标识是 <运行号>-<运行次数>，工作流里写成 \"$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT\"。",
+  "upload-targets 带 --only 时只打印点名的桶，选中的桶里有 R2 时才要账户 ID。",
   "optional-mirrors 打印这个键所在通道上传不上也照样发版的桶，一行一个。",
   "上传记录是 upload-to-mirrors.sh 写的那份，清单只列它记为传上的桶。",
   "build 的说明文件：beta 版本必须给，dev 版本不许给。compare 按 semver 优先级打印 -1、0 或 1。",
@@ -290,11 +292,23 @@ export function mirrorUrls(key) {
   return MIRRORS.map(({ name, host }) => ({ name, url: `https://${host}/${key}` }));
 }
 
-export function uploadTargets(r2AccountId) {
-  if (typeof r2AccountId !== "string" || !R2_ACCOUNT_ID.test(r2AccountId)) {
+// names 是要处理的桶，缺省是全部，按 MIRRORS 的先后返回。账户 ID 只用来拼 R2 的端点，选中的桶里有 R2 才必须给：
+// 国内的自托管机只传 cn，不该为了拿到上传目标去要 R2 的任何东西。给了就照样查格式，传错的值不会因为没用上而混过去。
+export function uploadTargets(r2AccountId, names = MIRROR_NAMES) {
+  if (!Array.isArray(names) || names.length === 0) throw new Error(`要处理的桶应是非空数组：${JSON.stringify(names)}`);
+  const seen = new Set();
+  for (const name of names) {
+    if (!MIRROR_NAMES.includes(name)) throw new Error(`桶名 ${JSON.stringify(name)} 不在 ${MIRROR_NAMES.join("、")} 之列`);
+    if (seen.has(name)) throw new Error(`桶 ${name} 重复`);
+    seen.add(name);
+  }
+  const selected = MIRRORS.filter(({ name }) => seen.has(name));
+  const r2 = selected.filter(({ profile }) => profile === "r2").map(({ name }) => name);
+  if (r2AccountId === undefined && r2.length > 0) throw new Error(`要处理的桶里有 R2 的 ${r2.join("、")}，必须给 R2 账户 ID`);
+  if (r2AccountId !== undefined && (typeof r2AccountId !== "string" || !R2_ACCOUNT_ID.test(r2AccountId))) {
     throw new Error(`R2 账户 ID 应为 32 位小写十六进制，实际长度 ${typeof r2AccountId === "string" ? r2AccountId.length : typeof r2AccountId}`);
   }
-  return MIRRORS.map(({ name, profile, bucket, endpoint, region }) => ({ name, profile, bucket, endpoint: endpoint(r2AccountId), region }));
+  return selected.map(({ name, profile, bucket, endpoint, region }) => ({ name, profile, bucket, endpoint: endpoint(r2AccountId), region }));
 }
 
 export function githubUrl(repo, tag, fileName) {
@@ -434,8 +448,13 @@ export function runCommand([command, ...args]) {
       return `${objectKey(...args)}\n`;
     }
     case "upload-targets": {
+      const row = ({ name, profile, bucket, endpoint, region }) => [name, profile, bucket, endpoint, region];
+      if (args[0] === "--only") {
+        expectArgs(args, 2, 3);
+        return tsv(uploadTargets(args[2], args[1].split(",")).map(row));
+      }
       expectArgs(args, 1);
-      return tsv(uploadTargets(args[0]).map(({ name, profile, bucket, endpoint, region }) => [name, profile, bucket, endpoint, region]));
+      return tsv(uploadTargets(args[0]).map(row));
     }
     case "mirror-urls": {
       expectArgs(args, 1);

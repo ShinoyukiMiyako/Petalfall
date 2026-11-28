@@ -2,19 +2,48 @@
 # 把一个文件按同一个对象键传到三个存储桶：杭州 OSS（cn）、香港 OSS（hk）、R2（global），每传完一个桶就不带凭据、
 # 按客户端会用的公网地址读回，大小和 sha256 与本地一致才算传上：公共读没开、自定义域名配错时上传照样成功，只有读回看得出来。
 # 桶、端点、区域与公网主机都从 dev-distribution.mjs 的同一张表来，读回和清单用的是同一套地址。
-# 用法：bash upload-to-mirrors.sh <对象键> <本地文件> [上传记录]
-# 不给上传记录时三个桶都必须传上，哪个失败都退出 1（分发试跑就这样用，要看清每个桶）。给了上传记录时，每个桶的结果追加
+# 用法：bash upload-to-mirrors.sh [--only <源名>]... [--readback-only <源名>]... <对象键> <本地文件> [上传记录]
+# 不给上传记录时处理的桶都必须传上，哪个失败都退出 1（分发试跑就这样用，要看清每个桶）。给了上传记录时，每个桶的结果追加
 # 一行「源名<tab>ok|failed<tab>对象键」，dev-distribution.mjs 的 build 只把记为 ok 的桶写进清单；本通道允许缺的桶
 # （dev-distribution.mjs optional-mirrors）失败时只打警告、写进作业摘要、记为 failed，接着传后面的桶，同一份记录里
 # 它失败过之后，后面的文件也不再传它；其余的桶失败照样退出 1。
-# 凭据只从调用它的那一步的环境变量来，缺任何一个都直接失败：
-#   OSS_CI_ACCESS_KEY_ID、OSS_CI_ACCESS_KEY_SECRET（RAM 子用户，只有 oss:PutObject，限两个桶里本通道的前缀，每个通道一个子用户）
+# --only 只处理点名的桶，可以给多次：国内的自托管机只传 cn。这时只要求点名的桶上传要用的那组凭据，不碰别的变量；
+# 记录里也只有点名的桶，不能交给 build 生成清单，那里要三个桶各一行。
+# --readback-only 点名的桶已由别处传过，可以给多次，必须在处理的桶里：不上传、不用它的凭据，只按公网地址读回，一致才记 ok；
+# 对不上和上传失败一样，按这个桶在本通道的规矩处理，同一份记录里失败过之后，后面的文件也不再读回它。
+# 凭据只从调用它的那一步的环境变量来，缺任何一个都直接失败；不给 --only 时下面五个都要：
+#   OSS_CI_ACCESS_KEY_ID、OSS_CI_ACCESS_KEY_SECRET（RAM 子用户，只有 oss:PutObject，限两个桶里本通道的前缀，每个通道一个子用户；
+#   国内机只传 cn，用的是另一个只放行 cn 里本通道前缀的子用户，工作流把它的凭据以同样的名字交进来）
 #   R2_CI_ACCESS_KEY_ID、R2_CI_SECRET_ACCESS_KEY（R2 的 S3 凭据，只授 petalfall-dl 一个桶）
 #   R2_ACCOUNT_ID（拼 R2 的 S3 端点）
 set -euo pipefail
 
+usage="用法：upload-to-mirrors.sh [--only <源名>]... [--readback-only <源名>]... <对象键> <本地文件> [上传记录]"
+only=()
+readback_only=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --only | --readback-only)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "$usage" >&2
+        exit 2
+      fi
+      if [ "$1" = --only ]; then
+        only+=("$2")
+      else
+        readback_only+=("$2")
+      fi
+      shift 2
+      ;;
+    -*)
+      echo "$usage" >&2
+      exit 2
+      ;;
+    *) break ;;
+  esac
+done
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ] || { [ "$#" -eq 3 ] && [ -z "$3" ]; }; then
-  echo "用法：upload-to-mirrors.sh <对象键> <本地文件> [上传记录]" >&2
+  echo "$usage" >&2
   exit 2
 fi
 key="$1"
@@ -22,17 +51,79 @@ file="$2"
 record="${3:-}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-for var in OSS_CI_ACCESS_KEY_ID OSS_CI_ACCESS_KEY_SECRET R2_CI_ACCESS_KEY_ID R2_CI_SECRET_ACCESS_KEY R2_ACCOUNT_ID; do
-  if [ -z "${!var:-}" ]; then
-    echo "::error::作业所在的环境里没有配置 $var" >&2
-    exit 1
-  fi
-done
+# listed <值> <元素>...：值是不是其中之一
+listed() {
+  local wanted="$1" item
+  shift
+  for item in "$@"; do
+    if [ "$item" = "$wanted" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+require() {
+  local var
+  for var in "$@"; do
+    if [ -z "${!var:-}" ]; then
+      echo "::error::作业所在的环境里没有配置 $var" >&2
+      exit 1
+    fi
+  done
+}
+
+if [ "${#only[@]}" -eq 0 ]; then
+  require OSS_CI_ACCESS_KEY_ID OSS_CI_ACCESS_KEY_SECRET R2_CI_ACCESS_KEY_ID R2_CI_SECRET_ACCESS_KEY R2_ACCOUNT_ID
+fi
 test -f "$file"
 # 对象键必须是 <通道>/<目录>/<文件名>，通道只认 dev、beta：OSS 的 RAM 策略只放行本通道的前缀，R2 的凭据却能写整个桶，
 # 写偏了就落在桶的规则之外，dev/ 的 30 天过期、beta/ 的禁止覆盖写与锁都管不到它。
 # mirror-urls 用的就是这条校验；它给出的公网地址留给下面每个桶传完后读回。
 public_urls="$(node "$script_dir/dev-distribution.mjs" mirror-urls "$key")"
+
+# 点名的桶在这里就核对完：名字拼错、重复、只读回的桶不在处理之列，都说明调用方写错了，不能传了一半才发现
+mapfile -t names < <(cut -f1 <<< "$public_urls")
+checked=()
+for name in "${only[@]}"; do
+  if ! listed "$name" "${names[@]}" || listed "$name" "${checked[@]}"; then
+    echo "::error::--only 点名的 $name 不是桶名或重复了，桶名只有 ${names[*]}" >&2
+    exit 2
+  fi
+  checked+=("$name")
+done
+processed=("${names[@]}")
+if [ "${#only[@]}" -gt 0 ]; then
+  processed=("${only[@]}")
+fi
+checked=()
+for name in "${readback_only[@]}"; do
+  if ! listed "$name" "${processed[@]}" || listed "$name" "${checked[@]}"; then
+    echo "::error::--readback-only 点名的 $name 不在要处理的桶 ${processed[*]} 里，或重复了" >&2
+    exit 2
+  fi
+  checked+=("$name")
+done
+
+# 给了 --only 时只核对要上传的那几个桶用得到的凭据：国内机只传 cn，它的环境里没有、也不该有 R2 的任何变量
+if [ "${#only[@]}" -eq 0 ]; then
+  targets="$(node "$script_dir/dev-distribution.mjs" upload-targets "$R2_ACCOUNT_ID")"
+else
+  account=()
+  if [ -n "${R2_ACCOUNT_ID:-}" ]; then
+    account=("$R2_ACCOUNT_ID")
+  fi
+  targets="$(IFS=,; node "$script_dir/dev-distribution.mjs" upload-targets --only "${only[*]}" "${account[@]}")"
+  while IFS=$'\t' read -r name profile _; do
+    if listed "$name" "${readback_only[@]}"; then
+      continue
+    fi
+    case "$profile" in
+      oss) require OSS_CI_ACCESS_KEY_ID OSS_CI_ACCESS_KEY_SECRET ;;
+      r2) require R2_CI_ACCESS_KEY_ID R2_CI_SECRET_ACCESS_KEY ;;
+    esac
+  done <<< "$targets"
+fi
 
 optional=""
 if [ -n "$record" ]; then
@@ -71,7 +162,6 @@ max_attempts = 5
 EOF
 
 md5="$(openssl md5 -binary "$file" | base64)"
-targets="$(node "$script_dir/dev-distribution.mjs" upload-targets "$R2_ACCOUNT_ID")"
 file_name="$(basename "$file")"
 channel="${key%%/*}"
 
@@ -93,21 +183,38 @@ summarize() {
   printf '**下载源降级**：%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
 }
 
+# 这个桶没传上，参数是原因：本通道允许缺的只降级、接着处理后面的桶，其余的退出 1
+give_up() {
+  if [ "$may_fail" = no ]; then
+    echo "::error::$name：$1" >&2
+    exit 1
+  fi
+  echo "::warning::$name：$1。$channel 通道允许缺 $name：$file_name 不算传上，后面的文件不再$verb $name，清单只列传上了更新包的源" >&2
+  printf '%s\tfailed\t%s\n' "$name" "$key" >> "$record"
+  summarize "$name 没有传上 \`$file_name\`（$1，用时 $((SECONDS - started)) 秒）。清单只列传上了更新包的源，其余源照发。"
+}
+
 while IFS=$'\t' read -r name profile bucket endpoint region; do
-  case "$profile" in
-    oss)
-      key_id="$OSS_CI_ACCESS_KEY_ID"
-      secret="$OSS_CI_ACCESS_KEY_SECRET"
-      ;;
-    r2)
-      key_id="$R2_CI_ACCESS_KEY_ID"
-      secret="$R2_CI_SECRET_ACCESS_KEY"
-      ;;
-    *)
-      echo "::error::$name 的 profile $profile 没有对应的凭据" >&2
-      exit 1
-      ;;
-  esac
+  # 只读回的桶不碰凭据：国内机传过 cn 之后，托管机这边不该再拿 cn 的凭据去写它
+  if listed "$name" "${readback_only[@]}"; then
+    verb=读回
+  else
+    verb=传
+    case "$profile" in
+      oss)
+        key_id="$OSS_CI_ACCESS_KEY_ID"
+        secret="$OSS_CI_ACCESS_KEY_SECRET"
+        ;;
+      r2)
+        key_id="$R2_CI_ACCESS_KEY_ID"
+        secret="$R2_CI_SECRET_ACCESS_KEY"
+        ;;
+      *)
+        echo "::error::$name 的 profile $profile 没有对应的凭据" >&2
+        exit 1
+        ;;
+    esac
+  fi
   url="$(awk -F '\t' -v name="$name" '$1 == name { print $2 }' <<< "$public_urls")"
   test -n "$url"
   may_fail=no
@@ -117,9 +224,9 @@ while IFS=$'\t' read -r name profile bucket endpoint region; do
 
   # 跨境链路慢起来多半一阵子都慢：前一个文件在这个桶上没传上，这个文件不再白等一轮时限
   if [ "$may_fail" = yes ] && awk -F '\t' -v name="$name" '$1 == name && $2 == "failed" { found = 1 } END { exit !found }' "$record"; then
-    echo "::warning::$name 在本次运行里已经失败过，$file_name 不再传 $name" >&2
+    echo "::warning::$name 在本次运行里已经失败过，$file_name 不再$verb $name" >&2
     printf '%s\tfailed\t%s\n' "$name" "$key" >> "$record"
-    summarize "$name 在本次运行里已经失败过，没有再传 \`$file_name\`。"
+    summarize "$name 在本次运行里已经失败过，没有再$verb \`$file_name\`。"
     continue
   fi
 
@@ -129,6 +236,22 @@ while IFS=$'\t' read -r name profile bucket endpoint region; do
   if [ "$may_fail" = yes ]; then
     level=warning
   fi
+
+  # 别处传过的对象只读回一次，整个 600 秒都给它：这里不重传，读回失败就是没传上
+  if [ "$verb" = 读回 ]; then
+    readback_status=0
+    bash "$script_dir/check-download.sh" "$name" "$url" "$file" "$bucket_budget" "$level" < /dev/null || readback_status=$?
+    if [ "$readback_status" -ne 0 ]; then
+      give_up "由别处上传，按公网地址读回却和本地文件对不上，见上面读回的报错"
+      continue
+    fi
+    if [ -n "$record" ]; then
+      printf '%s\tok\t%s\n' "$name" "$key" >> "$record"
+    fi
+    echo "$name：由别处上传，按公网地址读回与本地一致，用时 $((SECONDS - started)) 秒"
+    continue
+  fi
+
   attempt=0
   while :; do
     attempt=$(( attempt + 1 ))
@@ -209,11 +332,5 @@ while IFS=$'\t' read -r name profile bucket endpoint region; do
     124 | 137) failure="put-object 试了 $attempt 次都没在时限内传完，按公网地址读回也和本地文件对不上" ;;
     *) failure="put-object 试了 $attempt 次都失败，按公网地址读回也和本地文件对不上，见上面 aws 的报错" ;;
   esac
-  if [ "$may_fail" = no ]; then
-    echo "::error::$name：$failure" >&2
-    exit 1
-  fi
-  echo "::warning::$name：$failure。$channel 通道允许缺 $name：$file_name 不算传上，后面的文件不再传 $name，清单只列传上了更新包的源" >&2
-  printf '%s\tfailed\t%s\n' "$name" "$key" >> "$record"
-  summarize "$name 没有传上 \`$file_name\`（$failure，用时 $((SECONDS - started)) 秒）。清单只列传上了更新包的源，其余源照发。"
+  give_up "$failure"
 done <<< "$targets"

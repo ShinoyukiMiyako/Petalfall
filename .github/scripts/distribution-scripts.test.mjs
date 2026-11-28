@@ -49,7 +49,8 @@ echo '{"ETag": "fake"}'
 `;
 
 // 只认 check-download.sh 用到的形状：--output <文件>、--write-out <格式>，最后一个参数是地址。把 https://<主机>/<路径>
-// 映射到 $FAKE_CURL_ROOT/<主机>/<路径>，没有这个文件就按 404 失败；每次调用的地址记进 $FAKE_LOG.curl，参数记进
+// 映射到 $FAKE_CURL_ROOT/<主机>/<路径>，没有这个文件就按 404 应答：带 --fail 时以 22 退出，不带时和真 curl 一样以 0 退出，
+// 状态只在 --write-out 里；每次调用的地址记进 $FAKE_LOG.curl，参数记进
 // $FAKE_LOG.curl-args。$FAKE_CURL_PLAN 是空格分开的「退出码/HTTP 状态/耗时秒数」，第 n 项决定第 n 次调用怎么失败：
 // 先往输出文件追加一截残片、把模拟时钟拨快这么多秒，再按格式写出 HTTP 状态并以这个退出码退出；写成 - 的那一项照常应答，
 // 好让排在后面的某一次单独失败。
@@ -57,12 +58,16 @@ echo '{"ETag": "fake"}'
 const FAKE_CURL = `#!/usr/bin/env bash
 output=""
 format=""
+fail=no
 previous=""
 for arg in "$@"; do
   case "$previous" in
     --output) output="$arg" ;;
     --write-out) format="$arg" ;;
   esac
+  if [ "$arg" = --fail ]; then
+    fail=yes
+  fi
   previous="$arg"
 done
 url="\${@: -1}"
@@ -90,6 +95,9 @@ fi
 served="$FAKE_CURL_ROOT/\${url#https://}"
 if [ ! -f "$served" ]; then
   report 404
+  if [ "$fail" = no ]; then
+    exit 0
+  fi
   echo "curl: (22) The requested URL returned error: 404" >&2
   exit 22
 fi
@@ -1084,15 +1092,296 @@ describe("upload-to-mirrors.sh", () => {
     }
   });
 
+  const USAGE = /用法：upload-to-mirrors\.sh \[--only <源名>\]\.\.\. \[--readback-only <源名>\]\.\.\. <对象键> <本地文件> \[上传记录\]/;
+
   // 第三个参数传成空串多半是工作流里的变量没设上，不能悄悄当成不给记录
   it("参数不是两到三个、或上传记录是空串时退出 2 并提示用法，一个桶都不传", () => {
     const { log, file, env, record } = setup();
     for (const args of [[file], [KEY, file, record, "extra"], [KEY, file, ""]]) {
       const result = bash("upload-to-mirrors.sh", args, env);
       assert.equal(result.status, 2, JSON.stringify(args));
-      assert.match(result.stderr, /用法：upload-to-mirrors\.sh <对象键> <本地文件> \[上传记录\]/);
+      assert.match(result.stderr, USAGE);
     }
     assert.deepEqual(calls(log), []);
+  });
+
+  // 下面是国内机接手 cn 之后的两种用法：国内机只传 cn，托管机只读回 cn
+  const R2_VARS = ["R2_CI_ACCESS_KEY_ID", "R2_CI_SECRET_ACCESS_KEY", "R2_ACCOUNT_ID"];
+  const BETA_KEY = `beta/1.${randomInt(0, 50)}.0-beta.${randomInt(1, 100_000)}-${randomInt(1, 2 ** 40)}-${randomInt(1, 5)}/sample.bin`;
+
+  // 国内的自托管机所在的环境里只有 cn 的那一对凭据
+  function cnOnlySetup() {
+    const fixture = setup();
+    for (const name of R2_VARS) delete fixture.env[name];
+    return fixture;
+  }
+
+  it("--only cn 只往 cn 传，只要 OSS 那一组凭据：R2 的三个变量一个都没有也照样传上、读回", () => {
+    const fixture = cnOnlySetup();
+    const { log, file, credentials: c, env, record, summary } = fixture;
+    const [cn] = targets(c.R2_ACCOUNT_ID);
+    serveAll(fixture);
+    const result = bash("upload-to-mirrors.sh", ["--only", "cn", KEY, file], env);
+    assert.equal(result.status, 0, result.stderr);
+    const all = calls(log);
+    assert.equal(all.length, 1, JSON.stringify(all));
+    assert.deepEqual(all[0].slice(0, 3), ["AWS_PROFILE=oss", `AWS_ACCESS_KEY_ID=${c.OSS_CI_ACCESS_KEY_ID}`, `AWS_SECRET_ACCESS_KEY=${c.OSS_CI_ACCESS_KEY_SECRET}`]);
+    assert.equal(option(all[0], "--endpoint-url"), cn.endpoint);
+    assert.equal(option(all[0], "--bucket"), "petalfall-dl-cn");
+    assert.equal(option(all[0], "--key"), KEY);
+    assert.deepEqual(readbacks(log), [urlOf(cn.host)]);
+    assert.deepEqual(timeouts(log), ["10 90"]);
+    assert.match(result.stdout, new RegExp(`^cn：已传到 petalfall-dl-cn/${KEY.replaceAll(".", "\\.")}，用时 \\d+ 秒$`, "m"));
+    assert.doesNotMatch(result.stdout, /^(?:hk|global)[：\s]/m);
+    assert.equal(existsSync(record), false);
+    assert.equal(existsSync(summary), false);
+  });
+
+  it("--only cn 缺 OSS 凭据时点名缺的是哪个，一个桶都不传", () => {
+    for (const missing of ["OSS_CI_ACCESS_KEY_ID", "OSS_CI_ACCESS_KEY_SECRET"]) {
+      for (const value of [undefined, ""]) {
+        const fixture = cnOnlySetup();
+        const { log, file, env } = fixture;
+        serveAll(fixture);
+        if (value === undefined) delete env[missing];
+        else env[missing] = value;
+        const result = bash("upload-to-mirrors.sh", ["--only", "cn", KEY, file], env);
+        assert.equal(result.status, 1, `${missing}=${value}`);
+        assert.equal(result.stderr, `::error::作业所在的环境里没有配置 ${missing}\n`);
+        assert.deepEqual(calls(log), []);
+      }
+    }
+  });
+
+  // 国内机给记录是为了按通道的规矩处理 cn：dev 上只降级，beta 上让作业失败
+  it("--only cn 给了上传记录时按通道处理：dev 上 cn 传不上只降级、记录里只有 cn 的 failed，beta 上退出 1", () => {
+    for (const [key, status] of [[KEY, 0], [BETA_KEY, 1]]) {
+      const fixture = cnOnlySetup();
+      const { log, file, credentials: c, env, record, summary } = fixture;
+      const [cn] = targets(c.R2_ACCOUNT_ID);
+      env.FAKE_AWS_FAIL_ENDPOINT = cn.endpoint;
+      const result = bash("upload-to-mirrors.sh", ["--only", "cn", key, file, record], env);
+      assert.equal(result.status, status, `${key}：${result.stderr}`);
+      assert.deepEqual(endpoints(log), Array(4).fill(cn.endpoint), key);
+      const failure = "put-object 试了 4 次都失败，按公网地址读回也和本地文件对不上，见上面 aws 的报错";
+      if (status === 0) {
+        assert.equal(recordOf(record), `cn\tfailed\t${key}\n`);
+        assert.doesNotMatch(result.stderr, /::error::/);
+        assert.match(result.stderr, new RegExp(`^::warning::cn：${failure}。dev 通道允许缺 cn：sample\\.bin 不算传上，后面的文件不再传 cn，`, "m"));
+        assert.match(readFileSync(summary, "utf8"), new RegExp(`^\\*\\*下载源降级\\*\\*：cn 没有传上 \`sample\\.bin\`（${failure}，用时 \\d+ 秒）`));
+      } else {
+        assert.equal(recordOf(record), "");
+        assert.match(result.stderr, new RegExp(`::error::cn：${failure}\\n$`));
+        assert.equal(existsSync(summary), false);
+      }
+    }
+  });
+
+  it("--readback-only cn：不往 cn 传、不用它的凭据，只按公网地址读回、给满 600 秒，一致就记 ok；hk、global 照传", () => {
+    const fixture = setup();
+    const { log, file, credentials: c, env, record, summary } = fixture;
+    const [cn, hk, global] = targets(c.R2_ACCOUNT_ID);
+    serveAll(fixture);
+    const result = bash("upload-to-mirrors.sh", ["--readback-only", "cn", KEY, file, record], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(endpoints(log), [hk.endpoint, global.endpoint]);
+    assert.deepEqual(timeouts(log), ["10 90", "10 90"]);
+    assert.deepEqual(readbacks(log), [urlOf(cn.host), urlOf(hk.host), urlOf(global.host)]);
+    assert.deepEqual(readbackBudgets(log), ["600", "600", "600"]);
+    assert.equal(recordOf(record), `cn\tok\t${KEY}\nhk\tok\t${KEY}\nglobal\tok\t${KEY}\n`);
+    assert.match(result.stdout, /^cn：由别处上传，按公网地址读回与本地一致，用时 \d+ 秒$/m);
+    assert.doesNotMatch(result.stdout, /^cn：已传到/m);
+    assert.doesNotMatch(result.stderr, /::(?:error|warning)::/);
+    assert.equal(existsSync(summary), false);
+  });
+
+  it("--readback-only cn 在 dev 上读回不到时只降级、不重传，后面的文件不再读回 cn；hk、global 照传", () => {
+    const fixture = setup();
+    const { log, file, bytes, credentials: c, env, record, summary } = fixture;
+    const [cn, hk, global] = targets(c.R2_ACCOUNT_ID);
+    serveAll(fixture, ["cn"]);
+    const first = bash("upload-to-mirrors.sh", ["--readback-only", "cn", KEY, file, record], env);
+    assert.equal(first.status, 0, first.stderr);
+    assert.deepEqual(endpoints(log), [hk.endpoint, global.endpoint]);
+    assert.deepEqual(readbacks(log), [urlOf(cn.host), urlOf(hk.host), urlOf(global.host)]);
+    assert.doesNotMatch(first.stderr, /::error::/);
+    assert.equal(first.stderr.match(/^::warning::cn 读回失败（curl 退出 22，HTTP 404），不是暂时性错误，不重试：/gm).length, 1);
+    const failure = "由别处上传，按公网地址读回却和本地文件对不上，见上面读回的报错";
+    assert.match(first.stderr, new RegExp(`^::warning::cn：${failure}。dev 通道允许缺 cn：sample\\.bin 不算传上，后面的文件不再读回 cn，清单只列传上了更新包的源$`, "m"));
+    assert.equal(recordOf(record), `cn\tfailed\t${KEY}\nhk\tok\t${KEY}\nglobal\tok\t${KEY}\n`);
+    assert.match(readFileSync(summary, "utf8"), new RegExp(`^\\*\\*下载源降级\\*\\*：cn 没有传上 \`sample\\.bin\`（${failure}，用时 \\d+ 秒）。`));
+
+    const installer = join(fixture.dir, "sample-setup.bin");
+    writeFileSync(installer, bytes);
+    serveAll(fixture, [], INSTALLER_KEY);
+    const second = bash("upload-to-mirrors.sh", ["--readback-only", "cn", INSTALLER_KEY, installer, record], env);
+    assert.equal(second.status, 0, second.stderr);
+    assert.match(second.stderr, /^::warning::cn 在本次运行里已经失败过，sample-setup\.bin 不再读回 cn$/m);
+    assert.deepEqual(readbacks(log).slice(3), [urlOf(hk.host, INSTALLER_KEY), urlOf(global.host, INSTALLER_KEY)]);
+    assert.deepEqual(endpoints(log).slice(2), [hk.endpoint, global.endpoint]);
+    assert.equal(recordOf(record).split("\n").slice(3).join("\n"), `cn\tfailed\t${INSTALLER_KEY}\nhk\tok\t${INSTALLER_KEY}\nglobal\tok\t${INSTALLER_KEY}\n`);
+    assert.match(readFileSync(summary, "utf8"), /\n\*\*下载源降级\*\*：cn 在本次运行里已经失败过，没有再读回 `sample-setup\.bin`。\n$/);
+  });
+
+  // 别处传错了字节，清单就不能列这个源；beta 一个桶都不许缺，cn 排在最前，读回不过时一个桶都没传
+  it("--readback-only cn 在 beta 上读回的字节和本地不同或读不到时退出 1，不往任何桶传", () => {
+    for (const served of ["changed", "missing"]) {
+      const fixture = setup();
+      const { log, file, bytes, credentials: c, env, record, publicRoot, summary } = fixture;
+      const [cn] = targets(c.R2_ACCOUNT_ID);
+      serveAll(fixture, ["cn"], BETA_KEY);
+      const changed = Buffer.from(bytes);
+      changed[randomInt(0, changed.length)] ^= 0xff;
+      if (served === "changed") serve(publicRoot, cn.host, changed, BETA_KEY);
+      const result = bash("upload-to-mirrors.sh", ["--readback-only", "cn", BETA_KEY, file, record], env);
+      assert.equal(result.status, 1, `${served}：${result.stdout}`);
+      assert.deepEqual(calls(log), [], served);
+      assert.deepEqual(readbacks(log), [urlOf(cn.host, BETA_KEY)], served);
+      assert.match(
+        result.stderr,
+        served === "changed" ? new RegExp(`::error::cn 读回的 sha256 是 ${sha256(changed)}，本地是 ${sha256(bytes)}`) : /::error::cn 读回失败（curl 退出 22，HTTP 404）/,
+        served,
+      );
+      assert.match(result.stderr, /::error::cn：由别处上传，按公网地址读回却和本地文件对不上，见上面读回的报错\n$/, served);
+      assert.equal(recordOf(record), "", served);
+      assert.equal(existsSync(summary), false, served);
+    }
+  });
+
+  it("新参数缺值、拼错、点了不存在或重复的桶、只读回的桶不在要处理的桶里时退出 2，一个桶都不传", () => {
+    const { log, file, env } = setup();
+    for (const args of [["--only"], ["--only", "", KEY, file], ["--readback-only"], ["--bogus", KEY, file], ["--only", "cn"]]) {
+      const result = bash("upload-to-mirrors.sh", args, env);
+      assert.equal(result.status, 2, JSON.stringify(args));
+      assert.match(result.stderr, USAGE, JSON.stringify(args));
+    }
+    for (const [args, message] of [
+      [["--only", "github", KEY, file], "::error::--only 点名的 github 不是桶名或重复了，桶名只有 cn hk global\n"],
+      [["--only", "CN", KEY, file], "::error::--only 点名的 CN 不是桶名或重复了，桶名只有 cn hk global\n"],
+      [["--only", "cn", "--only", "cn", KEY, file], "::error::--only 点名的 cn 不是桶名或重复了，桶名只有 cn hk global\n"],
+      [["--only", "cn", "--readback-only", "hk", KEY, file], "::error::--readback-only 点名的 hk 不在要处理的桶 cn 里，或重复了\n"],
+      [["--readback-only", "cdn", KEY, file], "::error::--readback-only 点名的 cdn 不在要处理的桶 cn hk global 里，或重复了\n"],
+      [["--readback-only", "cn", "--readback-only", "cn", KEY, file], "::error::--readback-only 点名的 cn 不在要处理的桶 cn hk global 里，或重复了\n"],
+    ]) {
+      const result = bash("upload-to-mirrors.sh", args, env);
+      assert.equal(result.status, 2, JSON.stringify(args));
+      assert.equal(result.stderr, message, JSON.stringify(args));
+    }
+    assert.deepEqual(calls(log), []);
+  });
+});
+
+describe("check-beta-version.sh", () => {
+  const MANIFEST_URL = "https://petalfall.org/updates/beta/latest.json";
+  const SERVER = "https://github.com";
+  const REPO = "ShinoyukiMiyako/Petalfall";
+  const BASE = `${randomInt(1, 20)}.${randomInt(0, 20)}.0`;
+  const N = randomInt(2, 50);
+  const VERSION = `${BASE}-beta.${N}`;
+
+  // 只认脚本的那一种写法，地址记进 $FAKE_LOG.git，打印 $FAKE_GIT_REFS 里的 ls-remote 输出
+  const FAKE_GIT = `#!/usr/bin/env bash
+if [ "$#" -ne 4 ] || [ "$1" != ls-remote ] || [ "$2" != --tags ] || [ "$3" != --refs ]; then
+  echo "假 git 只认 ls-remote --tags --refs <地址>，收到：$*" >&2
+  exit 2
+fi
+echo "$4" >> "$FAKE_LOG.git"
+cat "$FAKE_GIT_REFS"
+`;
+
+  // hk 是香港机上的 beta 清单，不给就是 404；tags 是仓库里已有的 tag 名
+  function setup({ hk, tags = [], plan = [] }) {
+    const { dir, log } = fakeBin();
+    writeFileSync(join(dir, "bin", "git"), FAKE_GIT, { mode: 0o755 });
+    const publicRoot = join(dir, "public");
+    if (hk !== undefined) {
+      mkdirSync(join(publicRoot, "petalfall.org", "updates", "beta"), { recursive: true });
+      writeFileSync(join(publicRoot, "petalfall.org", "updates", "beta", "latest.json"), JSON.stringify(hk));
+    }
+    const refs = join(dir, "refs.tsv");
+    writeFileSync(refs, tags.map((tag) => `${randomBytes(20).toString("hex")}\trefs/tags/${tag}\n`).join(""));
+    const env = envWithFakes(dir, log, {
+      FAKE_CURL_ROOT: publicRoot,
+      FAKE_CURL_PLAN: plan.join(" "),
+      FAKE_GIT_REFS: refs,
+      GITHUB_SERVER_URL: SERVER,
+      GITHUB_REPOSITORY: REPO,
+    });
+    return { log, env };
+  }
+  const gitCalls = (log) => (existsSync(`${log}.git`) ? readFileSync(`${log}.git`, "utf8").split("\n").slice(0, -1) : []);
+  const older = `${BASE}-beta.${N - 1}`;
+
+  it("香港清单和已有的 v* tag 都比本版本旧时退出 0；不是 v 开头的 tag 不比", () => {
+    const { log, env } = setup({ hk: { version: older }, tags: [`v${older}`, `v${BASE}-beta.1`, "v0.9.0", "dev-build", "release-1"] });
+    const result = bash("check-beta-version.sh", [VERSION, MANIFEST_URL], env);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(result.stdout, `版本号 ${VERSION} 比香港 beta 清单和已有的 v* tag 都新\n`);
+    const [curl] = calls(`${log}.curl-args`);
+    assert.equal(curl.at(-1), MANIFEST_URL);
+    assert.equal(option(curl, "--write-out"), "%{http_code}");
+    assert.equal(curl.includes("--fail"), false, curl.join(" "));
+    assert.deepEqual(gitCalls(log), [`${SERVER}/${REPO}.git`]);
+  });
+
+  it("香港机上还没有 beta 清单（404）时跳过，照样对照 tag", () => {
+    const passed = setup({ tags: [`v${older}`] });
+    const ok = bash("check-beta-version.sh", [VERSION, MANIFEST_URL], passed.env);
+    assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+    assert.equal(ok.stdout, `香港机上还没有 beta 清单，跳过\n版本号 ${VERSION} 比香港 beta 清单和已有的 v* tag 都新\n`);
+
+    const newer = `${BASE}-beta.${N + 1}`;
+    const blocked = setup({ tags: [`v${newer}`] });
+    const failed = bash("check-beta-version.sh", [VERSION, MANIFEST_URL], blocked.env);
+    assert.equal(failed.status, 1, failed.stdout);
+    assert.equal(failed.stdout, `香港机上还没有 beta 清单，跳过\n::error::版本号 ${VERSION} 不比已有的 tag v${newer} 新\n`);
+  });
+
+  it("香港清单上的版本不比本版本旧时退出 1，不再列 tag", () => {
+    for (const previous of [VERSION, `${BASE}-beta.${N + 1}`, BASE]) {
+      const { log, env } = setup({ hk: { version: previous } });
+      const result = bash("check-beta-version.sh", [VERSION, MANIFEST_URL], env);
+      assert.equal(result.status, 1, previous);
+      assert.equal(result.stdout, `::error::版本号 ${VERSION} 不比香港 beta 清单上已发布的 ${previous} 新，beta 包不会更新过去\n`, previous);
+      assert.deepEqual(gitCalls(log), [], previous);
+    }
+  });
+
+  it("本版本的 tag 已经存在、或有更新的 v* tag（含同基础号的正式版）时退出 1", () => {
+    const exists = setup({ hk: { version: older }, tags: [`v${older}`, `v${VERSION}`] });
+    const same = bash("check-beta-version.sh", [VERSION, MANIFEST_URL], exists.env);
+    assert.equal(same.status, 1, same.stdout);
+    assert.equal(same.stdout, `::error::tag v${VERSION} 已经存在：这个版本发布过了\n`);
+    for (const tag of [`v${BASE}-beta.${N + 1}`, `v${BASE}`]) {
+      const { env } = setup({ hk: { version: older }, tags: ["dev-build", tag] });
+      const result = bash("check-beta-version.sh", [VERSION, MANIFEST_URL], env);
+      assert.equal(result.status, 1, tag);
+      assert.equal(result.stdout, `::error::版本号 ${VERSION} 不比已有的 tag ${tag} 新\n`, tag);
+    }
+  });
+
+  it("香港清单回了 200、404 以外的状态，或里面没有字符串形式的 version 时退出非 0，不再列 tag", () => {
+    for (const http of ["500", "503", "403"]) {
+      const { log, env } = setup({ hk: { version: older }, plan: [`0/${http}/0`] });
+      const result = bash("check-beta-version.sh", [VERSION, MANIFEST_URL], env);
+      assert.equal(result.status, 1, http);
+      assert.equal(result.stdout, `::error::读香港清单 ${MANIFEST_URL} 返回 HTTP ${http}\n`, http);
+      assert.deepEqual(gitCalls(log), [], http);
+    }
+    const { log, env } = setup({ hk: { version: Number(N) } });
+    const result = bash("check-beta-version.sh", [VERSION, MANIFEST_URL], env);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /香港 beta 清单里没有字符串形式的 version/);
+    assert.deepEqual(gitCalls(log), []);
+  });
+
+  it("参数不是两个非空值时退出 2 并提示用法", () => {
+    const { env } = setup({});
+    for (const args of [[VERSION], [VERSION, MANIFEST_URL, "extra"], ["", MANIFEST_URL], [VERSION, ""]]) {
+      const result = bash("check-beta-version.sh", args, env);
+      assert.equal(result.status, 2, JSON.stringify(args));
+      assert.match(result.stderr, /用法：check-beta-version\.sh <版本> <香港 beta 清单地址>/);
+    }
   });
 });
 

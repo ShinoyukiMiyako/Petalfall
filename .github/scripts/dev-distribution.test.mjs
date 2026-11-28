@@ -341,6 +341,42 @@ describe("uploadTargets", () => {
       );
     }
   });
+
+  const CN_TARGET = { name: "cn", profile: "oss", bucket: "petalfall-dl-cn", endpoint: "https://s3.oss-cn-hangzhou.aliyuncs.com", region: "cn-hangzhou" };
+
+  // 国内的自托管机只传 cn，它的环境里没有 R2 账户 ID，也不该为了拿到上传目标去要
+  it("点名只要 cn 时不要账户 ID，只返回 cn 这一个目标", () => {
+    assert.deepEqual(uploadTargets(undefined, ["cn"]), [CN_TARGET]);
+    assert.deepEqual(uploadTargets(ACCOUNT, ["cn"]), [CN_TARGET]);
+  });
+
+  it("点了几个就按表里的先后返回几个，与点名的先后无关", () => {
+    assert.deepEqual(
+      uploadTargets(ACCOUNT, ["global", "cn"]).map(({ name, endpoint }) => [name, endpoint]),
+      [
+        ["cn", "https://s3.oss-cn-hangzhou.aliyuncs.com"],
+        ["global", `https://${ACCOUNT}.r2.cloudflarestorage.com`],
+      ],
+    );
+    assert.deepEqual(uploadTargets(undefined, ["hk", "cn"]).map(({ name }) => name), ["cn", "hk"]);
+  });
+
+  it("点名里有 R2 的桶却没给账户 ID 时拒绝；给了就照样查格式，用不上也不放过", () => {
+    for (const names of [["global"], ["cn", "global"], undefined]) {
+      assert.throws(() => uploadTargets(undefined, names), { message: "要处理的桶里有 R2 的 global，必须给 R2 账户 ID" }, String(names));
+    }
+    assert.throws(() => uploadTargets(ACCOUNT.toUpperCase(), ["cn"]), { message: `R2 账户 ID 应为 32 位小写十六进制，实际长度 ${ACCOUNT.length}` });
+  });
+
+  it("点名为空、不是数组、有认不出的名字或重复时拒绝；github 不是桶", () => {
+    for (const names of [[], "cn", null]) {
+      assert.throws(() => uploadTargets(ACCOUNT, names), /^Error: 要处理的桶应是非空数组/, JSON.stringify(names));
+    }
+    for (const name of ["github", "CN", "", "constructor"]) {
+      assert.throws(() => uploadTargets(ACCOUNT, ["cn", name]), { message: `桶名 ${JSON.stringify(name)} 不在 cn、hk、global 之列` }, name);
+    }
+    assert.throws(() => uploadTargets(undefined, ["cn", "hk", "cn"]), { message: "桶 cn 重复" });
+  });
 });
 
 describe("githubUrl 与 sourceUrls", () => {
@@ -959,6 +995,31 @@ describe("命令行入口", () => {
         "",
       ].join("\n"),
     );
+  });
+
+  it("upload-targets --only 只打印点名的桶，只点 OSS 的桶时不要账户 ID", () => {
+    const cn = run("upload-targets", "--only", "cn");
+    assert.equal(cn.status, 0, cn.stderr);
+    assert.equal(cn.stdout, "cn\toss\tpetalfall-dl-cn\thttps://s3.oss-cn-hangzhou.aliyuncs.com\tcn-hangzhou\n");
+    const both = run("upload-targets", "--only", "global,hk", ACCOUNT);
+    assert.equal(both.status, 0, both.stderr);
+    assert.equal(both.stdout, `hk\toss\tpetalfall-dl\thttps://s3.oss-cn-hongkong.aliyuncs.com\tcn-hongkong\nglobal\tr2\tpetalfall-dl\thttps://${ACCOUNT}.r2.cloudflarestorage.com\tauto\n`);
+  });
+
+  it("upload-targets --only 点了 R2 却没给账户 ID、点名拼错或参数不对时退出非 0，什么都不打印", () => {
+    for (const [args, message] of [
+      [["--only", "global"], /要处理的桶里有 R2 的 global，必须给 R2 账户 ID/],
+      [["--only", "cn,"], /桶名 "" 不在 cn、hk、global 之列/],
+      [["--only", "cn,cn"], /桶 cn 重复/],
+      [["--only"], /用法：/],
+      [["--only", "cn", ACCOUNT, ACCOUNT], /用法：/],
+      [["--only", ""], /用法：/],
+    ]) {
+      const result = run("upload-targets", ...args);
+      assert.notEqual(result.status, 0, args.join(" "));
+      assert.match(result.stderr, message, args.join(" "));
+      assert.equal(result.stdout, "", args.join(" "));
+    }
   });
 
   it("mirror-urls 每个桶一行源名和地址", () => {
