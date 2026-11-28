@@ -34,7 +34,8 @@ export const INTERFACE_COPY = {
 } as const;
 
 /**
- * 界面语言的选项。English 还在预览：没有译文的文案照常显示中文，选项提示与说明都写明这一点；
+ * 界面语言的选项。设置页的下拉只给有译文的（见常规分区的语言行）：English 还没有译文，暂不出现在下拉里，
+ * 这一项先留着：译文落地、它回到下拉里时，提示与说明要跟着改掉「预览」的说法。
  * 说明随选中的语言换成那门语言自己的话，切过去的人看得懂。
  */
 export const LANGUAGE_OPTIONS: readonly { value: UiLanguage; label: string; hint: string; desc: string }[] = [

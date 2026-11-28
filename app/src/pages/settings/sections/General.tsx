@@ -9,6 +9,7 @@ import type { Settings } from "../../../domain/adapt";
 import { autoBackupOutcome } from "../../../domain/rules";
 import { springs } from "../../../lib/motion";
 import { useShell } from "../../../shell/shell";
+import { textLanguage } from "../../../shell/useDocumentLang";
 import { useRunner } from "../../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import type { LauncherState } from "../../../state/store";
@@ -110,20 +111,29 @@ function languageOption(value: Language) {
   return option;
 }
 
+/**
+ * 下拉里只给有译文的语言。English 还没有译文，选了以后界面照旧是中文、<html lang> 也还是 zh-CN，给出来只像是切换坏了，
+ * 所以先藏起来；译文落地、加进 useDocumentLang 的 TRANSLATED 之后它自己回到下拉里。
+ */
+const SHOWN_LANGUAGES = LANGUAGE_OPTIONS.filter((o) => textLanguage(o.value) === o.value).map((o) => ({ value: o.value, label: o.label, hint: o.hint }));
+
 function LanguageRow() {
   const language = useLauncherSelector(selectLanguage);
   const actions = useLauncherActions();
   const write = useSettingWrite(language, INTERFACE_COPY.language, (next: Language) => actions.updateSettings({ language: next }));
-  // 每个选项的说明用它自己的语言写：English 那句标 en-US，读屏按英文念
+  // 早先的版本里选过 English 的配置存着 en-US：下拉里没有它，按界面实际所用的语言显示，不然 Select 找不到当前值。
+  // 存的值不替用户改写，译文落地后他选过的语言照常生效
+  const shown = textLanguage(write.value);
+  // 每个选项的说明用它自己的语言写，标上那门语言，读屏按它念
   return (
-    <SettingRow title={INTERFACE_COPY.language} description={<span lang={write.value}>{languageOption(write.value).desc}</span>}>
+    <SettingRow title={INTERFACE_COPY.language} description={<span lang={shown}>{languageOption(shown).desc}</span>}>
       <Select<Language>
         className={s.select}
         size="sm"
         ariaLabel={INTERFACE_COPY.language}
-        value={write.value}
+        value={shown}
         onChange={write.set}
-        options={LANGUAGE_OPTIONS.map((o) => ({ value: o.value, label: o.label, hint: o.hint }))}
+        options={SHOWN_LANGUAGES}
       />
     </SettingRow>
   );

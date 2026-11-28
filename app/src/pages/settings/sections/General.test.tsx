@@ -5,7 +5,6 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../../art/illustrations/test-canvas";
 import type { ConfigDto } from "../../../ipc/config";
-import { IpcError } from "../../../ipc/errors";
 import { GAME_LOG_EVENT } from "../../../ipc/launch";
 import { APP_NAME } from "../../../lib/app-info";
 import { OverlayRoot } from "../../../shell/overlay";
@@ -167,50 +166,33 @@ afterEach(() => {
 });
 
 describe("设置页常规分区：界面语言", () => {
-  it("「界面」卡片里是语言下拉，默认简体中文；两个选项各带提示，English 标为预览", async () => {
+  it("「界面」卡片里是语言下拉，默认简体中文；下拉只给有译文的简体中文，还没有译文的 English 不出现", async () => {
     await mountGeneral();
     const card = interfaceCard();
     expect(card.contains(languageTrigger())).toBe(true);
     expect(languageTrigger().textContent).toBe("简体中文");
     expect(card.textContent).toContain(ZH_DESC);
+    expect(descLang(ZH_DESC)).toBe("zh-CN");
     await click(languageTrigger());
     const options = openOptions().map((o) => ({ text: o.textContent, selected: o.getAttribute("aria-selected") }));
-    expect(options).toEqual([
-      { text: "简体中文zh-CN", selected: "true" },
-      { text: "English预览", selected: "false" },
-    ]);
+    expect(options).toEqual([{ text: "简体中文zh-CN", selected: "true" }]);
   });
 
-  it("选 English：立即写入 language、控件与说明跟着换，状态层读回 en-US；再切回简体中文同样立即生效", async () => {
+  it("配置里存着早先选的 English：下拉与说明按中文显示、不报错；点简体中文也不写回，存的 en-US 原样留着", async () => {
+    config = configDto({ language: "en-US" });
     await mountGeneral();
-    await pickLanguage("English");
-    expect(callsOf(ipc, "update_config")).toEqual([{ language: "en-US" }]);
     expect(launcher.state.settings?.language).toBe("en-US");
-    expect(languageTrigger().textContent).toBe("English");
-    expect(interfaceCard().textContent).toContain(EN_DESC);
-    expect(interfaceCard().textContent).not.toContain(ZH_DESC);
-    // 每个选项的说明用它自己的语言写：English 那句标 en-US，读屏按英文念，周围的中文照旧按中文
-    expect(descLang(EN_DESC)).toBe("en-US");
+    expect(languageTrigger().textContent).toBe("简体中文");
+    expect(interfaceCard().textContent).toContain(ZH_DESC);
+    expect(interfaceCard().textContent).not.toContain(EN_DESC);
+    expect(descLang(ZH_DESC)).toBe("zh-CN");
 
     await pickLanguage("简体中文");
-    expect(callsOf(ipc, "update_config")).toEqual([{ language: "en-US" }, { language: "zh-CN" }]);
-    expect(launcher.state.settings?.language).toBe("zh-CN");
+    expect(openOptions()).toEqual([]);
+    expect(callsOf(ipc, "update_config")).toEqual([]);
+    expect(launcher.state.settings?.language).toBe("en-US");
+    expect(config.language).toBe("en-US");
     expect(languageTrigger().textContent).toBe("简体中文");
-  });
-
-  it("写入失败：控件回到原值，error 通知标题点名「语言」、正文给原因", async () => {
-    ipc.overrides.set("update_config", () => {
-      throw new IpcError("config_io", "磁盘已满");
-    });
-    await mountGeneral();
-    await pickLanguage("English");
-    expect(languageTrigger().textContent).toBe("简体中文");
-    expect(launcher.state.settings?.language).toBe("zh-CN");
-    expect(launcher.state.toasts.map((t) => ({ tone: t.tone, title: t.title, body: t.body }))).toContainEqual({
-      tone: "error",
-      title: "没能保存「语言」",
-      body: "磁盘已满",
-    });
   });
 });
 
@@ -316,7 +298,11 @@ describe("设置页常规分区：按片订阅", () => {
     expect(launcher.state.session?.logs).toHaveLength(20);
     expect(renders.SettingRow).toBe(before);
 
-    await pickLanguage("English");
+    // 下拉里只有简体中文，换不出别的语言：经状态层改，语言行订阅着这一项
+    await act(async () => {
+      await launcher.actions.updateSettings({ language: "en-US" });
+      await settle();
+    });
     expect(renders.SettingRow).toBeGreaterThan(before);
   });
 });
