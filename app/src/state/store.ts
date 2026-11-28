@@ -1921,10 +1921,11 @@ export class LauncherStore {
 
   /**
    * 后端在后台改写了账户记录（提前续期、启动前的验证、外置角色档案的后台同步）：重读账户列表，名字、状态与验证时刻跟着换；
-   * 档案里的皮肤可能也换了，这个账户的皮肤重取。界面自己发起的刷新与登录做完就重读，后端不为它们推这个事件。
+   * 档案里的皮肤可能也换了，这个账户的皮肤重取。不知道是哪个账户（后端的通知积压挤掉了几条）时所有账户的皮肤都重取。
+   * 界面自己发起的刷新与登录做完就重读，后端不为它们推这个事件。
    */
   private onAccountChanged(event: accountsIpc.AccountChangedEvent): void {
-    invalidateResources(`skin:${event.uuid}`);
+    invalidateResources(event.uuid === null ? "skin" : `skin:${event.uuid}`);
     this.background(ACTION_ERROR.refreshAccounts, this.fetchAccounts());
   }
 

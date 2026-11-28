@@ -135,6 +135,20 @@ describe("后端在后台改写了账户记录", () => {
     unsubscribe();
   });
 
+  it("通知积压、不知道是哪几个账户（uuid 为 null）：整份重读账户列表，每个账户的皮肤都重取", async () => {
+    const ms = await cacheSkin("ms-1");
+    const ys = await cacheSkin("ys-1");
+    const listed = callsOf(ipc, "list_accounts").length;
+
+    accounts = [{ ...MS, name: "Renamed_Player" }, { ...SKIN, name: "改过的角色" }];
+    emitMockEvent(ACCOUNT_CHANGED_EVENT, { uuid: null });
+    await settle();
+    expect(callsOf(ipc, "list_accounts")).toHaveLength(listed + 1);
+    expect(store.getState().accounts.map((a) => a.name)).toEqual(["Renamed_Player", "改过的角色"]);
+    expect(await ms()).toBe(2);
+    expect(await ys()).toBe(2);
+  });
+
   it("没人在看的皮肤缓存作废，下次要时重取；重读账户失败发通知，不往外抛", async () => {
     const skin = await cacheSkin("ys-1");
     ipc.overrides.set("list_accounts", () => {

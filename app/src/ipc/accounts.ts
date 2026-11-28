@@ -73,7 +73,8 @@ export const DEVICE_CODE_EVENT = "petalfall://device-code";
 export const ACCOUNT_CHANGED_EVENT = "petalfall://account-changed";
 
 export interface AccountChangedEvent {
-  uuid: string;
+  /** 改了的账户；null 是后端的通知积压、挤掉了几条，不知道是哪几个账户：整份重读，所有账户的皮肤都重取。 */
+  uuid: string | null;
 }
 
 /** 微软登录进入设备码阶段时推送，供界面展示待输入短码与验证网址。 */

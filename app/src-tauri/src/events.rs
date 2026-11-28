@@ -21,8 +21,8 @@ pub const DEVICE_CODE_EVENT: &str = "petalfall://device-code";
 pub const GAME_LOG_EVENT: &str = "petalfall://game-log";
 
 /// 后台改写了账户记录（后台提前续期、启动前的验证与续期、启动时顺带同步的外置档案）时推送，负载
-/// [`AccountChangedPayload`]。前端重读账户列表，并让这个账户的皮肤查询失效。账户页的刷新、登录、切换与删除由界面
-/// 自己发起，做完就重读，不推这个事件。
+/// [`AccountChangedPayload`]。前端重读账户列表，并让这个账户的皮肤查询失效；不知道是哪个账户（`uuid` 为 `null`）时
+/// 让所有账户的皮肤查询失效。账户页的刷新、登录、切换与删除由界面自己发起，做完就重读，不推这个事件。
 pub const ACCOUNT_CHANGED_EVENT: &str = "petalfall://account-changed";
 
 /// 推送一个事件；失败（窗口已关、无监听者）只记日志，不影响命令本身的结果。
@@ -165,11 +165,13 @@ fn continues_batch(last: &DownloadProgress, next: &DownloadProgress) -> bool {
 /// [`ACCOUNT_CHANGED_EVENT`] 的负载：改了的账户。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AccountChangedPayload {
-    pub uuid: String,
+    /// 改了的账户；`None`（序列化为 `null`）是积压挤掉了几条通知、不知道是哪几个账户，前端整份重读。
+    pub uuid: Option<String>,
 }
 
 /// 把门面的账户变更通知（[`petalfall_core::Petalfall::subscribe_account_changes`]）逐条交给 `deliver`，直到门面全部
-/// 放下、通道关闭。积压挤掉了几条时记 warn 接着转：丢的那几个账户要等下一次重读才换上新名字与皮肤。
+/// 放下、通道关闭。积压挤掉了几条时记 warn，再交一条不带账户的通知让前端整份重读，接着转后面的：不知道丢的是哪几个
+/// 账户，不这样的话它们要等下一次别的原因重读才换上新名字与皮肤。
 pub fn forward_account_changes(
     mut changes: tokio::sync::broadcast::Receiver<String>,
     deliver: impl Fn(AccountChangedPayload) + Send + 'static,
@@ -178,11 +180,14 @@ pub fn forward_account_changes(
     tauri::async_runtime::spawn(async move {
         loop {
             match changes.recv().await {
-                Ok(uuid) => deliver(AccountChangedPayload { uuid }),
-                Err(RecvError::Lagged(missed)) => tracing::warn!(
-                    missed,
-                    "账户变更通知积压，挤掉了几条：那几个账户的界面要等下一次重读才更新"
-                ),
+                Ok(uuid) => deliver(AccountChangedPayload { uuid: Some(uuid) }),
+                Err(RecvError::Lagged(missed)) => {
+                    tracing::warn!(
+                        missed,
+                        "账户变更通知积压，挤掉了几条：那几个账户的界面要等下一次重读才更新"
+                    );
+                    deliver(AccountChangedPayload { uuid: None });
+                }
                 Err(RecvError::Closed) => break,
             }
         }
@@ -607,8 +612,8 @@ mod tests {
 
         let log = log.lock().unwrap();
         assert_eq!(
-            log.iter().map(|p| p.uuid.as_str()).collect::<Vec<_>>(),
-            ["1111aaaa", "2222bbbb", "1111aaaa"]
+            log.iter().map(|p| p.uuid.as_deref()).collect::<Vec<_>>(),
+            [Some("1111aaaa"), Some("2222bbbb"), Some("1111aaaa")]
         );
         assert_eq!(
             serde_json::to_value(&log[1]).unwrap(),
@@ -616,9 +621,10 @@ mod tests {
         );
     }
 
-    /// 积压挤掉了几条：记下之后接着转后面的，不停下。改成遇到任何接收错误就退出，后面两条就转不出去。
+    /// 积压挤掉了几条：先交一条不带账户的通知让前端整份重读（序列化为 `{ "uuid": null }`），再接着转后面的，不停下。
+    /// 改成遇到任何接收错误就退出，后面两条就转不出去；只记日志不交通知，被挤掉的 a1、b2 要等下一次别的原因重读。
     #[tokio::test]
-    async fn lagged_account_changes_keep_forwarding_the_rest() {
+    async fn lagged_account_changes_ask_for_a_full_reload_and_keep_forwarding_the_rest() {
         let (changes, receiver) = tokio::sync::broadcast::channel(2);
         for uuid in ["a1", "b2", "c3", "d4"] {
             changes.send(uuid.to_owned()).unwrap();
@@ -633,12 +639,22 @@ mod tests {
         .expect("通道关闭后转发任务应结束")
         .unwrap();
 
+        let log = log.lock().unwrap();
         assert_eq!(
-            *log.lock().unwrap(),
+            *log,
             vec![
-                AccountChangedPayload { uuid: "c3".into() },
-                AccountChangedPayload { uuid: "d4".into() }
+                AccountChangedPayload { uuid: None },
+                AccountChangedPayload {
+                    uuid: Some("c3".into())
+                },
+                AccountChangedPayload {
+                    uuid: Some("d4".into())
+                }
             ]
+        );
+        assert_eq!(
+            serde_json::to_value(&log[0]).unwrap(),
+            json!({ "uuid": null })
         );
     }
 
