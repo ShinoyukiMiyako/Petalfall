@@ -297,7 +297,8 @@ jobs:
     # 上传用的是镜像预装的 aws-cli，publish-hk 推送用的是镜像里的 OpenSSH；固定镜像版本，免得 ubuntu-latest 换代时跟着悄悄变
     runs-on: ubuntu-24.04
     environment: updates-dev
-    # 两个包各传三个桶再逐个读回，杭州和香港对 GitHub 托管机都是跨境，按慢的情况放宽
+    # 两个包各传三个桶再逐个读回，杭州和香港对 GitHub 托管机都是跨境，按慢的情况放宽。每个桶每个包最多 600 秒
+    # （upload-to-mirrors.sh），dev 上 cn 传不上只降级、后面的包不再传它，平时三个桶各只要几秒。
     timeout-minutes: 30
     # 发布阶段不能半路取消：重建预发布是先删后建，掐在中间 GitHub 上就没有预发布，旧客户端检查更新只剩 404。
     # 不取消也让各运行的 publish 串行，版本检查到重建之间不会有别的运行改预发布。同组只留一个排队者，
@@ -466,6 +467,9 @@ jobs:
       # 不会撞上上次传了一半的对象（重建之后的步骤在 publish-hk 里，重跑语义见那里）。带运行号是与 beta 共用一套键规则：
       # dev 的版本号本身带运行序号，beta 的版本号在传完包才失败的运行之后会重复，见 dev-distribution.mjs；
       # dev/ 前缀 30 天后由桶的生命周期规则删掉。必须排在签名与验签之后，传上去的就是最终发出去的字节。
+      # 每传完一个桶就不带凭据、按客户端会用的公网地址读回，一致才记进上传记录。dev 上 cn 传不上（含超过时限）只打警告、
+      # 写进作业摘要，清单不列 cn、其余源照发：少一个源只是让大陆用户改走 hk，为它停发的话所有客户端都收不到这一版。
+      # hk、global 传不上照样让 publish 失败。
       - name: 上传到三个存储桶
         env:
           OSS_CI_ACCESS_KEY_ID: ${{ secrets.OSS_CI_ACCESS_KEY_ID }}
@@ -476,32 +480,21 @@ jobs:
         run: |
           for file in "$BOOTSTRAP" "$INSTALLER"; do
             key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
-            bash .github/scripts/upload-to-mirrors.sh "$key" "$file"
-          done
-
-      # 不带凭据，按客户端会用的公网地址读回：公共读没开、自定义域名配错时上传照样成功，只有这里看得出来。
-      - name: 读回三个存储桶
-        run: |
-          for file in "$BOOTSTRAP" "$INSTALLER"; do
-            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
-            urls="$(node .github/scripts/dev-distribution.mjs mirror-urls "$key")"
-            while IFS=$'\t' read -r name url; do
-              bash .github/scripts/check-download.sh "$name" "$url" "$file" < /dev/null
-            done <<< "$urls"
+            bash .github/scripts/upload-to-mirrors.sh "$key" "$file" "$RUNNER_TEMP/mirror-record.tsv"
           done
 
       # url 是 dev.35 及更早的客户端唯一会用的源，取 github：桶里 dev/ 下的对象 30 天后被删，dev 停更久了指向桶的 url
-      # 会让旧客户端一直 404，预发布附件跟着当前预发布走、不会过期。x-sources 列全 cn、hk、global、github 四个源，
+      # 会让旧客户端一直 404，预发布附件跟着当前预发布走、不会过期。x-sources 只列上传记录里传上了引导程序的桶，再加 github，
       # 新客户端按「文件下载源」排序，失败换下一个，不受 url 取哪个影响。x-size 是引导程序的字节数，客户端下载超过它就中止。
       # github 源指向下面重建的同一个预发布，那时才存在，重建后再读回。文件名带版本号，清单和包总是同一次构建的。
-      # 写完从文件读回来按确切的键集合、源名、主机白名单、https 和带版本的路径校验：拼错的键插件只会忽略，
+      # 写完从文件读回来按确切的键集合、源名、主机白名单、https 和带版本的路径校验，源要与上传记录对得上：拼错的键插件只会忽略，
       # 不会在任何地方报错。
       - name: 生成并校验开发版更新清单
         id: manifest
         run: |
           manifest="$RUNNER_TEMP/latest.json"
-          node .github/scripts/dev-distribution.mjs build "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$manifest"
-          node .github/scripts/dev-distribution.mjs validate "$manifest" "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG"
+          node .github/scripts/dev-distribution.mjs build "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$RUNNER_TEMP/mirror-record.tsv" "$manifest"
+          node .github/scripts/dev-distribution.mjs validate "$manifest" "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$RUNNER_TEMP/mirror-record.tsv"
           cat "$manifest"
           echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
 

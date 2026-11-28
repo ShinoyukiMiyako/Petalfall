@@ -470,4 +470,21 @@ describe('dev 构建工作流的契约', () => {
       'publish 的稀疏检出名单与各步用到的文件对不上：少了的会让 publish 在签名、上传做到一半时失败，多了的白放在持钥的机器上',
     );
   });
+
+  // dev 上 cn 传不上只降级，降级靠上传记录：上传那一步不写记录时 cn 一失败整个 publish 就停；build、validate 读的
+  // 不是同一份时，清单可能列出没传上的桶，或者漏掉传上了的
+  it('publish 上传时写上传记录，build 与 validate 读的是同一份', () => {
+    const publish = job('publish');
+    const record = '"$RUNNER_TEMP/mirror-record.tsv"';
+    assert.deepEqual(
+      // 稀疏检出名单里也有这个文件名，只看调用它的行
+      publish.filter((line) => line.includes('bash .github/scripts/upload-to-mirrors.sh')),
+      [`bash .github/scripts/upload-to-mirrors.sh "$key" "$file" ${record}`],
+      'publish 上传时不再写上传记录',
+    );
+    const manifestCalls = publish.filter((line) => /dev-distribution\.mjs (?:build|validate) /.test(line));
+    assert.equal(manifestCalls.length, 2, `publish 里生成、校验清单的地方变了：${manifestCalls}`);
+    assert.ok(manifestCalls[0].endsWith(`"$GITHUB_SHA" ${record} "$manifest"`), `build 没读上传记录：${manifestCalls[0]}`);
+    assert.ok(manifestCalls[1].endsWith(`"$TAG" ${record}`), `validate 没读上传记录：${manifestCalls[1]}`);
+  });
 });

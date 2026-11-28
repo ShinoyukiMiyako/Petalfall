@@ -12,11 +12,14 @@ const USAGE = [
   "  dev-distribution.mjs key <版本> <运行标识> <文件名>",
   "  dev-distribution.mjs upload-targets <R2 账户 ID>",
   "  dev-distribution.mjs mirror-urls <对象键>",
-  "  dev-distribution.mjs build <版本> <运行标识> <引导程序> <仓库> <tag> <提交> <输出清单> [说明文件]",
-  "  dev-distribution.mjs validate <清单> <版本> <运行标识> <引导程序> <仓库> <tag>",
+  "  dev-distribution.mjs optional-mirrors <对象键>",
+  "  dev-distribution.mjs build <版本> <运行标识> <引导程序> <仓库> <tag> <提交> <上传记录> <输出清单> [说明文件]",
+  "  dev-distribution.mjs validate <清单> <版本> <运行标识> <引导程序> <仓库> <tag> <上传记录>",
   "  dev-distribution.mjs compare <版本 a> <版本 b>",
   "  dev-distribution.mjs next-beta <基础号> <tag 列表文件>",
   "运行标识是 <运行号>-<运行次数>，工作流里写成 \"$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT\"。",
+  "optional-mirrors 打印这个键所在通道上传不上也照样发版的桶，一行一个。",
+  "上传记录是 upload-to-mirrors.sh 写的那份，清单只列它记为传上的桶。",
   "build 的说明文件：beta 版本必须给，dev 版本不许给。compare 按 semver 优先级打印 -1、0 或 1。",
   "next-beta 打印 tag 列表（每行一个）里 v<基础号>-beta.<N> 的最大 N 加 1，没有就打印 1。",
 ].join("\n");
@@ -85,6 +88,60 @@ export const SOURCE_HOSTS = Object.freeze({
   github: "github.com",
 });
 export const SOURCE_NAMES = Object.freeze(Object.keys(SOURCE_HOSTS));
+const MIRROR_NAMES = Object.freeze(MIRRORS.map(({ name }) => name));
+
+// 各通道上传不上也照样发版的桶：它们不进清单，其余源照发。dev 每次推送都自动发版、只给内部试用，托管机到杭州 OSS
+// 时快时慢（慢时一个包传二十多分钟，publish 撞上作业时限，这一版就谁都收不到），少了 cn 只是让大陆用户改走 hk；
+// beta 每版经人审批后发给测试用户，哪个桶传不上都停发、重跑。github 源不是桶，每份清单都有。键与 CHANNELS 一一对应。
+const OPTIONAL_MIRRORS = Object.freeze({
+  dev: Object.freeze(["cn"]),
+  beta: Object.freeze([]),
+});
+
+export function optionalMirrors(channel) {
+  if (!Object.hasOwn(OPTIONAL_MIRRORS, channel)) throw new Error(`通道 ${JSON.stringify(channel)} 没有定义哪些桶可以缺`);
+  return OPTIONAL_MIRRORS[channel];
+}
+
+// 清单列哪些桶由上传记录定，这里只查它合不合本通道的规矩：只认三个桶的名字，不重复，本通道不许缺的一个不少
+function requireMirrors(channel, mirrors) {
+  if (!Array.isArray(mirrors)) throw new Error(`传上的桶应是数组：${JSON.stringify(mirrors)}`);
+  const seen = new Set();
+  for (const name of mirrors) {
+    if (!MIRROR_NAMES.includes(name)) throw new Error(`桶名 ${JSON.stringify(name)} 不在 ${MIRROR_NAMES.join("、")} 之列`);
+    if (seen.has(name)) throw new Error(`桶 ${name} 重复`);
+    seen.add(name);
+  }
+  const missing = MIRROR_NAMES.filter((name) => !seen.has(name) && !optionalMirrors(channel).includes(name));
+  if (missing.length > 0) throw new Error(`${channel} 通道上 ${missing.join("、")} 不许缺，没有传上就不能发版`);
+}
+
+const RECORD_RESULTS = Object.freeze(["ok", "failed"]);
+
+// upload-to-mirrors.sh 每处理完一个桶记一行「源名<tab>结果<tab>对象键」：ok 是按公网地址读回与本地一致；failed 是本通道
+// 允许缺的桶没传上，或者它在前面的文件上失败过、这个文件就没再传。返回这个键上记为 ok 的桶，按 MIRRORS 的先后。
+// 三个桶在这个键上必须各有恰好一行：缺了一行说明那个桶没走完上传，不能当成传上，也不能当成可以不管。
+export function uploadedMirrors(record, key) {
+  if (typeof record !== "string") throw new Error("上传记录应是文件内容的文本");
+  requireObjectKey(key);
+  const lines = record.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  const results = new Map();
+  lines.forEach((line, index) => {
+    const fields = line.split("\t");
+    const [name, result, recordKey] = fields;
+    if (fields.length !== 3 || !MIRROR_NAMES.includes(name) || !RECORD_RESULTS.includes(result)) {
+      throw new Error(`上传记录第 ${index + 1} 行应为「源名<tab>${RECORD_RESULTS.join("|")}<tab>对象键」：${JSON.stringify(line)}`);
+    }
+    requireObjectKey(recordKey);
+    if (recordKey !== key) return;
+    if (results.has(name)) throw new Error(`上传记录里 ${name} 传 ${key} 的结果不止一行`);
+    results.set(name, result);
+  });
+  const missing = MIRROR_NAMES.filter((name) => !results.has(name));
+  if (missing.length > 0) throw new Error(`上传记录里没有 ${missing.join("、")} 传 ${key} 的结果`);
+  return MIRROR_NAMES.filter((name) => results.get(name) === "ok");
+}
 
 function requireSegment(value, what) {
   if (typeof value !== "string" || !SEGMENT.test(value)) throw new Error(`${what}只能由字母、数字和 . _ - 组成：${JSON.stringify(value)}`);
@@ -247,17 +304,21 @@ export function githubUrl(repo, tag, fileName) {
   return `https://github.com/${repo}/releases/download/${tag}/${fileName}`;
 }
 
-export function sourceUrls({ version, run, fileName, repo, tag }) {
+// mirrors 是这次传上并读回过的桶，没有默认值：清单里每个桶源都得有这次运行的上传记录作证
+export function sourceUrls({ version, run, fileName, repo, tag, mirrors }) {
   requireReleaseTag(version, tag);
-  return [...mirrorUrls(objectKey(version, run, fileName)), { name: "github", url: githubUrl(repo, tag, fileName) }];
+  requireMirrors(channelOf(version), mirrors);
+  const listed = mirrorUrls(objectKey(version, run, fileName)).filter(({ name }) => mirrors.includes(name));
+  return [...listed, { name: "github", url: githubUrl(repo, tag, fileName) }];
 }
 
 // url 是 dev.35 及更早的客户端唯一会用的源，取 github：三个桶里 dev/ 下的对象 30 天后被生命周期规则删掉，dev 停更
 // 超过 30 天时，指向桶的 url 会让旧客户端一直 404；github 附件跟着当前的滚动预发布走，预发布不重建就一直在、不会过期。
 // beta 没有旧客户端，照样取 github：每版一个永久保留的 Release，附件地址就是这一版的永久地址。
 // x-sources 是新客户端的完整候选表，含 url 本身；新客户端按它换源，url 取哪个源不影响它们。
-export function buildManifest({ version, notes, pubDate, signature, size, run, fileName, repo, tag }) {
-  const sources = sourceUrls({ version, run, fileName, repo, tag });
+// 它只列 mirrors 里的桶：客户端只在清单列出的源之间换，缺了 cn 就从剩下的源里挑。
+export function buildManifest({ version, notes, pubDate, signature, size, run, fileName, repo, tag, mirrors }) {
+  const sources = sourceUrls({ version, run, fileName, repo, tag, mirrors });
   return {
     version,
     notes,
@@ -307,7 +368,7 @@ function isBuildPubDate(value) {
   return typeof value === "string" && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value;
 }
 
-export function validateManifest(manifest, { version, run, fileName, size, repo, tag }) {
+export function validateManifest(manifest, { version, run, fileName, size, repo, tag, mirrors }) {
   requireKeys(manifest, ["version", "notes", "pub_date", "platforms"], "清单");
   if (manifest.version !== version) throw new Error(`清单的 version 是 ${JSON.stringify(manifest.version)}，应为 ${version}`);
   requireNotes(manifest.notes, "清单的 notes");
@@ -333,12 +394,17 @@ export function validateManifest(manifest, { version, run, fileName, size, repo,
     if (urls.has(name)) throw new Error(`源 ${name} 重复`);
     urls.set(name, parseSourceUrl(name, source.url));
   });
-  const missing = SOURCE_NAMES.filter((name) => !urls.has(name));
+  // 该列的是这次传上的桶加 github，一个不多：多出来的桶源没有从公网核对过字节，客户端会先去试一个可能 404 的地址
+  requireMirrors(channelOf(version), mirrors);
+  const wanted = [...mirrors, "github"];
+  const missing = SOURCE_NAMES.filter((name) => wanted.includes(name) && !urls.has(name));
   if (missing.length > 0) throw new Error(`x-sources 缺源 ${missing.join("、")}`);
+  const extra = SOURCE_NAMES.filter((name) => !wanted.includes(name) && urls.has(name));
+  if (extra.length > 0) throw new Error(`x-sources 列了这次没有传上的源 ${extra.join("、")}`);
 
   // 三个桶传的是同一个对象键，路径带版本和运行标识；GitHub 上的文件名本身带版本
   const key = `/${objectKey(version, run, fileName)}`;
-  for (const { name } of MIRRORS) {
+  for (const name of mirrors) {
     const { pathname } = urls.get(name);
     if (pathname !== key) throw new Error(`源 ${name} 的路径是 ${pathname}，应为 ${key}`);
   }
@@ -375,10 +441,17 @@ export function runCommand([command, ...args]) {
       expectArgs(args, 1);
       return tsv(mirrorUrls(args[0]).map(({ name, url }) => [name, url]));
     }
+    case "optional-mirrors": {
+      expectArgs(args, 1);
+      requireObjectKey(args[0]);
+      return tsv(optionalMirrors(args[0].split("/")[0]).map((name) => [name]));
+    }
     case "build": {
-      expectArgs(args, 7, 8);
-      const [version, run, bootstrap, repo, tag, commit, out, notesFile] = args;
+      expectArgs(args, 8, 9);
+      const [version, run, bootstrap, repo, tag, commit, recordPath, out, notesFile] = args;
       if (!COMMIT.test(commit)) throw new Error(`提交应为 40 位十六进制：${JSON.stringify(commit)}`);
+      const fileName = basename(bootstrap);
+      const mirrors = uploadedMirrors(readFileSync(recordPath, "utf8"), objectKey(version, run, fileName));
       const manifest = buildManifest({
         version,
         notes: releaseNotes(version, commit, notesFile),
@@ -386,18 +459,21 @@ export function runCommand([command, ...args]) {
         signature: readFileSync(`${bootstrap}.sig`, "utf8").trim(),
         size: statSync(bootstrap).size,
         run,
-        fileName: basename(bootstrap),
+        fileName,
         repo,
         tag,
+        mirrors,
       });
       writeFileSync(out, JSON.stringify(manifest, null, 2));
       return "";
     }
     case "validate": {
-      expectArgs(args, 6);
-      const [manifestPath, version, run, bootstrap, repo, tag] = args;
+      expectArgs(args, 7);
+      const [manifestPath, version, run, bootstrap, repo, tag, recordPath] = args;
       const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-      validateManifest(manifest, { version, run, fileName: basename(bootstrap), size: statSync(bootstrap).size, repo, tag });
+      const fileName = basename(bootstrap);
+      const mirrors = uploadedMirrors(readFileSync(recordPath, "utf8"), objectKey(version, run, fileName));
+      validateManifest(manifest, { version, run, fileName, size: statSync(bootstrap).size, repo, tag, mirrors });
       return `清单校验通过：${version}，${manifest.platforms[PLATFORM]["x-sources"].map(({ name }) => name).join("、")}\n`;
     }
     case "compare": {

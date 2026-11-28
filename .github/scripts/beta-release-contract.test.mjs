@@ -437,10 +437,25 @@ describe('beta 发布工作流的契约', () => {
   // 键就撞上上次留下、覆盖不了的对象；dev-distribution.mjs 认的运行标识是 <运行号>-<运行次数>。
   it('stage 按运行标识算对象键、生成和校验清单', () => {
     const calls = job(LINES, 'stage').filter((line) => /dev-distribution\.mjs (?:key|build|validate) /.test(line));
-    assert.equal(calls.length, 4, `stage 里调用 key、build、validate 的地方变了：${calls}`);
+    assert.equal(calls.length, 3, `stage 里调用 key、build、validate 的地方变了：${calls}`);
     for (const call of calls) {
       assert.ok(call.includes('"$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" '), `对象键没带运行标识：${call}`);
     }
+  });
+
+  // 清单里的桶源只认上传记录：上传那一步不写记录，或 build、validate 读的不是同一份，清单就可能列出没传上的桶
+  it('stage 上传时写上传记录，build 与 validate 读的是同一份', () => {
+    const stage = job(LINES, 'stage');
+    const record = '"$RUNNER_TEMP/mirror-record.tsv"';
+    assert.deepEqual(
+      stage.filter((line) => line.includes('bash .github/scripts/upload-to-mirrors.sh')),
+      [`bash .github/scripts/upload-to-mirrors.sh "$key" "$file" ${record}`],
+      'stage 上传时不再写上传记录',
+    );
+    const manifestCalls = stage.filter((line) => /dev-distribution\.mjs (?:build|validate) /.test(line));
+    assert.equal(manifestCalls.length, 2, `stage 里生成、校验清单的地方变了：${manifestCalls}`);
+    assert.ok(manifestCalls[0].includes(`"$GITHUB_SHA" ${record} "$manifest" "$NOTES"`), `build 没读上传记录：${manifestCalls[0]}`);
+    assert.ok(manifestCalls[1].endsWith(`"$TAG" ${record}`), `validate 没读上传记录：${manifestCalls[1]}`);
   });
 
   // beta 客户端只问这一个地址：推送后回读、发布前比版本，读的都得是它，否则推上去了也核对不到客户端看到的那份。

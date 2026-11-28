@@ -17,9 +17,11 @@ import {
   mirrorUrls,
   nextBeta,
   objectKey,
+  optionalMirrors,
   runCommand,
   sourceUrls,
   uploadTargets,
+  uploadedMirrors,
   validateManifest,
 } from "./dev-distribution.mjs";
 
@@ -58,7 +60,10 @@ const BETA_SOURCES = [
 const root = mkdtempSync(join(tmpdir(), "dev-distribution-"));
 after(() => rmSync(root, { recursive: true, force: true }));
 
-const expected = { version: VERSION, run: RUN, fileName: FILE_NAME, size: SIZE, repo: REPO, tag: TAG };
+// 三个桶都传上了；dev 上 cn 传不上时清单只列另外两个
+const ALL_MIRRORS = ["cn", "hk", "global"];
+const WITHOUT_CN = ["hk", "global"];
+const expected = { version: VERSION, run: RUN, fileName: FILE_NAME, size: SIZE, repo: REPO, tag: TAG, mirrors: ALL_MIRRORS };
 const betaExpected = { ...expected, version: BETA_VERSION, fileName: BETA_FILE, tag: BETA_TAG };
 const betaOverrides = { version: BETA_VERSION, fileName: BETA_FILE, tag: BETA_TAG, notes: "修复了启动时的闪退" };
 
@@ -73,9 +78,13 @@ function manifest(overrides = {}) {
     fileName: FILE_NAME,
     repo: REPO,
     tag: TAG,
+    mirrors: ALL_MIRRORS,
     ...overrides,
   });
 }
+
+// upload-to-mirrors.sh 写的上传记录：每行「源名<tab>结果<tab>对象键」
+const recordOf = (rows) => rows.map((row) => `${row.join("\t")}\n`).join("");
 
 const entryOf = (m) => m.platforms["windows-x86_64"];
 const sourceOf = (m, name) => entryOf(m)["x-sources"].find((source) => source.name === name);
@@ -341,8 +350,11 @@ describe("githubUrl 与 sourceUrls", () => {
     assert.throws(() => githubUrl(`${REPO}/x`, TAG, FILE_NAME), /仓库应为 owner\/name/);
   });
 
-  it("四个源依次是 cn、hk、global、github", () => {
-    assert.deepEqual(sourceUrls({ version: VERSION, run: RUN, fileName: FILE_NAME, repo: REPO, tag: TAG }), [
+  const devSources = (mirrors) => sourceUrls({ version: VERSION, run: RUN, fileName: FILE_NAME, repo: REPO, tag: TAG, mirrors });
+  const betaSources = (mirrors) => sourceUrls({ version: BETA_VERSION, run: RUN, fileName: BETA_FILE, repo: REPO, tag: BETA_TAG, mirrors });
+
+  it("三个桶都传上时四个源依次是 cn、hk、global、github", () => {
+    assert.deepEqual(devSources(ALL_MIRRORS), [
       { name: "cn", url: CN },
       { name: "hk", url: HK },
       { name: "global", url: GLOBAL },
@@ -350,15 +362,59 @@ describe("githubUrl 与 sourceUrls", () => {
     ]);
   });
 
+  it("dev 上 cn 没传上时只列 hk、global、github，按桶表的先后，与传进来的先后无关", () => {
+    const expectedSources = [
+      { name: "hk", url: HK },
+      { name: "global", url: GLOBAL },
+      { name: "github", url: GITHUB },
+    ];
+    assert.deepEqual(devSources(WITHOUT_CN), expectedSources);
+    assert.deepEqual(devSources(["global", "hk"]), expectedSources);
+    assert.deepEqual(devSources(["global", "cn", "hk"]).map(({ name }) => name), ["cn", "hk", "global", "github"]);
+  });
+
+  it("dev 上 hk 或 global 没传上时拒绝：只有 cn 可以缺", () => {
+    for (const [mirrors, missing] of [
+      [["cn", "global"], "hk"],
+      [["cn", "hk"], "global"],
+      [["global"], "hk"],
+      [["cn"], "hk、global"],
+      [[], "hk、global"],
+    ]) {
+      assert.throws(() => devSources(mirrors), { message: `dev 通道上 ${missing} 不许缺，没有传上就不能发版` }, mirrors.join(","));
+    }
+  });
+
   it("beta 的桶源在 beta/ 下，github 源指向这一版自己的 Release v<版本>", () => {
-    assert.deepEqual(sourceUrls({ version: BETA_VERSION, run: RUN, fileName: BETA_FILE, repo: REPO, tag: BETA_TAG }), BETA_SOURCES);
+    assert.deepEqual(betaSources(ALL_MIRRORS), BETA_SOURCES);
+  });
+
+  it("beta 上哪个桶没传上都拒绝，cn 也一样", () => {
+    for (const [mirrors, missing] of [
+      [WITHOUT_CN, "cn"],
+      [["cn", "global"], "hk"],
+      [["cn", "hk"], "global"],
+      [[], "cn、hk、global"],
+    ]) {
+      assert.throws(() => betaSources(mirrors), { message: `beta 通道上 ${missing} 不许缺，没有传上就不能发版` }, mirrors.join(","));
+    }
+  });
+
+  it("传上的桶不是数组、有认不出的名字或重复时拒绝；github 不是桶，也不能写进去", () => {
+    for (const mirrors of [undefined, null, "cn,hk,global", { cn: true }]) {
+      assert.throws(() => devSources(mirrors), /^Error: 传上的桶应是数组/, String(mirrors));
+    }
+    for (const name of ["github", "CN", "cdn", "", "constructor"]) {
+      assert.throws(() => devSources([...ALL_MIRRORS, name]), { message: `桶名 ${JSON.stringify(name)} 不在 cn、hk、global 之列` }, name);
+    }
+    assert.throws(() => devSources(["hk", "global", "hk"]), { message: "桶 hk 重复" });
   });
 
   it("beta 的 tag 不是 v<版本> 时拒绝：滚动预发布或别的版本的附件会被删、会对不上", () => {
     const other = BETA_VERSION.replace(/\d+$/, (n) => String(Number(n) + 1));
     for (const tag of [TAG, BETA_VERSION, `v${other}`, `V${BETA_VERSION}`, `${BETA_TAG}-1`]) {
       assert.throws(
-        () => sourceUrls({ version: BETA_VERSION, run: RUN, fileName: BETA_FILE, repo: REPO, tag }),
+        () => sourceUrls({ version: BETA_VERSION, run: RUN, fileName: BETA_FILE, repo: REPO, tag, mirrors: ALL_MIRRORS }),
         { message: `beta 版本 ${BETA_VERSION} 的 tag 应为 ${BETA_TAG}，实际 ${JSON.stringify(tag)}` },
         tag,
       );
@@ -369,7 +425,18 @@ describe("githubUrl 与 sourceUrls", () => {
 describe("buildManifest", () => {
   it("插件的标准格式加 x-size 与 x-sources，url 等于不会过期的 github 源", () => {
     const pubDate = new Date(randomInt(1_700_000_000, 2_000_000_000) * 1000).toISOString();
-    const built = buildManifest({ version: VERSION, notes: "说明", pubDate, signature: SIGNATURE, size: SIZE, run: RUN, fileName: FILE_NAME, repo: REPO, tag: TAG });
+    const built = buildManifest({
+      version: VERSION,
+      notes: "说明",
+      pubDate,
+      signature: SIGNATURE,
+      size: SIZE,
+      run: RUN,
+      fileName: FILE_NAME,
+      repo: REPO,
+      tag: TAG,
+      mirrors: ALL_MIRRORS,
+    });
     assert.deepEqual(built, {
       version: VERSION,
       notes: "说明",
@@ -396,6 +463,122 @@ describe("buildManifest", () => {
     assert.equal(built.notes, "修复了启动时的闪退");
     assert.equal(entryOf(built).url, BETA_GITHUB);
     assert.deepEqual(entryOf(built)["x-sources"], BETA_SOURCES);
+  });
+
+  it("dev 上 cn 没传上时 x-sources 不列 cn，url 照样是 github 源", () => {
+    const built = manifest({ mirrors: WITHOUT_CN });
+    assert.deepEqual(entryOf(built)["x-sources"], [
+      { name: "hk", url: HK },
+      { name: "global", url: GLOBAL },
+      { name: "github", url: GITHUB },
+    ]);
+    assert.equal(entryOf(built).url, GITHUB);
+  });
+
+  it("beta 上 cn 没传上时不生成清单", () => {
+    assert.throws(() => manifest({ ...betaOverrides, mirrors: WITHOUT_CN }), { message: "beta 通道上 cn 不许缺，没有传上就不能发版" });
+  });
+});
+
+describe("optionalMirrors", () => {
+  it("dev 只有 cn 可以缺，beta 一个都不能缺", () => {
+    assert.deepEqual(optionalMirrors("dev"), ["cn"]);
+    assert.deepEqual(optionalMirrors("beta"), []);
+  });
+
+  // 正式版的流水线还没有；给 CHANNELS 加 stable 时这里会提醒同时定它哪些桶可以缺
+  it("别的通道名一律拒绝，原型链上的名字也不认", () => {
+    for (const channel of ["stable", "Dev", "", "constructor", "__proto__", "toString", undefined]) {
+      assert.throws(() => optionalMirrors(channel), { message: `通道 ${JSON.stringify(channel)} 没有定义哪些桶可以缺` }, String(channel));
+    }
+  });
+});
+
+describe("uploadedMirrors", () => {
+  const OTHER_KEY = `dev/${VERSION}-${RUN}/Petalfall_${VERSION}_x64-setup.exe`;
+
+  it("返回这个键上记为 ok 的桶，按桶表的先后；别的键上的行不管结果", () => {
+    const record = recordOf([
+      ["global", "ok", KEY],
+      ["cn", "failed", KEY],
+      ["cn", "failed", OTHER_KEY],
+      ["hk", "ok", KEY],
+      ["hk", "ok", OTHER_KEY],
+      ["global", "ok", OTHER_KEY],
+    ]);
+    assert.deepEqual(uploadedMirrors(record, KEY), WITHOUT_CN);
+    assert.deepEqual(uploadedMirrors(record, OTHER_KEY), WITHOUT_CN);
+    assert.deepEqual(uploadedMirrors(recordOf(ALL_MIRRORS.map((name) => [name, "ok", BETA_KEY])), BETA_KEY), ALL_MIRRORS);
+  });
+
+  it("引导程序传上了 cn、NSIS 包没传上时，引导程序的键上照样有 cn：清单只管引导程序", () => {
+    const record = recordOf([
+      ...ALL_MIRRORS.map((name) => [name, "ok", KEY]),
+      ["cn", "failed", OTHER_KEY],
+      ["hk", "ok", OTHER_KEY],
+      ["global", "ok", OTHER_KEY],
+    ]);
+    assert.deepEqual(uploadedMirrors(record, KEY), ALL_MIRRORS);
+  });
+
+  it("这个键上少了哪个桶的结果就拒绝：没走完上传的桶不能当成传上，也不能当成可以不管", () => {
+    for (const absent of ALL_MIRRORS) {
+      const record = recordOf(ALL_MIRRORS.filter((name) => name !== absent).map((name) => [name, "ok", KEY]));
+      assert.throws(() => uploadedMirrors(record, KEY), { message: `上传记录里没有 ${absent} 传 ${KEY} 的结果` }, absent);
+    }
+    assert.throws(() => uploadedMirrors("", KEY), { message: `上传记录里没有 cn、hk、global 传 ${KEY} 的结果` });
+    // 只有别的键的记录：工作流把 NSIS 包的键当成了引导程序的
+    assert.throws(() => uploadedMirrors(recordOf(ALL_MIRRORS.map((name) => [name, "ok", OTHER_KEY])), KEY), /^Error: 上传记录里没有 cn、hk、global 传 /);
+  });
+
+  it("同一个桶在这个键上不止一行时拒绝，哪怕结果相同", () => {
+    for (const second of ["ok", "failed"]) {
+      const record = recordOf([...ALL_MIRRORS.map((name) => [name, "ok", KEY]), ["hk", second, KEY]]);
+      assert.throws(() => uploadedMirrors(record, KEY), { message: `上传记录里 hk 传 ${KEY} 的结果不止一行` }, second);
+    }
+  });
+
+  it("有一行认不出就拒绝，哪怕它是别的键的：字段数、源名、结果都按确切的写法", () => {
+    const good = ALL_MIRRORS.map((name) => [name, "ok", KEY]);
+    for (const bad of [
+      "cn ok " + KEY,
+      `cn\tok`,
+      `cn\tok\t${KEY}\textra`,
+      `github\tok\t${KEY}`,
+      `CN\tok\t${OTHER_KEY}`,
+      `cn\tOK\t${OTHER_KEY}`,
+      `cn\tskipped\t${OTHER_KEY}`,
+      `cn\t\t${OTHER_KEY}`,
+      "",
+    ]) {
+      const record = `${recordOf(good)}${bad}\n`;
+      assert.throws(() => uploadedMirrors(record, KEY), { message: `上传记录第 4 行应为「源名<tab>ok|failed<tab>对象键」：${JSON.stringify(bad)}` }, bad);
+    }
+  });
+
+  it("行里的对象键不合法、带 CR 时拒绝；要查的键不合法时也拒绝", () => {
+    for (const recordKey of [`stable/${VERSION}-${RUN}/${FILE_NAME}`, `${KEY}\r`, "dev/a", ""]) {
+      const record = recordOf([...ALL_MIRRORS.map((name) => [name, "ok", KEY]), ["cn", "ok", recordKey]]);
+      assert.throws(() => uploadedMirrors(record, KEY), /^Error: 对象键应为 <通道>\/<目录>\/<文件名>/, JSON.stringify(recordKey));
+    }
+    assert.throws(() => uploadedMirrors(recordOf(ALL_MIRRORS.map((name) => [name, "ok", KEY])), `/${KEY}`), /^Error: 对象键应为 /);
+    assert.throws(() => uploadedMirrors(Buffer.from(""), KEY), { message: "上传记录应是文件内容的文本" });
+  });
+
+  it("随机打乱的记录里照样只取这个键上记为 ok 的", () => {
+    const results = Object.fromEntries(ALL_MIRRORS.map((name) => [name, randomInt(0, 2) === 0 ? "ok" : "failed"]));
+    const rows = [
+      ...ALL_MIRRORS.map((name) => [name, results[name], KEY]),
+      ...ALL_MIRRORS.map((name) => [name, randomInt(0, 2) === 0 ? "ok" : "failed", OTHER_KEY]),
+    ];
+    for (let i = rows.length - 1; i > 0; i--) {
+      const j = randomInt(0, i + 1);
+      [rows[i], rows[j]] = [rows[j], rows[i]];
+    }
+    assert.deepEqual(
+      uploadedMirrors(recordOf(rows), KEY),
+      ALL_MIRRORS.filter((name) => results[name] === "ok"),
+    );
   });
 });
 
@@ -457,6 +640,43 @@ describe("validateManifest", () => {
     const m = manifest();
     entryOf(m)["x-sources"].reverse();
     assert.equal(validateManifest(m, expected), undefined);
+  });
+
+  it("dev 上 cn 没传上时，不列 cn 的清单拿同一份传上的桶比，经 JSON 往返后通过", () => {
+    const m = JSON.parse(JSON.stringify(manifest({ mirrors: WITHOUT_CN })));
+    assert.equal(validateManifest(m, { ...expected, mirrors: WITHOUT_CN }), undefined);
+  });
+
+  it("清单列了这次没传上的桶时拒绝：它没从公网核对过字节，客户端会先去试一个可能 404 的地址", () => {
+    assert.throws(() => validateManifest(manifest(), { ...expected, mirrors: WITHOUT_CN }), {
+      message: "x-sources 列了这次没有传上的源 cn",
+    });
+  });
+
+  it("传上了的桶清单里却没有时拒绝：缺的是哪个就报哪个", () => {
+    assert.throws(() => validateManifest(manifest({ mirrors: WITHOUT_CN }), expected), { message: "x-sources 缺源 cn" });
+    const m = manifest({ mirrors: WITHOUT_CN });
+    entryOf(m)["x-sources"].splice(0, 1);
+    assert.throws(() => validateManifest(m, { ...expected, mirrors: WITHOUT_CN }), { message: "x-sources 缺源 hk" });
+  });
+
+  it("桶缺了也必须有 github 源：它是 url 指向的那一个，旧客户端只认它", () => {
+    const m = manifest({ mirrors: WITHOUT_CN });
+    entryOf(m)["x-sources"].pop();
+    assert.throws(() => validateManifest(m, { ...expected, mirrors: WITHOUT_CN }), { message: "x-sources 缺源 github" });
+  });
+
+  it("期望的桶不合本通道的规矩时拒绝，哪怕清单与它一致：beta 不许缺 cn，dev 不许缺 hk", () => {
+    const beta = manifest(betaOverrides);
+    entryOf(beta)["x-sources"].splice(0, 1);
+    assert.throws(() => validateManifest(beta, { ...betaExpected, mirrors: WITHOUT_CN }), {
+      message: "beta 通道上 cn 不许缺，没有传上就不能发版",
+    });
+    const dev = manifest();
+    entryOf(dev)["x-sources"].splice(1, 1);
+    assert.throws(() => validateManifest(dev, { ...expected, mirrors: ["cn", "global"] }), {
+      message: "dev 通道上 hk 不许缺，没有传上就不能发版",
+    });
   });
 
   it("pub_date 是 toISOString 形状的真实时刻时通过：闰年的 2 月 29 日、一年最后一毫秒、随机时刻", () => {
@@ -707,6 +927,17 @@ describe("命令行入口", () => {
     return { dir, bootstrap, manifest: join(dir, "latest.json") };
   }
 
+  function recordFixture(rows) {
+    const dir = join(root, String(nextCase++));
+    mkdirSync(dir);
+    const path = join(dir, "mirror-record.tsv");
+    writeFileSync(path, recordOf(rows));
+    return path;
+  }
+
+  // 三个桶都传上了这个键
+  const okRecord = (key) => recordFixture(ALL_MIRRORS.map((name) => [name, "ok", key]));
+
   it("key 打印对象键", () => {
     const result = run("key", VERSION, RUN, FILE_NAME);
     assert.equal(result.status, 0, result.stderr);
@@ -736,11 +967,33 @@ describe("命令行入口", () => {
     assert.equal(result.stdout, `cn\t${CN}\nhk\t${HK}\nglobal\t${GLOBAL}\n`);
   });
 
+  it("optional-mirrors 打印键所在通道允许缺的桶：dev 只有 cn，beta 什么都不打印", () => {
+    const dev = run("optional-mirrors", KEY);
+    assert.equal(dev.status, 0, dev.stderr);
+    assert.equal(dev.stdout, "cn\n");
+    const trial = run("optional-mirrors", `dev/trial-${RUN}/sample-${RUN}.bin`);
+    assert.equal(trial.status, 0, trial.stderr);
+    assert.equal(trial.stdout, "cn\n");
+    const beta = run("optional-mirrors", BETA_KEY);
+    assert.equal(beta.status, 0, beta.stderr);
+    assert.equal(beta.stdout, "");
+  });
+
+  it("optional-mirrors 的键不在 dev/ 或 beta/ 下时退出非 0，什么都不打印：空输出在脚本里就是一个都不许缺，不能拿它兜认不出的键", () => {
+    for (const key of [`stable/${VERSION}-${RUN}/${FILE_NAME}`, `/${KEY}`, "dev/a"]) {
+      const result = run("optional-mirrors", key);
+      assert.notEqual(result.status, 0, key);
+      assert.match(result.stderr, /对象键应为 <通道>\/<目录>\/<文件名>/);
+      assert.equal(result.stdout, "");
+    }
+  });
+
   it("build 写出的清单带签名文件的内容、引导程序的字节数和这次提交，validate 照它通过", () => {
     const { bootstrap, manifest: out } = bootstrapFixture();
     const commit = randomBytes(20).toString("hex");
     const before = Date.now();
-    const built = run("build", VERSION, RUN, bootstrap, REPO, TAG, commit, out);
+    const record = okRecord(KEY);
+    const built = run("build", VERSION, RUN, bootstrap, REPO, TAG, commit, record, out);
     assert.equal(built.status, 0, built.stderr);
     assert.equal(built.stdout, "");
 
@@ -762,17 +1015,93 @@ describe("命令行入口", () => {
       },
     });
 
-    const validated = run("validate", out, VERSION, RUN, bootstrap, REPO, TAG);
+    const validated = run("validate", out, VERSION, RUN, bootstrap, REPO, TAG, record);
     assert.equal(validated.status, 0, validated.stderr);
     assert.equal(validated.stdout, `清单校验通过：${VERSION}，cn、hk、global、github\n`);
+  });
+
+  it("dev 的上传记录里 cn 没传上引导程序时，build 写出的清单不列 cn，validate 照同一份记录通过", () => {
+    const { bootstrap, manifest: out } = bootstrapFixture();
+    const installerKey = `dev/${VERSION}-${RUN}/Petalfall_${VERSION}_x64-setup.exe`;
+    const record = recordFixture([
+      ["cn", "failed", KEY],
+      ["hk", "ok", KEY],
+      ["global", "ok", KEY],
+      ["cn", "failed", installerKey],
+      ["hk", "ok", installerKey],
+      ["global", "ok", installerKey],
+    ]);
+    const built = run("build", VERSION, RUN, bootstrap, REPO, TAG, commit(), record, out);
+    assert.equal(built.status, 0, built.stderr);
+    const entry = JSON.parse(readFileSync(out, "utf8")).platforms["windows-x86_64"];
+    assert.deepEqual(entry["x-sources"], [
+      { name: "hk", url: HK },
+      { name: "global", url: GLOBAL },
+      { name: "github", url: GITHUB },
+    ]);
+    assert.equal(entry.url, GITHUB);
+
+    const validated = run("validate", out, VERSION, RUN, bootstrap, REPO, TAG, record);
+    assert.equal(validated.status, 0, validated.stderr);
+    assert.equal(validated.stdout, `清单校验通过：${VERSION}，hk、global、github\n`);
+
+    // 换一份三个桶都传上的记录来比：清单少了 cn，说明它不是照这份记录生成的
+    const stale = run("validate", out, VERSION, RUN, bootstrap, REPO, TAG, okRecord(KEY));
+    assert.notEqual(stale.status, 0);
+    assert.match(stale.stderr, /x-sources 缺源 cn/);
+    assert.equal(stale.stdout, "");
+  });
+
+  it("validate 拿 cn 没传上的记录比列了 cn 的清单时退出非 0", () => {
+    const { bootstrap, manifest: out } = bootstrapFixture();
+    assert.equal(run("build", VERSION, RUN, bootstrap, REPO, TAG, commit(), okRecord(KEY), out).status, 0);
+    const record = recordFixture([
+      ["cn", "failed", KEY],
+      ["hk", "ok", KEY],
+      ["global", "ok", KEY],
+    ]);
+    const result = run("validate", out, VERSION, RUN, bootstrap, REPO, TAG, record);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /x-sources 列了这次没有传上的源 cn/);
+    assert.equal(result.stdout, "");
+  });
+
+  it("build 在上传记录不全、不许缺的桶没传上或记录文件不存在时退出非 0，不写清单", () => {
+    const { bootstrap, manifest: out } = bootstrapFixture();
+    for (const [record, message] of [
+      [recordFixture([["hk", "ok", KEY], ["global", "ok", KEY]]), `上传记录里没有 cn 传 ${KEY} 的结果`],
+      [recordFixture([["cn", "ok", KEY], ["hk", "failed", KEY], ["global", "ok", KEY]]), "dev 通道上 hk 不许缺，没有传上就不能发版"],
+      [recordFixture([["cn", "ok", KEY], ["hk", "ok", KEY], ["global", "failed", KEY]]), "dev 通道上 global 不许缺，没有传上就不能发版"],
+      [join(root, "missing-record.tsv"), "ENOENT"],
+    ]) {
+      const result = run("build", VERSION, RUN, bootstrap, REPO, TAG, commit(), record, out);
+      assert.notEqual(result.status, 0, message);
+      assert.ok(result.stderr.includes(message), result.stderr);
+      assert.equal(result.stdout, "");
+      assert.throws(() => statSync(out), { code: "ENOENT" });
+    }
+  });
+
+  it("build 给 beta 版本时 cn 没传上也不写清单：beta 哪个桶都不许缺", () => {
+    const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
+    const record = recordFixture([
+      ["cn", "failed", BETA_KEY],
+      ["hk", "ok", BETA_KEY],
+      ["global", "ok", BETA_KEY],
+    ]);
+    const result = run("build", BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG, commit(), record, out, notesFixture("说明"));
+    assert.notEqual(result.status, 0);
+    assert.ok(result.stderr.includes("beta 通道上 cn 不许缺，没有传上就不能发版"), result.stderr);
+    assert.throws(() => statSync(out), { code: "ENOENT" });
   });
 
   it("validate 拿另一个引导程序比时退出非 0：x-size 对不上", () => {
     const bytes = randomBytes(randomInt(2, 8192));
     const { bootstrap, manifest: out } = bootstrapFixture(bytes);
-    assert.equal(run("build", VERSION, RUN, bootstrap, REPO, TAG, randomBytes(20).toString("hex"), out).status, 0);
+    const record = okRecord(KEY);
+    assert.equal(run("build", VERSION, RUN, bootstrap, REPO, TAG, randomBytes(20).toString("hex"), record, out).status, 0);
     writeFileSync(bootstrap, bytes.subarray(1));
-    const result = run("validate", out, VERSION, RUN, bootstrap, REPO, TAG);
+    const result = run("validate", out, VERSION, RUN, bootstrap, REPO, TAG, record);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, new RegExp(`x-size 是 ${bytes.length}，引导程序实际 ${bytes.length - 1} 字节`));
     assert.equal(result.stdout, "");
@@ -780,10 +1109,11 @@ describe("命令行入口", () => {
 
   it("validate 用另一次运行的标识比时退出非 0：读回验的和清单写的不是同一批对象", () => {
     const { bootstrap, manifest: out } = bootstrapFixture();
-    assert.equal(run("build", VERSION, RUN, bootstrap, REPO, TAG, randomBytes(20).toString("hex"), out).status, 0);
-    // 同一运行的下一次重跑；运行次数相同、运行号不同的另一次运行
+    assert.equal(run("build", VERSION, RUN, bootstrap, REPO, TAG, randomBytes(20).toString("hex"), okRecord(KEY), out).status, 0);
+    // 同一运行的下一次重跑；运行次数相同、运行号不同的另一次运行。上传记录跟着那次运行走，拦下它的是清单里的路径
     for (const other of [`${RUN_ID}-${RUN_ATTEMPT + 1}`, `${RUN_ID + randomInt(1, 1000)}-${RUN_ATTEMPT}`]) {
-      const result = run("validate", out, VERSION, other, bootstrap, REPO, TAG);
+      const record = okRecord(`dev/${VERSION}-${other}/${FILE_NAME}`);
+      const result = run("validate", out, VERSION, other, bootstrap, REPO, TAG, record);
       assert.notEqual(result.status, 0, other);
       assert.ok(result.stderr.includes(`源 cn 的路径是 /${KEY}，应为 /dev/${VERSION}-${other}/${FILE_NAME}`), result.stderr);
       assert.equal(result.stdout, "");
@@ -800,13 +1130,14 @@ describe("命令行入口", () => {
     assert.equal(key.stdout, "");
 
     const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
-    const built = run("build", BETA_VERSION, attemptOnly, bootstrap, REPO, BETA_TAG, commit(), out, notesFixture("说明"));
+    const record = okRecord(BETA_KEY);
+    const built = run("build", BETA_VERSION, attemptOnly, bootstrap, REPO, BETA_TAG, commit(), record, out, notesFixture("说明"));
     assert.notEqual(built.status, 0);
     assert.ok(built.stderr.includes(message), built.stderr);
     assert.throws(() => statSync(out), { code: "ENOENT" });
 
-    assert.equal(run("build", BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG, commit(), out, notesFixture("说明")).status, 0);
-    const validated = run("validate", out, BETA_VERSION, attemptOnly, bootstrap, REPO, BETA_TAG);
+    assert.equal(run("build", BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG, commit(), record, out, notesFixture("说明")).status, 0);
+    const validated = run("validate", out, BETA_VERSION, attemptOnly, bootstrap, REPO, BETA_TAG, record);
     assert.notEqual(validated.status, 0);
     assert.ok(validated.stderr.includes(message), validated.stderr);
     assert.equal(validated.stdout, "");
@@ -814,7 +1145,7 @@ describe("命令行入口", () => {
 
   it("build 的提交不是 40 位十六进制时退出非 0，不写清单", () => {
     const { bootstrap, manifest: out } = bootstrapFixture();
-    const result = run("build", VERSION, RUN, bootstrap, REPO, TAG, "0123abcd", out);
+    const result = run("build", VERSION, RUN, bootstrap, REPO, TAG, "0123abcd", okRecord(KEY), out);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /提交应为 40 位十六进制/);
     assert.throws(() => statSync(out), { code: "ENOENT" });
@@ -839,7 +1170,8 @@ describe("命令行入口", () => {
       [`\n${"说".repeat(4000)}\n`, "说".repeat(4000)],
     ]) {
       const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
-      const built = run("build", BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG, commit(), out, notesFixture(content));
+      const record = okRecord(BETA_KEY);
+      const built = run("build", BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG, commit(), record, out, notesFixture(content));
       assert.equal(built.status, 0, built.stderr);
       assert.equal(built.stdout, "");
       const written = JSON.parse(readFileSync(out, "utf8"));
@@ -849,7 +1181,7 @@ describe("命令行入口", () => {
         "windows-x86_64": { signature: SIGNATURE, url: BETA_GITHUB, "x-size": statSync(bootstrap).size, "x-sources": BETA_SOURCES },
       });
 
-      const validated = run("validate", out, BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG);
+      const validated = run("validate", out, BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG, record);
       assert.equal(validated.status, 0, validated.stderr);
       assert.equal(validated.stdout, `清单校验通过：${BETA_VERSION}，cn、hk、global、github\n`);
     }
@@ -858,7 +1190,7 @@ describe("命令行入口", () => {
   it("build 给 dev 版本传说明文件时退出非 0，不写清单：dev 的说明固定是提交号", () => {
     const { bootstrap, manifest: out } = bootstrapFixture();
     const notes = notesFixture("说明");
-    const result = run("build", VERSION, RUN, bootstrap, REPO, TAG, commit(), out, notes);
+    const result = run("build", VERSION, RUN, bootstrap, REPO, TAG, commit(), okRecord(KEY), out, notes);
     assert.notEqual(result.status, 0);
     assert.ok(result.stderr.includes(`dev 版本的说明固定写提交号，不收说明文件：${notes}`), result.stderr);
     assert.throws(() => statSync(out), { code: "ENOENT" });
@@ -866,7 +1198,7 @@ describe("命令行入口", () => {
 
   it("build 给 beta 版本不传说明文件时退出非 0，不写清单", () => {
     const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
-    const result = run("build", BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG, commit(), out);
+    const result = run("build", BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG, commit(), okRecord(BETA_KEY), out);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, new RegExp(`beta 版本 ${BETA_VERSION.replaceAll(".", "\\.")} 必须给说明文件`));
     assert.throws(() => statSync(out), { code: "ENOENT" });
@@ -884,7 +1216,7 @@ describe("命令行入口", () => {
       [Buffer.from([0x61, 0xff]), /不是合法的 UTF-8/],
     ]) {
       const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
-      const result = run("build", BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG, commit(), out, notesFixture(content));
+      const result = run("build", BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG, commit(), okRecord(BETA_KEY), out, notesFixture(content));
       assert.notEqual(result.status, 0, String(message));
       assert.match(result.stderr, message);
       assert.throws(() => statSync(out), { code: "ENOENT" });
@@ -893,7 +1225,7 @@ describe("命令行入口", () => {
 
   it("build 的 beta tag 不是 v<版本> 时退出非 0，不写清单", () => {
     const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
-    const result = run("build", BETA_VERSION, RUN, bootstrap, REPO, TAG, commit(), out, notesFixture("说明"));
+    const result = run("build", BETA_VERSION, RUN, bootstrap, REPO, TAG, commit(), okRecord(BETA_KEY), out, notesFixture("说明"));
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /的 tag 应为 v/);
     assert.throws(() => statSync(out), { code: "ENOENT" });
@@ -952,11 +1284,16 @@ describe("命令行入口", () => {
       [],
       ["key", VERSION, RUN],
       ["mirror-urls"],
+      ["optional-mirrors"],
+      ["optional-mirrors", KEY, KEY],
       ["upload-targets", ACCOUNT, ACCOUNT],
       ["validate", "x"],
+      // 没跟着改、照旧不传上传记录的 validate 与 dev 的 build
+      ["validate", "latest.json", VERSION, RUN, "boot.exe", REPO, TAG],
+      [...build, "out.json"],
       ["publish", KEY],
       build,
-      [...build, "out.json", "notes.md", "extra"],
+      [...build, "record.tsv", "out.json", "notes.md", "extra"],
       ["compare", "1.0.0"],
       ["compare", "1.0.0", "1.0.0", "1.0.0"],
       ["next-beta", "1.0.0"],
@@ -971,6 +1308,8 @@ describe("命令行入口", () => {
 
   it("参数里有空串时同样拒绝，可选的说明文件也一样", () => {
     assert.throws(() => runCommand(["key", VERSION, "", FILE_NAME]), /^Error: 用法：/);
-    assert.throws(() => runCommand(["build", BETA_VERSION, RUN, "boot.exe", REPO, BETA_TAG, "0".repeat(40), "out.json", ""]), /^Error: 用法：/);
+    assert.throws(() => runCommand(["build", BETA_VERSION, RUN, "boot.exe", REPO, BETA_TAG, "0".repeat(40), "record.tsv", "out.json", ""]), /^Error: 用法：/);
+    assert.throws(() => runCommand(["build", VERSION, RUN, "boot.exe", REPO, TAG, "0".repeat(40), "", "out.json"]), /^Error: 用法：/);
+    assert.throws(() => runCommand(["validate", "latest.json", VERSION, RUN, "boot.exe", REPO, TAG, ""]), /^Error: 用法：/);
   });
 });

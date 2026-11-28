@@ -4,7 +4,8 @@ name: 分发试跑
 # 现有的 dev 清单原样重推一次。用来验证 updates-dev 环境里的凭据、OSS 的 S3 兼容层、从 GitHub 托管机跨境上传的
 # 速度和香港机的 22 端口。不发版，也不改任何客户端会读到的内容：试跑文件放在 dev/trial-<运行号>-<运行次数>/ 下，
 # 随 dev/ 前缀 30 天后由生命周期规则删掉；重推的清单字节相同，put-manifest 视为无变化。
-# 上传与推送用的是和 dev-build.yml 同一套脚本，这里过了，发版时那两步就只剩包本身的问题。
+# 上传与推送用的是和 dev-build.yml 同一套脚本，这里过了，发版时那两步就只剩包本身的问题；只是这里三个桶都必须过，
+# 发版时 dev 的 cn 传不上只降级。
 on:
   workflow_dispatch:
 
@@ -42,6 +43,8 @@ jobs:
           echo "sample=$sample" >> "$GITHUB_OUTPUT"
           echo "key=dev/trial-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/$(basename "$sample")" >> "$GITHUB_OUTPUT"
 
+      # 脚本每传完一个桶就按公网地址匿名读回。不给上传记录：dev 发版时 cn 传不上只降级，试跑却要每个桶都过，
+      # 哪个桶坏了在这里直接失败，不会被降级盖住。
       - name: 上传到三个存储桶
         env:
           OSS_CI_ACCESS_KEY_ID: ${{ secrets.OSS_CI_ACCESS_KEY_ID }}
@@ -52,16 +55,6 @@ jobs:
           KEY: ${{ steps.sample.outputs.key }}
           SAMPLE: ${{ steps.sample.outputs.sample }}
         run: bash .github/scripts/upload-to-mirrors.sh "$KEY" "$SAMPLE"
-
-      - name: 读回三个存储桶
-        env:
-          KEY: ${{ steps.sample.outputs.key }}
-          SAMPLE: ${{ steps.sample.outputs.sample }}
-        run: |
-          urls="$(node .github/scripts/dev-distribution.mjs mirror-urls "$KEY")"
-          while IFS=$'\t' read -r name url; do
-            bash .github/scripts/check-download.sh "$name" "$url" "$SAMPLE" < /dev/null
-          done <<< "$urls"
 
       # 从公网取下香港机上现有的清单，原样推回去，核对 put-manifest 回显的 sha256。
       # 香港机上还没有清单时没有可重推的东西，跳过；这时 22 端口和推送密钥要等第一次发版才验得到。

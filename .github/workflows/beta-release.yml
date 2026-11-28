@@ -709,7 +709,9 @@ jobs:
       # 对象键是 beta/<版本>-<运行标识>/<文件名>，运行标识是 <运行号>-<运行次数>，桶上同一个键只能写一次。传完包才失败的
       # 运行不建 tag、不占 beta 序号，下一次运行算出同一个版本号，只带运行次数的话又从 1 起，撞上上次留下、覆盖不了的对象；
       # 运行号分开各次运行，运行次数分开同一次运行的重跑。beta/ 不过期，测试版可能几周不更新，桶源不能先 404。
-      # 必须排在验签之后，传上去的就是最终发出去的字节。
+      # 必须排在验签之后，传上去的就是最终发出去的字节。每传完一个桶就不带凭据、按客户端会用的公网地址读回，一致才记进
+      # 上传记录；每个桶每个包最多 600 秒。beta 没有允许缺的桶（dev-distribution.mjs 的 OPTIONAL_MIRRORS），哪个桶传不上
+      # 都让 stage 失败，重跑这个作业。
       - name: 上传到三个存储桶
         env:
           OSS_CI_ACCESS_KEY_ID: ${{ secrets.OSS_CI_ACCESS_KEY_ID }}
@@ -720,29 +722,18 @@ jobs:
         run: |
           for file in "$BOOTSTRAP" "$INSTALLER"; do
             key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
-            bash .github/scripts/upload-to-mirrors.sh "$key" "$file"
-          done
-
-      # 不带凭据，按客户端会用的公网地址读回：公共读没开、自定义域名配错时上传照样成功，只有这里看得出来。
-      - name: 读回三个存储桶
-        run: |
-          for file in "$BOOTSTRAP" "$INSTALLER"; do
-            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
-            urls="$(node .github/scripts/dev-distribution.mjs mirror-urls "$key")"
-            while IFS=$'\t' read -r name url; do
-              bash .github/scripts/check-download.sh "$name" "$url" "$file" < /dev/null
-            done <<< "$urls"
+            bash .github/scripts/upload-to-mirrors.sh "$key" "$file" "$RUNNER_TEMP/mirror-record.tsv"
           done
 
       # url 取这一版 Release 的引导程序附件：每版一个 tag、永久保留，地址不会失效。github 源要等下面转正才存在，
       # 由 publish-hk 读回。说明取自 build 交来的更新说明，beta 版本不给说明文件时脚本直接拒绝。
-      # 写完从文件读回来按确切的键集合、源名、主机白名单、https 和带版本的路径校验。
+      # 写完从文件读回来按确切的键集合、源名、主机白名单、https 和带版本的路径校验，三个桶都要在上传记录里记为传上。
       - name: 生成并校验测试版更新清单
         id: manifest
         run: |
           manifest="$RUNNER_TEMP/latest.json"
-          node .github/scripts/dev-distribution.mjs build "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$manifest" "$NOTES"
-          node .github/scripts/dev-distribution.mjs validate "$manifest" "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG"
+          node .github/scripts/dev-distribution.mjs build "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$RUNNER_TEMP/mirror-record.tsv" "$manifest" "$NOTES"
+          node .github/scripts/dev-distribution.mjs validate "$manifest" "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$RUNNER_TEMP/mirror-record.tsv"
           cat "$manifest"
           echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
 
