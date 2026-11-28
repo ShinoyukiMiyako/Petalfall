@@ -585,7 +585,7 @@ describe("ListRow 样式", () => {
     expect(rule(".row[data-interactive]:hover")).not.toMatch(/transition/);
     expect(rule(".row[data-selected],\n.row[data-selected]:hover")).toMatch(/transition: background-color var\(--sk-dur-hover\)/);
     expect(rule(".row[data-interactive]:not([data-overlay], [data-disabled]):active,\n.row[data-overlay]:has(.titleButton:active)")).toMatch(
-      /background: var\(--sk-bg-3\);\s*transition: none;/,
+      /background: var\(--sk-fill-press\);\s*transition: none;/,
     );
   });
 

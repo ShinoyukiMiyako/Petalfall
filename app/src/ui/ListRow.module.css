@@ -112,17 +112,15 @@
 }
 
 /* ---- 状态 ---- */
-/* 悬停底色瞬时跟手：指针扫过一列行时不留拖尾。只有选中底色淡入（过渡写在选中态上，取消选中瞬时） */
+/* 悬停底色瞬时跟手：指针扫过一列行时不留拖尾。只有选中底色淡入（过渡写在选中态上，取消选中瞬时）。
+   悬停与按下铺半透明叠层，不铺实色 bg-2：夜樱 bg-2 与卡片底几乎同色，实色悬停看不出来；叠层在卡片、弹窗上都拉得开，
+   内嵌与贴边两种列表同一套 */
 .row[data-interactive] {
   cursor: pointer;
 }
 
 .row[data-interactive]:hover {
-  background: var(--sk-bg-2);
-}
-
-.row[data-variant="flush"][data-interactive]:hover {
-  background: color-mix(in srgb, var(--sk-bg-2) 60%, transparent);
+  background: var(--sk-fill-hover);
 }
 
 .row[data-selected],
@@ -134,13 +132,8 @@
 /* 按下：比悬停深一档，瞬时。标题按钮覆盖整行的写法以按住标题按钮为准，按尾部控件不算按行 */
 .row[data-interactive]:not([data-overlay], [data-disabled]):active,
 .row[data-overlay]:has(.titleButton:active) {
-  background: var(--sk-bg-3);
+  background: var(--sk-fill-press);
   transition: none;
-}
-
-.row[data-variant="flush"][data-interactive]:not([data-overlay], [data-disabled]):active,
-.row[data-variant="flush"][data-overlay]:has(.titleButton:active) {
-  background: var(--sk-bg-2);
 }
 
 .row[data-selected][data-interactive]:not([data-overlay], [data-disabled]):active,
@@ -150,6 +143,14 @@
 
 .row[data-selected] .title {
   color: var(--sk-accent-strong);
+}
+
+/* 叠层上 text-2 不到 4.5:1（夜樱卡片上悬停约 4.3、按下约 3.5），铺叠层时说明与尾部文字提到 text。
+   选中行铺的是 accent-soft、停用行不铺叠层，都不提；键盘按住按钮时只有 :active 没有 :hover，按下另列 */
+.row[data-interactive]:not([data-selected], [data-disabled]):hover :is(.meta, .trailing),
+.row[data-interactive]:not([data-overlay], [data-selected], [data-disabled]):active :is(.meta, .trailing),
+.row[data-overlay]:not([data-selected]):has(.titleButton:active) :is(.meta, .trailing) {
+  color: var(--sk-text);
 }
 
 /* 停用与恢复时淡化走透明度过渡，不是整行一帧变灰 */

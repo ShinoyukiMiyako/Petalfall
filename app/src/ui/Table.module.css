@@ -176,9 +176,10 @@
   cursor: pointer;
 }
 
-/* 悬停底色瞬时跟手：指针扫过一列行时不留拖尾。只有选中底色淡入（过渡写在目标状态上，取消选中瞬时） */
+/* 悬停底色瞬时跟手：指针扫过一列行时不留拖尾。只有选中底色淡入（过渡写在目标状态上，取消选中瞬时）。
+   悬停与按下铺半透明叠层，不铺 bg-2：夜樱 bg-2 与卡片底几乎同色，按它混出的悬停看不出来 */
 .row:hover {
-  background: color-mix(in srgb, var(--sk-bg-2) 60%, transparent);
+  background: var(--sk-fill-hover);
 }
 
 .row[data-selected],
@@ -189,7 +190,7 @@
 
 /* 按下行（不是按行内控件）：深一档底色，瞬时 */
 .row[data-activatable]:active:not(:has(:is(button, a[href], input, select, textarea, label, [role="switch"], [role="checkbox"], [role="button"]):active)) {
-  background: var(--sk-bg-2);
+  background: var(--sk-fill-press);
   transition: none;
 }
 

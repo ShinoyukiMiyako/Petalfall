@@ -124,11 +124,11 @@ const APPEARANCE_NAMES = Object.keys(APPEARANCES) as AppearanceName[];
 const PINNED: Record<"day" | "night", readonly (readonly [number, number])[]> = {
   // 窗口底、卡片、可点卡片悬停、凹陷区、列表行悬停、表格行悬停、浮层面板、弹窗、弹窗底栏、通知，提示条四色，横幅四色
   day: [
-    [12.35, 10.84], [12.99, 11.4], [13.1, 11.49], [11.43, 10.05], [11.43, 10.05], [12.04, 10.58], [13.1, 11.49], [13.1, 11.49], [12.65, 11.1], [13.1, 11.49],
+    [12.35, 10.84], [12.99, 11.4], [13.1, 11.49], [11.43, 10.05], [11.05, 9.73], [11.05, 9.73], [13.1, 11.49], [13.1, 11.49], [12.65, 11.1], [13.1, 11.49],
     [11.87, 10.43], [11.89, 10.45], [11.88, 10.44], [11.73, 10.31], [11.87, 10.43], [11.89, 10.45], [11.88, 10.44], [11.73, 10.31],
   ],
   night: [
-    [11.38, 9.26], [10.1, 8.23], [9.29, 7.59], [10.27, 8.36], [10.27, 8.36], [10.2, 8.31], [9.87, 8.04], [9.87, 8.04], [10.76, 8.75], [9.87, 8.04],
+    [11.38, 9.26], [10.1, 8.23], [9.29, 7.59], [10.27, 8.36], [7.41, 6.14], [7.41, 6.14], [9.87, 8.04], [9.87, 8.04], [10.76, 8.75], [9.87, 8.04],
     [8.69, 7.12], [8.63, 7.08], [8.61, 7.06], [8.86, 7.26], [8.69, 7.12], [8.63, 7.08], [8.61, 7.06], [8.86, 7.26],
   ],
 };
@@ -160,15 +160,15 @@ describe("幽灵按钮的悬停与按下叠层", () => {
     }
   });
 
-  it("text-2 留在叠层上：悬停最低只剩日樱 4.17、夜樱 3.68，按下 3.66 / 3.02，所以悬停与按下都要提到 text", () => {
+  it("text-2 留在叠层上：悬停最低只剩日樱 4.03、夜樱 3.17，按下 3.55 / 2.63（行悬停叠层上再叠一层），所以悬停与按下都要提到 text", () => {
     const lowest = (appearance: AppearanceName, state: State) => {
       const tokens = tokensOf(appearance);
       return round(Math.min(...GROUNDS.map((ground) => ratioOn(groundOf(ground, tokens), tokens, KINDS[0], state, "var(--sk-text-2)"))));
     };
-    expect([lowest("日樱 · 樱粉", "hover"), lowest("夜樱 · 樱粉", "hover"), lowest("日樱 · 樱粉", "active"), lowest("夜樱 · 樱粉", "active")]).toEqual([4.17, 3.68, 3.66, 3.02]);
+    expect([lowest("日樱 · 樱粉", "hover"), lowest("夜樱 · 樱粉", "hover"), lowest("日樱 · 樱粉", "active"), lowest("夜樱 · 樱粉", "active")]).toEqual([4.03, 3.17, 3.55, 2.63]);
   });
 
-  it("悬停底在每种底上都拉得开：叠层最少日樱 1.18、夜樱 1.33；原来的实色 bg-2 落在凹陷区与行悬停上是 1.00，夜樱浮层与弹窗上 1.04", () => {
+  it("悬停底在每种底上都拉得开：叠层最少日樱 1.18、夜樱 1.33；原来的实色 bg-2 落在凹陷区上是 1.00，夜樱浮层与弹窗上 1.04", () => {
     const separation = (appearance: AppearanceName, fill: string) => {
       const tokens = tokensOf(appearance);
       return GROUNDS.map((ground) => {
@@ -179,7 +179,7 @@ describe("幽灵按钮的悬停与按下叠层", () => {
     const overlay = overlayOf(KINDS[0], "hover");
     expect([Math.min(...separation("日樱 · 樱粉", overlay)), Math.min(...separation("夜樱 · 樱粉", overlay))]).toEqual([1.18, 1.33]);
     const solid = Object.fromEntries(GROUNDS.map((ground, i) => [ground.name, separation("夜樱 · 樱粉", "var(--sk-bg-2)")[i]]));
-    expect([solid["凹陷区"], solid["列表行悬停"], solid["浮层面板"], solid["弹窗"]]).toEqual([1, 1, 1.04, 1.04]);
+    expect([solid["凹陷区"], solid["浮层面板"], solid["弹窗"]]).toEqual([1, 1.04, 1.04]);
   });
 });
 
