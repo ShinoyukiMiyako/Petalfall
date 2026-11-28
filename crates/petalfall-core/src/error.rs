@@ -124,6 +124,14 @@ pub enum CoreError {
         platform: &'static str,
         file_name: String,
     },
+    /// 要装进 mods 的平台文件不是 .jar（.litemod、.zip 之类）：Mod 列表与启停只认 .jar，装进去既列不出来也启停不了。
+    #[error(
+        "{platform} 给出的文件 {file_name} 不是 .jar，这一版只支持 .jar 格式的 Mod，已拒绝安装"
+    )]
+    ModFileUnsupported {
+        platform: &'static str,
+        file_name: String,
+    },
     /// CurseForge 作者禁止第三方分发，这些文件拿不到下载地址，只能去网页手动下载。
     #[error(
         "这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：{}",

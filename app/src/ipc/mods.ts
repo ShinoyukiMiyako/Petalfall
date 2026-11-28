@@ -14,6 +14,12 @@ export function isModFileBusy(error: unknown): boolean {
   return isIpcError(error) && error.code === MOD_FILE_BUSY_ERROR_CODE;
 }
 
+/**
+ * 装或更新 Mod 时，平台给的主项或前置文件不是 .jar（.litemod、.zip 之类）的错误码：这一版只支持 .jar 格式的 Mod，装进去
+ * 列表里看不见、也启停不了，所以下载之前整份拒绝。`detail.platform`、`detail.file_name` 是哪个平台的哪个文件。
+ */
+export const MOD_FILE_UNSUPPORTED_ERROR_CODE = "mod_file_unsupported";
+
 export type MetadataFormat = "fabric" | "quilt_mod_json" | "forge_toml" | "neo_forge_toml";
 
 export interface ModMetadata {
@@ -222,7 +228,8 @@ export const modUpdateChangelog = (versionId: string, fileName: string, modVersi
 
 /**
  * 长任务：进度经 core-event 推送并带 task_id，可用 cancelTask(taskId) 取消。旧文件留作 `.old` 备份，可在变更历史里回滚。
- * gameDir 是入队那一刻的游戏目录，当前目录已经不是它时以 game_dir_changed 拒绝、什么都不动。
+ * gameDir 是入队那一刻的游戏目录，当前目录已经不是它时以 game_dir_changed 拒绝、什么都不动。新版本或它要补的前置不是 .jar
+ * 时以 MOD_FILE_UNSUPPORTED_ERROR_CODE 拒绝，一个文件都不下。
  * 作为组合任务的一项调用时 step 给第几项（从 0 计），后端把它标在这次调用的每条事件上；单独调用不给。
  */
 export const updateMod = (taskId: string, gameDir: string, versionId: string, fileName: string, modVersionId: string, step?: number): Promise<ModUpdateOutcomeDto> =>

@@ -1069,6 +1069,9 @@ export function taskFailureReason(error: TaskError): string {
       return "下载到的文件和官方记录不一致";
     case "install_unsafe_path":
       return "版本文件里有指向游戏目录之外的路径，已拒绝写入";
+    // 主项或前置有一个不是 .jar 就整份不装，是哪个文件在后端原文里
+    case "mod_file_unsupported":
+      return "要装的文件不是 .jar，这一版只支持 .jar 格式的 Mod";
     case "loader_library_missing":
       return LOADER_LIBRARY_MISSING_REASON;
     case "curseforge_key_rejected":

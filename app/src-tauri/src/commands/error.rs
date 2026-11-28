@@ -96,6 +96,9 @@ pub mod code {
     pub const WORLD_NAME_UNENCODABLE: &str = "world_name_unencodable";
     /// 平台给出的文件名不能安全落盘（detail.platform、file_name）。
     pub const UNSAFE_FILE_NAME: &str = "unsafe_file_name";
+    /// 要装的 Mod 文件（主项或前置）不是 .jar，这一版只支持 .jar 格式的 Mod，一个文件都没下
+    /// （detail.platform、file_name）。
+    pub const MOD_FILE_UNSUPPORTED: &str = "mod_file_unsupported";
     /// CurseForge 作者禁止第三方分发，文件只能去网页手动下载。detail.files 为对象数组，每项
     /// `{ project_id, file_id, file_name, web_url, destination, sha1, fingerprint, size }`。
     pub const DISTRIBUTION_BLOCKED: &str = "distribution_blocked";
@@ -442,6 +445,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::WorldNameUnencodable { .. } => code::WORLD_NAME_UNENCODABLE,
         CoreError::WorldBackupNotFound { .. } => code::WORLD_BACKUP_NOT_FOUND,
         CoreError::UnsafeFileName { .. } => code::UNSAFE_FILE_NAME,
+        CoreError::ModFileUnsupported { .. } => code::MOD_FILE_UNSUPPORTED,
         CoreError::FileDistributionBlocked { .. } => code::DISTRIBUTION_BLOCKED,
         CoreError::ClaimFolderInvalid { .. } => code::IO,
         CoreError::Modpack(e) => modpack_code(e),
@@ -757,6 +761,10 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             detail.insert("staged".to_owned(), json!(staged.display().to_string()));
         }
         CoreError::UnsafeFileName {
+            platform,
+            file_name,
+        }
+        | CoreError::ModFileUnsupported {
             platform,
             file_name,
         } => {
@@ -1161,6 +1169,20 @@ mod tests {
         assert_eq!(unsafe_name.code, code::UNSAFE_FILE_NAME);
         assert_eq!(unsafe_name.detail.unwrap()["file_name"], json!("../x.jar"));
 
+        let not_jar: CommandError = CoreError::ModFileUnsupported {
+            platform: "CurseForge",
+            file_name: "voxelmap-1.12.2.litemod".into(),
+        }
+        .into();
+        assert_eq!(not_jar.code, code::MOD_FILE_UNSUPPORTED);
+        assert_eq!(
+            not_jar.message,
+            "CurseForge 给出的文件 voxelmap-1.12.2.litemod 不是 .jar，这一版只支持 .jar 格式的 Mod，已拒绝安装"
+        );
+        let detail = not_jar.detail.unwrap();
+        assert_eq!(detail["platform"], json!("CurseForge"));
+        assert_eq!(detail["file_name"], json!("voxelmap-1.12.2.litemod"));
+
         let target: CommandError =
             CoreError::InvalidResourceTarget("数据包要指明存档".into()).into();
         assert_eq!(target.code, code::INVALID_ARGUMENT);
@@ -1172,6 +1194,24 @@ mod tests {
         .into();
         assert_eq!(project.code, code::INVALID_ARGUMENT);
         assert_eq!(project.detail.unwrap()["project_id"], json!("jei"));
+    }
+
+    /// 前端认得「Mod 文件不是 .jar」这个码：ipc 里声明了同一个码，任务失败原因给了它的说法。两边各写一份，改了一边这里就失败。
+    #[test]
+    fn front_end_knows_the_mod_file_unsupported_code() {
+        let ipc = include_str!("../../../src/ipc/mods.ts");
+        assert!(
+            ipc.contains(&format!(
+                "export const MOD_FILE_UNSUPPORTED_ERROR_CODE = \"{}\";",
+                code::MOD_FILE_UNSUPPORTED
+            )),
+            "app/src/ipc/mods.ts 里的错误码与后端不一致"
+        );
+        let flows = include_str!("../../../src/copy/flows.ts");
+        assert!(
+            flows.contains(&format!("case \"{}\":", code::MOD_FILE_UNSUPPORTED)),
+            "app/src/copy/flows.ts 的任务失败原因里没有这个码的说法"
+        );
     }
 
     #[test]

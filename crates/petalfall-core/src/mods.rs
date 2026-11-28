@@ -551,6 +551,17 @@ impl Petalfall {
             .into_iter()
             .filter(|item| !item.already_satisfied)
             .collect();
+        // 列表与启停只认 .jar（见 mod_file_path），别的扩展名装进 mods 既列不出来也启停不了：主项与前置里有一个
+        // 不是就整份拒绝，一个文件都不下。
+        if let Some(item) = pending
+            .iter()
+            .find(|item| !item.version.file_name.ends_with(".jar"))
+        {
+            return Err(CoreError::ModFileUnsupported {
+                platform: item.version.platform.display_name(),
+                file_name: item.version.file_name.clone(),
+            });
+        }
         emit(
             events,
             CoreEvent::stage(format!(
@@ -1948,6 +1959,101 @@ mod tests {
             }
             other => panic!("期望安装事件，得到 {other:?}"),
         }
+    }
+
+    /// 平台给的文件不是 .jar：主项是 .litemod、或主项是 jar 而必需前置是 .zip，都在下载之前整份拒绝，报出是哪个文件；
+    /// 一个文件都没下，mods 里什么都没有，卷宗与历史都不写。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mod_file_that_is_not_a_jar_is_refused_before_downloading() {
+        let server = MockServer::start().await;
+        let bytes = b"not a jar".to_vec();
+        let hashes = format!(r#"{{"sha1":"{}"}}"#, sha1_hex(&bytes));
+        let version = |id: &str, project: &str, file: &str, deps: &str| {
+            modrinth_version(
+                id,
+                project,
+                "2026-01-01T00:00:00Z",
+                file,
+                &format!("{}/{file}", server.uri()),
+                &hashes,
+                bytes.len(),
+                deps,
+            )
+        };
+        mount_version(
+            &server,
+            "lm1",
+            &version("lm1", "voxelmap", "voxelmap-1.0.litemod", ""),
+        )
+        .await;
+        mount_version(
+            &server,
+            "s1",
+            &version(
+                "s1",
+                "sodium",
+                "sodium-s1.jar",
+                r#"{"project_id":"lib","dependency_type":"required"}"#,
+            ),
+        )
+        .await;
+        mount_versions(
+            &server,
+            "lib",
+            format!("[{}]", version("z1", "lib", "lib-1.0.zip", "")),
+        )
+        .await;
+        for file in ["voxelmap-1.0.litemod", "sodium-s1.jar", "lib-1.0.zip"] {
+            mount_jar(&server, file, bytes.clone()).await;
+        }
+        mount_projects(
+            &server,
+            &[
+                ("voxelmap", "VoxelMap"),
+                ("sodium", "Sodium"),
+                ("lib", "Lib"),
+            ],
+        )
+        .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_version(tmp.path(), "1.21").await;
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
+        for (project, version, refused) in [
+            ("voxelmap", "lm1", "voxelmap-1.0.litemod"),
+            ("sodium", "s1", "lib-1.0.zip"),
+        ] {
+            let err = petalfall
+                .install_mod("1.21", Platform::Modrinth, project, version, None)
+                .await
+                .unwrap_err();
+            match &err {
+                CoreError::ModFileUnsupported {
+                    platform,
+                    file_name,
+                } => {
+                    assert_eq!(*platform, "Modrinth");
+                    assert_eq!(file_name, refused);
+                }
+                other => panic!("期望 ModFileUnsupported，得到 {other:?}"),
+            }
+        }
+
+        let downloads: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| request.url.path().to_owned())
+            .filter(|path| {
+                path.ends_with(".jar") || path.ends_with(".zip") || path.ends_with(".litemod")
+            })
+            .collect();
+        assert!(downloads.is_empty(), "不该下任何文件：{downloads:?}");
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
+        assert!(!mods_dir.exists() || dir_names(&mods_dir).await.is_empty());
+        assert!(petalfall.list_mods("1.21").await.unwrap().is_empty());
+        assert!(petalfall.history("1.21").await.unwrap().events.is_empty());
     }
 
     /// 校验不过：mods 里一个文件都不落，卷宗与历史都不写。

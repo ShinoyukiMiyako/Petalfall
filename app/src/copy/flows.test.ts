@@ -268,6 +268,14 @@ describe("任务状态标签", () => {
   });
 });
 
+describe("任务失败原因：要装的 Mod 文件不是 .jar", () => {
+  it("给统一说法，说明这一版只支持 .jar；不含禁用词", () => {
+    const reason = taskFailureReason({ code: "mod_file_unsupported", message: "Modrinth 给出的文件 lib-1.0.zip 不是 .jar，这一版只支持 .jar 格式的 Mod，已拒绝安装" });
+    expect(reason).toBe("要装的文件不是 .jar，这一版只支持 .jar 格式的 Mod");
+    expect(bannedIn([reason])).toEqual([]);
+  });
+});
+
 describe("启动失败：账户验证暂时不可用", () => {
   it.each(NAMES)("account_service_down（账户 %s）：标题、正文、重试与以离线方式进单人", (name) => {
     const copy = failureCopy("account_service_down", PARAMS.account_service_down, ctx(name));

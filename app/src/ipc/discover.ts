@@ -178,7 +178,7 @@ export const projectDetail = (platform: PlatformId, projectId: string): Promise<
 /**
  * 长任务：进度经 core-event 推送并带 task_id，可用 cancelTask(taskId) 取消。gameDir 是入队那一刻的游戏目录，当前目录已经不是它时
  * 以 game_dir_changed 拒绝、什么都不动。作为组合任务的一项调用时 step 给第几项（从 0 计），后端把它标在这次调用的每条事件上；
- * 单独调用不给。
+ * 单独调用不给。主项或要补的前置不是 .jar 时以 mod_file_unsupported 拒绝（见 ipc/mods 的 MOD_FILE_UNSUPPORTED_ERROR_CODE）。
  */
 export const installMod = (
   taskId: string,
