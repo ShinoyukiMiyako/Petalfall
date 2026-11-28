@@ -562,8 +562,8 @@ interface MockTemplate {
 let template: MockTemplate | null = null;
 let backups: BackupBook = seedBackups();
 // 实例上的全部占用，键不分大小写，与后端 InstanceLocks 一致：同一实例可以同时有几件兼容的事。
-// usedBy 只在 inherited 时有：正以这个实例为基底的那个实例。
-const holds = new Map<string, { token: number; activity: InstanceActivity; usedBy: string | null }[]>();
+// usedBy 只在 inherited 时有：正以这个实例为基底的那个实例；readsOnly 为真时那个实例只读这里（移到其他游戏目录）。
+const holds = new Map<string, { token: number; activity: InstanceActivity; usedBy: string | null; readsOnly: boolean }[]>();
 let nextHoldToken = 0;
 
 // ---------------------------------------------------------------- 共用
@@ -679,6 +679,14 @@ function compatible(a: InstanceActivity, b: InstanceActivity): boolean {
   return (a === "launching" || a === "running") && b === "modifying";
 }
 
+/**
+ * 已有的一份占用容不容得下再来一份 activity，与后端 Hold::admits 一致：先看两件事本身；移动只读基底，基底的游戏已经跑起来时
+ * 另行放行，基底还在启动时不行（启动会补写客户端 jar）。
+ */
+function admits(held: { activity: InstanceActivity; readsOnly: boolean }, activity: InstanceActivity, readsOnly: boolean): boolean {
+  return compatible(activity, held.activity) || (readsOnly && held.activity === "running") || (held.readsOnly && activity === "running");
+}
+
 /** 实例上的一份占用。release 放开它；setActivity 只用于转向兼容集合不比原来窄的事（启动转运行、运行转备份）。 */
 export interface MockInstanceHold {
   release(): void;
@@ -701,7 +709,7 @@ function busyError(id: string, activity: InstanceActivity, usedBy: string | null
 /** 占住实例做 activity；有与它不兼容的事在做时报 instance_busy，形状与后端一致。 */
 export function acquireMockInstance(id: string, activity: InstanceActivity): MockInstanceHold {
   if (activity === "inherited") throw new Error("mock：基底占用要记下使用者，只经 acquireMockInstanceWithBases 占");
-  return hold(id, activity, null);
+  return hold(id, activity, null, false);
 }
 
 /**
@@ -713,12 +721,13 @@ export function acquireMockInstanceWithBases(id: string, activity: InstanceActiv
   const own = acquireMockInstance(id, activity);
   const keys = new Set([id.toLowerCase()]);
   let held: MockInstanceHold[] = [];
+  const readsOnly = activity === "moving";
   try {
     for (const base of bases) {
       const key = base.toLowerCase();
       if (keys.has(key)) continue;
       keys.add(key);
-      held.push(hold(base, "inherited", id));
+      held.push(hold(base, "inherited", id, readsOnly));
     }
   } catch (error) {
     for (const h of held) h.release();
@@ -757,17 +766,17 @@ export function mockInheritanceChain(id: string): string[] {
   return chain;
 }
 
-function hold(id: string, activity: InstanceActivity, usedBy: string | null): MockInstanceHold {
+function hold(id: string, activity: InstanceActivity, usedBy: string | null, readsOnly: boolean): MockInstanceHold {
   const key = id.toLowerCase();
   const held = holds.get(key);
   // 冲突有几处时报列表里也报的那一件，与后端同一优先级；同级时报最早占到的
-  const conflicts = held === undefined ? [] : held.filter((h) => !compatible(activity, h.activity));
+  const conflicts = held === undefined ? [] : held.filter((h) => !admits(h, activity, readsOnly));
   if (conflicts.length > 0) {
     let conflict = conflicts[0];
     for (const h of conflicts) if (reportRank(h.activity) < reportRank(conflict.activity)) conflict = h;
     throw busyError(id, conflict.activity, conflict.usedBy);
   }
-  const entry = { token: nextHoldToken, activity, usedBy };
+  const entry = { token: nextHoldToken, activity, usedBy, readsOnly };
   nextHoldToken += 1;
   holds.set(key, held === undefined ? [entry] : [...held, entry]);
   const ownEntry = () => {
@@ -2015,7 +2024,7 @@ async function moveInstance(args: MockArgs): Promise<MoveOutcomeDto> {
   const source = str(args, "source");
   const rawTarget = str(args, "target");
   requireInstance(id);
-  // 与后端一样，移动期间连同继承链上的基底一起占住：要从基底读客户端 jar 带过去
+  // 与后端一样，移动期间连同继承链上的基底一起占住：要从基底读客户端 jar 带过去，只读，基底的游戏在跑时照样能移
   const moveHold = acquireMockInstanceWithBases(id, "moving", mockInheritanceChain(id));
   try {
     beginMockTask(taskId);

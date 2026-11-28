@@ -23,9 +23,15 @@ describe("按实例摘要算锁", () => {
   });
 
   it("后端报着继承链上的基底正忙：摘要里的这一项进补全锁与移动锁", () => {
+    const summary = locksOf({ ...ready, activity: null, baseBusy: { id: "1.21.1", activity: "launching" } }, false);
+    expect(summary.repair).toEqual({ kind: "base_busy", base: "1.21.1", activity: "launching" });
+    expect(summary.move).toEqual({ kind: "base_busy", base: "1.21.1", activity: "launching" });
+  });
+
+  it("基底在运行：补全照旧被挡，移动只读基底、不挡", () => {
     const summary = locksOf({ ...ready, activity: null, baseBusy: { id: "1.21.1", activity: "running" } }, false);
     expect(summary.repair).toEqual({ kind: "base_busy", base: "1.21.1", activity: "running" });
-    expect(summary.move).toEqual({ kind: "base_busy", base: "1.21.1", activity: "running" });
+    expect(summary.move).toBeNull();
   });
 
   it("后端报 moving：锁住一切，启动也挡着", () => {
@@ -35,9 +41,15 @@ describe("按实例摘要算锁", () => {
 
 describe("锁定矩阵", () => {
   it("继承链上的基底正忙：只锁补全与移动并说明是哪个基底，改名、删除、启动与 Mod 操作都不碰基底", () => {
+    for (const activity of ["installing", "repairing", "renaming", "deleting", "launching", "moving"] as const) {
+      const busy = { kind: "base_busy", base: "1.21.1", activity };
+      expect(locks(false, false, false, null, false, { id: "1.21.1", activity })).toEqual({ ...FREE, repair: busy, move: busy });
+    }
+  });
+  it("基底的游戏在跑：只锁补全；移动只读基底，照常能移", () => {
     const base = { id: "1.21.1", activity: "running" } as const;
-    const busy = { kind: "base_busy", base: "1.21.1", activity: "running" };
-    expect(locks(false, false, false, null, false, base)).toEqual({ ...FREE, repair: busy, move: busy });
+    expect(locks(false, false, false, null, false, base)).toEqual({ ...FREE, repair: { kind: "base_busy", base: "1.21.1", activity: "running" } });
+    expect(locks(false, false, true, null, false, base).move).toBe("modifying");
   });
   it("基底正忙排在最后：实例自己的事与自己被别的实例占用，后端都先于基底报出来", () => {
     const base = { id: "1.21.1", activity: "running" } as const;

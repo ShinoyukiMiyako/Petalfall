@@ -10,7 +10,7 @@ export interface InheritedLock {
   usedBy: string;
 }
 
-/** 继承链上的基底正忙：补全与移动要占住基底，它在运行或目录正被重写时，任务一开工就被后端拒绝。 */
+/** 继承链上的基底正忙：补全与移动要占住基底，它在运行（移动只读基底，运行不挡移动）或目录正被重写时，任务一开工就被后端拒绝。 */
 export interface BaseBusyLock {
   kind: "base_busy";
   /** 挡路的那个基底。 */
@@ -34,7 +34,7 @@ export interface InstanceLocks {
   delete: "running" | "moving" | HeldActivity | InheritedLock | null;
   /** 启动：正在移走或被当作基底会挡住。存档正忙另由 savesBusy 判定，它还要看前端排着的存档任务。 */
   launch: InheritedLock | "moving" | null;
-  /** 移到别的游戏目录：要读整个实例目录并从继承链上的基底带走客户端 jar，所以与补全一样也看基底忙不忙。 */
+  /** 移到其他游戏目录：要读整个实例目录并从继承链上的基底带走客户端 jar，所以与补全一样也看基底忙不忙；只读基底，基底在运行不挡。 */
   move: InstanceLock | BaseBusyLock | null;
 }
 
@@ -46,8 +46,10 @@ export interface InstanceLocks {
  * 只能等后端以 instance_busy 拒绝后再报错。后端只报告一种活动，两者不会同时为真。
  * usedBy：正以它为基底的实例。基底照样能改动 Mod，所以不锁 Mod 操作；改名、删除、补全、移动会挪走或重写它的目录，
  * 与之互斥；启动也互斥，游戏映射着 natives 时用它的实例写不了。几种原因同时在时报实例自己的事。
- * baseBusy：继承链上容不下基底占用的基底。后端先占实例自己、再占基底，所以它排在所有实例自己的原因之后。
- * moving：实例正被移到别的游戏目录（前端排着的移动任务也算），后端记为与一切互斥，什么都做不了；排在游戏与安装之后，
+ * baseBusy：继承链上容不下基底占用的基底。后端先占实例自己、再占基底，所以它排在所有实例自己的原因之后。移动只读基底，
+ * 基底的游戏已经跑起来时后端照样放行；报的是 running 时，它往上的基底都被那一局占着，也不挡移动。启动中的基底仍挡着：
+ * 启动会补写客户端 jar。
+ * moving：实例正被移到其他游戏目录（前端排着的移动任务也算），后端记为与一切互斥，什么都做不了；排在游戏与安装之后，
  * 它们在跑时移动根本开不了工。
  */
 export function instanceLocks(
@@ -66,13 +68,14 @@ export function instanceLocks(
   const dirLock = fileLock !== null ? fileLock : occupied;
   const baseLock: BaseBusyLock | null = baseBusy === null ? null : { kind: "base_busy", base: baseBusy.id, activity: baseBusy.activity };
   const chainLock = dirLock !== null ? dirLock : baseLock;
+  const readBaseLock = baseLock !== null && baseLock.activity === "running" ? null : baseLock;
   return {
     mods: fileLock,
     rename: dirLock,
     repair: chainLock,
     delete: busy ? "running" : moving ? "moving" : occupied,
     launch: moving ? "moving" : inherited,
-    move: chainLock,
+    move: dirLock !== null ? dirLock : readBaseLock,
   };
 }
 

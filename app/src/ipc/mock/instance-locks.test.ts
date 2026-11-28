@@ -209,6 +209,18 @@ describe("mock 的实例占用与后端同一张兼容表", () => {
     endMockGame(0, MINUTE);
   });
 
+  it("移动只读基底：基底的游戏在跑时照样能占住它上面的实例去移，基底还在启动时不行；移动占着基底时基底启动不了", () => {
+    const game = acquireMockInstance("1.21", "launching");
+    expect(() => acquireMockInstanceWithBases("导入的包", "moving", ["1.21"])).toThrow(expect.objectContaining({ code: "instance_busy", detail: { id: "1.21", activity: "launching" } }));
+    game.setActivity("running");
+    const moving = acquireMockInstanceWithBases("导入的包", "moving", ["1.21"]);
+    expect(() => acquireMockInstanceWithBases("别的包", "repairing", ["1.21"])).toThrow(expect.objectContaining({ code: "instance_busy", detail: { id: "1.21", activity: "running" } }));
+    game.release();
+    expect(() => acquireMockInstance("1.21", "launching")).toThrow(expect.objectContaining({ code: "instance_busy", detail: { id: "1.21", activity: "inherited", used_by: "导入的包" } }));
+    moving.release();
+    acquireMockInstance("1.21", "launching").release();
+  });
+
   it("列表的 base_busy 与补全实际被拒的一致：基底只是在备份、改动时不算，基底自己与原版实例没有这一项", async () => {
     addMockInstance("导入的包", "1.21", { kind: "fabric", version: "0.16.10" }, null);
     const backup = acquireMockInstance("1.21", "backing_up");

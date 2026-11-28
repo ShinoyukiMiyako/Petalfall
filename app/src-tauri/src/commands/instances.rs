@@ -7,6 +7,7 @@
 //! （运行中改不了的文件由门面的占用探测把关），与其余操作互斥。启动到游戏退出、补全、导入整合包与移动期间，实例继承链上的
 //! 基底版本（客户端 jar 与 natives 所在的原版，导入时还有它要写的加载器版本）以 inherited 一并占住，启动、删除、
 //! 改名、移动、补全基底报 `instance_busy` 并带上正在用它的实例；基底自己开着游戏时，这几件事反过来被基底挡住。
+//! 移动只读基底，基底的游戏已经跑起来时照样能移它上面的实例。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -56,14 +57,15 @@ pub enum InstanceActivity {
     /// 删除存档备份，或为打开文件夹建出工作目录下的子目录。
     Modifying,
     /// 别的实例正以它为基底（在那个实例的 `inheritsFrom` 链上）：那个实例启动到游戏退出、补全、导入整合包
-    /// 期间都要读写这里的客户端 jar 与 natives，移到另一个游戏目录期间要把这里的版本 JSON 与客户端 jar 补到
-    /// 目标里。导入还以同样的名义占住要写的加载器版本：不在继承链上，但实例 JSON 抄自它。只经
-    /// [`InstanceLocks::acquire_with_bases`] 与 [`InstanceLocks::acquire_with_chain`] 占，占用里记着是哪个实例在用。
+    /// 期间都要读写这里的客户端 jar 与 natives，移到其他游戏目录期间要读这里的版本 JSON 与客户端 jar，补到
+    /// 目标里（只读，见 [`Hold::reads_only`]）。导入还以同样的名义占住要写的加载器版本：不在继承链上，但实例 JSON
+    /// 抄自它。只经 [`ScopedLocks::acquire_with_bases`] 与 [`ScopedLocks::acquire_with_chain`] 占，占用里记着是哪个
+    /// 实例在用。
     Inherited,
     /// 备份、恢复或导出存档；游戏退出后的自动备份由启动命令把「运行」转成它，备份完才释放，基底在转的时候
     /// 就放开（[`ChainGuard::into_backup`]）。
     BackingUp,
-    /// 移到另一个游戏目录：整个实例目录连同它的存档备份挪走。继承链上的基底以 inherited 一并占住：要读它们的
+    /// 移到其他游戏目录：整个实例目录连同它的存档备份挪走。继承链上的基底以 inherited 一并占住，只读：要读它们的
     /// 版本 JSON 与客户端 jar 补到目标里。
     Moving,
 }
@@ -92,7 +94,8 @@ impl InstanceActivity {
     /// 几个实例也可以同时以它为基底；挪走或重写它的目录则会让那些实例丢掉客户端 jar 与 natives。基底自己的
     /// 启动与运行也与基底占用互斥：游戏映射着 natives，补全或导入要重写它们时会写到一半报 IO 错误，提前报
     /// `instance_busy` 比让任务半路失败好。占用槽全局只跑一个游戏，「基底运行时启动加载器实例」本来就走不到，
-    /// 被挡住的只有补全、移动与导入；移动只读基底的版本 JSON 与客户端 jar，被挡是因为它同样以 inherited 占基底。
+    /// 被挡住的只有补全与导入。移动只读基底的版本 JSON 与客户端 jar，基底的游戏已经跑起来时与它并行，
+    /// 这张表之外另行放行（[`Hold::admits`]）。
     ///
     /// 备份与恢复只碰 saves 下的一个存档与游戏目录里的备份区，和 Mod 改动、基底占用都不相交；游戏开着时
     /// 存档随时在写，打包出来的是半截，恢复则会被游戏下次保存覆盖，所以与启动、运行互斥。它的兼容集合比
@@ -157,6 +160,22 @@ struct Hold {
     scope: Scope,
     activity: InstanceActivity,
     used_by: Option<String>,
+    /// 用它当基底的那个实例只读这里的文件（移到其他游戏目录）；只在 [`InstanceActivity::Inherited`] 时可能为真。
+    reads_only: bool,
+}
+
+impl Hold {
+    /// 这份占用容不容得下再来一份做 `activity` 的（`reads_only` 同 [`Hold::reads_only`]）。
+    ///
+    /// 先看两件事本身（[`InstanceActivity::compatible_with`]）。移动只读基底的版本 JSON 与客户端 jar，基底自己的游戏
+    /// 已经跑起来时不再写这两样，这一对另外放行；基底在启动时仍互斥：启动会补下缺了或对不上的客户端 jar。「运行」
+    /// 只由「启动」原地转来，转的时候不会多出冲突。
+    fn admits(&self, activity: InstanceActivity, reads_only: bool) -> bool {
+        use InstanceActivity::Running;
+        activity.compatible_with(self.activity)
+            || (reads_only && self.activity == Running)
+            || (self.reads_only && activity == Running)
+    }
 }
 
 /// 一份「存档正被读走或写入」的记录：号、原样 id 与落在哪个游戏目录。
@@ -319,7 +338,7 @@ impl ScopedLocks<'_> {
             InstanceActivity::Inherited,
             "基底占用要记下使用者，只经 acquire_with_bases 或 acquire_with_chain 占"
         );
-        self.hold(id, activity, None)
+        self.hold(id, activity, None, false)
     }
 
     /// 占住实例 `id` 做 `activity`，同时以它的名义占住继承链上的基底版本 `bases`
@@ -361,9 +380,11 @@ impl ScopedLocks<'_> {
     ) -> Result<ChainGuard, CommandError> {
         let mut keys = HashSet::from([lock_key(id)]);
         let mut held = Vec::with_capacity(bases.len());
+        // 移动只把基底的版本 JSON 与客户端 jar 复制到目标，不写它们；启动、补全、导入都要写。
+        let reads_only = activity == InstanceActivity::Moving;
         for base in bases {
             if keys.insert(lock_key(base)) {
-                held.push(self.hold(base, InstanceActivity::Inherited, Some(id))?);
+                held.push(self.hold(base, InstanceActivity::Inherited, Some(id), reads_only)?);
             }
         }
         if !held.is_empty() {
@@ -377,13 +398,14 @@ impl ScopedLocks<'_> {
         id: &str,
         activity: InstanceActivity,
         used_by: Option<&str>,
+        reads_only: bool,
     ) -> Result<InstanceGuard, CommandError> {
         let key = lock_key(id);
         let mut table = lock_table(&self.locks.table);
         if let Some(conflict) = table
             .held
             .get(&key)
-            .and_then(|holds| self.conflict(holds, activity))
+            .and_then(|holds| self.conflict(holds, activity, reads_only))
         {
             return Err(busy_by(id, conflict));
         }
@@ -395,8 +417,9 @@ impl ScopedLocks<'_> {
             scope: self.scope.clone(),
             activity,
             used_by: used_by.map(str::to_owned),
+            reads_only,
         });
-        tracing::debug!(id, ?activity, used_by, scope = ?self.scope, "占用实例");
+        tracing::debug!(id, ?activity, used_by, reads_only, scope = ?self.scope, "占用实例");
         Ok(InstanceGuard {
             table: self.locks.table.clone(),
             key,
@@ -407,21 +430,28 @@ impl ScopedLocks<'_> {
     /// `holds`（同一个键下的全部占用）里落在这个目录、容不下再来一份 `activity` 的那一份。有几处时报列表里也报的
     /// 那一件（实例自己的事、modifying、inherited 依次），不随哪份占用先到而变，否则基底自己在运行时，被拒的删除会
     /// 说成「正在被别的实例使用」，与界面上的状态对不上。
-    fn conflict<'h>(&self, holds: &'h [Hold], activity: InstanceActivity) -> Option<&'h Hold> {
+    fn conflict<'h>(
+        &self,
+        holds: &'h [Hold],
+        activity: InstanceActivity,
+        reads_only: bool,
+    ) -> Option<&'h Hold> {
         holds
             .iter()
-            .filter(|h| h.scope.overlaps(&self.scope) && !activity.compatible_with(h.activity))
+            .filter(|h| h.scope.overlaps(&self.scope) && !h.admits(activity, reads_only))
             .min_by_key(|h| h.activity.report_rank())
     }
 
-    /// `bases` 里第一个此刻容不下基底占用的基底，连同挡路的那件事：补全、重新安装加载器与移动沿继承链依次占基底时，
-    /// 就停在它上面报 `instance_busy`，报的也是这一份。实例列表用它让界面提前禁用入口。
+    /// `bases` 里第一个此刻容不下要写的基底占用的基底，连同挡路的那件事：补全与重新安装加载器沿继承链依次占基底时，
+    /// 就停在它上面报 `instance_busy`，报的也是这一份。实例列表用它让界面提前禁用入口。移动只读基底，报的是 running
+    /// 时不挡移动：基底的游戏在跑，它往上的基底都被这一局占着，只容得下改动、备份与别的基底占用，也都不挡。
     pub fn blocking_base(&self, bases: &[String]) -> Option<BaseBusyDto> {
         let table = lock_table(&self.locks.table);
         bases.iter().find_map(|base| {
             let conflict = self.conflict(
                 table.held.get(&lock_key(base))?,
                 InstanceActivity::Inherited,
+                false,
             )?;
             Some(BaseBusyDto {
                 id: base.clone(),
@@ -2506,8 +2536,8 @@ pub(crate) async fn move_instance_with(
     let target = validate_game_dir(args.target)?;
     let id = args.id;
     let snapshot = facade.snapshot().await;
-    // 基底的版本 JSON 与客户端 jar 要补到目标里：移动期间基底不能被删、改名、补全、移走或启动（启动被挡只因同样以
-    // inherited 占基底，见 `compatible_with`）。
+    // 基底的版本 JSON 与客户端 jar 要补到目标里：移动期间基底不能被删、改名、补全、移走或启动（启动会补写客户端 jar）。
+    // 只读这两样，基底的游戏已经在跑时照样能移（见 `Hold::admits`）。
     let _guard = locks
         .in_dir(snapshot.game_dir())
         .acquire_with_chain(id, InstanceActivity::Moving, async {
@@ -9112,7 +9142,8 @@ mod tests {
     // ---------------------------------------------------------------- 移到另一个游戏目录
 
     /// 移动与一切互斥，两个方向都是：别的事碰到正在移动的实例报 moving，移动碰到在忙的实例报那件事，被别的实例
-    /// 当作基底时报 inherited 与使用者。移动以 inherited 占住继承链上的基底，基底这时只能改动、备份。
+    /// 当作基底时报 inherited 与使用者。移动以 inherited 只读地占住继承链上的基底，基底这时只能改动、备份，游戏已经
+    /// 跑起来的也照跑（两个方向对称）；启动、补全、改名、删除、移走、新建都被挡住。
     #[tokio::test]
     async fn moving_excludes_everything_and_holds_its_bases_as_inherited() {
         use InstanceActivity::*;
@@ -9180,9 +9211,7 @@ mod tests {
             locks.occupancy("1.20.1"),
             (Some(Inherited), Some("FAB".to_owned()))
         );
-        for activity in [
-            Installing, Repairing, Renaming, Deleting, Moving, Launching, Running,
-        ] {
+        for activity in [Installing, Repairing, Renaming, Deleting, Moving, Launching] {
             let err = locks.acquire("1.20.1", activity).err().unwrap();
             assert_eq!(
                 err.detail.unwrap(),
@@ -9190,12 +9219,119 @@ mod tests {
                 "{activity:?}"
             );
         }
-        for activity in [Modifying, BackingUp] {
+        for activity in [Modifying, BackingUp, Running] {
             drop(locks.acquire("1.20.1", activity).unwrap());
         }
         drop(chain);
         assert_eq!(locks.occupancy("1.20.1"), (None, None));
         assert_eq!(locks.activity("FAB"), None);
+    }
+
+    /// 移动只读基底：基底的游戏在跑时照样能移它上面的实例（几个一起移也行），基底报的仍是运行，used_by 是移动的
+    /// 实例；基底还在启动时不行，启动会补写客户端 jar。要写基底的补全照旧被运行中的基底挡住；游戏退出后基底只剩
+    /// 移动的占用，启动、删除、补全基底都要等移动做完，别的实例以它为基底的补全照常。
+    #[test]
+    fn moving_only_reads_its_bases_so_a_running_base_does_not_stop_it() {
+        use InstanceActivity::*;
+        let locks = InstanceLocks::default();
+        let bases = ["1.20.1".to_owned()];
+
+        let game = locks.acquire("1.20.1", Launching).unwrap();
+        let err = locks
+            .acquire_with_bases("FAB", Moving, &bases)
+            .err()
+            .unwrap();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "1.20.1", "activity": "launching" })
+        );
+        assert_eq!(locks.activity("FAB"), None);
+
+        game.set_activity(Running);
+        let moving = locks.acquire_with_bases("FAB", Moving, &bases).unwrap();
+        let also = locks.acquire_with_bases("叠层", Moving, &bases).unwrap();
+        assert_eq!(
+            locks.occupancy("1.20.1"),
+            (Some(Running), Some("FAB".to_owned()))
+        );
+        let err = locks
+            .acquire_with_bases("Quilt", Repairing, &bases)
+            .err()
+            .unwrap();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "1.20.1", "activity": "running" })
+        );
+        drop(game);
+
+        for activity in [Launching, Deleting, Repairing] {
+            let err = locks.acquire("1.20.1", activity).err().unwrap();
+            assert_eq!(
+                err.detail.unwrap(),
+                json!({ "id": "1.20.1", "activity": "inherited", "used_by": "FAB" }),
+                "{activity:?}"
+            );
+        }
+        let repair = locks
+            .acquire_with_bases("Quilt", Repairing, &bases)
+            .unwrap();
+        drop((moving, also, repair));
+        assert_eq!(locks.occupancy("1.20.1"), (None, None));
+    }
+
+    /// 基底的游戏在跑时照样能把它上面的实例移走，基底的版本 JSON 与客户端 jar 带到目标，基底的游戏照旧占着它；
+    /// 基底还在启动时报 instance_busy，什么都没动。
+    #[tokio::test]
+    async fn a_running_base_does_not_stop_moving_the_instance_above_it() {
+        let env = Env::new();
+        let base = env.vanilla("1.20.1");
+        std::fs::write(base.join("1.20.1.jar"), b"client").unwrap();
+        env.version(
+            "FAB",
+            r#"{"id":"FAB","inheritsFrom":"1.20.1","type":"release","mainClass":"K"}"#,
+        );
+        let target = new_home(&env);
+        let (tasks, locks) = (TaskRegistry::default(), InstanceLocks::default());
+        let (events, _rx) = sink();
+        let (source_text, target_text) = (path_text(&env.game_dir()), path_text(&target));
+        let args = || MoveArgs {
+            id: "FAB",
+            source: &source_text,
+            target: &target_text,
+        };
+
+        let game = locks
+            .in_dir(&env.game_dir())
+            .acquire("1.20.1", InstanceActivity::Launching)
+            .unwrap();
+        let err = move_instance_with(&env.facade, &tasks, &locks, "mv", args(), &events)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "1.20.1", "activity": "launching" })
+        );
+        assert!(env.game_dir().join("versions").join("FAB").is_dir());
+        assert!(!target.exists());
+
+        game.set_activity(InstanceActivity::Running);
+        move_instance_with(&env.facade, &tasks, &locks, "mv", args(), &events)
+            .await
+            .unwrap();
+        let versions = target.join("versions");
+        assert!(versions.join("FAB").join("FAB.json").is_file());
+        assert!(versions.join("1.20.1").join("1.20.1.json").is_file());
+        assert_eq!(
+            std::fs::read(versions.join("1.20.1").join("1.20.1.jar")).unwrap(),
+            b"client"
+        );
+        assert!(!env.game_dir().join("versions").join("FAB").exists());
+        assert_eq!(
+            locks.occupancy("1.20.1"),
+            (Some(InstanceActivity::Running), None),
+            "基底的游戏照旧占着它，移动的占用已放开"
+        );
+        drop(game);
     }
 
     /// 还没记录、也还不存在的 `<临时目录>/新家/.minecraft`：显示名按叶子是 .minecraft 取上一级。
