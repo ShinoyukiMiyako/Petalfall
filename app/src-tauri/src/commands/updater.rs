@@ -407,7 +407,15 @@ impl UpdaterState {
             channel = ready.channel.as_str(),
             "开始安装更新"
         );
+        // 拉起成功时插件当场结束进程，只能赶在之前记下；安装程序没起来的话，下次启动据它告诉用户（update_attempt）
+        if let Err(err) = crate::update_attempt::record(current, &ready.update.version) {
+            tracing::warn!(error = %err, "没能记下这次更新，安装程序要是没起来，下次启动不会提示");
+        }
         ready.update.install(&ready.bytes).map_err(|err| {
+            // 没拉起来的错误当场就报给用户了，记录留着的话下次启动会再报一遍
+            if let Err(withdraw) = crate::update_attempt::withdraw() {
+                tracing::warn!(error = %withdraw, "安装程序没拉起来，更新记录也没撤掉，下次启动会再提示一次");
+            }
             updater_error(code::UPDATE_INSTALL_FAILED, "启动更新安装失败", None, err)
         })
     }
@@ -527,6 +535,15 @@ pub async fn updater_info(
     updater: State<'_, UpdaterState>,
 ) -> Result<UpdaterInfoDto, CommandError> {
     Ok(info_now(&facade, &updater, &app.package_info().version).await)
+}
+
+/// 上次拉起安装程序去更新到的那一版，安装程序却没有起来（多半被安全软件拦下了）时为它的版本号，否则为 `null`。
+/// 启动时读一次更新记录得出（[`crate::update_attempt`]），整个会话不变。
+#[tauri::command]
+pub async fn update_installer_missed(
+    missed: State<'_, crate::update_attempt::MissedInstall>,
+) -> Result<Option<String>, CommandError> {
+    Ok(missed.version().map(str::to_owned))
 }
 
 /// 设置更新通道偏好，返回设置之后的 `updater_info`。`channel` 不是 `dev`、`beta`、`stable` 之一时报
@@ -4404,6 +4421,19 @@ mod tests {
             "{state}"
         );
         assert!(!state.contains("slot.ready()"), "{state}");
+        // 拉起成功时插件当场结束进程：更新记录只能写在拉起之前，没拉起来时撤掉
+        let launch = at(&state, "ready.update.install(&ready.bytes)");
+        assert!(
+            at(
+                &state,
+                "crate::update_attempt::record(current, &ready.update.version)"
+            ) < launch,
+            "{state}"
+        );
+        assert!(
+            launch < at(&state, "crate::update_attempt::withdraw()"),
+            "{state}"
+        );
     }
 
     /// 等这个进程退出的后来者只在更新插件的退出前钩子里放走：插件 2.12.0 解包成功之后、拉起安装程序之前才调它，

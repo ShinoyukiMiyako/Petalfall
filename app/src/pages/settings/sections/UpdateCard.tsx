@@ -1,8 +1,10 @@
 // 关于页的「启动器更新」卡：一行状态（主句 + 次句）配一个按钮，其下是「更新通道」选项块与「自动检查更新」开关。
 // 状态行至少留出主句与一行次句的高度：检查中没有次句，那时状态行不变矮，下面的行与卡片不来回跳。
 // 选项块依赖更新信息，和状态行放在同一个加载门里；不支持自更新、更新信息读不出来时整块不显示。
+// 上次拉起的安装程序没起来时，状态行上面另有一块说明，给出到发布页手动下载的出路；它晚到，由让位把下面的行滑下去。
 
-import { memo, useCallback, useState } from "react";
+import { memo, useCallback, useState, type ReactNode } from "react";
+import { REPO_URL } from "../../../lib/app-info";
 import { useLoadingGate } from "../../../lib/loading-gate";
 import { useDisplayCount } from "../../../lib/progress-display";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../../state/launcher";
@@ -23,6 +25,7 @@ import { SmoothPercent } from "../../../ui/SmoothPercent";
 import { Tag } from "../../../ui/Tag";
 import { Toggle } from "../../../ui/Toggle";
 import { UPDATE_COPY, updateChannelLabel } from "../../../copy/updater";
+import { useUpdateInstallerMissed } from "../../../state/queries/catalog";
 import { useDownloadHold } from "../../../state/updater/useDownloadHold";
 import { useUpdater } from "../../../state/updater/useUpdater";
 import { ABOUT_COPY, LOAD_COPY } from "../copy";
@@ -45,6 +48,27 @@ import {
 
 /** 相对时间「x 分钟前检查过」的刷新间隔。 */
 const RELATIVE_REFRESH_MS = 30_000;
+
+/** 手动下载安装包的去处：仓库的发布页。 */
+const RELEASES_URL = `${REPO_URL}/releases`;
+
+/** 上次拉起的安装程序没起来时的说明块：说清可能的原因，给出到发布页手动下载的出路。 */
+function InstallerMissedNotice({ version, onDownload }: { version: string; onDownload: () => void }) {
+  return (
+    <Callout
+      tone="warn"
+      announce
+      action={
+        <Button size="sm" variant="ghost" icon="external" onClick={onDownload}>
+          {UPDATE_COPY.manualDownload}
+        </Button>
+      }
+    >
+      <span className={s.calloutTitle}>{UPDATE_COPY.installerMissed}</span>
+      {UPDATE_COPY.installerMissedSub(version)}
+    </Callout>
+  );
+}
 
 /**
  * 下载中的次句。已下大小随进度事件约 100 ms 一涨，照原样换字一秒跳十次、读不清，与更新面板按同一个节拍换。
@@ -227,6 +251,27 @@ export function UpdateCard() {
   const { snapshot } = updater;
   const changeCost = useCallback(() => channelChangeCost(snapshot().phase), [snapshot]);
   const shown = useDownloadHold(updater.state.phase);
+  const missed = useUpdateInstallerMissed();
+
+  let missedNotice: ReactNode = null;
+  if (missed.status === "error") {
+    missedNotice = (
+      <Callout
+        tone="danger"
+        announce
+        action={
+          <Button size="sm" variant="ghost" onClick={() => missed.reload()}>
+            {LOAD_COPY.retry}
+          </Button>
+        }
+      >
+        <span className={s.calloutTitle}>{UPDATE_COPY.installerMissedFailed}</span>
+        <span className={s.errorText}>{missed.error.message}</span>
+      </Callout>
+    );
+  } else if (missed.status === "ready" && missed.data !== null) {
+    missedNotice = <InstallerMissedNotice version={missed.data} onDownload={() => void run(() => actions.openExternal(RELEASES_URL), UPDATE_COPY.manualDownloadFailed)} />;
+  }
 
   // 更新信息读失败不算加载中：那时换成带重试的说明块
   const gate = useLoadingGate(updater.state.currentVersion === null && updater.info.status !== "error");
@@ -293,6 +338,7 @@ export function UpdateCard() {
       <CardHeader title={UPDATE_COPY.cardTitle} icon="refresh" />
       {/* 状态行换成多行的错误原文、说明块与状态行互换、骨架换成少了选项块的内容时，下面的「自动检查更新」一行滑过去 */}
       <RowFlow>
+        {missedNotice}
         {line}
         <SettingRow title={UPDATE_COPY.autoCheck} description={UPDATE_COPY.autoCheckDesc}>
           <Toggle checked={autoCheck.value} onChange={autoCheck.set} ariaLabel={UPDATE_COPY.autoCheck} />

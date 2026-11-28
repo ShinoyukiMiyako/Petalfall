@@ -1,4 +1,4 @@
-//! 引导程序和已安装的启动器之间的两件事：安装前看它开着没有，装完替用户把它打开。
+//! 引导程序和已安装的启动器之间的三件事：一起来就删掉它记下的更新记录，安装前看它开着没有，装完替用户把它打开。
 //!
 //! 这里对别的进程只读：静默的 NSIS 会直接结束同名进程，下载和没保存的改动都会丢，所以开着就让用户自己关。
 //! 打开进程只要查询权限，不要结束权限。
@@ -39,6 +39,22 @@ pub enum Opened {
     /// 进程先退了。再次启动的启动器把已有窗口叫到前台后就会这样，这本身不算失败。
     Exited(Option<i32>),
     TimedOut,
+}
+
+/// 启动器拉起安装程序之前写在 `%LOCALAPPDATA%\Petalfall-Setup` 下的更新记录。必须与启动器
+/// app/src-tauri/src/update_attempt.rs 的 `ATTEMPT_FILE` 相同，那边有测试钉住。
+pub const UPDATE_ATTEMPT_FILE: &str = "update-attempt.json";
+
+/// 删掉 `root` 下启动器记下的更新记录，交回有没有删到。
+///
+/// 记录还在、版本又没变，启动器下次启动就会说安装程序没能启动、可能被安全软件拦了，所以引导程序一起来就删，
+/// 不论是不是更新拉起的、后面装没装成：起来过的引导程序自己会把结果告诉用户。
+pub fn acknowledge_update_attempt(root: &Path) -> io::Result<bool> {
+    match std::fs::remove_file(root.join(UPDATE_ATTEMPT_FILE)) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 /// 当前用户有没有在运行启动器，不看它装在哪个目录：NSIS 就是这么判的，文件名也用同一个，别的目录的便携副本同样会被它结束。
@@ -193,6 +209,20 @@ mod tests {
     use crate::boot::{Claim, test_claim, test_claim_within};
 
     const DUMP_ENV: &str = "PETALFALL_TEST_DUMP_LAUNCHER_ARGS";
+
+    #[test]
+    fn starting_up_deletes_the_update_record_the_launcher_left() {
+        let root = TempDir::new().unwrap();
+        let record = root.path().join(UPDATE_ATTEMPT_FILE);
+        fs::write(&record, br#"{"from":"1.0.0-dev.61","to":"1.0.0-dev.62"}"#).unwrap();
+        fs::write(root.path().join("setup.log"), b"keep").unwrap();
+
+        assert!(acknowledge_update_attempt(root.path()).unwrap());
+        assert!(!record.exists());
+        assert_eq!(fs::read(root.path().join("setup.log")).unwrap(), b"keep");
+        // 没有记录（没经过更新、或已经删过）不算错
+        assert!(!acknowledge_update_attempt(root.path()).unwrap());
+    }
 
     fn instance(test: &str) -> Instance {
         match test_claim(&format!("launcher-{test}")) {

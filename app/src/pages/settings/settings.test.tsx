@@ -2139,6 +2139,47 @@ describe("设置页：关于与启动器更新", () => {
     expect(all("button").some((b) => b.textContent === "重试")).toBe(false);
   });
 
+  describe("上次拉起的安装程序没起来", () => {
+    const missedNotice = () => section(`${APP_NAME}更新`).querySelector('[data-tone="warn"]');
+
+    it("卡片在状态行上面说明可能被安全软件拦截，「手动下载」交给 opener 插件打开发布页", async () => {
+      ipc.overrides.set("update_installer_missed", () => "0.2.0");
+      ipc.overrides.set("plugin:opener|open_url", () => null);
+      await mount("about");
+      const notice = missedNotice();
+      if (notice === null) throw new Error("更新卡上没有说明块");
+      expect(notice.querySelector('[class*="calloutTitle"]')?.textContent).toBe("安装程序没能启动，可能被安全软件拦截");
+      expect(notice.textContent).toContain("上次更新到 0.2.0 时安装程序没有运行起来，这次没有装上。可以到发布页手动下载安装包再安装。");
+      // 排在状态行之前：先读到没装上，再看状态行
+      expect(notice.compareDocumentPosition(button("检查更新")) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+      await click(button("手动下载"));
+      expect(callsOf(ipc, "plugin:opener|open_url")).toEqual([{ url: `${REPO_URL}/releases` }]);
+    });
+
+    it("没有这回事时没有说明块", async () => {
+      await mount("about");
+      expect(callsOf(ipc, "update_installer_missed")).toHaveLength(1);
+      expect(missedNotice()).toBeNull();
+      expect(text()).not.toContain("安装程序没能启动");
+    });
+
+    it("读不出来时写明原因、给重试，重试成功就收起", async () => {
+      let calls = 0;
+      ipc.overrides.set("update_installer_missed", () => {
+        calls += 1;
+        if (calls === 1) throw new IpcError("internal", "后端没有回应");
+        return null;
+      });
+      await mount("about");
+      const alert = section(`${APP_NAME}更新`).querySelector('[data-tone="danger"]');
+      expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe("读不出上次更新的结果");
+      expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe("后端没有回应");
+      await click(button("重试"));
+      expect(calls).toBe(2);
+      expect(section(`${APP_NAME}更新`).querySelector('[data-tone="danger"]')).toBeNull();
+    });
+  });
+
   describe("更新通道", () => {
     const card = () => section(`${APP_NAME}更新`);
     /** 卡里在场的状态行（退场中的旧内容层带 inert）。 */

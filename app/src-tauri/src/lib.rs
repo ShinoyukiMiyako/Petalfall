@@ -9,7 +9,8 @@
 //! [`commands`] 下；各领域共用的设施——门面锁 [`facade`]、长任务登记与取消 [`tasks`]、
 //! 事件转发 [`events`]、主窗口启动期处理 [`window`]、主窗口记住大小与位置 [`window_state`]、主窗口原生拖放 [`drop`]、渲染进程故障后的
 //! 自动重载 [`renderer`]、最小化时的页面可见性 [`page_visibility`]、同一数据目录只跑一个启动器
-//! [`single_instance`]、更新插件留下的安装包目录的清扫 [`update_leftovers`]——各自成模块。
+//! [`single_instance`]、更新插件留下的安装包目录的清扫 [`update_leftovers`]、看上次拉起的安装程序有没有起来的
+//! 更新记录 [`update_attempt`]——各自成模块。
 //!
 //! 新增命令时在 `generate_handler!` 里本领域的分块内追加，块之间以 `// -- 领域 --` 分隔；
 //! 新增 managed state 同样写在 setup 里本领域的分块内。
@@ -30,6 +31,7 @@ mod renderer;
 mod single_instance;
 mod tasks;
 mod textures;
+mod update_attempt;
 #[cfg(windows)]
 mod update_leftovers;
 mod window;
@@ -159,6 +161,11 @@ pub fn run() {
             app.manage(commands::system::FirstRunBaselineSlot::default());
             app.manage(server_monitor);
             app.manage(UpdaterState::new(updater_support));
+            // 上次拉起的安装程序有没有起来：更新卡要在本次会话里说
+            app.manage(update_attempt::MissedInstall::consume_on_startup(
+                &app.package_info().version,
+                updater_support == UpdaterSupport::Supported,
+            ));
             // 只有装了插件的构建才会留下这些目录；开发构建不碰，本机正式安装的更新包轮不到它来删
             #[cfg(windows)]
             if updater_support == UpdaterSupport::Supported {
@@ -307,6 +314,7 @@ pub fn run() {
             commands::servers::ping_servers,
             commands::news::list_news,
             commands::updater::updater_info,
+            commands::updater::update_installer_missed,
             commands::updater::check_update,
             commands::updater::download_update,
             commands::updater::install_update,
@@ -468,6 +476,21 @@ mod tests {
         assert!(
             source.contains("let updater_support = commands::updater::detect_support("),
             "updater_support 应是 detect_support 的结果"
+        );
+    }
+
+    // 更新记录同理：开发构建不该读掉、删掉这台机器上正式安装留下的那份。
+    #[test]
+    fn the_update_attempt_is_consumed_only_when_self_update_is_supported() {
+        let (source, _) = include_str!("lib.rs").split_once("#[cfg(test)]").unwrap();
+        let call = "update_attempt::MissedInstall::consume_on_startup(";
+        assert_eq!(source.matches(call).count(), 1, "读更新记录只该有一处");
+        let (_, after) = source.split_once(call).unwrap();
+        let (args, _) = after.split_once("));").expect("找不到这次调用的结尾");
+        let args = args.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            args,
+            "&app.package_info().version, updater_support == UpdaterSupport::Supported,"
         );
     }
 

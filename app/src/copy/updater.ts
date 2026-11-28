@@ -60,6 +60,12 @@ export const UPDATE_COPY = {
     pubkey_mismatch: "这个版本配的更新签名公钥与它所属的发布通道对不上，验不了更新包，所以不检查更新",
   } satisfies Readonly<Record<UpdaterUnsupportedReason, string>>,
   installingCard: "正在启动安装程序…",
+  /** 上次拉起安装程序去更新，这次打开时发现它根本没起来：更新卡上的说明块。拦下它的多半是安全软件，只说可能。 */
+  installerMissed: "安装程序没能启动，可能被安全软件拦截",
+  installerMissedSub: (v: string) => `上次更新到 ${v} 时安装程序没有运行起来，这次没有装上。可以到发布页手动下载安装包再安装。`,
+  manualDownload: "手动下载",
+  manualDownloadFailed: "没能打开发布页",
+  installerMissedFailed: "读不出上次更新的结果",
   // 更新通道：选项块的小标题也是组的读屏名与写入失败通知里的名字
   channelTitle: "更新通道",
   channelDesc: "从选的这条线接收更新。选了更稳的线时，现在的版本先留着，等那条线出了更新的版本再换过去。",

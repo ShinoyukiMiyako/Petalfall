@@ -19,7 +19,7 @@ import {
   type ManifestDto,
   type VersionRequirementsDto,
 } from "../../ipc/instances";
-import { memoryAdvice, updaterInfo, type MemoryAdviceDto, type UpdaterInfoDto } from "../../ipc/system";
+import { memoryAdvice, updateInstallerMissed, updaterInfo, type MemoryAdviceDto, type UpdaterInfoDto } from "../../ipc/system";
 import { resources, useResource, type ResourceResult } from "../resource";
 
 export type { GameDirectoryDto, GameDirectoryInspectionDto, GameDirectoryProblem, NamedDirectoryDto } from "../../ipc/config";
@@ -114,4 +114,12 @@ export function useGameDirectoryInspection(path: string | null): ResourceResult<
 /** updater —— 启动器更新的能力与状态。 */
 export function useUpdaterInfo(): ResourceResult<UpdaterInfoDto> {
   return useResource("updater", updaterInfo);
+}
+
+/**
+ * update-installer-missed —— 上次拉起的安装程序没起来的那一版，没有为 null；整个会话不变。
+ * 键不以 updater 开头：更新动作之后让 updater 失效重读时不必连带重读它。
+ */
+export function useUpdateInstallerMissed(): ResourceResult<string | null> {
+  return useResource("update-installer-missed", updateInstallerMissed);
 }

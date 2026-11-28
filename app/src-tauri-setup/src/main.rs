@@ -15,6 +15,7 @@ use petalfall_setup_lib::boot::{self, Claim, DesktopUser, Notice, Webview};
 use petalfall_setup_lib::cli;
 use petalfall_setup_lib::commands::{self, FallenBack, SetupContext};
 use petalfall_setup_lib::extract::WEBVIEW_DATA_PREFIX;
+use petalfall_setup_lib::launcher;
 use petalfall_setup_lib::log::{self, SetupLog};
 use petalfall_setup_lib::overlay;
 use petalfall_setup_lib::runner::Session;
@@ -125,6 +126,15 @@ fn run(webview: Webview, log: &Arc<SetupLog>) -> Result<ExitCode, Box<dyn Error>
             "这些参数不起作用，已忽略：{:?}",
             parsed.ignored
         ));
+    }
+    // 启动器拉起安装程序前记下了这次更新，起来了就删：留着的话落樱下次启动会说安装程序没能启动。排在互斥那关之前：
+    // 被转发掉的后来者也起来过，没更新的原因由它自己说（boot::forwarded_notice）
+    match log::default_root().and_then(|root| launcher::acknowledge_update_attempt(&root)) {
+        Ok(true) => log.info("删掉了启动器记下的更新记录"),
+        Ok(false) => {}
+        Err(err) => log.warn(format_args!(
+            "删不掉启动器记下的更新记录，落樱下次启动会误报安装程序没能启动：{err}"
+        )),
     }
     let instance = match boot::claim()? {
         Claim::First(instance) => Arc::new(instance),

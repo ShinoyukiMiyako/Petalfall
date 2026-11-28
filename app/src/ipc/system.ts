@@ -307,6 +307,12 @@ export interface UpdaterInfoDto {
 export const updaterInfo = (): Promise<UpdaterInfoDto> => invoke<UpdaterInfoDto>("updater_info");
 
 /**
+ * 上次拉起安装程序去更新到的那一版，安装程序却没有起来（多半被安全软件拦下了）时为它的版本号，否则为 null。
+ * 后端在启动时读一次拉起之前留下的记录得出，整个会话不变；不支持自更新时恒为 null。
+ */
+export const updateInstallerMissed = (): Promise<string | null> => invoke<string | null>("update_installer_missed");
+
+/**
  * 检查更新，没有新版本返回 null。更新源上还没有发布（所有端点的清单都回 404）不算失败：本次会话已知的版本仍在就返回它，否则同样是 null。
  * 不支持时报 updater_unsupported（detail.reason），失败报 update_check_failed：全部端点都败在网络层时带 detail.network；
  * detail.attempts 按顺序列出每个端点的结果。只有一个端点、它回了 404 以外的非 2xx 时带 detail.status；

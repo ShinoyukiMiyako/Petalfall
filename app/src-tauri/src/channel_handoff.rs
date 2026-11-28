@@ -59,8 +59,8 @@ pub async fn consume_on_startup(
 }
 
 /// 记录所在的目录 `%LOCALAPPDATA%\Petalfall-Setup`。照引导程序取这个目录的写法读环境变量：写的一方与读的一方
-/// 才落在同一处。变量为空时也算没有，不能拼成当前目录下的相对路径。
-fn setup_dir() -> io::Result<PathBuf> {
+/// 才落在同一处。变量为空时也算没有，不能拼成当前目录下的相对路径。更新记录（[`crate::update_attempt`]）也放在这里。
+pub(crate) fn setup_dir() -> io::Result<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA")
         .filter(|value| !value.is_empty())
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "环境变量 LOCALAPPDATA 没有设置"))?;

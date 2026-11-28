@@ -757,6 +757,8 @@ export const handlers: MockHandlers = {
   ping_servers: (args) => pingServers(args),
   list_news: (args) => listNews(args),
   updater_info: () => updaterInfo(),
+  // 假后端不拉起安装程序，也就没有没起来的那一次
+  update_installer_missed: () => null,
   check_update: () => checkUpdate(),
   download_update: (args) => downloadUpdate(args),
   install_update: () => installUpdate(),
