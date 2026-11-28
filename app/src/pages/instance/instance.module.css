@@ -730,6 +730,13 @@
   line-height: var(--sk-lh-caption);
 }
 
+/* 表格行悬停与按下铺叠层，叠层上 text-2 不到 4.5:1（夜樱悬停约 4.2、按下约 3.4）：铺叠层时版本号与第二行提到 text。
+   选中行铺的是 accent-soft，不提 */
+[role="row"]:not([data-selected]):hover :is(.modVersion, .modSub),
+[role="row"][data-activatable]:not([data-selected]):active :is(.modVersion, .modSub) {
+  color: var(--sk-text);
+}
+
 .modFile {
   min-width: 0;
   overflow: hidden;

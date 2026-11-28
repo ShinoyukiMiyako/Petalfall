@@ -133,6 +133,13 @@ describe("叠层上的字", () => {
     expect(declarationOf(tableCss, ".row", "color")).toBe("var(--sk-text)");
   });
 
+  it("模组表格的版本号与第二行静止时是 text-2，所在的表格行铺叠层时提到 text", () => {
+    const instanceCss = readCss(new URL("../pages/instance/instance.module.css", import.meta.url));
+    for (const rest of [".modVersion", ".modSub"]) expect(declarationOf(instanceCss, rest, "color")).toBe("var(--sk-text-2)");
+    const lifted = ['[role="row"]:not([data-selected]):hover :is(.modVersion, .modSub)', '[role="row"][data-activatable]:not([data-selected]):active :is(.modVersion, .modSub)'];
+    expect(lifted.map((selector) => declarationOf(instanceCss, selector, "color"))).toEqual(["var(--sk-text)", "var(--sk-text)"]);
+  });
+
   it("text-2 留在叠层上：悬停最低日樱 4.74、夜樱 4.22，按下 4.16、3.44，所以铺叠层时要提", () => {
     const lowest = (appearance: AppearanceName, state: State) => lowestInk(appearance, state === "hover" ? "var(--sk-fill-hover)" : "var(--sk-fill-press)", "var(--sk-text-2)");
     expect([lowest("日樱 · 樱粉", "hover"), lowest("夜樱 · 樱粉", "hover"), lowest("日樱 · 樱粉", "active"), lowest("夜樱 · 樱粉", "active")]).toEqual([4.74, 4.22, 4.16, 3.44]);
