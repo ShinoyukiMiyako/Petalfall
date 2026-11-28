@@ -80,7 +80,7 @@
 其他位置：
 
 - 界面的 WebView2 数据：`%LOCALAPPDATA%\org.petalfall.launcher`。
-- 安装程序的文件夹 `%LOCALAPPDATA%\Petalfall-Setup`：安装日志 `setup.log`，每次安装往后追加，不会自动清理；安装进行中的记录 `journal.json`，记着安装位置与版本，装好并核对过文件后删掉，安装被打断时留着，下次运行安装程序时靠它认出上次没装完；在安装程序里换通道时写下的 `channel-handoff.json`，记着换到的通道与版本，落樱下次打开时按它改好「更新通道」，随后删掉。
+- 安装程序的文件夹 `%LOCALAPPDATA%\Petalfall-Setup`：安装日志 `setup.log`，每次安装往后追加，不会自动清理；安装进行中的记录 `journal.json`，记着安装位置与版本，装好并核对过文件后删掉，安装被打断时留着，下次运行安装程序时靠它认出上次没装完；在安装程序里换通道时写下的 `channel-handoff.json`，记着换到的通道与版本，落樱下次打开时按它改好「更新通道」，随后删掉；落樱拉起安装程序更新之前写下的 `update-attempt.json`，记着从哪一版更新到哪一版，安装程序一启动就删掉，没删掉时落樱下次打开读一次，用来说明上次的更新没有装上，随后删掉。
 - 自动更新下载的安装包：放在系统临时文件夹 `%TEMP%` 里名字以 `Petalfall-` 开头、带 `-updater-` 的文件夹中，落樱每次打开时清掉放了一小时以上的。
 - 显卡偏好：开了「设置 · Java」里的「让游戏用独立显卡」时，落樱在启动游戏前把这次用的 Java 写进 Windows 图形设置（注册表 `HKCU\Software\Microsoft\DirectX\UserGpuPreferences`），设成「高性能」。关掉这个选项不会把已经写进去的改回来。
 
