@@ -548,8 +548,19 @@ impl Petalfall {
             CoreEvent::stage(format!("打包 {override_count} 个文件")),
         );
         let written = self
-            .write_pack_reporting(pack, target.part_path(), bytes_total, events, phases)
+            .write_pack_reporting(
+                pack,
+                target.part_path(),
+                bytes_total,
+                events,
+                Arc::clone(&phases),
+            )
             .await?;
+        // 报乱了步骤就不换上导出的文件，与改名失败一样丢掉临时文件。
+        if let Err(err) = phases.check() {
+            target.discard().await;
+            return Err(err);
+        }
 
         if let Err(source) = tokio::fs::rename(target.part_path(), target.destination()).await {
             target.discard().await;

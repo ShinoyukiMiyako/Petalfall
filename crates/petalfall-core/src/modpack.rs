@@ -1052,6 +1052,8 @@ impl Petalfall {
         {
             emit(events, CoreEvent::stage(template_stage(&template)));
         }
+        // 报乱了步骤就在写下整合包信息、清掉未完成标记之前失败，与别的失败一样删掉半成品。
+        announcer.check()?;
 
         let (platform, project_id, version_id) = match source {
             ModpackSource::Platform {

@@ -279,6 +279,13 @@ impl Petalfall {
         }
 
         announcer.enter(InstallPhase::RestoreCommit);
+        // 报乱了步骤就在动现在的存档之前失败，与取消一样丢掉解好的副本。
+        if let Err(err) = announcer.check() {
+            if let Err(cleanup) = tokio::fs::remove_dir_all(&staged).await {
+                tracing::warn!(path = %staged.display(), error = %cleanup, "清理恢复用的临时目录失败");
+            }
+            return Err(err);
+        }
         if path_exists(&paths.world_dir).await? {
             emit(events, CoreEvent::stage("正在把现在的存档移入回收站"));
         }

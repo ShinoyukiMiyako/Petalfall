@@ -434,6 +434,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::NoJava { .. } => code::JAVA_MISSING,
         CoreError::PrecheckFailed(_) => code::PRECHECK_FAILED,
         CoreError::TaskJoin(_) => code::INTERNAL,
+        CoreError::PhaseOrder(_) => code::INTERNAL,
         CoreError::PlatformUnsupported => code::PLATFORM_UNSUPPORTED,
         CoreError::InvalidProjectId { .. } => code::INVALID_ARGUMENT,
         CoreError::InvalidResourceTarget(_) => code::INVALID_ARGUMENT,
@@ -1516,6 +1517,14 @@ mod tests {
 
         let memory: CommandError = CoreError::MemoryUnavailable.into();
         assert_eq!(memory.code, code::MEMORY_UNAVAILABLE);
+
+        let phase: CommandError =
+            CoreError::PhaseOrder("步骤 Template 不在这次的步骤表 [Metadata] 里".into()).into();
+        assert_eq!(phase.code, code::INTERNAL);
+        assert_eq!(
+            phase.message,
+            "任务的步骤顺序出错（程序缺陷）：步骤 Template 不在这次的步骤表 [Metadata] 里"
+        );
 
         let feed: CommandError = CoreError::FeedParse {
             url: "https://x/news.json".into(),

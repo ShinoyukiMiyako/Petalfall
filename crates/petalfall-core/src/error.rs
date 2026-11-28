@@ -83,6 +83,10 @@ pub enum CoreError {
     /// 后台阻塞任务异常结束（如 Java 探测子任务 panic）。
     #[error("后台任务异常结束")]
     TaskJoin(#[from] tokio::task::JoinError),
+    /// 长任务报步骤违反了开工时排定的步骤表：程序缺陷，玩家处理不了。正式构建里不崩，让这个任务以内部错误失败，
+    /// 见 `instance_install::PhaseAnnouncer`。
+    #[error("任务的步骤顺序出错（程序缺陷）：{0}")]
+    PhaseOrder(String),
     /// 该操作在当前平台不受支持（微软登录凭据加密仅限 Windows）。
     #[error("该操作在当前平台不受支持（微软登录的凭据加密仅限 Windows）")]
     PlatformUnsupported,

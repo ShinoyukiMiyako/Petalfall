@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -416,6 +417,8 @@ impl Petalfall {
         } else {
             None
         };
+        // 报乱了步骤的安装照失败处理：调用方据此把未完成标记记成失败，下次补全照标记重装。
+        announcer.check()?;
         emit(
             events,
             CoreEvent::stage(format!(
@@ -604,6 +607,7 @@ impl Petalfall {
                 .with_phases(Some(&report_phase));
                 emit(events, CoreEvent::stage(format!("补全实例 {id} 的文件")));
                 let report = ensure_complete(cx, &merged, &root).await?;
+                announcer.check()?;
                 emit(
                     events,
                     CoreEvent::stage(format!(
@@ -1082,8 +1086,10 @@ fn install_plan(request: &InstanceRequest) -> Vec<InstallPhase> {
     plan
 }
 
-/// 按开工时排定的步骤表报步骤。报来的步骤不在表里、比上一步靠前或报了两遍，说明表排错了：前端拿到这样的
-/// 下标只会算出倒退的进度，直接崩。
+/// 按开工时排定的步骤表报步骤。报来的步骤不在表里、比上一步靠前或报了两遍，说明表排错了，是程序缺陷：前端
+/// 拿到这样的下标只会算出倒退的进度。测试与 debug 构建当场崩，排错的表混不过测试；正式构建不为一条进度崩掉
+/// 整个启动器，记 error 日志、这一步与之后的步骤都不再报，任务交出结果之前经 [`check`](Self::check) 以内部
+/// 错误失败。
 ///
 /// 开工时还排不准的任务（导入整合包读到包之前不知道加载器与有没有远程文件）先按已知情况排一份，读清楚后经
 /// [`revise`](Self::revise) 改写还没报到的步骤，再经 [`resume`](Self::resume) 接着报。
@@ -1095,6 +1101,10 @@ pub(crate) struct PhaseAnnouncer {
     plan: Vec<InstallPhase>,
     /// 下一步最小的合法下标。
     next: AtomicUsize,
+    /// 第一次违约的说明。之后的违约都是它的连带，不再记。
+    broken: OnceLock<String>,
+    /// 违约时当场崩：测试与 debug 构建为真，正式构建为假。
+    strict: bool,
 }
 
 /// 报到一半的步骤表与下一步最小的合法下标：改写步骤表之后交给 [`PhaseAnnouncer::resume`] 接着报。
@@ -1102,11 +1112,20 @@ pub(crate) struct PhaseAnnouncer {
 pub(crate) struct PhaseCursor {
     plan: Vec<InstallPhase>,
     next: usize,
+    /// 改写之前或改写时违约过：接着报的播报器照样交出那次的错误。
+    broken: Option<String>,
 }
 
 impl PhaseAnnouncer {
     pub(crate) fn new(events: Option<&EventSink>, plan: Vec<InstallPhase>) -> Self {
-        Self::resume(events, PhaseCursor { plan, next: 0 })
+        Self::resume(
+            events,
+            PhaseCursor {
+                plan,
+                next: 0,
+                broken: None,
+            },
+        )
     }
 
     /// 接着 `cursor` 报：已经报过的步骤不能再报，下标照旧只许变大。
@@ -1115,21 +1134,35 @@ impl PhaseAnnouncer {
             events: events.cloned(),
             plan: cursor.plan,
             next: AtomicUsize::new(cursor.next),
+            broken: cursor.broken.map_or_else(OnceLock::new, OnceLock::from),
+            strict: cfg!(any(test, debug_assertions)),
         }
+    }
+
+    /// 按正式构建的方式处理违约（不崩），测的就是正式构建里那条路。
+    #[cfg(test)]
+    fn lenient(mut self) -> Self {
+        self.strict = false;
+        self
     }
 
     /// 把还没报到的步骤改写成 `plan`。自己不发事件，下一次 [`enter`](Self::enter) 发出的事件带新表。
     ///
     /// 已经报过的步骤（前端据此算过进度、画过「第几步」）必须原样留在新表的同一位置，否则前端拿到的是一份
-    /// 前后对不上的表：新表的前 `next` 项与旧表不同就是契约错误，直接崩。
+    /// 前后对不上的表：新表的前 `next` 项与旧表不同就是违约，按类型文档处理，违约随返回的游标带下去。
     pub(crate) fn revise(self, plan: Vec<InstallPhase>) -> PhaseCursor {
-        let next = self.next.into_inner();
-        assert!(
-            plan.get(..next) == self.plan.get(..next),
-            "改写步骤表动了已经报过的前 {next} 步：旧表 {:?}，新表 {plan:?}",
-            self.plan
-        );
-        PhaseCursor { plan, next }
+        let next = self.next.load(Ordering::Relaxed);
+        if self.broken.get().is_none() && plan.get(..next) != self.plan.get(..next) {
+            self.violate(format!(
+                "改写步骤表动了已经报过的前 {next} 步：旧表 {:?}，新表 {plan:?}",
+                self.plan
+            ));
+        }
+        PhaseCursor {
+            plan,
+            next,
+            broken: self.broken.into_inner(),
+        }
     }
 
     /// 这次的表里有没有 `phase`。可有可无的步骤报不报照这个判断，不再读一遍排表时读过的状态：那份状态在
@@ -1138,24 +1171,35 @@ impl PhaseAnnouncer {
         self.plan.contains(&phase)
     }
 
+    /// 不返回结果：安装链路经没有返回值的回调报步骤。违约由 [`check`](Self::check) 交出。
     pub(crate) fn enter(&self, phase: InstallPhase) {
-        let index = self
-            .plan
-            .iter()
-            .position(|p| *p == phase)
-            .unwrap_or_else(|| panic!("步骤 {phase:?} 不在这次的步骤表 {:?} 里", self.plan));
+        // 违约过之后表已经对不上，再报只会让前端算出更乱的进度。
+        if self.broken.get().is_some() {
+            return;
+        }
+        let Some(index) = self.plan.iter().position(|p| *p == phase) else {
+            self.violate(format!(
+                "步骤 {phase:?} 不在这次的步骤表 {:?} 里",
+                self.plan
+            ));
+            return;
+        };
         let floor = self.next.swap(index + 1, Ordering::Relaxed);
-        // 两种违约分开报：崩溃信息里一眼分得清是把刚报过的一步又报了一遍，还是退回了更早的一步。
-        assert!(
-            index + 1 != floor,
-            "步骤 {phase:?} 报了两遍：上一步报的就是它，步骤表 {:?}",
-            self.plan
-        );
-        assert!(
-            index >= floor,
-            "步骤 {phase:?} 报在了它后面的步骤之后：步骤表 {:?}",
-            self.plan
-        );
+        // 两种违约分开报：一眼分得清是把刚报过的一步又报了一遍，还是退回了更早的一步。
+        if index + 1 == floor {
+            self.violate(format!(
+                "步骤 {phase:?} 报了两遍：上一步报的就是它，步骤表 {:?}",
+                self.plan
+            ));
+            return;
+        }
+        if index < floor {
+            self.violate(format!(
+                "步骤 {phase:?} 报在了它后面的步骤之后：步骤表 {:?}",
+                self.plan
+            ));
+            return;
+        }
         emit(
             self.events.as_ref(),
             CoreEvent::Phase {
@@ -1163,6 +1207,23 @@ impl PhaseAnnouncer {
                 index,
             },
         );
+    }
+
+    /// 报步骤违约过就交出那次的内部错误。任务在交出结果之前调它：回调里的违约只有在这里才报得出来，不调的话
+    /// 正式构建里违约的任务会带着报乱的进度显示成功。
+    pub(crate) fn check(&self) -> Result<()> {
+        match self.broken.get() {
+            Some(violation) => Err(CoreError::PhaseOrder(violation.clone())),
+            None => Ok(()),
+        }
+    }
+
+    fn violate(&self, violation: String) {
+        tracing::error!(%violation, "报步骤违反了开工时排定的步骤表（程序缺陷）");
+        if self.strict {
+            panic!("{violation}");
+        }
+        self.broken.get_or_init(|| violation);
     }
 }
 
@@ -1590,6 +1651,102 @@ mod tests {
         let announcer =
             PhaseAnnouncer::new(None, vec![InstallPhase::Metadata, InstallPhase::Libraries]);
         announcer.enter(InstallPhase::Template);
+    }
+
+    fn phase_order_message(checked: Result<()>) -> String {
+        match checked {
+            Err(CoreError::PhaseOrder(message)) => message,
+            other => panic!("应以步骤顺序出错失败，实际是 {other:?}"),
+        }
+    }
+
+    /// 正式构建里违约不崩：违约的这一步与之后的步骤都不报，check 交出第一次违约的内部错误，后来的违约不覆盖它。
+    #[test]
+    fn a_lenient_announcer_stops_reporting_and_fails_on_the_first_violation() {
+        use InstallPhase::*;
+        let plan = vec![Metadata, Libraries, Assets];
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let announcer = PhaseAnnouncer::new(Some(&tx), plan.clone()).lenient();
+        announcer.enter(Metadata);
+        announcer.check().expect("还没违约");
+        announcer.enter(Template);
+        announcer.enter(Libraries);
+        announcer.enter(Libraries);
+        assert_eq!(
+            phase_order_message(announcer.check()),
+            format!("步骤 Template 不在这次的步骤表 {plan:?} 里")
+        );
+        drop(announcer);
+        drop(tx);
+        assert_eq!(phases_of(&drain(rx)), vec![(plan, 0)]);
+    }
+
+    /// 报两遍与往回报在正式构建里也各自交出说明，违约之前报的照常发出。
+    #[test]
+    fn a_lenient_announcer_names_each_kind_of_violation() {
+        use InstallPhase::*;
+        let plan = vec![Metadata, Libraries, Assets];
+        for (steps, expected, reported) in [
+            (
+                vec![Metadata, Metadata],
+                format!("步骤 Metadata 报了两遍：上一步报的就是它，步骤表 {plan:?}"),
+                vec![0],
+            ),
+            (
+                vec![Metadata, Assets, Libraries],
+                format!("步骤 Libraries 报在了它后面的步骤之后：步骤表 {plan:?}"),
+                vec![0, 2],
+            ),
+        ] {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let announcer = PhaseAnnouncer::new(Some(&tx), plan.clone()).lenient();
+            for phase in &steps {
+                announcer.enter(*phase);
+            }
+            assert_eq!(
+                phase_order_message(announcer.check()),
+                expected,
+                "{steps:?}"
+            );
+            drop(announcer);
+            drop(tx);
+            assert_eq!(
+                phases_of(&drain(rx)),
+                reported
+                    .into_iter()
+                    .map(|index| (plan.clone(), index))
+                    .collect::<Vec<_>>(),
+                "{steps:?}"
+            );
+        }
+    }
+
+    /// 正式构建里改写动了已报过的步骤同样不崩：违约随游标带给接着报的播报器，它一步都不再报，check 交出这次违约。
+    #[test]
+    fn a_lenient_revision_carries_the_violation_into_the_resumed_announcer() {
+        use InstallPhase::*;
+        let announcer = PhaseAnnouncer::new(None, prelude_plan()).lenient();
+        announcer.enter(ModpackDownload);
+        announcer.enter(ModpackRead);
+        let mut revised = prelude_plan();
+        revised[1] = Metadata;
+        let cursor = announcer.revise(revised.clone());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let resumed = PhaseAnnouncer::resume(Some(&tx), cursor);
+        resumed.enter(Libraries);
+        assert_eq!(
+            phase_order_message(resumed.check()),
+            format!(
+                "改写步骤表动了已经报过的前 2 步：旧表 {:?}，新表 {revised:?}",
+                prelude_plan()
+            )
+        );
+        drop(resumed);
+        drop(tx);
+        assert_eq!(
+            phases_of(&drain(rx)),
+            Vec::<(Vec<InstallPhase>, usize)>::new()
+        );
     }
 
     /// 导入整合包开工时预排的表（加载器、远程文件与覆盖文件都还不知道）。
