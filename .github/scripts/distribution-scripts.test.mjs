@@ -51,7 +51,8 @@ echo '{"ETag": "fake"}'
 // 只认 check-download.sh 用到的形状：--output <文件>、--write-out <格式>，最后一个参数是地址。把 https://<主机>/<路径>
 // 映射到 $FAKE_CURL_ROOT/<主机>/<路径>，没有这个文件就按 404 失败；每次调用的地址记进 $FAKE_LOG.curl，参数记进
 // $FAKE_LOG.curl-args。$FAKE_CURL_PLAN 是空格分开的「退出码/HTTP 状态/耗时秒数」，第 n 项决定第 n 次调用怎么失败：
-// 先往输出文件追加一截残片、把模拟时钟拨快这么多秒，再按格式写出 HTTP 状态并以这个退出码退出。
+// 先往输出文件追加一截残片、把模拟时钟拨快这么多秒，再按格式写出 HTTP 状态并以这个退出码退出；写成 - 的那一项照常应答，
+// 好让排在后面的某一次单独失败。
 // 成功时也只追加不覆盖：截断输出文件是脚本的责任，假 curl 替它截断就测不出残片混进比对。
 const FAKE_CURL = `#!/usr/bin/env bash
 output=""
@@ -78,7 +79,7 @@ report() {
   out=\${out//'%{time_total}'/0.5}
   printf '%s' "$out"
 }
-if [ "$call" -le "\${#plan[@]}" ]; then
+if [ "$call" -le "\${#plan[@]}" ] && [ "\${plan[call - 1]}" != "-" ]; then
   IFS=/ read -r code http took <<< "\${plan[call - 1]}"
   echo $(( $(cat "$FAKE_CLOCK") + took )) > "$FAKE_CLOCK"
   printf 'partial' >> "$output"
@@ -146,6 +147,7 @@ echo $(( $(cat "$FAKE_CLOCK") + $1 )) > "$FAKE_CLOCK"
 // 只认 upload-to-mirrors.sh 的写法：timeout --kill-after=<秒> <秒> <命令…>，两个秒数记进 $FAKE_LOG.timeout。
 // 命令里有一个参数等于 $FAKE_TIMEOUT_ENDPOINT 时，照样跑一遍命令（假 aws 记下这次调用），再把模拟时钟拨快整个时限、
 // 以 $FAKE_TIMEOUT_STATUS（默认 124，补发 KILL 时是 137）退出，相当于传到时限被掐断；否则原样交给命令，退出码也是它的。
+// 给了 $FAKE_TIMEOUT_TIMES 时只有那个端点的前这么多次卡住，之后照常跑，模拟跨境连接卡死、掐断重来就好。
 const FAKE_TIMEOUT = `#!/usr/bin/env bash
 if [ "$#" -lt 3 ] || ! [[ "$1" =~ ^--kill-after=[0-9]+$ ]] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
   echo "假 timeout 只认 --kill-after=<秒> <整数秒> <命令>，收到：$*" >&2
@@ -156,6 +158,12 @@ limit="$2"
 shift 2
 for arg in "$@"; do
   if [ -n "\${FAKE_TIMEOUT_ENDPOINT:-}" ] && [ "$arg" = "$FAKE_TIMEOUT_ENDPOINT" ]; then
+    if [ -n "\${FAKE_TIMEOUT_TIMES:-}" ]; then
+      echo x >> "$FAKE_LOG.timeout-hits"
+      if [ "$(wc -l < "$FAKE_LOG.timeout-hits")" -gt "$FAKE_TIMEOUT_TIMES" ]; then
+        exec "$@"
+      fi
+    fi
     "$@" > /dev/null 2>&1 || true
     echo $(( $(cat "$FAKE_CLOCK") + limit )) > "$FAKE_CLOCK"
     exit "\${FAKE_TIMEOUT_STATUS:-124}"
@@ -494,6 +502,11 @@ describe("upload-to-mirrors.sh", () => {
   const readbackBudgets = (log) => calls(`${log}.curl-args`).map((args) => option(args, "--max-time"));
   const endpoints = (log) => calls(log).map((call) => call[call.indexOf("--endpoint-url") + 1]);
   const urlOf = (host, key = KEY) => `https://${host}/${key}`;
+  // stdout 里某个桶的重传提示，按出现顺序；下面两个按次数造出应有的提示
+  const retryLines = (stdout, name) => [...stdout.matchAll(new RegExp(`^${name}：第 \\d+ 次 put-object [^\\n]*重传$`, "gm"))].map(([line]) => line);
+  const timedOutRetries = (name, count, limit = 90) =>
+    Array.from({ length: count }, (_, i) => `${name}：第 ${i + 1} 次 put-object 超过 ${limit} 秒没有传完，读回也对不上，重传`);
+  const failedRetries = (name, count) => Array.from({ length: count }, (_, i) => `${name}：第 ${i + 1} 次 put-object 报错，读回也对不上，重传`);
 
   it("同一个对象键传三个桶：杭州、香港用 OSS 凭据，R2 用 R2 凭据，带内容类型、缓存头、Content-MD5 与超时", () => {
     const fixture = setup();
@@ -556,14 +569,16 @@ describe("upload-to-mirrors.sh", () => {
     );
     // 配置文件里只有设置，凭据只走每条命令的环境变量
     for (const secret of Object.values(c)) assert.doesNotMatch(readFileSync(`${log}.config`, "utf8"), new RegExp(secret));
-    // 每个桶 600 秒：put-object 最多 480 秒、--kill-after 10 秒；传完马上按公网地址读回，读回拿到的是这个桶剩下的时间
-    assert.deepEqual(timeouts(log), ["10 480", "10 480", "10 480"]);
+    // 每个桶 600 秒：一次 put-object 最多 90 秒、--kill-after 10 秒；传完马上按公网地址读回，读回拿到的是这个桶剩下的时间。
+    // 一次就传上时只试一次，不打重传的提示
+    assert.deepEqual(timeouts(log), ["10 90", "10 90", "10 90"]);
     assert.deepEqual(readbacks(log), targets(c.R2_ACCOUNT_ID).map(({ host }) => urlOf(host)));
     assert.deepEqual(readbackBudgets(log), ["600", "600", "600"]);
     for (const { name, host } of targets(c.R2_ACCOUNT_ID)) {
       assert.match(result.stdout, new RegExp(`^${name} 读回一致：${bytes.length} 字节，sha256 ${sha256(bytes)}，`, "m"));
       assert.match(result.stdout, new RegExp(`^${name}：已传到 [a-z-]+/${KEY.replaceAll(".", "\\.")}，用时 \\d+ 秒$`, "m"), host);
     }
+    assert.doesNotMatch(result.stdout, /重传|试到第|按已传上处理/);
     // 不给上传记录就不写记录，也不碰作业摘要
     assert.equal(existsSync(fixture.record), false);
     assert.equal(existsSync(summary), false);
@@ -595,13 +610,20 @@ describe("upload-to-mirrors.sh", () => {
     serveAll(fixture);
     const result = bash("upload-to-mirrors.sh", [KEY, file], env);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stderr, /FileAlreadyExists/);
-    assert.match(result.stdout, new RegExp(`${failing.name}：put-object 报错，但公网读回与本地一致，按已传上处理\n`));
+    assert.equal(result.stderr.match(/FileAlreadyExists/g).length, 1);
+    // 读回一致就停：只试这一次，不重传，也不打「试到第几次」
+    assert.match(
+      result.stdout,
+      new RegExp(`^${name} 读回一致：[^\\n]*\\n${name}：第 1 次 put-object 报错，但公网读回与本地一致，按已传上处理\\n${name}：已传到 `, "m"),
+    );
+    assert.deepEqual(retryLines(result.stdout, name), []);
+    assert.doesNotMatch(result.stdout, /试到第/);
     assert.deepEqual(endpoints(log), targets(c.R2_ACCOUNT_ID).map(({ endpoint }) => endpoint));
     assert.deepEqual(readbacks(log), targets(c.R2_ACCOUNT_ID).map(({ host }) => urlOf(host)));
+    assert.deepEqual(timeouts(log), ["10 90", "10 90", "10 90"]);
   });
 
-  for (const [index, name] of BUCKETS.entries()) it(`put-object 报错、公网上的字节和本地不同时退出 1，后面的桶不再传（${name}）`, () => {
+  for (const [index, name] of BUCKETS.entries()) it(`put-object 每次都报错、公网上的字节和本地不同时试满 4 次后退出 1，后面的桶不再传（${name}）`, () => {
     const fixture = setup();
     const { log, file, bytes, credentials: c, env, publicRoot } = fixture;
     const failing = targets(c.R2_ACCOUNT_ID)[index];
@@ -613,13 +635,18 @@ describe("upload-to-mirrors.sh", () => {
     serve(publicRoot, failing.host, changed);
     const result = bash("upload-to-mirrors.sh", [KEY, file], env);
     assert.equal(result.status, 1, result.stdout);
-    assert.match(result.stderr, new RegExp(`::error::${failing.name} 读回的 sha256 是 ${sha256(changed)}，本地是 ${sha256(bytes)}`));
-    assert.match(result.stderr, new RegExp(`::error::${failing.name}：put-object 失败，按公网地址读回也和本地文件对不上，见上面 aws 的报错\n$`));
-    assert.equal(calls(log).length, index + 1);
-    assert.doesNotMatch(result.stdout, new RegExp(`${failing.name}：已传到`));
+    const tried = [...targets(c.R2_ACCOUNT_ID).slice(0, index), ...Array(4).fill(failing)];
+    assert.deepEqual(endpoints(log), tried.map(({ endpoint }) => endpoint));
+    assert.deepEqual(readbacks(log), tried.map(({ host }) => urlOf(host)));
+    // 之后还会重传的三次读回只是警告，最后一次才是错误：后面传上的话作业成功，不该挂着错误注解
+    assert.equal(result.stderr.match(new RegExp(`::warning::${name} 读回的 sha256 是 ${sha256(changed)}，本地是 ${sha256(bytes)}`, "g")).length, 3);
+    assert.equal(result.stderr.match(new RegExp(`::error::${name} 读回的 sha256 是 ${sha256(changed)}，本地是 ${sha256(bytes)}`, "g")).length, 1);
+    assert.deepEqual(retryLines(result.stdout, name), failedRetries(name, 3));
+    assert.match(result.stderr, new RegExp(`::error::${name}：put-object 试了 4 次都失败，按公网地址读回也和本地文件对不上，见上面 aws 的报错\n$`));
+    assert.doesNotMatch(result.stdout, new RegExp(`${name}：已传到`));
   });
 
-  for (const [index, name] of BUCKETS.entries()) it(`put-object 报错、公网上没有这个对象时退出 1，后面的桶不再传（${name}）`, () => {
+  for (const [index, name] of BUCKETS.entries()) it(`put-object 每次都报错、公网上没有这个对象时试满 4 次就退出 1，不在时限里空转，后面的桶不再传（${name}）`, () => {
     const fixture = setup();
     const { log, file, credentials: c, env } = fixture;
     const failing = targets(c.R2_ACCOUNT_ID)[index];
@@ -628,12 +655,18 @@ describe("upload-to-mirrors.sh", () => {
     serveAll(fixture, [name]);
     const result = bash("upload-to-mirrors.sh", [KEY, file], env);
     assert.equal(result.status, 1, result.stdout);
-    assert.match(result.stderr, new RegExp(`::error::${failing.name}：put-object 失败，按公网地址读回也和本地文件对不上，见上面 aws 的报错\n$`));
-    assert.equal(calls(log).length, index + 1);
-    assert.deepEqual(readbacks(log), targets(c.R2_ACCOUNT_ID).slice(0, index + 1).map(({ host }) => urlOf(host)));
+    assert.match(result.stderr, new RegExp(`::error::${name}：put-object 试了 4 次都失败，按公网地址读回也和本地文件对不上，见上面 aws 的报错\n$`));
+    const tried = [...targets(c.R2_ACCOUNT_ID).slice(0, index), ...Array(4).fill(failing)];
+    assert.deepEqual(endpoints(log), tried.map(({ endpoint }) => endpoint));
+    assert.deepEqual(readbacks(log), tried.map(({ host }) => urlOf(host)));
+    assert.equal(result.stderr.match(/FileAlreadyExists/g).length, 4);
+    // 报错都是立刻返回的，模拟时钟一秒没走：停下来是因为次数用完，不是时限到了
+    assert.deepEqual(timeouts(log), Array(index + 4).fill("10 90"));
+    assert.deepEqual(readbackBudgets(log), Array(index + 4).fill("600"));
+    assert.deepEqual(retryLines(result.stdout, name), failedRetries(name, 3));
   });
 
-  for (const [index, name] of BUCKETS.entries()) it(`put-object 超过 480 秒被掐断、公网上没有这个对象时退出 1，读回只拿到剩下的 120 秒（${name}）`, () => {
+  for (const [index, name] of BUCKETS.entries()) it(`put-object 每次卡满 90 秒被掐断、公网上没有这个对象时试满 4 次后退出 1，读回的时限随剩余时间变小（${name}）`, () => {
     const fixture = setup();
     const { log, file, credentials: c, env } = fixture;
     const failing = targets(c.R2_ACCOUNT_ID)[index];
@@ -641,9 +674,13 @@ describe("upload-to-mirrors.sh", () => {
     serveAll(fixture, [name]);
     const result = bash("upload-to-mirrors.sh", [KEY, file], env);
     assert.equal(result.status, 1, result.stdout);
-    assert.match(result.stderr, new RegExp(`::error::${name}：put-object 超过 480 秒没有传完，按公网地址读回也和本地文件对不上\n$`));
-    assert.equal(calls(log).length, index + 1);
-    assert.deepEqual(readbackBudgets(log), [...Array(index).fill("600"), "120"]);
+    assert.match(result.stderr, new RegExp(`::error::${name}：put-object 试了 4 次都没在时限内传完，按公网地址读回也和本地文件对不上\n$`));
+    const tried = [...targets(c.R2_ACCOUNT_ID).slice(0, index), ...Array(4).fill(failing)];
+    assert.deepEqual(endpoints(log), tried.map(({ endpoint }) => endpoint));
+    assert.deepEqual(timeouts(log), Array(index + 4).fill("10 90"));
+    // 每次卡满 90 秒，读回依次拿到 600 秒减去 90、180、270、360；试满 4 次时上传时间还够，是次数先用完
+    assert.deepEqual(readbackBudgets(log), [...Array(index).fill("600"), "510", "420", "330", "240"]);
+    assert.deepEqual(retryLines(result.stdout, name), timedOutRetries(name, 3));
   });
 
   it("put-object 被时限掐断、公网上却已是同样的字节时按已传上处理：可能刚好在掐断前写完", () => {
@@ -653,26 +690,34 @@ describe("upload-to-mirrors.sh", () => {
     serveAll(fixture);
     const result = bash("upload-to-mirrors.sh", [KEY, file], env);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /^hk：put-object 超过 480 秒没有传完，但公网读回与本地一致，按已传上处理$/m);
+    assert.match(result.stdout, /^hk：第 1 次 put-object 超过 90 秒没有传完，但公网读回与本地一致，按已传上处理$/m);
+    assert.deepEqual(retryLines(result.stdout, "hk"), []);
+    assert.doesNotMatch(result.stdout, /试到第/);
     assert.deepEqual(endpoints(log), targets(c.R2_ACCOUNT_ID).map(({ endpoint }) => endpoint));
-    assert.deepEqual(readbackBudgets(log), ["600", "120", "600"]);
+    assert.deepEqual(timeouts(log), ["10 90", "10 90", "10 90"]);
+    // 卡满 90 秒之后读回只剩 510 秒
+    assert.deepEqual(readbackBudgets(log), ["600", "510", "600"]);
   });
 
   // aws-cli 不理 TERM 时 timeout 在 10 秒后补发 KILL，连自己一起被杀，退出码是 137 而不是 124
   it("timeout 补发 KILL、以 137 退出时同样按超时处理", () => {
     const fixture = setup();
-    const { file, credentials: c, env } = fixture;
+    const { log, file, credentials: c, env } = fixture;
     env.FAKE_TIMEOUT_ENDPOINT = targets(c.R2_ACCOUNT_ID)[0].endpoint;
     env.FAKE_TIMEOUT_STATUS = "137";
     serveAll(fixture, ["cn"]);
     const failed = bash("upload-to-mirrors.sh", [KEY, file], env);
     assert.equal(failed.status, 1, failed.stdout);
-    assert.match(failed.stderr, /::error::cn：put-object 超过 480 秒没有传完，按公网地址读回也和本地文件对不上\n$/);
+    assert.deepEqual(retryLines(failed.stdout, "cn"), timedOutRetries("cn", 3));
+    assert.match(failed.stderr, /::error::cn：put-object 试了 4 次都没在时限内传完，按公网地址读回也和本地文件对不上\n$/);
+    assert.deepEqual(timeouts(log), Array(4).fill("10 90"));
 
     serveAll(fixture);
     const passed = bash("upload-to-mirrors.sh", [KEY, file], env);
     assert.equal(passed.status, 0, passed.stderr);
-    assert.match(passed.stdout, /^cn：put-object 超过 480 秒没有传完，但公网读回与本地一致，按已传上处理$/m);
+    assert.match(passed.stdout, /^cn：第 1 次 put-object 超过 90 秒没有传完，但公网读回与本地一致，按已传上处理$/m);
+    assert.deepEqual(retryLines(passed.stdout, "cn"), []);
+    assert.equal(timeouts(log).length, 4 + 3);
   });
 
   // 下面是给了上传记录的情形：dev 发版这样调，cn 传不上只降级；分发试跑不给记录，三个桶都必须过（见上面几条）
@@ -699,17 +744,20 @@ describe("upload-to-mirrors.sh", () => {
     const first = bash("upload-to-mirrors.sh", [KEY, file, record], env);
     assert.equal(first.status, 0, first.stderr);
     assert.doesNotMatch(first.stderr, /::error::/);
-    // 读回失败的注解也降成警告，作业成功时不挂错误
-    assert.match(first.stderr, /^::warning::cn 读回失败（curl 退出 22，HTTP 404），不是暂时性错误，不重试：/m);
+    // 读回失败的注解也降成警告，作业成功时不挂错误；每试一次读回一次
+    assert.equal(first.stderr.match(/^::warning::cn 读回失败（curl 退出 22，HTTP 404），不是暂时性错误，不重试：/gm).length, 4);
+    assert.deepEqual(retryLines(first.stdout, "cn"), timedOutRetries("cn", 3));
     assert.match(
       first.stderr,
-      /^::warning::cn：put-object 超过 480 秒没有传完，按公网地址读回也和本地文件对不上。dev 通道允许缺 cn：sample\.bin 不算传上，后面的文件不再传 cn，清单只列传上了更新包的源$/m,
+      /^::warning::cn：put-object 试了 4 次都没在时限内传完，按公网地址读回也和本地文件对不上。dev 通道允许缺 cn：sample\.bin 不算传上，后面的文件不再传 cn，清单只列传上了更新包的源$/m,
     );
     assert.equal(recordOf(record), `cn\tfailed\t${KEY}\nhk\tok\t${KEY}\nglobal\tok\t${KEY}\n`);
-    assert.deepEqual(endpoints(log), [cn.endpoint, hk.endpoint, global.endpoint]);
+    assert.deepEqual(endpoints(log), [cn.endpoint, cn.endpoint, cn.endpoint, cn.endpoint, hk.endpoint, global.endpoint]);
+    assert.deepEqual(timeouts(log), Array(6).fill("10 90"));
+    assert.deepEqual(readbackBudgets(log), ["510", "420", "330", "240", "600", "600"]);
     assert.match(
       readFileSync(summary, "utf8"),
-      /^\*\*下载源降级\*\*：cn 没有传上 `sample\.bin`（put-object 超过 480 秒没有传完，按公网地址读回也和本地文件对不上，用时 \d+ 秒）。清单只列传上了更新包的源，其余源照发。\n$/,
+      /^\*\*下载源降级\*\*：cn 没有传上 `sample\.bin`（put-object 试了 4 次都没在时限内传完，按公网地址读回也和本地文件对不上，用时 \d+ 秒）。清单只列传上了更新包的源，其余源照发。\n$/,
     );
 
     // 同一份记录传下一个文件：cn 一次都不再试，直接记为 failed
@@ -719,8 +767,8 @@ describe("upload-to-mirrors.sh", () => {
     const second = bash("upload-to-mirrors.sh", [INSTALLER_KEY, installer, record], env);
     assert.equal(second.status, 0, second.stderr);
     assert.match(second.stderr, /^::warning::cn 在本次运行里已经失败过，sample-setup\.bin 不再传 cn$/m);
-    assert.deepEqual(endpoints(log).slice(3), [hk.endpoint, global.endpoint]);
-    assert.deepEqual(readbacks(log).slice(3), [urlOf(hk.host, INSTALLER_KEY), urlOf(global.host, INSTALLER_KEY)]);
+    assert.deepEqual(endpoints(log).slice(6), [hk.endpoint, global.endpoint]);
+    assert.deepEqual(readbacks(log).slice(6), [urlOf(hk.host, INSTALLER_KEY), urlOf(global.host, INSTALLER_KEY)]);
     assert.equal(
       recordOf(record),
       [`cn\tfailed\t${KEY}`, `hk\tok\t${KEY}`, `global\tok\t${KEY}`, `cn\tfailed\t${INSTALLER_KEY}`, `hk\tok\t${INSTALLER_KEY}`, `global\tok\t${INSTALLER_KEY}`, ""].join("\n"),
@@ -731,7 +779,7 @@ describe("upload-to-mirrors.sh", () => {
   it("dev 上 cn 的 put-object 报错、公网上也没有时同样降级；cn 传上了引导程序时，下一个文件照样传 cn", () => {
     const fixture = setup();
     const { log, file, bytes, credentials: c, env, record, summary } = fixture;
-    const [cn] = targets(c.R2_ACCOUNT_ID);
+    const [cn, hk, global] = targets(c.R2_ACCOUNT_ID);
     serveAll(fixture);
     assert.equal(bash("upload-to-mirrors.sh", [KEY, file, record], env).status, 0);
 
@@ -741,25 +789,31 @@ describe("upload-to-mirrors.sh", () => {
     serveAll(fixture, ["cn"], INSTALLER_KEY);
     const result = bash("upload-to-mirrors.sh", [INSTALLER_KEY, installer, record], env);
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(endpoints(log).length, 6);
-    assert.match(result.stderr, /^::warning::cn：put-object 失败，按公网地址读回也和本地文件对不上，见上面 aws 的报错。dev 通道允许缺 cn：/m);
+    assert.deepEqual(endpoints(log).slice(3), [cn.endpoint, cn.endpoint, cn.endpoint, cn.endpoint, hk.endpoint, global.endpoint]);
+    assert.deepEqual(retryLines(result.stdout, "cn"), failedRetries("cn", 3));
+    assert.match(result.stderr, /^::warning::cn：put-object 试了 4 次都失败，按公网地址读回也和本地文件对不上，见上面 aws 的报错。dev 通道允许缺 cn：/m);
     assert.doesNotMatch(result.stderr, /::error::/);
     assert.equal(
       recordOf(record),
       [`cn\tok\t${KEY}`, `hk\tok\t${KEY}`, `global\tok\t${KEY}`, `cn\tfailed\t${INSTALLER_KEY}`, `hk\tok\t${INSTALLER_KEY}`, `global\tok\t${INSTALLER_KEY}`, ""].join("\n"),
     );
-    assert.match(readFileSync(summary, "utf8"), /^\*\*下载源降级\*\*：cn 没有传上 `sample-setup\.bin`（put-object 失败，/);
+    assert.match(readFileSync(summary, "utf8"), /^\*\*下载源降级\*\*：cn 没有传上 `sample-setup\.bin`（put-object 试了 4 次都失败，/);
   });
 
   for (const name of ["hk", "global"]) it(`dev 上 ${name} 没传上时照样退出 1，不记它的结果：只有 cn 可以缺`, () => {
     const fixture = setup();
-    const { file, credentials: c, env, record, summary } = fixture;
-    env.FAKE_TIMEOUT_ENDPOINT = targets(c.R2_ACCOUNT_ID).find((target) => target.name === name).endpoint;
+    const { log, file, credentials: c, env, record, summary } = fixture;
+    const failing = targets(c.R2_ACCOUNT_ID).find((target) => target.name === name);
+    env.FAKE_TIMEOUT_ENDPOINT = failing.endpoint;
     serveAll(fixture, [name]);
     const result = bash("upload-to-mirrors.sh", [KEY, file, record], env);
     assert.equal(result.status, 1, result.stdout);
-    assert.match(result.stderr, new RegExp(`::error::${name}：put-object 超过 480 秒没有传完，按公网地址读回也和本地文件对不上\n$`));
-    assert.match(result.stderr, new RegExp(`^::error::${name} 读回失败（curl 退出 22，HTTP 404）`, "m"));
+    assert.match(result.stderr, new RegExp(`::error::${name}：put-object 试了 4 次都没在时限内传完，按公网地址读回也和本地文件对不上\n$`));
+    // 之后还会重传的三次读回只是警告，第 4 次之后不再重传，那次读回才是错误
+    assert.equal(result.stderr.match(new RegExp(`^::warning::${name} 读回失败（curl 退出 22，HTTP 404）`, "gm")).length, 3);
+    assert.equal(result.stderr.match(new RegExp(`^::error::${name} 读回失败（curl 退出 22，HTTP 404）`, "gm")).length, 1);
+    assert.equal(endpoints(log).filter((endpoint) => endpoint === failing.endpoint).length, 4);
+    assert.deepEqual(retryLines(result.stdout, name), timedOutRetries(name, 3));
     assert.doesNotMatch(recordOf(record), new RegExp(`^${name}\t`, "m"));
     assert.equal(existsSync(summary), false);
   });
@@ -771,8 +825,9 @@ describe("upload-to-mirrors.sh", () => {
     env.FAKE_TIMEOUT_ENDPOINT = targets(c.R2_ACCOUNT_ID)[0].endpoint;
     const result = bash("upload-to-mirrors.sh", [key, file, record], env);
     assert.equal(result.status, 1, result.stdout);
-    assert.match(result.stderr, /::error::cn：put-object 超过 480 秒没有传完，按公网地址读回也和本地文件对不上\n$/);
-    assert.equal(calls(log).length, 1);
+    assert.match(result.stderr, /::error::cn：put-object 试了 4 次都没在时限内传完，按公网地址读回也和本地文件对不上\n$/);
+    assert.deepEqual(endpoints(log), Array(4).fill(targets(c.R2_ACCOUNT_ID)[0].endpoint));
+    assert.deepEqual(timeouts(log), Array(4).fill("10 90"));
     assert.equal(recordOf(record), "");
     assert.equal(existsSync(summary), false);
   });
@@ -784,9 +839,181 @@ describe("upload-to-mirrors.sh", () => {
     serveAll(fixture, ["cn"]);
     const result = bash("upload-to-mirrors.sh", [KEY, file], env);
     assert.equal(result.status, 1, result.stdout);
-    assert.match(result.stderr, /::error::cn：put-object 超过 480 秒没有传完/);
-    assert.equal(calls(log).length, 1);
+    assert.match(result.stderr, /::error::cn：put-object 试了 4 次都没在时限内传完，按公网地址读回也和本地文件对不上\n$/);
+    assert.equal(calls(log).length, 4);
     assert.equal(existsSync(record), false);
+  });
+
+  // 跨境连接偶尔整个卡死，掐断重来几秒就传完。假 aws 不往公网写，「第一次还没写成」由读回的计划表达：
+  // 前面每个桶各读回一次、照常应答，这个桶第一次读回按 404 失败，第二次照常拿到同样的字节
+  for (const [index, name] of BUCKETS.entries()) it(`put-object 第一次卡满 90 秒、读回也没有时重传，第二次几秒传完就退出 0，记为 ok（${name}）`, () => {
+    const fixture = setup();
+    const { log, file, bytes, credentials: c, env, record, summary } = fixture;
+    const all = targets(c.R2_ACCOUNT_ID);
+    const failing = all[index];
+    assert.equal(failing.name, name);
+    env.FAKE_TIMEOUT_ENDPOINT = failing.endpoint;
+    env.FAKE_TIMEOUT_TIMES = "1";
+    env.FAKE_CURL_PLAN = [...Array(index).fill("-"), "22/404/0"].join(" ");
+    serveAll(fixture);
+    const result = bash("upload-to-mirrors.sh", [KEY, file, record], env);
+    assert.equal(result.status, 0, result.stderr);
+    const tried = [...all.slice(0, index), failing, ...all.slice(index)];
+    assert.deepEqual(endpoints(log), tried.map(({ endpoint }) => endpoint));
+    assert.deepEqual(readbacks(log), tried.map(({ host }) => urlOf(host)));
+    assert.deepEqual(timeouts(log), Array(4).fill("10 90"));
+    // 第一次卡满 90 秒，这个桶的两次读回都只剩 510 秒；别的桶不受影响
+    assert.deepEqual(readbackBudgets(log), [...Array(index).fill("600"), "510", "510", ...Array(2 - index).fill("600")]);
+    assert.match(result.stderr, new RegExp(`^::(?:error|warning)::${name} 读回失败（curl 退出 22，HTTP 404），不是暂时性错误，不重试：`, "m"));
+    assert.deepEqual(retryLines(result.stdout, name), timedOutRetries(name, 1));
+    // 中间那行是第二次 put-object 照常跑完时假 aws 的输出，卡住那次的输出被假 timeout 丢掉
+    assert.match(
+      result.stdout,
+      new RegExp(
+        `^${name}：第 1 次 put-object 超过 90 秒没有传完，读回也对不上，重传\\n\\{"ETag": "fake"\\}\\n${name} 读回一致：${bytes.length} 字节，sha256 ${sha256(bytes)}，[^\\n]*\\n${name}：试到第 2 次才传上\\n${name}：已传到 [a-z-]+/${KEY.replaceAll(".", "\\.")}，用时 \\d+ 秒$`,
+        "m",
+      ),
+    );
+    // 第二次 put-object 自己就成功了，不打「按已传上处理」
+    assert.doesNotMatch(result.stdout, /按已传上处理/);
+    assert.equal(recordOf(record), `cn\tok\t${KEY}\nhk\tok\t${KEY}\nglobal\tok\t${KEY}\n`);
+    assert.equal(existsSync(summary), false);
+  });
+
+  it("第一次卡满 90 秒、第二次 put-object 报错但公网读回一致时按已传上处理，提示写的是第 2 次", () => {
+    const fixture = setup();
+    const { log, file, credentials: c, env } = fixture;
+    const [cn, hk, global] = targets(c.R2_ACCOUNT_ID);
+    env.FAKE_TIMEOUT_ENDPOINT = hk.endpoint;
+    env.FAKE_TIMEOUT_TIMES = "1";
+    env.FAKE_AWS_FAIL_ENDPOINT = hk.endpoint;
+    env.FAKE_CURL_PLAN = "- 22/404/0";
+    serveAll(fixture);
+    const result = bash("upload-to-mirrors.sh", [KEY, file], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(endpoints(log), [cn.endpoint, hk.endpoint, hk.endpoint, global.endpoint]);
+    assert.deepEqual(timeouts(log), Array(4).fill("10 90"));
+    assert.deepEqual(readbackBudgets(log), ["600", "510", "510", "600"]);
+    // 卡住那次的输出被假 timeout 丢掉，报错只来自第二次
+    assert.equal(result.stderr.match(/FileAlreadyExists/g).length, 1);
+    assert.deepEqual(retryLines(result.stdout, "hk"), timedOutRetries("hk", 1));
+    assert.match(result.stdout, /^hk 读回一致：[^\n]*\nhk：第 2 次 put-object 报错，但公网读回与本地一致，按已传上处理\nhk：试到第 2 次才传上\nhk：已传到 /m);
+  });
+
+  // 读回也耗时间：每次读回 50 秒，第四次 put-object 只给到 600 - 3 × (90 + 50) - 120 = 60 秒，留够最后一次读回的 120 秒
+  it("一直卡住、每次读回也耗掉 50 秒时试满 4 次，最后一次只给剩下的 60 秒：dev 带记录时 cn 只降级，beta 与不带记录时退出 1", () => {
+    const beta = `beta/1.${randomInt(0, 50)}.0-beta.${randomInt(1, 100_000)}-${randomInt(1, 2 ** 40)}-${randomInt(1, 5)}/sample.bin`;
+    const failure = "put-object 试了 4 次都没在时限内传完，按公网地址读回也和本地文件对不上";
+    for (const { key, withRecord, status } of [
+      { key: KEY, withRecord: true, status: 0 },
+      { key: beta, withRecord: true, status: 1 },
+      { key: KEY, withRecord: false, status: 1 },
+    ]) {
+      const fixture = setup();
+      const { log, file, credentials: c, env, record, summary } = fixture;
+      const [cn, hk, global] = targets(c.R2_ACCOUNT_ID);
+      const label = `${key.split("/")[0]}，${withRecord ? "带" : "不带"}上传记录`;
+      env.FAKE_TIMEOUT_ENDPOINT = cn.endpoint;
+      env.FAKE_CURL_PLAN = Array(4).fill("22/404/50").join(" ");
+      serveAll(fixture, ["cn"], key);
+      const result = bash("upload-to-mirrors.sh", withRecord ? [key, file, record] : [key, file], env);
+      assert.equal(result.status, status, `${label}：${result.stderr}`);
+      assert.deepEqual(timeouts(log).slice(0, 4), ["10 90", "10 90", "10 90", "10 60"], label);
+      assert.deepEqual(endpoints(log).slice(0, 4), Array(4).fill(cn.endpoint), label);
+      assert.deepEqual(readbackBudgets(log).slice(0, 4), ["510", "370", "230", "120"], label);
+      assert.deepEqual(retryLines(result.stdout, "cn"), timedOutRetries("cn", 3), label);
+      if (status === 0) {
+        assert.deepEqual(endpoints(log).slice(4), [hk.endpoint, global.endpoint], label);
+        assert.deepEqual(readbackBudgets(log).slice(4), ["600", "600"], label);
+        assert.doesNotMatch(result.stderr, /::error::/, label);
+        assert.match(result.stderr, new RegExp(`^::warning::cn：${failure}。dev 通道允许缺 cn：`, "m"), label);
+        assert.equal(recordOf(record), `cn\tfailed\t${key}\nhk\tok\t${key}\nglobal\tok\t${key}\n`, label);
+        assert.match(readFileSync(summary, "utf8"), new RegExp(`^\\*\\*下载源降级\\*\\*：cn 没有传上 \`sample\\.bin\`（${failure}，用时 \\d+ 秒）`), label);
+      } else {
+        assert.equal(endpoints(log).length, 4, label);
+        assert.match(result.stderr, new RegExp(`::error::cn：${failure}\\n$`), label);
+        if (withRecord) assert.equal(recordOf(record), "", label);
+        else assert.equal(existsSync(record), false, label);
+        assert.equal(existsSync(summary), false, label);
+      }
+    }
+  });
+
+  it("dev 上 cn 的 put-object 一报错就失败、公网上也没有时试满 4 次就降级，不在时限里空转，hk、global 照传", () => {
+    const fixture = setup();
+    const { log, file, credentials: c, env, record, summary } = fixture;
+    const [cn, hk, global] = targets(c.R2_ACCOUNT_ID);
+    env.FAKE_AWS_FAIL_ENDPOINT = cn.endpoint;
+    serveAll(fixture, ["cn"]);
+    const result = bash("upload-to-mirrors.sh", [KEY, file, record], env);
+    assert.equal(result.status, 0, result.stderr);
+    const tried = [cn, cn, cn, cn, hk, global];
+    assert.deepEqual(endpoints(log), tried.map(({ endpoint }) => endpoint));
+    assert.deepEqual(readbacks(log), tried.map(({ host }) => urlOf(host)));
+    assert.deepEqual(timeouts(log), Array(6).fill("10 90"));
+    // 模拟时钟一秒没走，cn 却只试了 4 次：停下来是因为次数用完
+    assert.deepEqual(readbackBudgets(log), Array(6).fill("600"));
+    assert.equal(result.stderr.match(/FileAlreadyExists/g).length, 4);
+    assert.deepEqual(retryLines(result.stdout, "cn"), failedRetries("cn", 3));
+    assert.doesNotMatch(result.stderr, /::error::/);
+    assert.match(
+      result.stderr,
+      /^::warning::cn：put-object 试了 4 次都失败，按公网地址读回也和本地文件对不上，见上面 aws 的报错。dev 通道允许缺 cn：sample\.bin 不算传上，后面的文件不再传 cn，清单只列传上了更新包的源$/m,
+    );
+    assert.equal(recordOf(record), `cn\tfailed\t${KEY}\nhk\tok\t${KEY}\nglobal\tok\t${KEY}\n`);
+    assert.match(
+      readFileSync(summary, "utf8"),
+      /^\*\*下载源降级\*\*：cn 没有传上 `sample\.bin`（put-object 试了 4 次都失败，按公网地址读回也和本地文件对不上，见上面 aws 的报错，用时 \d+ 秒）。清单只列传上了更新包的源，其余源照发。\n$/,
+    );
+  });
+
+  it("dev 上 cn 的 put-object 退出 0、公网读回的字节不同时只试 1 次就降级：配置问题重传也一样", () => {
+    const fixture = setup();
+    const { log, file, bytes, credentials: c, env, record, summary, publicRoot } = fixture;
+    const [cn, hk, global] = targets(c.R2_ACCOUNT_ID);
+    serveAll(fixture, ["cn"]);
+    serve(publicRoot, cn.host, Buffer.concat([bytes, Buffer.from("x")]));
+    const result = bash("upload-to-mirrors.sh", [KEY, file, record], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(endpoints(log), [cn.endpoint, hk.endpoint, global.endpoint]);
+    assert.deepEqual(readbacks(log), [urlOf(cn.host), urlOf(hk.host), urlOf(global.host)]);
+    assert.deepEqual(timeouts(log), ["10 90", "10 90", "10 90"]);
+    assert.deepEqual(retryLines(result.stdout, "cn"), []);
+    assert.doesNotMatch(result.stdout, /试到第/);
+    assert.match(result.stderr, new RegExp(`^::warning::cn 读回 ${bytes.length + 1} 字节，本地 ${bytes.length} 字节：`, "m"));
+    assert.match(result.stderr, /^::warning::cn：put-object 成功，按公网地址读回却和本地文件对不上，见上面读回的报错。dev 通道允许缺 cn：/m);
+    assert.doesNotMatch(result.stderr, /::error::/);
+    assert.equal(recordOf(record), `cn\tfailed\t${KEY}\nhk\tok\t${KEY}\nglobal\tok\t${KEY}\n`);
+    assert.match(readFileSync(summary, "utf8"), /（put-object 成功，按公网地址读回却和本地文件对不上，见上面读回的报错，用时 \d+ 秒）/);
+  });
+
+  // 读回耗掉的时间也从上传时间里扣：600 - 90 - 360 - 120 恰好 30 秒，还重传一次、时限就给这 30 秒；再多耗 1 秒就不重传
+  it("剩下的上传时间恰好 30 秒时还重传一次、时限给 30，剩 29 秒就不再重传，次数没用完也一样", () => {
+    const enough = setup();
+    const [cn] = targets(enough.credentials.R2_ACCOUNT_ID);
+    enough.env.FAKE_TIMEOUT_ENDPOINT = cn.endpoint;
+    enough.env.FAKE_CURL_PLAN = "22/404/360";
+    serveAll(enough, ["cn"]);
+    const retried = bash("upload-to-mirrors.sh", [KEY, enough.file], enough.env);
+    assert.equal(retried.status, 1, retried.stdout);
+    assert.deepEqual(timeouts(enough.log), ["10 90", "10 30"]);
+    assert.deepEqual(endpoints(enough.log), [cn.endpoint, cn.endpoint]);
+    // 第二次卡满 30 秒后只剩留给读回的 120 秒，不够再试
+    assert.deepEqual(readbackBudgets(enough.log), ["510", "120"]);
+    assert.deepEqual(retryLines(retried.stdout, "cn"), timedOutRetries("cn", 1));
+    assert.match(retried.stderr, /::error::cn：put-object 试了 2 次都没在时限内传完，按公网地址读回也和本地文件对不上\n$/);
+
+    const short = setup();
+    short.env.FAKE_TIMEOUT_ENDPOINT = cn.endpoint;
+    short.env.FAKE_CURL_PLAN = "22/404/361";
+    serveAll(short, ["cn"]);
+    const given = bash("upload-to-mirrors.sh", [KEY, short.file], short.env);
+    assert.equal(given.status, 1, given.stdout);
+    assert.deepEqual(timeouts(short.log), ["10 90"]);
+    assert.deepEqual(endpoints(short.log), [cn.endpoint]);
+    assert.deepEqual(readbackBudgets(short.log), ["510"]);
+    assert.deepEqual(retryLines(given.stdout, "cn"), []);
+    assert.match(given.stderr, /::error::cn：put-object 试了 1 次都没在时限内传完，按公网地址读回也和本地文件对不上\n$/);
   });
 
   it("给了上传记录却没有作业摘要路径时退出非 0，一个桶都不传", () => {

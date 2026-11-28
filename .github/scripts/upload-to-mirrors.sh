@@ -77,11 +77,17 @@ channel="${key%%/*}"
 
 # 每个桶的上传与读回共用 600 秒：单次请求的连接、读超时管不住时快时慢的跨境链路，托管机到杭州 OSS 慢起来一个包能传
 # 二十多分钟，aws-cli 的重试又会让它一直传下去，直到作业时限把整个 publish 掐掉。平时一个包传进任一个桶只要几秒。
-# put-object 最多用到只剩 120 秒，余下的给读回；--kill-after 防它不理 TERM。到时限时 timeout 以 124 退出，
-# 再过 10 秒还没退、补发 KILL 时，timeout 连同自己所在的进程组一起被杀，退出码是 137，两种都按超时处理。
+# 跨境连接偶尔会整个卡死：同一个包这次卡满时限，掐断重来几秒就传完。所以一次 put-object 最多 90 秒（平时几秒，
+# 见过最慢的一次 46 秒），没传上就先读回（可能刚好写成），对不上再重传，直到只剩 120 秒留给最后一次读回。
+# --kill-after 防它不理 TERM。到时限时 timeout 以 124 退出，再过 10 秒还没退、补发 KILL 时，timeout 连同自己所在的
+# 进程组一起被杀，退出码是 137，两种都按超时处理。
 bucket_budget=600
 readback_floor=120
-put_limit=$(( bucket_budget - readback_floor ))
+attempt_limit=90
+# 剩下的上传时间不到这么多就不再重传：太短的一次多半也传不完，只会挤掉读回
+attempt_floor=30
+# 一个桶最多试这么多次：一报错就立刻失败的情形（凭据、权限）不会自己好，不该在时限里反复撞
+max_attempts=4
 
 summarize() {
   printf '**下载源降级**：%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
@@ -119,47 +125,78 @@ while IFS=$'\t' read -r name profile bucket endpoint region; do
 
   started=$SECONDS
   deadline=$(( $(date +%s) + bucket_budget ))
-  # 用 AWS_PROFILE 选配置段、凭据放环境变量：文档写明这种组合下环境变量里的凭据优先于 profile。
-  # 对象路径带版本、永不改写，所以缓存一年并标 immutable。stdin 接 /dev/null，免得吃掉循环读的目标表。
-  put_status=0
-  AWS_PROFILE="$profile" AWS_ACCESS_KEY_ID="$key_id" AWS_SECRET_ACCESS_KEY="$secret" \
-    timeout --kill-after=10 "$put_limit" \
-    aws s3api put-object \
-    --endpoint-url "$endpoint" \
-    --region "$region" \
-    --bucket "$bucket" \
-    --key "$key" \
-    --body "$file" \
-    --content-type application/octet-stream \
-    --cache-control 'public, max-age=31536000, immutable' \
-    --content-md5 "$md5" \
-    --cli-connect-timeout 30 \
-    --cli-read-timeout 120 \
-    --no-cli-pager < /dev/null || put_status=$?
-
-  # put-object 报错也照样读回：服务端已经写成、响应却在跨境路上丢了时，aws-cli 按可重试错误重发同一个键，撞上桶的
-  # 禁止覆盖写而报错，对象其实完好；被时限掐断时也可能刚好写完。CI 的凭据只能写、查不了对象，所以按客户端用的公网地址
-  # 匿名读回，大小和 sha256 与本地一致才算传上；不按错误码分辨，OSS 的 S3 兼容层与 R2 对「已存在」各报什么码这里
-  # 核实不了，比字节不依赖它。允许缺的桶读回失败只是警告，注解级别跟着降。
   level=error
   if [ "$may_fail" = yes ]; then
     level=warning
   fi
-  remaining=$(( deadline - $(date +%s) ))
-  readback_status=0
-  if [ "$remaining" -ge 1 ]; then
-    bash "$script_dir/check-download.sh" "$name" "$url" "$file" "$remaining" "$level" < /dev/null || readback_status=$?
-  else
-    echo "::$level::$name：${bucket_budget} 秒的时限在读回之前就用完了：$url" >&2
-    readback_status=1
-  fi
+  attempt=0
+  while :; do
+    attempt=$(( attempt + 1 ))
+    limit=$(( deadline - $(date +%s) - readback_floor ))
+    if [ "$limit" -gt "$attempt_limit" ]; then
+      limit=$attempt_limit
+    fi
+    # 用 AWS_PROFILE 选配置段、凭据放环境变量：文档写明这种组合下环境变量里的凭据优先于 profile。
+    # 对象路径带版本、永不改写，所以缓存一年并标 immutable。stdin 接 /dev/null，免得吃掉循环读的目标表。
+    put_status=0
+    AWS_PROFILE="$profile" AWS_ACCESS_KEY_ID="$key_id" AWS_SECRET_ACCESS_KEY="$secret" \
+      timeout --kill-after=10 "$limit" \
+      aws s3api put-object \
+      --endpoint-url "$endpoint" \
+      --region "$region" \
+      --bucket "$bucket" \
+      --key "$key" \
+      --body "$file" \
+      --content-type application/octet-stream \
+      --cache-control 'public, max-age=31536000, immutable' \
+      --content-md5 "$md5" \
+      --cli-connect-timeout 30 \
+      --cli-read-timeout 120 \
+      --no-cli-pager < /dev/null || put_status=$?
+
+    # put-object 报错也照样读回：服务端已经写成、响应却在跨境路上丢了时，aws-cli 按可重试错误重发同一个键，撞上桶的
+    # 禁止覆盖写而报错，对象其实完好；被时限掐断时也可能刚好写完。CI 的凭据只能写、查不了对象，所以按客户端用的公网地址
+    # 匿名读回，大小和 sha256 与本地一致才算传上；不按错误码分辨，OSS 的 S3 兼容层与 R2 对「已存在」各报什么码这里
+    # 核实不了，比字节不依赖它。允许缺的桶读回失败只是警告，注解级别跟着降；这次读回之后还会重传时也只是警告，
+    # 后面传上了的话作业成功，不该挂着错误注解。还会不会重传要读回之后才知道，读回耗掉的时间只会让它更不会，
+    # 所以这里按读回之前的余量判，判成还会重传而实际没重传时，下面的失败行照样以错误报出。
+    remaining=$(( deadline - $(date +%s) ))
+    readback_level=$level
+    if [ "$put_status" -ne 0 ] && [ "$attempt" -lt "$max_attempts" ] && [ $(( remaining - readback_floor )) -ge "$attempt_floor" ]; then
+      readback_level=warning
+    fi
+    readback_status=0
+    if [ "$remaining" -ge 1 ]; then
+      bash "$script_dir/check-download.sh" "$name" "$url" "$file" "$remaining" "$readback_level" < /dev/null || readback_status=$?
+    else
+      echo "::$readback_level::$name：${bucket_budget} 秒的时限在读回之前就用完了：$url" >&2
+      readback_status=1
+    fi
+    if [ "$readback_status" -eq 0 ]; then
+      break
+    fi
+    # put-object 自己说成功、读回却对不上，是公共读或自定义域名的配置问题，重传也一样
+    if [ "$put_status" -eq 0 ]; then
+      break
+    fi
+    if [ "$attempt" -ge "$max_attempts" ] || [ $(( deadline - $(date +%s) - readback_floor )) -lt "$attempt_floor" ]; then
+      break
+    fi
+    case "$put_status" in
+      124 | 137) echo "$name：第 $attempt 次 put-object 超过 $limit 秒没有传完，读回也对不上，重传" ;;
+      *) echo "$name：第 $attempt 次 put-object 报错，读回也对不上，重传" ;;
+    esac
+  done
 
   if [ "$readback_status" -eq 0 ]; then
     case "$put_status" in
       0) ;;
-      124 | 137) echo "$name：put-object 超过 $put_limit 秒没有传完，但公网读回与本地一致，按已传上处理" ;;
-      *) echo "$name：put-object 报错，但公网读回与本地一致，按已传上处理" ;;
+      124 | 137) echo "$name：第 $attempt 次 put-object 超过 $limit 秒没有传完，但公网读回与本地一致，按已传上处理" ;;
+      *) echo "$name：第 $attempt 次 put-object 报错，但公网读回与本地一致，按已传上处理" ;;
     esac
+    if [ "$attempt" -gt 1 ]; then
+      echo "$name：试到第 $attempt 次才传上"
+    fi
     if [ -n "$record" ]; then
       printf '%s\tok\t%s\n' "$name" "$key" >> "$record"
     fi
@@ -169,8 +206,8 @@ while IFS=$'\t' read -r name profile bucket endpoint region; do
 
   case "$put_status" in
     0) failure="put-object 成功，按公网地址读回却和本地文件对不上，见上面读回的报错" ;;
-    124 | 137) failure="put-object 超过 $put_limit 秒没有传完，按公网地址读回也和本地文件对不上" ;;
-    *) failure="put-object 失败，按公网地址读回也和本地文件对不上，见上面 aws 的报错" ;;
+    124 | 137) failure="put-object 试了 $attempt 次都没在时限内传完，按公网地址读回也和本地文件对不上" ;;
+    *) failure="put-object 试了 $attempt 次都失败，按公网地址读回也和本地文件对不上，见上面 aws 的报错" ;;
   esac
   if [ "$may_fail" = no ]; then
     echo "::error::$name：$failure" >&2
