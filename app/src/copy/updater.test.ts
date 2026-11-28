@@ -51,14 +51,14 @@ describe("普通更新被拒的原因", () => {
 describe("跨通道更新：面板的说明行与发现新版本的通知", () => {
   it("新版本属于包的通道：没有说明行，通知照旧", () => {
     for (const preference of ["dev", "beta", "stable"] as const) {
-      expect(updateChannelNote({ channel: "beta", preference, packageChannel: "beta" })).toBeNull();
+      for (const discarded of [false, true]) expect(updateChannelNote({ channel: "beta", preference, packageChannel: "beta" }, discarded)).toBeNull();
       expect(updateFoundToastBody({ channel: "beta", preference, packageChannel: "beta" })).toBe("点「查看」了解更新内容");
     }
   });
 
   it("新版本属于偏好通道、不属于包的通道：装上以后就换过去了", () => {
     const channels = { channel: "beta", preference: "beta", packageChannel: "stable" } as const;
-    expect(updateChannelNote(channels)).toBe("这一版属于测试版，装上以后就换到测试版了。");
+    expect(updateChannelNote(channels, false)).toBe("这一版属于测试版，装上以后就换到测试版了。");
     expect(updateFoundToastBody(channels)).toBe("装上以后就换到测试版了，点「查看」了解更新内容");
     expect(UPDATE_FOUND_TOAST.title("1.1.0-beta.1")).toBe(`${APP_NAME} 1.1.0-beta.1 可以更新了`);
   });
@@ -66,8 +66,13 @@ describe("跨通道更新：面板的说明行与发现新版本的通知", () =
   it("新版本属于更慢的线、不是偏好：装上以后照常按偏好收更新，通知照旧", () => {
     // 预览版的包等测试版追上来，正式版先发了
     const channels = { channel: "stable", preference: "beta", packageChannel: "dev" } as const;
-    expect(updateChannelNote(channels)).toBe("这一版属于正式版，装上以后照常接收测试版的更新。");
+    expect(updateChannelNote(channels, false)).toBe("这一版属于正式版，装上以后照常接收测试版的更新。");
     expect(updateFoundToastBody(channels)).toBe("点「查看」了解更新内容");
+  });
+
+  it("包已丢弃、不会安装：说明行不再说「装上以后」，换成没有装上的说法", () => {
+    expect(updateChannelNote({ channel: "beta", preference: "beta", packageChannel: "stable" }, true)).toBe("这一版属于测试版，没有装上，还没换到测试版。");
+    expect(updateChannelNote({ channel: "stable", preference: "beta", packageChannel: "dev" }, true)).toBe("这一版属于正式版，没有装上，照常接收测试版的更新。");
   });
 
   it("读不了数据的那一版：面板说明块不说成下载失败", () => {

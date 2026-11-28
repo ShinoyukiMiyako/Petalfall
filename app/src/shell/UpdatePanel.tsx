@@ -92,10 +92,15 @@ function PhaseStatus({ phaseKey, children }: { phaseKey: string; children: React
  * 安装说明之前的通道说明行：新版本不属于包的通道时说清装上之后在哪条线上；属于包的通道时为 null，不占这一行。
  * 有可查看的版本时更新信息早已到达，包的通道与偏好只在不支持自更新时为空，空了是后端违约。
  */
-function channelNoteOf(update: UpdateInfo, channels: UpdaterChannels | null): string | null {
+function channelNoteOf(update: UpdateInfo, channels: UpdaterChannels | null, discarded: boolean): string | null {
   if (channels === null) throw new Error(`有可查看的 ${update.version} 时更新信息应当已经到达`);
   const { packageChannel, preference } = supportedChannels(channels);
-  return updateChannelNote({ channel: update.channel, preference, packageChannel });
+  return updateChannelNote({ channel: update.channel, preference, packageChannel }, discarded);
+}
+
+/** 下好的包已被丢弃、不会安装：签名不符，或验过签却读不了这台电脑上的数据。两种说明块都写着「已丢弃，不会安装」。 */
+function packageDiscarded(phase: UpdaterPhase): boolean {
+  return phase.kind === "download_failed" && (phase.signature || phase.refusal !== null);
 }
 
 /**
@@ -186,7 +191,7 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
   if ((phase.kind === "ready" || phase.kind === "install_on_exit") && phase.kind !== installFrom) setInstallFrom(phase.kind);
   const update = current !== null ? current : last;
   if (update === null) return null;
-  const channelNote = channelNoteOf(update, updater.state.channels);
+  const channelNote = channelNoteOf(update, updater.state.channels, packageDiscarded(phase));
 
   const installReason = gameRunning ? UPDATE_COPY.gameRunningReason : undefined;
   const offlineReason = online ? undefined : UPDATE_COPY.offlineReason;

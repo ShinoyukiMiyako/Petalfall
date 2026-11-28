@@ -384,6 +384,38 @@ describe("通道说明行", () => {
     const notes = `${UPDATE_COPY.notesTitle}${update.notes}`;
     expect(bodyBlocks()).toEqual(line === null ? [notes, UPDATE_COPY.installNote] : [notes, line, UPDATE_COPY.installNote]);
   });
+
+  it.each([
+    { name: "读不了这台电脑上的数据", code: "update_data_too_new", status: UPDATE_COPY.dataTooNew },
+    { name: "签名不符", code: "update_signature_invalid", status: UPDATE_COPY.downloadFailedBecause(UPDATE_COPY.signatureInvalid) },
+  ])("下好的包被丢弃（$name）：通道说明在原来那一行换成没有装上的说法，正文不多出一行", async ({ code, status }) => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const update: UpdateDto = { version: "0.3.0-beta.1", current_version: "0.1.0", notes: "修复若干问题", date: null, channel: "beta" };
+    info = { ...info, preference: "beta", relation: "following", available: update, downloaded_version: null, downloaded_channel: null, downloaded_intent: null };
+    ipc.overrides.set("download_update", () => {
+      throw new IpcError(code, "后端原文");
+    });
+    await openReady();
+    const notes = `${UPDATE_COPY.notesTitle}${update.notes}`;
+    expect(bodyBlocks()).toEqual([notes, "这一版属于测试版，装上以后就换到测试版了。", UPDATE_COPY.installNote]);
+
+    act(() => button(UPDATE_COPY.download).click());
+    await flush();
+    expect(bodyBlocks()).toEqual([notes, "这一版属于测试版，没有装上，还没换到测试版。", UPDATE_COPY.installNote, status]);
+  });
+
+  it("别的下载失败还能重试装上：通道说明照旧", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const update: UpdateDto = { version: "0.3.0-beta.1", current_version: "0.1.0", notes: "修复若干问题", date: null, channel: "beta" };
+    info = { ...info, preference: "beta", relation: "following", available: update, downloaded_version: null, downloaded_channel: null, downloaded_intent: null };
+    ipc.overrides.set("download_update", () => {
+      throw new IpcError("update_download_failed", "连接被重置");
+    });
+    await openReady();
+    act(() => button(UPDATE_COPY.download).click());
+    await flush();
+    expect(bodyBlocks().slice(0, 3)).toEqual([`${UPDATE_COPY.notesTitle}${update.notes}`, "这一版属于测试版，装上以后就换到测试版了。", UPDATE_COPY.installNote]);
+  });
 });
 
 describe("下好之后被拒装", () => {

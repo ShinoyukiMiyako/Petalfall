@@ -139,6 +139,10 @@ export const UPDATE_COPY = {
   channelNoteSwitches: (channel: UpdateChannel) => `这一版属于${updateChannelLabel(channel)}，装上以后就换到${updateChannelLabel(channel)}了。`,
   /** 面板里的通道说明行：偏好更快的人收到了更慢的线上更新的版本，装上以后仍按偏好收更新。 */
   channelNoteKeeps: (channel: UpdateChannel, preference: UpdateChannel) => `这一版属于${updateChannelLabel(channel)}，装上以后照常接收${updateChannelLabel(preference)}的更新。`,
+  /** 包被丢弃（签名不符、读不了数据）时替掉 channelNoteSwitches 的那一行：说明块写着不会安装，这一行不能再说「装上以后」。 */
+  channelNoteSwitchesDiscarded: (channel: UpdateChannel) => `这一版属于${updateChannelLabel(channel)}，没有装上，还没换到${updateChannelLabel(channel)}。`,
+  /** 包被丢弃时替掉 channelNoteKeeps 的那一行。 */
+  channelNoteKeepsDiscarded: (channel: UpdateChannel, preference: UpdateChannel) => `这一版属于${updateChannelLabel(channel)}，没有装上，照常接收${updateChannelLabel(preference)}的更新。`,
   /** 打包、备份这类本地任务不能说成下载：与关窗确认同一口径，有下载时取消键才写「继续下载」。 */
   restartConfirm: (tasks: number, downloads: number) => ({
     title: "重启并安装更新？",
@@ -220,11 +224,12 @@ export interface UpdateChannels {
 /**
  * 更新面板里放在安装说明之前的通道说明行：新版本属于包的通道时没有这一行（与只有一条线时一样）；
  * 属于偏好通道时说装上就换过去了；属于别的线（偏好更快的人收到更慢的线上更新的版本）时说装上以后照常按偏好收更新。
+ * discarded 为真（下好的包已丢弃、不会安装）时换成没有装上的说法，仍占原来那一行，正文不多出一行、也不跳。
  */
-export function updateChannelNote({ channel, preference, packageChannel }: UpdateChannels): string | null {
+export function updateChannelNote({ channel, preference, packageChannel }: UpdateChannels, discarded: boolean): string | null {
   if (channel === packageChannel) return null;
-  if (channel === preference) return UPDATE_COPY.channelNoteSwitches(channel);
-  return UPDATE_COPY.channelNoteKeeps(channel, preference);
+  if (channel === preference) return discarded ? UPDATE_COPY.channelNoteSwitchesDiscarded(channel) : UPDATE_COPY.channelNoteSwitches(channel);
+  return discarded ? UPDATE_COPY.channelNoteKeepsDiscarded(channel, preference) : UPDATE_COPY.channelNoteKeeps(channel, preference);
 }
 
 /** 自动检查发现新版本时的通知：每个版本只弹一次，动作打开更新面板。 */
