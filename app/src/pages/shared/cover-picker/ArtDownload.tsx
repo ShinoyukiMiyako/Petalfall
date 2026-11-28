@@ -13,6 +13,7 @@ import { cx } from "../../../lib/util";
 import { useRunner } from "../../../shell/useRunner";
 import { useArtDownload, type ArtDownloadProgress } from "../../../state/art-download";
 import { useOnline } from "../../../state/online";
+import { useDrawsDefaultSkin } from "../../../state/queries/home";
 import { Button } from "../../../ui/Button";
 import { Inset } from "../../../ui/Inset";
 import { ProgressBar } from "../../../ui/ProgressBar";
@@ -34,12 +35,16 @@ export interface ArtDownloadProps {
 }
 
 /**
- * 账户的头像与立绘要不要配一个下载入口：本机没有材质源时默认皮肤（离线账户、没有自定义皮肤的正版与外置账户）读不到。
+ * 这一处画的账户（accountUuids）要不要配一个下载入口：其中有画默认皮肤的（离线账户、没有自定义皮肤的正版与外置账户），
+ * 而本机没有材质源、默认皮肤读不到。画的都是自己的远程皮肤（不经材质源）、或选不出默认皮肤只能画人偶时，下了材质也换不出
+ * 任何东西，不给入口；皮肤信息还在读时先不给，读到是默认皮肤再出现。
  * 只看材质源、不看方块目录：降级集里也有默认皮肤，方块目录没载入也不影响读皮肤。下完后材质源一换上入口就退场，
  * 默认皮肤随材质状态就地换上（useSkin 订阅着材质状态，换材质源时取图缓存整体作废）。
  */
-export function useSkinArtMissing(): boolean {
-  return useArtStatus().source === null;
+export function useSkinArtMissing(accountUuids: readonly string[]): boolean {
+  const missing = useArtStatus().source === null;
+  const drawsDefault = useDrawsDefaultSkin(accountUuids);
+  return missing && drawsDefault;
 }
 
 /**

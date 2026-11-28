@@ -537,6 +537,16 @@ describe("首次启动向导：推进与收尾", () => {
       expect(note()).toBeUndefined();
     });
 
+    it("已添加的账户都有自己的远程皮肤：本机没有材质源也不放这一行", async () => {
+      ipc.overrides.set("skin_info", () => ({ kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true }));
+      await mount();
+      await click(button("下一步"));
+      await click(button("下一步"));
+      expect(note()).toBeUndefined();
+      expect(all("button").some((b) => b.closest("[inert]") === null && b.textContent === "下载原版材质")).toBe(false);
+      expect(avatars().map((a) => a.dataset.art)).toEqual(["skin", "skin"]);
+    });
+
     it("点下载：连点两下也只发一次 art_download，下载中换成进度；下完后头像在原节点上换上默认皮肤，这一行退场", async () => {
       const download = deferred<ArtStatusDto>();
       ipc.overrides.set("art_download", () => download.promise);

@@ -75,7 +75,7 @@ export const DeviceCodeDialog = memo(function DeviceCodeDialog({ login, report }
   const totalMs = useCodeLifetime(device);
   const onboarding = useLauncherSelector(onboardingActive);
   const gate = useLoadingGate(device.status === "requesting");
-  const artMissing = useSkinArtMissing();
+  const artMissing = useSkinArtMissing(device.status === "success" ? [device.account.uuid] : []);
 
   const close = () => void run(() => actions.closeLogin(), ACTION_ERROR.cancelLogin);
   const restart = () => void run(() => actions.startMicrosoftLogin(login.intent), ACTION_ERROR.microsoftLogin);

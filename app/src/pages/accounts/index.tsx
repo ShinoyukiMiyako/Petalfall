@@ -78,7 +78,7 @@ const AccountsView = memo(function AccountsView({ view }: { view: AccountsSnapsh
   const online = useOnline();
   const microsoftUnavailable = useLauncherSelector(microsoftLoginUnavailable);
   const act = useAccountActions(accounts, currentAccountId);
-  const artMissing = useSkinArtMissing();
+  const artMissing = useSkinArtMissing(accounts.map((account) => account.uuid));
   const gridRef = useReflow<HTMLDivElement>();
 
   // 上一次落定的读取结果。读取出错后点重试的这一轮不开加载门：错误卡留在原处、重试按钮转圈，结果回来再原位换掉。

@@ -132,7 +132,7 @@ export function StepAccount() {
   const microsoftUnavailable = useLauncherSelector(microsoftLoginUnavailable);
   const availability: Availability = { online, microsoftUnavailable };
   const [expanded, setExpanded] = useState(false);
-  const artMissing = useSkinArtMissing();
+  const artMissing = useSkinArtMissing(accounts.map((account) => account.uuid));
   // 「已添加」区出现、选项换形态时，下面的块从旧位置滑过去
   const reflow = useReflow<HTMLDivElement>();
   return (

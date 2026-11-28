@@ -14,6 +14,7 @@ import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { getArtDownloadState } from "../../state/art-download";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
+import { useSkinInfo } from "../../state/queries/home";
 import { render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
@@ -446,6 +447,9 @@ describe("账户页：皮肤", () => {
 describe("账户页：下载原版材质", () => {
   // 后端给 Hanami（UUID 哈希 593896604）的默认皮肤：18 款里的宽臂 noor
   const FALLBACK = { kind: "default", path: "entity/player/wide/noor", model: "wide" } as const;
+  // 账户自己的皮肤：走 /skin/，不经材质源
+  const REMOTE = { kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true } as const;
+  const SKIN_URL = `http://petalfall-tex.localhost/skin/${"ab".repeat(20)}.png`;
   const MODERN: ArtStatusDto = { source: { version_id: "1.21.4", degraded: false, legacy_skins: false }, panorama: false };
   const NOTE = "本机还没有原版材质，默认皮肤画不出来。整包约 20 到 40 MB，下完只留不到 1 MB。";
   const NOOR = "http://petalfall-tex.localhost/art/entity/player/wide/noor.png?v=1.21.4";
@@ -512,6 +516,35 @@ describe("账户页：下载原版材质", () => {
     await mount();
     expect(liveText()).toContain("还没有账户");
     expect(entry()).toBeUndefined();
+  });
+
+  it("画的账户都有自己的远程皮肤：本机没有材质源也不放这一行，立绘照常画远程皮肤", async () => {
+    ipc.overrides.set("skin_info", () => REMOTE);
+    await mount();
+    await flush();
+    expect(entry()).toBeUndefined();
+    expect(live(page().querySelectorAll("button")).some((b) => b.textContent === "下载原版材质")).toBe(false);
+    expect(spotFigure()?.dataset.art).toBe("skin");
+    // 两个账户同一张皮肤，取图缓存只取一次
+    expect(drawn).toEqual([SKIN_URL]);
+  });
+
+  it("画的账户都选不出默认皮肤（画人偶）：下了材质也画不出来，不放这一行", async () => {
+    ipc.overrides.set("skin_info", () => null);
+    await mount();
+    await flush();
+    expect(entry()).toBeUndefined();
+    expect(spotFigure()?.dataset.art).toBe("mannequin");
+  });
+
+  it("当前账户画远程皮肤、另一张账户卡画默认皮肤：照样放这一行", async () => {
+    ipc.overrides.set("skin_info", (args) => (args.accountUuid === hanami.uuid ? REMOTE : FALLBACK));
+    await mount();
+    await flush();
+    const card = entry();
+    if (card === undefined) throw new Error("没有下载原版材质的那一行");
+    expect([...card.querySelectorAll("p")].map((p) => p.textContent)).toEqual([NOTE]);
+    expect(spotFigure()?.dataset.art).toBe("skin");
   });
 
   it("点下载：连点两下也只发一次 art_download，这一行换成进度；下完后立绘在原节点上换上默认皮肤，这一行退场", async () => {
@@ -1048,12 +1081,25 @@ describe("账户页：断网、加载与读取失败", () => {
     expect(content.style.opacity).toBe("0");
   });
 
-  /** 账户早已读到之后才进页：先只挂状态容器读完数据，再挂上页面，页面挂载那一刻正文就在。 */
+  /** 进页之前就读过的皮肤信息（主页问候卡这类地方读过）。 */
+  function SkinRead({ uuid }: { uuid: string }) {
+    useSkinInfo(uuid);
+    return null;
+  }
+
+  /**
+   * 账户与皮肤信息早已读到之后才进页：先只挂状态容器读完数据，再挂上页面，页面挂载那一刻正文就在。
+   * 皮肤都是默认皮肤，本文件默认又没有材质源：页面挂载那一刻就知道要放下载原版材质那一行。
+   */
   async function enterWithAccountsRead() {
+    ipc.overrides.set("skin_info", () => ({ kind: "default", path: "entity/player/wide/noor", model: "wide" }));
     const tree = (withPage: boolean) => (
       <LauncherProvider>
         <ShellProvider>
           <Probe />
+          {accounts.map((account) => (
+            <SkinRead key={account.uuid} uuid={account.uuid} />
+          ))}
           {withPage && <AccountsPage route={{ page: "accounts" }} />}
           <OverlayRoot />
         </ShellProvider>
@@ -1069,7 +1115,7 @@ describe("账户页：断网、加载与读取失败", () => {
 
   it("进页时账户早已读到：空的横幅槽不占序号，聚光卡与分区紧接着页头往下编号，错开入场", async () => {
     await enterWithAccountsRead();
-    // 本文件默认没有材质源：聚光卡与分区之间那一行下载原版材质（div）也领一个号
+    // 聚光卡与分区之间那一行下载原版材质（div）也领一个号
     expect(entrances()).toEqual([
       ["header", "0"],
       ["section", "1"],

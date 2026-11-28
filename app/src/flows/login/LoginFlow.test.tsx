@@ -936,6 +936,15 @@ describe("微软设备码弹窗", () => {
       expect(avatar()?.dataset.art).toBe("skin");
     });
 
+    it("登录的账户有自己的皮肤：本机没有材质源也不放这一行，别的账户画默认皮肤不算", async () => {
+      ipc.overrides.set("skin_info", (args) => (args.accountUuid === sakura.uuid ? { kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true } : FALLBACK));
+      await loginSucceeds();
+      expect(note()).toBeUndefined();
+      expect(buttons().some((b) => labelOf(b) === "下载原版材质")).toBe(false);
+      expect(modalLayoutKeys.at(-1)).toBe("microsoft:success:content");
+      expect(avatar()?.dataset.art).toBe("skin");
+    });
+
     it("点下载：连点两下也只发一次 art_download；下完后头像在原节点上换上默认皮肤，这一行退场，弹窗换回不带它的版式", async () => {
       const download = deferred<ArtStatusDto>();
       ipc.overrides.set("art_download", () => download.promise);
