@@ -129,25 +129,54 @@ impl InstanceActivity {
     }
 }
 
-/// 一份占用。`used_by` 只在 [`InstanceActivity::Inherited`] 时有：正以这个实例为基底的那个实例。
+/// 一份占用落在哪个游戏目录。实例的位置由名字决定（`<游戏目录>/versions/<id>`），同名实例在其他游戏目录里是另一个
+/// 实例：接回的游戏、切换游戏目录之前开工的任务占着原目录里的那个，不该挡住当前目录里的同名实例。
+#[derive(Debug, Clone)]
+enum Scope {
+    /// 这个游戏目录里的实例。目录经 [`same_path`] 比较：Windows 上不分大小写，`\` 与 `/` 混用、末尾的分隔符都算同一个。
+    Dir(PathBuf),
+    /// 调用方没说是哪个游戏目录（经 [`InstanceLocks`] 自己的方法占、查）：保守地与每个游戏目录里的同名实例都相交，
+    /// 与按 id 一个键时一样。
+    Any,
+}
+
+impl Scope {
+    fn overlaps(&self, other: &Scope) -> bool {
+        match (self, other) {
+            (Scope::Dir(a), Scope::Dir(b)) => same_path(a, b),
+            (Scope::Any, _) | (_, Scope::Any) => true,
+        }
+    }
+}
+
+/// 一份占用。`id` 是占用时的原样 id：按活动找实例时要拿它去解析工作目录、写进 `instance_busy` 的 detail，不能用
+/// 小写键代替。`used_by` 只在 [`InstanceActivity::Inherited`] 时有：正以这个实例为基底的那个实例。
 struct Hold {
     token: u64,
+    id: String,
+    scope: Scope,
     activity: InstanceActivity,
     used_by: Option<String>,
 }
 
-/// 一个实例上的全部占用。`next` 给每次占用发一个号，守卫凭号释放自己那一份。`ids` 记下每个键第一次占用时
-/// 的原样 id：按活动找实例时要拿它去解析工作目录、写进 `instance_busy` 的 detail，不能用小写键代替。
+/// 一份「存档正被读走或写入」的记录：号、原样 id 与落在哪个游戏目录。
+struct SavesMark {
+    token: u64,
+    id: String,
+    scope: Scope,
+}
+
+/// 全部占用，按不分大小写的 id 归在一起，每份各记着落在哪个游戏目录。`next` 给每次占用发一个号，守卫凭号释放
+/// 自己那一份。
 #[derive(Default)]
 struct LockTable {
     next: u64,
     held: HashMap<String, Vec<Hold>>,
-    ids: HashMap<String, String>,
-    /// 存档正被整份读走的实例（导出整合包勾了存档），每份记下号与原样 id。与占用分开记：导出对外仍是
-    /// 「改动中」，与备份兼容，只有要替换存档的恢复需要看它。
-    saves_readers: HashMap<String, Vec<(u64, String)>>,
+    /// 存档正被整份读走的实例（导出整合包勾了存档）。与占用分开记：导出对外仍是「改动中」，与备份兼容，只有要替换
+    /// 存档的恢复需要看它。
+    saves_readers: HashMap<String, Vec<SavesMark>>,
     /// 正往存档目录里写东西的实例（装数据包），记法同上。对外同样是「改动中」，备份、恢复与带存档的导出看它。
-    saves_writers: HashMap<String, Vec<(u64, String)>>,
+    saves_writers: HashMap<String, Vec<SavesMark>>,
 }
 
 /// 存档正被做什么。
@@ -158,7 +187,7 @@ enum SavesUse {
 }
 
 impl LockTable {
-    fn saves_marks(&mut self, kind: SavesUse) -> &mut HashMap<String, Vec<(u64, String)>> {
+    fn saves_marks(&mut self, kind: SavesUse) -> &mut HashMap<String, Vec<SavesMark>> {
         match kind {
             SavesUse::Read => &mut self.saves_readers,
             SavesUse::Write => &mut self.saves_writers,
@@ -166,7 +195,11 @@ impl LockTable {
     }
 }
 
-/// 实例级互斥表（managed state）。键不分大小写：Windows 上 `ABC` 与 `abc` 是同一个目录。
+/// 实例级互斥表（managed state）。只有落在同一个游戏目录里（见 [`Scope`]）、id 不分大小写相同的占用才相交：
+/// Windows 上 `ABC` 与 `abc` 是同一个目录。
+///
+/// 按游戏目录占用、查询经 [`InstanceLocks::in_dir`]。这里直接给的同名方法不带目录，与每个游戏目录里的同名实例都
+/// 相交，留给还没交出游戏目录的调用方。
 #[derive(Default, Clone)]
 pub struct InstanceLocks {
     table: Arc<Mutex<LockTable>>,
@@ -178,6 +211,101 @@ fn lock_table(table: &Mutex<LockTable>) -> std::sync::MutexGuard<'_, LockTable> 
 }
 
 impl InstanceLocks {
+    /// 游戏目录 `game_dir` 里的实例：经它占的只挡同一目录里的同名实例，经它查的只看同一目录里的占用（以及没说
+    /// 目录的那些）。
+    pub fn in_dir(&self, game_dir: &Path) -> ScopedLocks<'_> {
+        ScopedLocks {
+            locks: self,
+            scope: Scope::Dir(game_dir.to_path_buf()),
+        }
+    }
+
+    fn unscoped(&self) -> ScopedLocks<'_> {
+        ScopedLocks {
+            locks: self,
+            scope: Scope::Any,
+        }
+    }
+
+    /// 同 [`ScopedLocks::acquire`]，不说是哪个游戏目录。
+    pub fn acquire(
+        &self,
+        id: &str,
+        activity: InstanceActivity,
+    ) -> Result<InstanceGuard, CommandError> {
+        self.unscoped().acquire(id, activity)
+    }
+
+    /// 同 [`ScopedLocks::acquire_with_bases`]，不说是哪个游戏目录。
+    pub fn acquire_with_bases(
+        &self,
+        id: &str,
+        activity: InstanceActivity,
+        bases: &[String],
+    ) -> Result<ChainGuard, CommandError> {
+        self.unscoped().acquire_with_bases(id, activity, bases)
+    }
+
+    /// 同 [`ScopedLocks::acquire_with_chain`]，不说是哪个游戏目录。
+    pub async fn acquire_with_chain(
+        &self,
+        id: &str,
+        activity: InstanceActivity,
+        chain: impl std::future::Future<Output = Result<Vec<String>, CommandError>>,
+    ) -> Result<ChainGuard, CommandError> {
+        self.unscoped()
+            .acquire_with_chain(id, activity, chain)
+            .await
+    }
+
+    /// 同 [`ScopedLocks::read_saves`]，不说是哪个游戏目录。
+    pub fn read_saves(&self, id: &str) -> SavesGuard {
+        self.unscoped().read_saves(id)
+    }
+
+    /// 同 [`ScopedLocks::write_saves`]，不说是哪个游戏目录。
+    pub fn write_saves(&self, id: &str) -> SavesGuard {
+        self.unscoped().write_saves(id)
+    }
+
+    /// 实例此刻在做的事，同 [`ScopedLocks::occupancy`] 的前一半，不分游戏目录；只有用例单看它。
+    #[cfg(test)]
+    pub fn activity(&self, id: &str) -> Option<InstanceActivity> {
+        self.occupancy(id).0
+    }
+
+    /// 同 [`ScopedLocks::occupancy`]，不分游戏目录。
+    #[cfg(test)]
+    pub fn occupancy(&self, id: &str) -> (Option<InstanceActivity>, Option<String>) {
+        self.unscoped().occupancy(id)
+    }
+
+    /// 同 [`ScopedLocks::reading_saves`]，不分游戏目录。
+    #[cfg(test)]
+    pub fn reading_saves(&self) -> Vec<String> {
+        self.unscoped().reading_saves()
+    }
+
+    /// 同 [`ScopedLocks::writing_saves`]，不分游戏目录。
+    #[cfg(test)]
+    pub fn writing_saves(&self) -> Vec<String> {
+        self.unscoped().writing_saves()
+    }
+
+    /// 同 [`ScopedLocks::holding`]，不分游戏目录。
+    #[cfg(test)]
+    pub fn holding(&self, activity: InstanceActivity) -> Vec<String> {
+        self.unscoped().holding(activity)
+    }
+}
+
+/// [`InstanceLocks`] 落在一个游戏目录上（[`InstanceLocks::in_dir`]），或不分目录。
+pub struct ScopedLocks<'a> {
+    locks: &'a InstanceLocks,
+    scope: Scope,
+}
+
+impl ScopedLocks<'_> {
     /// 占住实例 `id` 做 `activity`；已有与它不兼容的事在做时报 `instance_busy`。返回的守卫被丢弃即释放。
     ///
     /// 守卫自带表的引用、不借用 `self`，可以存进别的状态里跨命令持有（运行中的游戏会话）。
@@ -195,7 +323,8 @@ impl InstanceLocks {
     }
 
     /// 占住实例 `id` 做 `activity`，同时以它的名义占住继承链上的基底版本 `bases`
-    /// （[`petalfall_core::Petalfall::inheritance_chain`] 的结果，或导入要写的自然版本目录）。
+    /// （[`petalfall_core::Petalfall::inheritance_chain`] 的结果，或导入要写的自然版本目录）。基底与实例在同一个
+    /// 游戏目录里。
     ///
     /// 先占实例自己，再依次占基底；任一处冲突都报 `instance_busy`（基底被占时 detail 里的 id 是那个基底），
     /// 已占到的随返回的错误一起放开。基底里与 `id` 同名（链成环）或彼此重复（不分大小写）的只占一次。
@@ -209,7 +338,7 @@ impl InstanceLocks {
         self.hold_bases(own, id, activity, bases)
     }
 
-    /// 同 [`InstanceLocks::acquire_with_bases`]，基底要读盘才知道（`chain` 读实例的继承链）：占住实例自己之后
+    /// 同 [`ScopedLocks::acquire_with_bases`]，基底要读盘才知道（`chain` 读实例的继承链）：占住实例自己之后
     /// 才去读。实例正被安装、补全、改名、删除或移走时它的版本 JSON 可能正被替换或挪走，先读的话报出来的会是读文件
     /// 的错误而不是 `instance_busy`；占住之后链也不会再被别的命令改掉。读链失败时实例自己的占用随错误放开。
     pub async fn acquire_with_chain(
@@ -250,47 +379,50 @@ impl InstanceLocks {
         used_by: Option<&str>,
     ) -> Result<InstanceGuard, CommandError> {
         let key = lock_key(id);
-        let mut table = lock_table(&self.table);
-        // 冲突有几处时报列表里也报的那一件（实例自己的事、modifying、inherited 依次），不随哪份占用先到而变，
-        // 否则基底自己在运行时，被拒的删除会说成「正在被别的实例使用」，与界面上的状态对不上。
-        if let Some(conflict) = table.held.get(&key).and_then(|holds| {
-            holds
-                .iter()
-                .filter(|h| !activity.compatible_with(h.activity))
-                .min_by_key(|h| h.activity.report_rank())
-        }) {
+        let mut table = lock_table(&self.locks.table);
+        if let Some(conflict) = table
+            .held
+            .get(&key)
+            .and_then(|holds| self.conflict(holds, activity))
+        {
             return Err(busy_by(id, conflict));
         }
         let token = table.next;
         table.next += 1;
         table.held.entry(key.clone()).or_default().push(Hold {
             token,
+            id: id.to_owned(),
+            scope: self.scope.clone(),
             activity,
             used_by: used_by.map(str::to_owned),
         });
-        table
-            .ids
-            .entry(key.clone())
-            .or_insert_with(|| id.to_owned());
-        tracing::debug!(id, ?activity, used_by, "占用实例");
+        tracing::debug!(id, ?activity, used_by, scope = ?self.scope, "占用实例");
         Ok(InstanceGuard {
-            table: self.table.clone(),
+            table: self.locks.table.clone(),
             key,
             token,
         })
     }
 
+    /// `holds`（同一个键下的全部占用）里落在这个目录、容不下再来一份 `activity` 的那一份。有几处时报列表里也报的
+    /// 那一件（实例自己的事、modifying、inherited 依次），不随哪份占用先到而变，否则基底自己在运行时，被拒的删除会
+    /// 说成「正在被别的实例使用」，与界面上的状态对不上。
+    fn conflict<'h>(&self, holds: &'h [Hold], activity: InstanceActivity) -> Option<&'h Hold> {
+        holds
+            .iter()
+            .filter(|h| h.scope.overlaps(&self.scope) && !activity.compatible_with(h.activity))
+            .min_by_key(|h| h.activity.report_rank())
+    }
+
     /// `bases` 里第一个此刻容不下基底占用的基底，连同挡路的那件事：补全、重新安装加载器与移动沿继承链依次占基底时，
     /// 就停在它上面报 `instance_busy`，报的也是这一份。实例列表用它让界面提前禁用入口。
     pub fn blocking_base(&self, bases: &[String]) -> Option<BaseBusyDto> {
-        let table = lock_table(&self.table);
+        let table = lock_table(&self.locks.table);
         bases.iter().find_map(|base| {
-            let conflict = table
-                .held
-                .get(&lock_key(base))?
-                .iter()
-                .filter(|h| !InstanceActivity::Inherited.compatible_with(h.activity))
-                .min_by_key(|h| h.activity.report_rank())?;
+            let conflict = self.conflict(
+                table.held.get(&lock_key(base))?,
+                InstanceActivity::Inherited,
+            )?;
             Some(BaseBusyDto {
                 id: base.clone(),
                 activity: conflict.activity,
@@ -298,25 +430,19 @@ impl InstanceLocks {
         })
     }
 
-    /// 实例此刻在做的事，同 [`InstanceLocks::occupancy`] 的前一半；只有用例单看它。
-    #[cfg(test)]
-    pub fn activity(&self, id: &str) -> Option<InstanceActivity> {
-        self.occupancy(id).0
-    }
-
     /// 实例此刻在做的事（有几件并行时报最值得界面知道的那一件）与正以它为基底的实例（有几个时报最早占到的
     /// 那个，与 instance_busy 报的是同一个；没被当作基底时为 `None`），在同一次查表里取出。实例列表与删除预览
     /// 用它：分两次查的话，两次之间别的命令占上或放开基底，就会报出「inherited 却没有 used_by」这类对不上的一对。
     pub fn occupancy(&self, id: &str) -> (Option<InstanceActivity>, Option<String>) {
-        let table = lock_table(&self.table);
+        let table = lock_table(&self.locks.table);
         let Some(holds) = table.held.get(&lock_key(id)) else {
             return (None, None);
         };
-        let activity = holds
-            .iter()
+        let here = || holds.iter().filter(|h| h.scope.overlaps(&self.scope));
+        let activity = here()
             .map(|h| h.activity)
             .min_by_key(|activity| activity.report_rank());
-        (activity, holds.iter().find_map(|h| h.used_by.clone()))
+        (activity, here().find_map(|h| h.used_by.clone()))
     }
 
     /// 记下实例 `id` 的存档正被整份读走（导出整合包勾了存档）；返回的守卫被丢弃即撤销。恢复存档开始前经
@@ -336,16 +462,20 @@ impl InstanceLocks {
 
     fn mark_saves(&self, id: &str, kind: SavesUse) -> SavesGuard {
         let key = lock_key(id);
-        let mut table = lock_table(&self.table);
+        let mut table = lock_table(&self.locks.table);
         let token = table.next;
         table.next += 1;
         table
             .saves_marks(kind)
             .entry(key.clone())
             .or_default()
-            .push((token, id.to_owned()));
+            .push(SavesMark {
+                token,
+                id: id.to_owned(),
+                scope: self.scope.clone(),
+            });
         SavesGuard {
-            table: self.table.clone(),
+            table: self.locks.table.clone(),
             key,
             token,
             kind,
@@ -363,26 +493,28 @@ impl InstanceLocks {
     }
 
     fn marked_saves(&self, kind: SavesUse) -> Vec<String> {
-        lock_table(&self.table)
+        lock_table(&self.locks.table)
             .saves_marks(kind)
             .values()
-            .filter_map(|marks| marks.first().map(|(_, id)| id.clone()))
+            .filter_map(|marks| {
+                marks
+                    .iter()
+                    .find(|mark| mark.scope.overlaps(&self.scope))
+                    .map(|mark| mark.id.clone())
+            })
             .collect()
     }
 
-    /// 此刻占着 `activity` 的实例（原样的 id）。
+    /// 此刻占着 `activity` 的实例（原样的 id，每个实例一次）。
     pub fn holding(&self, activity: InstanceActivity) -> Vec<String> {
-        let table = lock_table(&self.table);
-        table
+        lock_table(&self.locks.table)
             .held
-            .iter()
-            .filter(|(_, holds)| holds.iter().any(|h| h.activity == activity))
-            .map(|(key, _)| {
-                table
-                    .ids
-                    .get(key)
-                    .expect("有占用的键一定记着原样 id")
-                    .clone()
+            .values()
+            .filter_map(|holds| {
+                holds
+                    .iter()
+                    .find(|h| h.activity == activity && h.scope.overlaps(&self.scope))
+                    .map(|h| h.id.clone())
             })
             .collect()
     }
@@ -422,7 +554,7 @@ impl Drop for SavesGuard {
         let mut table = lock_table(&self.table);
         let all = table.saves_marks(self.kind);
         if let Some(marks) = all.get_mut(&self.key) {
-            marks.retain(|(token, _)| *token != self.token);
+            marks.retain(|mark| mark.token != self.token);
             if marks.is_empty() {
                 all.remove(&self.key);
             }
@@ -437,7 +569,6 @@ impl Drop for InstanceGuard {
             holds.retain(|h| h.token != self.token);
             if holds.is_empty() {
                 table.held.remove(&self.key);
-                table.ids.remove(&self.key);
             }
         }
     }
@@ -463,6 +594,7 @@ impl ChainGuard {
     }
 }
 
+/// 占用表里归在一起的键：不分大小写的 id。游戏目录不进键，记在每份占用里，比较时经 [`Scope::overlaps`]。
 fn lock_key(id: &str) -> String {
     id.to_lowercase()
 }
@@ -1271,9 +1403,13 @@ fn content_dto(content: InstanceContent) -> InstanceContentDto {
     }
 }
 
-/// 删除预览带上实例此刻的占用：它在做的事与正以它为基底的实例，删除确认据此提前说明为什么删不了。
-fn preview_dto(preview: DeletionPreview, locks: &InstanceLocks) -> DeletionPreviewDto {
-    let (activity, used_by) = locks.occupancy(&preview.id);
+/// 删除预览带上实例此刻在 `game_dir` 里的占用：它在做的事与正以它为基底的实例，删除确认据此提前说明为什么删不了。
+fn preview_dto(
+    preview: DeletionPreview,
+    locks: &InstanceLocks,
+    game_dir: &Path,
+) -> DeletionPreviewDto {
+    let (activity, used_by) = locks.in_dir(game_dir).occupancy(&preview.id);
     DeletionPreviewDto {
         activity,
         used_by,
@@ -1426,6 +1562,8 @@ pub(crate) async fn list_instances_with(
             Readable::Unreadable(reason)
         }
     };
+    // 列的是快照这个游戏目录里的实例：别的目录里同名实例的占用不算它的。
+    let locks = locks.in_dir(petalfall.game_dir());
     Ok(list
         .into_iter()
         .map(|summary| {
@@ -1526,8 +1664,10 @@ pub(crate) async fn set_instance_settings_with(
     let dto: InstanceSettingsDto = serde_json::from_value(settings).map_err(|err| {
         invalid_field("settings", "malformed", format!("实例设置格式不对：{err}"))
     })?;
-    let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
     let petalfall = facade.snapshot().await;
+    let _guard = locks
+        .in_dir(petalfall.game_dir())
+        .acquire(id, InstanceActivity::Modifying)?;
     let settings = VersionSettings::from(dto);
     petalfall
         .set_instance_settings(id, &settings)
@@ -1569,8 +1709,10 @@ pub(crate) async fn import_cover_image_with(
             format!("图片路径须是绝对路径：{path}"),
         ));
     }
-    let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
     let petalfall = facade.snapshot().await;
+    let _guard = locks
+        .in_dir(petalfall.game_dir())
+        .acquire(id, InstanceActivity::Modifying)?;
     Ok(petalfall
         .import_cover_image(id, slot, source)
         .await
@@ -1801,7 +1943,9 @@ pub(crate) async fn install_version_with(
         .check_new_instance_name(&name)
         .await
         .map_err(instance_error)?;
-    let _guard = locks.acquire(&name, InstanceActivity::Installing)?;
+    let _guard = locks
+        .in_dir(petalfall.game_dir())
+        .acquire(&name, InstanceActivity::Installing)?;
     let task = tasks.register(task_id)?;
     let petalfall = petalfall.with_cancel(task.token().clone());
     let marker = petalfall
@@ -1948,6 +2092,7 @@ async fn run_repair(
     // 传统布局的加载器实例把客户端 jar 与 natives 补进继承链根的目录：补全期间基底不能被删、改名、补全、移走或启动
     // （游戏映射着 natives，补到一半会报 IO 错误）。依赖检查只在删除、改名、移动动手那一刻扫一次，挡不住补全中途的这些操作。
     let _guard = locks
+        .in_dir(petalfall.game_dir())
         .acquire_with_chain(id, InstanceActivity::Repairing, async {
             petalfall.repair_chain(id).await.map_err(instance_error)
         })
@@ -2049,8 +2194,10 @@ pub(crate) async fn save_instance_as_template_with(
     if !is_safe_instance_id(id) {
         return Err(CoreError::from(InstanceError::InvalidId { id: id.to_owned() }).into());
     }
-    let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
     let petalfall = facade.snapshot().await;
+    let _guard = locks
+        .in_dir(petalfall.game_dir())
+        .acquire(id, InstanceActivity::Modifying)?;
     Ok(petalfall
         .save_template_from_instance(id)
         .await
@@ -2088,7 +2235,7 @@ pub async fn preview_instance_deletion(
         .deletion_preview(&id)
         .await
         .map_err(instance_error)?;
-    Ok(preview_dto(preview, &locks))
+    Ok(preview_dto(preview, &locks, petalfall.game_dir()))
 }
 
 /// 把实例移入回收站，并从侧栏固定、当前选中与游玩记录里去掉它。实例在忙报 `instance_busy`，被依赖报
@@ -2112,8 +2259,10 @@ pub(crate) async fn delete_instance_with(
     id: &str,
     disposer: impl Disposer + 'static,
 ) -> Result<DeleteOutcomeDto, CommandError> {
-    let _guard = locks.acquire(id, InstanceActivity::Deleting)?;
     let snapshot = facade.snapshot().await;
+    let _guard = locks
+        .in_dir(snapshot.game_dir())
+        .acquire(id, InstanceActivity::Deleting)?;
     let existed = snapshot
         .delete_instance_files(id, disposer)
         .await
@@ -2225,6 +2374,8 @@ pub(crate) async fn rename_instance_with(
     id: &str,
     new_name: &str,
 ) -> Result<RenameOutcomeDto, CommandError> {
+    let snapshot = facade.snapshot().await;
+    let locks = locks.in_dir(snapshot.game_dir());
     let _old = locks.acquire(id, InstanceActivity::Renaming)?;
     // 新名字也要占住：改名进行中，别的命令不能抢先用这个名字新建实例。只改大小写时是同一个键。
     let _new = if lock_key(id) == lock_key(new_name) {
@@ -2232,7 +2383,6 @@ pub(crate) async fn rename_instance_with(
     } else {
         Some(locks.acquire(new_name, InstanceActivity::Renaming)?)
     };
-    let snapshot = facade.snapshot().await;
     // 备份没挪成时要告诉用户它留在哪：改名之前按旧名算好，此时还没有动任何东西。
     let old_backups = snapshot.instance_backups_dir(id).map_err(instance_error)?;
     snapshot
@@ -2359,10 +2509,22 @@ pub(crate) async fn move_instance_with(
     // 基底的版本 JSON 与客户端 jar 要补到目标里：移动期间基底不能被删、改名、补全、移走或启动（启动被挡只因同样以
     // inherited 占基底，见 `compatible_with`）。
     let _guard = locks
+        .in_dir(snapshot.game_dir())
         .acquire_with_chain(id, InstanceActivity::Moving, async {
             snapshot.inheritance_chain(id).await.map_err(instance_error)
         })
         .await?;
+    // 目标目录里的同名实例也占住：提交之后到收尾做完之前，实例已经在目标里，切到目标目录的玩家不能改名、删除它，
+    // 也不能抢先用这个名字新建实例。目标就是当前目录时不另占，留给预检报 same_directory。
+    let _arrival = if same_path(&target, snapshot.game_dir()) {
+        None
+    } else {
+        Some(
+            locks
+                .in_dir(&target)
+                .acquire(id, InstanceActivity::Moving)?,
+        )
+    };
     let task = tasks.register(task_id)?;
     let petalfall = snapshot.with_cancel(task.token().clone());
     // 不走 TaskHandle::run：门面在提交开始前自己看令牌，提交一旦开始就要做完；宽限期满丢弃 future 只是不再等它，
@@ -2770,7 +2932,9 @@ pub(crate) async fn folder_path(
         "session_logs" => {
             let id = require_id()?;
             // 缺了要建出来：和工作子目录一样先占住实例，不然可能建进正在改名或删除的目录，留下一个空壳
-            let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
+            let _guard = locks
+                .in_dir(petalfall.game_dir())
+                .acquire(id, InstanceActivity::Modifying)?;
             let dir = petalfall
                 .session_logs_dir(id)
                 .await
@@ -2804,7 +2968,9 @@ pub(crate) async fn folder_path(
         }
         sub if WORKING_SUBDIRS.contains(&sub) => {
             let id = require_id()?;
-            let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
+            let _guard = locks
+                .in_dir(petalfall.game_dir())
+                .acquire(id, InstanceActivity::Modifying)?;
             let resolved = petalfall
                 .resolve_working_dir(id)
                 .await
@@ -3007,7 +3173,9 @@ pub(crate) async fn ensure_shared_worlds_settled(
     locks: &InstanceLocks,
     id: &str,
 ) -> Result<(), CommandError> {
+    // 只看同一个游戏目录里的：共用存档在游戏目录根下，别的目录里备份的不会是这一份。
     let others: Vec<String> = locks
+        .in_dir(petalfall.game_dir())
         .holding(InstanceActivity::BackingUp)
         .into_iter()
         .filter(|other| lock_key(other) != lock_key(id))
@@ -3047,7 +3215,7 @@ pub(crate) async fn ensure_saves_settled_for_reading(
             | InstanceActivity::BackingUp),
         ),
         _,
-    ) = locks.occupancy(id)
+    ) = locks.in_dir(petalfall.game_dir()).occupancy(id)
     {
         return Err(busy(id, activity));
     }
@@ -3063,7 +3231,7 @@ pub(crate) async fn ensure_saves_free_for_writing(
     locks: &InstanceLocks,
     id: &str,
 ) -> Result<(), CommandError> {
-    if locks.occupancy(id).0 == Some(InstanceActivity::BackingUp) {
+    if locks.in_dir(petalfall.game_dir()).occupancy(id).0 == Some(InstanceActivity::BackingUp) {
         return Err(busy(id, InstanceActivity::BackingUp));
     }
     ensure_shared_worlds_settled(petalfall, locks, id).await?;
@@ -3088,7 +3256,8 @@ async fn ensure_saves_not_read(
     locks: &InstanceLocks,
     id: &str,
 ) -> Result<(), CommandError> {
-    match saves_holder(petalfall, id, locks.reading_saves()).await? {
+    let readers = locks.in_dir(petalfall.game_dir()).reading_saves();
+    match saves_holder(petalfall, id, readers).await? {
         Some(reader) => Err(saves_busy(
             &reader,
             format!("实例 {reader} 正在导出带存档的整合包，请稍后再试"),
@@ -3104,7 +3273,8 @@ async fn ensure_saves_not_written(
     locks: &InstanceLocks,
     id: &str,
 ) -> Result<(), CommandError> {
-    match saves_holder(petalfall, id, locks.writing_saves()).await? {
+    let writers = locks.in_dir(petalfall.game_dir()).writing_saves();
+    match saves_holder(petalfall, id, writers).await? {
         Some(writer) => Err(saves_busy(
             &writer,
             format!("实例 {writer} 正在往存档里装数据包，请稍后再试"),
@@ -3167,7 +3337,10 @@ async fn begin_world_task<'a>(
 ) -> Result<(InstanceGuard, TaskHandle<'a>, Petalfall), CommandError> {
     let snapshot = env.facade.snapshot().await;
     ensure_game_dir(&snapshot, game_dir)?;
-    let guard = env.locks.acquire(id, InstanceActivity::BackingUp)?;
+    let guard = env
+        .locks
+        .in_dir(snapshot.game_dir())
+        .acquire(id, InstanceActivity::BackingUp)?;
     ensure_shared_world_free(&snapshot, env.game, id).await?;
     // 备份与导出存档只读，可以和读存档的导出整合包并行；恢复要替换存档，得等它读完。
     if replaces_saves {
@@ -3360,8 +3533,10 @@ pub(crate) async fn delete_world_backup_with(
     check_backup_file(file)?;
     // 备份目录按实例名放，改名时整个挪走，挪的时候不看存档锁：不占住实例的话，这边删到一半，清单会按旧路径
     // 重新写出来，挪过去的清单里却还记着删掉的那份。
-    let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
     let petalfall = facade.snapshot().await;
+    let _guard = locks
+        .in_dir(petalfall.game_dir())
+        .acquire(id, InstanceActivity::Modifying)?;
     petalfall
         .delete_world_backup(id, world, file, disposer)
         .await
@@ -4660,6 +4835,7 @@ mod tests {
                 .await
                 .unwrap(),
             &locks,
+            &game_dir,
         );
         assert_eq!(
             (preview.activity, preview.used_by.as_deref()),
@@ -4710,6 +4886,7 @@ mod tests {
                 .await
                 .unwrap(),
             &locks,
+            &env.game_dir(),
         );
         assert!(preview.dependents.is_empty());
         assert_eq!(preview.activity, None);
@@ -6899,6 +7076,122 @@ mod tests {
         assert!(locks.holding(BackingUp).is_empty());
     }
 
+    /// 占用按游戏目录分开：两个目录里的同名实例互不阻挡，占用、基底、存档记录与按活动找实例都只看自己的目录；
+    /// 同一个目录里照旧互斥，路径写法不同（大小写、分隔符、末尾的分隔符）也是同一个目录。不说目录的占用与每个目录里
+    /// 的同名实例都相交。
+    #[test]
+    fn same_named_instances_in_different_game_dirs_do_not_block_each_other() {
+        use InstanceActivity::*;
+        let locks = InstanceLocks::default();
+        let home = locks.in_dir(Path::new(r"C:\Games\.minecraft"));
+        let same_home = locks.in_dir(Path::new("c:/games/.MINECRAFT/"));
+        let elsewhere = locks.in_dir(Path::new(r"D:\别处\.minecraft"));
+
+        let game = elsewhere
+            .acquire_with_bases("Pack", Running, &["1.20.1".to_owned()])
+            .unwrap();
+        assert_eq!(home.occupancy("pack"), (None, None));
+        assert_eq!(home.occupancy("1.20.1"), (None, None));
+        assert_eq!(elsewhere.occupancy("PACK"), (Some(Running), None));
+        assert_eq!(
+            elsewhere.occupancy("1.20.1"),
+            (Some(Inherited), Some("Pack".to_owned()))
+        );
+        drop(home.acquire("pack", Deleting).unwrap());
+        drop(home.acquire("1.20.1", Repairing).unwrap());
+
+        let renaming = home.acquire("PACK", Renaming).unwrap();
+        let err = same_home.acquire("pack", Deleting).err().unwrap();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "pack", "activity": "renaming" })
+        );
+        let err = elsewhere.acquire("pack", Deleting).err().unwrap();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "pack", "activity": "running" })
+        );
+        let err = locks.acquire("pack", Modifying).err().unwrap();
+        assert_eq!(
+            err.detail.unwrap()["activity"],
+            "renaming",
+            "不说目录的占用挡在每个目录里"
+        );
+        drop(renaming);
+        drop(game);
+
+        let base_game = elsewhere.acquire("1.20.1", Running).unwrap();
+        let bases = ["1.20.1".to_owned()];
+        assert_eq!(home.blocking_base(&bases), None);
+        assert_eq!(
+            elsewhere.blocking_base(&bases),
+            Some(BaseBusyDto {
+                id: "1.20.1".to_owned(),
+                activity: Running,
+            })
+        );
+        drop(base_game);
+
+        let backup = elsewhere.acquire("共用", BackingUp).unwrap();
+        let _reading = elsewhere.read_saves("导出");
+        let _writing = locks.write_saves("装包");
+        assert!(home.holding(BackingUp).is_empty());
+        assert_eq!(elsewhere.holding(BackingUp), vec!["共用".to_owned()]);
+        assert!(home.reading_saves().is_empty());
+        assert_eq!(same_home.writing_saves(), vec!["装包".to_owned()]);
+        assert_eq!(locks.holding(BackingUp), vec!["共用".to_owned()]);
+        drop(backup);
+    }
+
+    /// 别的游戏目录里的游戏（接回的那一局、切换目录之前开的游戏）占着的是那边的同名实例：当前目录里的这个在列表与
+    /// 删除预览里是空闲的，照样能改名；当前目录里的游戏仍然挡着改名。
+    #[tokio::test]
+    async fn a_game_in_another_game_dir_leaves_the_same_named_instance_here_free() {
+        let env = Env::new();
+        env.vanilla("生存");
+        let locks = InstanceLocks::default();
+        let elsewhere = env.dir.path().join("别处").join(".minecraft");
+        let game = locks
+            .in_dir(&elsewhere)
+            .acquire("生存", InstanceActivity::Running)
+            .unwrap();
+
+        let listed = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
+        let here = listed.iter().find(|i| i.id == "生存").unwrap();
+        assert_eq!((here.activity, here.used_by.as_deref()), (None, None));
+        let preview = preview_dto(
+            env.facade
+                .snapshot()
+                .await
+                .deletion_preview("生存")
+                .await
+                .unwrap(),
+            &locks,
+            &env.game_dir(),
+        );
+        assert_eq!(preview.activity, None);
+        rename_instance_with(&env.facade, &locks, "生存", "生存二")
+            .await
+            .unwrap();
+        drop(game);
+
+        let game = locks
+            .in_dir(&env.game_dir())
+            .acquire("生存二", InstanceActivity::Running)
+            .unwrap();
+        let err = rename_instance_with(&env.facade, &locks, "生存二", "生存三")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "生存二", "activity": "running" })
+        );
+        assert!(env.game_dir().join("versions").join("生存二").is_dir());
+        drop(game);
+    }
+
     // ---- 存档备份的命令 ----
 
     /// 备份、恢复、导出存档不占基底：占住的只有实例自己，基底这期间照样能补全；基底的删除与改名由依赖检查挡着，
@@ -8525,7 +8818,7 @@ mod tests {
             .unwrap();
     }
 
-    /// 按活动找实例时给出原样的 id（键是小写的），放开后不再列出。
+    /// 按活动找实例时给出占着这件事的那一份的原样 id（键是小写的），放开后不再列出。
     #[test]
     fn holders_are_reported_by_their_original_id() {
         let locks = InstanceLocks::default();
@@ -8544,12 +8837,16 @@ mod tests {
             locks.holding(InstanceActivity::Running),
             vec!["创造".to_owned()]
         );
+        assert_eq!(
+            locks.holding(InstanceActivity::Modifying),
+            vec!["survival".to_owned()],
+            "同一个键下各份占用各记各的写法"
+        );
         drop(first);
         assert!(locks.holding(InstanceActivity::BackingUp).is_empty());
         assert_eq!(
             locks.holding(InstanceActivity::Modifying),
-            vec!["Survival".to_owned()],
-            "同一个键还有占用时原样 id 不变"
+            vec!["survival".to_owned()]
         );
         drop((second, other));
         assert!(locks.holding(InstanceActivity::Modifying).is_empty());
@@ -8602,6 +8899,7 @@ mod tests {
                 .await
                 .unwrap(),
             &w.locks,
+            &env.game_dir(),
         );
         assert_eq!(preview.backup_count, 1);
         assert_eq!(PathBuf::from(&preview.backups_dir), moved);
@@ -9177,6 +9475,68 @@ mod tests {
         assert_eq!(err.detail.unwrap()["problem"], "not_absolute");
         assert!(dir.join("生存.json").is_file());
         assert_eq!(locks.activity("生存"), None, "源不合法时同样不占实例");
+    }
+
+    /// 移动连目标目录里的同名实例一起占：那边正有事占着这个名字时报 instance_busy，什么都没动；第三个目录里的
+    /// 同名占用不相干，照常移过去。
+    #[tokio::test]
+    async fn a_move_also_holds_the_same_name_in_the_target() {
+        let env = Env::new();
+        let dir = env.vanilla("生存");
+        let target = new_home(&env);
+        let (tasks, locks) = (TaskRegistry::default(), InstanceLocks::default());
+        let (events, _rx) = sink();
+        let args = MoveArgs {
+            id: "生存",
+            source: &path_text(&env.game_dir()),
+            target: &path_text(&target),
+        };
+
+        let arriving = locks
+            .in_dir(&target)
+            .acquire("生存", InstanceActivity::Installing)
+            .unwrap();
+        let err = move_instance_with(&env.facade, &tasks, &locks, "mv", args, &events)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "生存", "activity": "installing" })
+        );
+        assert!(dir.join("生存.json").is_file());
+        assert!(!target.exists());
+        assert_eq!(
+            locks.in_dir(&env.game_dir()).occupancy("生存"),
+            (None, None),
+            "被目标挡住时原目录里的占用一并放开"
+        );
+        drop(arriving);
+
+        let third = locks
+            .in_dir(&env.dir.path().join("第三处").join(".minecraft"))
+            .acquire("生存", InstanceActivity::Running)
+            .unwrap();
+        move_instance_with(
+            &env.facade,
+            &tasks,
+            &locks,
+            "mv",
+            MoveArgs {
+                id: "生存",
+                source: &path_text(&env.game_dir()),
+                target: &path_text(&target),
+            },
+            &events,
+        )
+        .await
+        .unwrap();
+        assert!(target
+            .join("versions")
+            .join("生存")
+            .join("生存.json")
+            .is_file());
+        assert_eq!(locks.in_dir(&target).occupancy("生存"), (None, None));
+        drop(third);
     }
 
     /// 移到还没记录的文件夹：实例目录整个过去，原目录里它的侧栏固定与当前选中去掉、别的实例不动，目标以推出的
