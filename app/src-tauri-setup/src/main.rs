@@ -130,7 +130,15 @@ fn run(webview: Webview, log: &Arc<SetupLog>) -> Result<ExitCode, Box<dyn Error>
         Claim::First(instance) => Arc::new(instance),
         Claim::Forwarded => {
             log.info("已有实例在运行，这个进程退出");
-            return Ok(ExitCode::SUCCESS);
+            // 插件拉起之后不等退出码，非零退出本身没人看得到：带着更新请求来的要自己告诉用户这次没更新
+            return Ok(match boot::forwarded_notice(&parsed.launch) {
+                None => ExitCode::SUCCESS,
+                Some(notice) => {
+                    log.warn("这次是更新拉起的，已有实例接不了更新请求，提示用户后以失败退出");
+                    boot::alert(&notice);
+                    ExitCode::FAILURE
+                }
+            });
         }
     };
     match boot::desktop_user()? {

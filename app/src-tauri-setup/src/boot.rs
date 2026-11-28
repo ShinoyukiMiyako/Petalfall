@@ -34,10 +34,11 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, SetEvent, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetShellWindow, GetWindowThreadProcessId, MB_ICONERROR, MB_ICONWARNING, MB_OK,
+    GetShellWindow, GetWindowThreadProcessId, MB_ICONERROR, MB_ICONWARNING, MB_OK, MB_TOPMOST,
     MESSAGEBOX_STYLE, MessageBoxW,
 };
 
+use crate::cli::Launch;
 use crate::log::SetupLog;
 
 /// 主窗口的 label，与 tauri.conf.json、能力文件一致。
@@ -175,6 +176,14 @@ impl Instance {
 
 pub fn claim() -> io::Result<Claim> {
     claim_name(INSTANCE_EVENT)
+}
+
+/// 被转发掉的后来者退出前要给用户的话；`None` 时它照常成功退出。
+///
+/// 事件只能叫醒先来的实例，带不过去参数。普通的重复打开叫醒就够了；带着更新请求来的，请求到这里就丢了，
+/// 更新器（插件拉起之后不等退出码）和用户都会以为在更新。所以由后来者自己说出来，并以失败退出。
+pub fn forwarded_notice(launch: &Launch) -> Option<Notice> {
+    launch.update().map(|_| Notice::AlreadyRunning)
 }
 
 fn claim_name(name: &str) -> io::Result<Claim> {
@@ -351,6 +360,8 @@ pub enum Notice {
     ForeignUser,
     IncompletePackage,
     StartFailed(String),
+    /// 更新拉起的这个进程撞上了已在运行的安装程序，这次更新没有进行（[`forwarded_notice`]）。
+    AlreadyRunning,
     /// 装回较早的版本只走窗口里的那条安装流程，那里有复核、半装记录与事后核验，窗口却起不来。
     NeedsWindow {
         reopens: bool,
@@ -380,6 +391,8 @@ impl Notice {
             (Notice::IncompletePackage, false) => "This installer is incomplete, most likely a cut-off download. Download it again and reopen it.".to_owned(),
             (Notice::StartFailed(detail), true) => format!("安装程序没能继续。重新打开试试，反馈问题时带上下面这段原文。\n\n{detail}"),
             (Notice::StartFailed(detail), false) => format!("Setup can't continue. Try opening it again, and include the text below if you report the problem.\n\n{detail}"),
+            (Notice::AlreadyRunning, true) => "已有落樱安装程序在运行，这次更新没有进行。先关掉它，再从落樱重新更新。".to_owned(),
+            (Notice::AlreadyRunning, false) => "Petalfall Setup is already running, so this update didn't start. Close it, then update again from Petalfall.".to_owned(),
             (Notice::NeedsWindow { reopens }, true) => reopening("这次安装要用到安装程序的窗口，但这台电脑上的 WebView2 用不了。先装好或修复 WebView2，再运行这个安装包。".to_owned(), *reopens, true),
             (Notice::NeedsWindow { reopens }, false) => reopening("This install needs the setup window, but WebView2 isn't working on this PC. Install or repair WebView2, then run this installer again.".to_owned(), *reopens, false),
             (
@@ -409,6 +422,8 @@ impl Notice {
             | Notice::NeedsWindow { .. }
             | Notice::Newer { .. }
             | Notice::DataBlocked { .. } => MB_OK | MB_ICONWARNING,
+            // 叫醒先来的实例与弹这个框是同一刻，它的窗口正被拿到前台，不置顶的话框可能压在它下面
+            Notice::AlreadyRunning => MB_OK | MB_ICONWARNING | MB_TOPMOST,
             Notice::IncompletePackage | Notice::StartFailed(_) => MB_OK | MB_ICONERROR,
         }
     }
@@ -1081,6 +1096,7 @@ mod tests {
             Notice::ForeignUser,
             Notice::IncompletePackage,
             Notice::StartFailed("x".into()),
+            Notice::AlreadyRunning,
         ];
         notices.extend(refusals(false));
         notices.extend(refusals(true));
@@ -1106,6 +1122,40 @@ mod tests {
         for notice in &warnings {
             assert_eq!(notice.style(), MB_OK | MB_ICONWARNING, "{notice:?}");
         }
+        assert_eq!(
+            Notice::AlreadyRunning.style(),
+            MB_OK | MB_ICONWARNING | MB_TOPMOST
+        );
+    }
+
+    fn launch_of(args: &[&str]) -> Launch {
+        crate::cli::parse(args.iter().map(std::ffi::OsString::from)).launch
+    }
+
+    #[test]
+    fn a_forwarded_update_says_it_did_not_run_and_a_plain_reopen_stays_quiet() {
+        for args in [
+            &["/P", "/UPDATE"][..],
+            &["/P", "/R", "/UPDATE", "/ARGS", "--minimized"],
+            &["/P", "/UPDATE", "/R", "/CHANNELSWITCH"],
+        ] {
+            assert_eq!(
+                forwarded_notice(&launch_of(args)),
+                Some(Notice::AlreadyRunning),
+                "{args:?}"
+            );
+        }
+        for args in [&[][..], &["/P"], &["/S", "/D=C:\\落樱"]] {
+            assert_eq!(forwarded_notice(&launch_of(args)), None, "{args:?}");
+        }
+        assert_eq!(
+            Notice::AlreadyRunning.text(true),
+            "已有落樱安装程序在运行，这次更新没有进行。先关掉它，再从落樱重新更新。"
+        );
+        assert_eq!(
+            Notice::AlreadyRunning.text(false),
+            "Petalfall Setup is already running, so this update didn't start. Close it, then update again from Petalfall."
+        );
     }
 
     #[test]
