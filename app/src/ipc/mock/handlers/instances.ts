@@ -1003,11 +1003,14 @@ function stage(taskId: string, message: string): void {
   emitMockEvent(CORE_EVENT, { kind: "stage", task_id: taskId, message });
 }
 
-/** 与后端 install_plan 同一份步骤表：Forge / NeoForge 先补齐原版再装加载器，装好后照合并后的版本 JSON 再校验一遍。 */
+/**
+ * 与后端 install_plan 同一份步骤表：Forge / NeoForge 先补齐原版，排到队（同一时刻只装一个）再准备 Java、装加载器，
+ * 装好后照合并后的版本 JSON 再校验一遍。
+ */
 function mockInstallPlan(loader: LoaderChoice | null, useTemplate: boolean): InstallPhase[] {
   const plan: InstallPhase[] = ["metadata"];
   if (loader === "fabric" || loader === "quilt") plan.push("loader_profile", "libraries", "assets", "natives");
-  else if (loader === "forge" || loader === "neoforge") plan.push("libraries", "assets", "natives", "java", "loader_installer", "loader_libraries", "loader_processors", "verify");
+  else if (loader === "forge" || loader === "neoforge") plan.push("libraries", "assets", "natives", "loader_queue", "java", "loader_installer", "loader_libraries", "loader_processors", "verify");
   else plan.push("libraries", "assets", "natives");
   if (useTemplate) plan.push("template");
   return plan;

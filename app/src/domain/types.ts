@@ -138,6 +138,7 @@ export const INSTALL_PHASES = [
   "libraries",
   "assets",
   "natives",
+  "loader_queue",
   "java",
   "loader_installer",
   "loader_libraries",

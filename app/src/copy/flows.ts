@@ -931,6 +931,8 @@ export const INSTALL_PHASE_LABEL: Readonly<Record<InstallPhase, string>> = {
   libraries: "下载游戏本体与库文件",
   assets: "下载资源文件",
   natives: "解压本地库",
+  // Forge 与 NeoForge 同一时刻只装一个；前面没有在装的时候这一步转眼就过
+  loader_queue: "等前一个 Forge / NeoForge 安装完成",
   java: "准备 Java",
   loader_installer: "下载加载器安装器",
   loader_libraries: "下载加载器的库文件",

@@ -491,7 +491,7 @@ describe("整合包 mock：导入的步骤事件", () => {
   const PACK_TAIL = ["modpack_files", "modpack_overrides", "template"];
   const FABRIC_FILE = ["modpack_read", ...VANILLA, "loader_profile", "loader_libraries", ...PACK_TAIL];
   const FABRIC_PLATFORM = ["modpack_download", ...FABRIC_FILE];
-  const FORGE_PLATFORM = ["modpack_download", "modpack_read", ...VANILLA, "java", "loader_installer", "loader_libraries", "loader_processors", ...PACK_TAIL];
+  const FORGE_PLATFORM = ["modpack_download", "modpack_read", ...VANILLA, "loader_queue", "java", "loader_installer", "loader_libraries", "loader_processors", ...PACK_TAIL];
 
   async function run(taskId: string, source: ModpackSource, name: string | null): Promise<{ result: unknown; events: CoreEvent[] }> {
     const events: CoreEvent[] = [];
@@ -637,7 +637,7 @@ describe("整合包 mock：导入的步骤事件", () => {
     expect(batchSizes(events)[0]).toEqual([2, 196_608]);
   });
 
-  it("Forge 整合包：确切的表在 natives 之后排进 Java、加载器安装器、加载器库与处理器，Java 与处理器只报步骤", async () => {
+  it("Forge 整合包：确切的表在 natives 之后排进排队、Java、加载器安装器、加载器库与处理器，排队、Java 与处理器只报步骤", async () => {
     const { result, events } = await run("t-forge", RLCRAFT, "硬核生存");
     expect(result).toMatchObject({ version_id: "硬核生存" });
     const phases = phasesOf(events);
@@ -652,6 +652,7 @@ describe("整合包 mock：导入的步骤事件", () => {
       ["libraries", 5],
       ["assets", 5],
       ["natives", 0],
+      ["loader_queue", 0],
       ["java", 0],
       ["loader_installer", 5],
       ["loader_libraries", 5],
@@ -730,7 +731,7 @@ describe("整合包 mock：导入的步骤事件", () => {
     expect((await installModpack("t-after-mid", mockGameDir(), local, "半途", [])).version_id).toBe("半途");
   });
 
-  it("节奏：默认的快节奏在假时钟上也走得完、步数最多的 Forge 平台包不超过原来的 60 ms；预览节奏下报下载的一步走 1.5 秒、别的步骤 0.6 秒，整次 14.1 秒", async () => {
+  it("节奏：默认的快节奏在假时钟上也走得完、步数最多的 Forge 平台包不超过原来的 60 ms；预览节奏下报下载的一步走 1.5 秒、别的步骤 0.6 秒，整次 14.7 秒", async () => {
     // 先在真实计时器下走一趟桥：假后端经动态 import 载入，假时钟推不动那段 I/O
     await listInstances();
     vi.useFakeTimers();
@@ -763,6 +764,7 @@ describe("整合包 mock：导入的步骤事件", () => {
         ["libraries", 1500],
         ["assets", 1500],
         ["natives", 600],
+        ["loader_queue", 600],
         ["java", 600],
         ["loader_installer", 1500],
         ["loader_libraries", 1500],
@@ -771,7 +773,7 @@ describe("整合包 mock：导入的步骤事件", () => {
         ["modpack_overrides", 600],
         ["template", 600],
       ]);
-      expect(marks[marks.length - 1]).toEqual(["done", begin + 14_100]);
+      expect(marks[marks.length - 1]).toEqual(["done", begin + 14_700]);
     } finally {
       setMockModpackPace("fast");
     }

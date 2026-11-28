@@ -313,6 +313,8 @@ export const PHASE_WEIGHT: Readonly<Record<InstallPhase, number>> = {
   libraries: 7,
   assets: 11,
   natives: 1,
+  // 通常不用等；等的时候也没有进度可言，只占最小的一份
+  loader_queue: 1,
   java: 4,
   loader_installer: 1,
   loader_libraries: 3,
@@ -381,7 +383,7 @@ export interface StageProgress {
 
 /**
  * 分步任务当前这一步的进度。这一步还没认下批次时给不出（null）：不按步骤的种类去猜它会不会报批次，同一步在不同情形下
- * 两样都有（校验只在缺文件时下载；打包先要遍历一遍要收的文件；等别的 Forge 安装让出来时停在准备 Java 上）。
+ * 两样都有（校验只在缺文件时下载；打包先要遍历一遍要收的文件；准备 Java 时本机有就不下载）。
  * 刚进一步就马上有批次的情形由界面去抹平，见任务行的 StageBar。
  * 认下的批次只有一个文件、又没声明大小时同样给不出：这一批按文件数算，一个文件下完之前比例只能是 0，画出来是一条
  * 不动的空轨道（版本 JSON、加载器安装器都是这样的一批，网慢时会停很久）。

@@ -413,7 +413,7 @@ fn import_prelude_plan(source: &ModpackSource) -> Vec<InstallPhase> {
 
 /// 读完包之后确切的步骤表。装游戏走的是 [`Petalfall::install_reporting`]，原版与加载器的几步照它实际报的顺序
 /// 排：原版四步在前，加载器各步在后（Fabric / Quilt 是 LoaderProfile、LoaderLibraries，Forge / NeoForge 是
-/// Java、LoaderInstaller、LoaderLibraries、LoaderProcessors），没有 Verify。新建实例的表（`install_plan`）走的是
+/// LoaderQueue、Java、LoaderInstaller、LoaderLibraries、LoaderProcessors），没有 Verify。新建实例的表（`install_plan`）走的是
 /// 另一条路，不能照搬：那里 Fabric / Quilt 的 LoaderProfile 排在 Libraries 之前、没有 LoaderLibraries，
 /// Forge / NeoForge 末尾还有 Verify。没有文件要放、包里没有覆盖文件、配置没开默认设置时，对应的一步不排，
 /// 免得前端画出一步永远走不到的步骤。
@@ -433,7 +433,13 @@ fn import_plan(
             plan.extend([LoaderProfile, LoaderLibraries]);
         }
         Some(PackLoaderKind::Forge | PackLoaderKind::NeoForge) => {
-            plan.extend([Java, LoaderInstaller, LoaderLibraries, LoaderProcessors]);
+            plan.extend([
+                LoaderQueue,
+                Java,
+                LoaderInstaller,
+                LoaderLibraries,
+                LoaderProcessors,
+            ]);
         }
     }
     if places_files {
@@ -7487,6 +7493,7 @@ mod tests {
                 Libraries,
                 Assets,
                 Natives,
+                LoaderQueue,
                 Java,
                 LoaderInstaller,
                 LoaderLibraries,
@@ -7548,9 +7555,13 @@ mod tests {
                         Some(PackLoaderKind::Fabric | PackLoaderKind::Quilt) => {
                             &[LoaderProfile, LoaderLibraries]
                         }
-                        Some(PackLoaderKind::Forge | PackLoaderKind::NeoForge) => {
-                            &[Java, LoaderInstaller, LoaderLibraries, LoaderProcessors]
-                        }
+                        Some(PackLoaderKind::Forge | PackLoaderKind::NeoForge) => &[
+                            LoaderQueue,
+                            Java,
+                            LoaderInstaller,
+                            LoaderLibraries,
+                            LoaderProcessors,
+                        ],
                     };
                     let tail: Vec<InstallPhase> = [
                         (files, ModpackFiles),
@@ -7892,6 +7903,7 @@ mod tests {
             Libraries,
             Assets,
             Natives,
+            LoaderQueue,
             Java,
             LoaderInstaller,
             LoaderLibraries,

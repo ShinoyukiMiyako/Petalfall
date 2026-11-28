@@ -136,15 +136,17 @@ describe("进行中的状态", () => {
 
 describe("分步任务的步骤", () => {
   const VANILLA = ["metadata", "libraries", "assets", "natives"] as const;
-  const FORGE = ["metadata", "libraries", "assets", "natives", "java", "loader_installer", "loader_libraries", "loader_processors", "verify"] as const;
+  const FORGE = ["metadata", "libraries", "assets", "natives", "loader_queue", "java", "loader_installer", "loader_libraries", "loader_processors", "verify"] as const;
 
   it("横幅写整句，胶囊与任务行这类窄处写短的；首末两步与长表一样", () => {
     expect(taskPhaseText({ plan: VANILLA, index: 2 }, "long")).toBe("第 3 步，共 4 步：下载资源文件");
     expect(taskPhaseText({ plan: VANILLA, index: 2 }, "short")).toBe("下载资源文件 · 第 3/4 步");
     expect(taskPhaseText({ plan: VANILLA, index: 0 }, "short")).toBe("获取版本信息 · 第 1/4 步");
     expect(taskPhaseText({ plan: VANILLA, index: 3 }, "long")).toBe("第 4 步，共 4 步：解压本地库");
-    expect(taskPhaseText({ plan: FORGE, index: 8 }, "long")).toBe("第 9 步，共 9 步：校验游戏文件");
-    expect(taskPhaseText({ plan: FORGE, index: 4 }, "short")).toBe("准备 Java · 第 5/9 步");
+    expect(taskPhaseText({ plan: FORGE, index: 9 }, "long")).toBe("第 10 步，共 10 步：校验游戏文件");
+    expect(taskPhaseText({ plan: FORGE, index: 5 }, "short")).toBe("准备 Java · 第 6/10 步");
+    // 等别的 Forge / NeoForge 安装时停在排队这一步，不停在准备 Java 上
+    expect(taskPhaseText({ plan: FORGE, index: 4 }, "long")).toBe("第 5 步，共 10 步：等前一个 Forge / NeoForge 安装完成");
   });
 
   it("下标越出步骤表是调用方的错，不写出一句缺了步骤名的话", () => {

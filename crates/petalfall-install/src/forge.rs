@@ -309,6 +309,43 @@ enum Target<'t> {
 /// 随后读它就失败。串行的代价只是后来的那个多等一会儿。
 static FORGE_INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// 等到 [`FORGE_INSTALL`] 轮到自己；等待期间照样响应取消。
+async fn wait_forge_turn(
+    cancel: Option<&CancellationToken>,
+) -> Result<tokio::sync::MutexGuard<'static, ()>> {
+    // 锁是公平的：放锁时直接交给排在最前的等待者，空着才拿得到，不会插到排队的前面。
+    if let Ok(guard) = FORGE_INSTALL.try_lock() {
+        return Ok(guard);
+    }
+    tracing::info!("前面有 Forge / NeoForge 安装在跑，排队等它装完");
+    let Some(token) = cancel else {
+        return Ok(FORGE_INSTALL.lock().await);
+    };
+    tokio::select! {
+        guard = FORGE_INSTALL.lock() => Ok(guard),
+        () = token.cancelled() => Err(petalfall_download::Error::Cancelled.into()),
+    }
+}
+
+/// 轮到这一个 Forge / NeoForge 安装的凭据，持有期间别的安装都在排队（见 [`FORGE_INSTALL`]）。
+///
+/// 安装器自己也会排队，但那是在调用方备好 Java 之后：调用方要先报排队、拿到凭据再进 Java 一步，就先经
+/// [`ForgeTurn::acquire`] 拿凭据，再经 [`ForgeInstaller::with_turn`] 交给安装器，凭据随安装器一起放下。
+pub struct ForgeTurn {
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl ForgeTurn {
+    /// 先报 [`InstallPhase::LoaderQueue`]，再等到轮到自己；等待期间照样响应上下文里的取消令牌。前面没有安装在跑时
+    /// 转眼就过，这一步也照报：步骤表里排了它，前端不该看到跳步。
+    pub async fn acquire(cx: &InstallContext<'_>) -> Result<Self> {
+        cx.enter(InstallPhase::LoaderQueue);
+        Ok(Self {
+            _guard: wait_forge_turn(cx.cancel).await?,
+        })
+    }
+}
+
 /// 处理器产物校验不过时换用的 Java 从哪里取，交回 java 可执行文件与它的主版本（主版本只用来写报错正文）。按需
 /// 求值：只有真的对不上才去取，取的时候可能要下载一个运行时；一次安装最多求值一次。取回的就是注入的那个 Java 时
 /// 交回 [`FallbackJavaError::SameJava`]，是不是同一个由来源判断（见那一项）。
@@ -344,6 +381,7 @@ pub struct ForgeInstaller<'a> {
     side: String,
     sources: Option<SourcePlan>,
     fallback_java: Option<FallbackJava<'a>>,
+    turn: Option<ForgeTurn>,
 }
 
 impl<'a> ForgeInstaller<'a> {
@@ -358,7 +396,14 @@ impl<'a> ForgeInstaller<'a> {
             side: "client".to_owned(),
             sources: None,
             fallback_java: None,
+            turn: None,
         }
+    }
+
+    /// 用调用方已经拿到的凭据安装，不再自己排队（锁不可重入，自己再排就等不到了）。凭据随安装器放下。
+    pub fn with_turn(mut self, turn: ForgeTurn) -> Self {
+        self.turn = Some(turn);
+        self
     }
 
     /// 注入的 java 的主版本，只用来在产物对不上的报错里写成「Java 8」；`None` 时写可执行文件的文件名。
@@ -381,15 +426,13 @@ impl<'a> ForgeInstaller<'a> {
         self
     }
 
-    /// 等到轮到自己安装（见 [`FORGE_INSTALL`]）；等待期间照样响应取消。
-    async fn exclusive(&self) -> Result<tokio::sync::MutexGuard<'static, ()>> {
-        let Some(token) = self.cx.cancel else {
-            return Ok(FORGE_INSTALL.lock().await);
-        };
-        tokio::select! {
-            guard = FORGE_INSTALL.lock() => Ok(guard),
-            () = token.cancelled() => Err(petalfall_download::Error::Cancelled.into()),
+    /// 等到轮到自己安装（见 [`FORGE_INSTALL`]）；等待期间照样响应取消。带着调用方给的凭据时不排，返回 `None`。
+    /// 不报排队一步：没经 [`ForgeTurn::acquire`] 的调用方，步骤表里没有那一步。
+    async fn exclusive(&self) -> Result<Option<tokio::sync::MutexGuard<'static, ()>>> {
+        if self.turn.is_some() {
+            return Ok(None);
         }
+        Ok(Some(wait_forge_turn(self.cx.cancel).await?))
     }
 
     /// 下载 installer 到缓存目录再安装，版本 JSON 写到 `versions/<forge 版本 id>/`。
@@ -2056,6 +2099,93 @@ mod tests {
         let (_, summary) = waiting.await.unwrap();
         assert_eq!(summary.id, "1.12.2-forge-14.23.5.2860");
         assert!(!server.received_requests().await.unwrap().is_empty());
+    }
+
+    /// 调用方在准备 Java 之前先排队：排队一步在轮到之前就报出来，前一个安装没结束时一直等着，等待中照样能取消。
+    /// 拿到的凭据交给安装器，安装器不再自己排（锁不可重入，再排就永远等不到），装完凭据随安装器放下。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_turn_taken_ahead_reports_the_queue_and_is_handed_to_the_installer() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let installer = legacy_installer_bytes();
+        Mock::given(method("GET"))
+            .and(path("/forge-installer.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(installer.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/forge-installer.jar.sha1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sha1_hex(&installer)))
+            .mount(&server)
+            .await;
+        let url = format!("{}/forge-installer.jar", server.uri());
+        let f = fixture();
+        let entered = std::sync::Mutex::new(Vec::new());
+        let record = |phase: InstallPhase| entered.lock().unwrap().push(phase);
+        let running = FORGE_INSTALL.lock().await;
+
+        let token = CancellationToken::new();
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy)
+            .with_cancel(Some(&token))
+            .with_phases(Some(&record));
+        let attempt = ForgeTurn::acquire(&cx);
+        tokio::pin!(attempt);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut attempt)
+                .await
+                .is_err(),
+            "前一个安装没结束时不该轮到"
+        );
+        token.cancel();
+        assert!(matches!(
+            attempt.await.err(),
+            Some(Error::Download(petalfall_download::Error::Cancelled))
+        ));
+        assert_eq!(*entered.lock().unwrap(), [InstallPhase::LoaderQueue]);
+        entered.lock().unwrap().clear();
+
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy)
+            .with_phases(Some(&record));
+        let waiting = ForgeTurn::acquire(&cx);
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut waiting)
+                .await
+                .is_err()
+        );
+        assert_eq!(*entered.lock().unwrap(), [InstallPhase::LoaderQueue]);
+        drop(running);
+        let turn = waiting.await.unwrap();
+        assert!(
+            FORGE_INSTALL.try_lock().is_err(),
+            "凭据在手时别的安装进不来"
+        );
+
+        let (_, summary) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            ForgeInstaller::new(cx, "java")
+                .with_turn(turn)
+                .install_for_instance(&url, "排队的"),
+        )
+        .await
+        .expect("带着凭据的安装器不该再排队")
+        .unwrap();
+        assert_eq!(summary.id, "1.12.2-forge-14.23.5.2860");
+        assert_eq!(
+            *entered.lock().unwrap(),
+            [
+                InstallPhase::LoaderQueue,
+                InstallPhase::LoaderInstaller,
+                InstallPhase::LoaderLibraries,
+                InstallPhase::LoaderProcessors,
+            ]
+        );
+        // 同一 crate 里别的用例也排这把锁，只能等它空出来，不能要求此刻就是空的。
+        tokio::time::timeout(std::time::Duration::from_secs(30), FORGE_INSTALL.lock())
+            .await
+            .expect("安装器放下后凭据应随之放下");
     }
 
     /// 按给定条目造一个 installer zip，写到 `dir/installer.jar`。

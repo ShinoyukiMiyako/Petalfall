@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use petalfall_install::error::JavaExecutable;
-use petalfall_install::forge::{FallbackJava, FallbackJavaError};
+use petalfall_install::forge::{FallbackJava, FallbackJavaError, ForgeTurn};
 use petalfall_install::{
     ForgeInstaller, InstallContext, LoaderInstaller, LoaderSummary, VanillaInstaller,
     VanillaSummary, forge_installer_url, neoforge_installer_url,
@@ -130,7 +130,7 @@ impl Petalfall {
 
     /// 同 [`Petalfall::install`]，另把走到的每一步经 `phases` 报出，供把安装嵌进自己步骤表的任务（导入整合包）
     /// 接着报步骤。依次报 Metadata、Libraries、Assets、Natives，Fabric / Quilt 接着报 LoaderProfile、
-    /// LoaderLibraries，Forge / NeoForge 接着报 Java、LoaderInstaller、LoaderLibraries、LoaderProcessors。
+    /// LoaderLibraries，Forge / NeoForge 接着报 LoaderQueue、Java、LoaderInstaller、LoaderLibraries、LoaderProcessors。
     /// `phases` 为 `None` 时一步都不报。
     pub(crate) async fn install_reporting(
         &self,
@@ -223,7 +223,8 @@ impl Petalfall {
         Ok(InstallOutcome { vanilla, loader })
     }
 
-    /// 安装 Forge/NeoForge：先据原版版本 JSON 定 Java 主版本、备妥运行时，再下载并执行官方 installer。
+    /// 安装 Forge/NeoForge：先据原版版本 JSON 定 Java 主版本，排到队（同一时刻只装一个，见 [`ForgeTurn`]）之后备妥
+    /// 运行时，再下载并执行官方 installer。
     ///
     /// 与 Fabric/Quilt 不同，Forge/NeoForge 的 installer 内含需 Java 子进程执行的 processors，故本步依赖
     /// [`Petalfall::resolve_java`] 取得可执行 java。`installer_url` 由调用方按风味拼好（Forge 需 mc+loader
@@ -260,6 +261,9 @@ impl Petalfall {
             .map(|j| j.major_version)
             .unwrap_or(8);
 
+        // 先排队再进 Java：前一个 Forge / NeoForge 安装跑处理器可能要好几分钟，这段时间界面停在排队一步，
+        // 不停在准备 Java 上像卡住了。凭据交给安装器，装完随它放下。
+        let turn = ForgeTurn::acquire(&cx).await?;
         cx.enter(InstallPhase::Java);
         emit(
             events,
@@ -280,6 +284,7 @@ impl Petalfall {
         let java_major = found.first().map(|picked| picked.version.major);
         let summary = self
             .forge_installer(cx, required_major, java_path, java_major, events)
+            .with_turn(turn)
             .install(installer_url)
             .await?;
         emit(
@@ -1155,11 +1160,8 @@ mod tests {
         );
     }
 
-    /// Forge 在解析 Java 之前报 Java 这一步：找不到 Java 999 时停在这一步，后面的安装器、库、处理器都没报。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn install_reporting_announces_java_before_resolving_it_for_forge() {
-        use InstallPhase::*;
-        let server = MockServer::start().await;
+    /// 原版要求 Java 999 的清单与版本 JSON：没有这个 Java、又关着自动下载，Forge 走到解析 Java 就以 NoJava 停下。
+    async fn mount_vanilla_needing_java_999(server: &MockServer) {
         let base = server.uri();
         Mock::given(method("GET"))
             .and(path("/manifest.json"))
@@ -1168,7 +1170,7 @@ mod tests {
                     "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
                     "time":"t","releaseTime":"t"}}]}}"#
             )))
-            .mount(&server)
+            .mount(server)
             .await;
         Mock::given(method("GET"))
             .and(path("/test.json"))
@@ -1176,12 +1178,21 @@ mod tests {
                 r#"{"id":"test","type":"release","mainClass":"net.minecraft.client.main.Main",
                     "javaVersion":{"component":"jre-legacy","majorVersion":999}}"#,
             ))
-            .mount(&server)
+            .mount(server)
             .await;
+    }
+
+    /// Forge 先排队、轮到之后在解析 Java 之前报 Java 这一步：找不到 Java 999 时停在这一步，后面的安装器、库、处理器
+    /// 都没报。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_reporting_announces_java_before_resolving_it_for_forge() {
+        use InstallPhase::*;
+        let server = MockServer::start().await;
+        mount_vanilla_needing_java_999(&server).await;
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().to_path_buf();
         let mut petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc)
-            .with_manifest_url(format!("{base}/manifest.json"));
+            .with_manifest_url(format!("{}/manifest.json", server.uri()));
         petalfall.set_auto_download_java(false);
 
         let seen = std::sync::Mutex::new(Vec::new());
@@ -1203,7 +1214,81 @@ mod tests {
         );
         assert_eq!(
             *seen.lock().unwrap(),
-            vec![Metadata, Libraries, Assets, Natives, Java]
+            vec![Metadata, Libraries, Assets, Natives, LoaderQueue, Java]
+        );
+    }
+
+    /// 另一个 Forge / NeoForge 安装占着时，停在排队一步等它，还没进 Java；它放下之后才进 Java。改回先进 Java 再排队，
+    /// 等的那段时间报的就是 Java。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forge_waits_in_the_queue_before_java_while_another_install_holds_the_turn() {
+        use InstallPhase::*;
+        let server = MockServer::start().await;
+        mount_vanilla_needing_java_999(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        let mut petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc)
+            .with_manifest_url(format!("{}/manifest.json", server.uri()));
+        petalfall.set_auto_download_java(false);
+        let (http, pool, layout, policy) = (
+            petalfall.http(),
+            petalfall.download_pool(),
+            petalfall.layout(),
+            petalfall.retry_policy(),
+        );
+        let held = ForgeTurn::acquire(&make_context(
+            &http,
+            &pool,
+            &layout,
+            petalfall.runtime(),
+            &policy,
+            None,
+        ))
+        .await
+        .unwrap();
+
+        let seen = std::sync::Mutex::new(Vec::new());
+        let record = |phase: InstallPhase| seen.lock().unwrap().push(phase);
+        let install = petalfall.install_reporting(
+            "test",
+            Some(LoaderChoice::NeoForge),
+            Some("21.1.0"),
+            None,
+            Some(&record),
+        );
+        tokio::pin!(install);
+        // 原版那几步快慢看机器，轮询到报出排队一步为止；之后再给它一段时间，确认它在等、没有接着进 Java。
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !seen.lock().unwrap().contains(&LoaderQueue) {
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(20), &mut install)
+                        .await
+                        .is_err(),
+                    "前一个安装没放下时不该结束"
+                );
+            }
+        })
+        .await
+        .expect("10 秒内没报出排队一步");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut install)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Metadata, Libraries, Assets, Natives, LoaderQueue]
+        );
+
+        drop(held);
+        let err = install.await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::CoreError::NoJava { major: 999 }),
+            "实际：{err:?}"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Metadata, Libraries, Assets, Natives, LoaderQueue, Java]
         );
     }
 

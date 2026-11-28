@@ -400,12 +400,12 @@ describe("mock：新建与补全", () => {
     await run(installVersion("t-vanilla", mockGameDir(), "1.21.1", null, null, "原版", true));
     expect(steps("t-vanilla")).toEqual(["metadata", "libraries", "assets", "natives", "template"]);
     await run(installVersion("t-forge", mockGameDir(), "1.20.1", "forge", "47.2.0", "锻造"));
-    expect(steps("t-forge")).toEqual(["metadata", "libraries", "assets", "natives", "java", "loader_installer", "loader_libraries", "loader_processors", "verify"]);
+    expect(steps("t-forge")).toEqual(["metadata", "libraries", "assets", "natives", "loader_queue", "java", "loader_installer", "loader_libraries", "loader_processors", "verify"]);
     // 只补全的实例走三步；照未完成标记重装的走新建那一份表，不套模板
     await run(repairInstance("t-complete", mockGameDir(), "樱花生存"));
     expect(steps("t-complete")).toEqual(["libraries", "assets", "natives"]);
     await run(repairInstance("t-reinstall", mockGameDir(), "没装完"));
-    expect(steps("t-reinstall")).toEqual(["metadata", "libraries", "assets", "natives", "java", "loader_installer", "loader_libraries", "loader_processors", "verify"]);
+    expect(steps("t-reinstall")).toEqual(["metadata", "libraries", "assets", "natives", "loader_queue", "java", "loader_installer", "loader_libraries", "loader_processors", "verify"]);
   });
 
   it("新建的实例不继承已经不在的同名旧实例留下的游玩记录，别的实例的记录不动", async () => {

@@ -408,7 +408,7 @@ async function fakeBatch(taskId: string, batch: MockBatch): Promise<void> {
 }
 
 /** 装原版与加载器那几步。 */
-type RuntimeStep = "metadata" | "libraries" | "assets" | "natives" | "loader_profile" | "java" | "loader_installer" | "loader_libraries" | "loader_processors";
+type RuntimeStep = "metadata" | "libraries" | "assets" | "natives" | "loader_profile" | "loader_queue" | "java" | "loader_installer" | "loader_libraries" | "loader_processors";
 
 /**
  * 装原版与加载器各步的假下载，null 是这一步不报下载。同一次导入里任意两批的文件数与总字节不会都相同：前端按这两项认批次。
@@ -420,6 +420,8 @@ const RUNTIME_BATCHES: Readonly<Record<RuntimeStep, MockBatch | null>> = {
   assets: { files: 1_200, bytes: 24_576_000 },
   natives: null,
   loader_profile: null,
+  // 假后端里没有别的 Forge 安装在跑，不用等
+  loader_queue: null,
   java: null,
   loader_installer: { files: 1, bytes: 6_291_456 },
   loader_libraries: { files: 24, bytes: 7_864_320 },
@@ -440,7 +442,7 @@ function preludePlan(source: ModpackSource): InstallPhase[] {
   return [...packSteps(source), "metadata", "libraries", "assets", "natives", "modpack_files", "modpack_overrides"];
 }
 
-/** 与后端 install_reporting 同一顺序：Fabric、Quilt 先取 profile 再下库；Forge、NeoForge 先找 Java，再下安装器、下库、跑处理器。 */
+/** 与后端 install_reporting 同一顺序：Fabric、Quilt 先取 profile 再下库；Forge、NeoForge 先排队、再找 Java，再下安装器、下库、跑处理器。 */
 function loaderSteps(loader: PackLoader | null): InstallPhase[] {
   if (loader === null) return [];
   switch (loader.kind) {
@@ -449,7 +451,7 @@ function loaderSteps(loader: PackLoader | null): InstallPhase[] {
       return ["loader_profile", "loader_libraries"];
     case "forge":
     case "neoforge":
-      return ["java", "loader_installer", "loader_libraries", "loader_processors"];
+      return ["loader_queue", "java", "loader_installer", "loader_libraries", "loader_processors"];
   }
 }
 

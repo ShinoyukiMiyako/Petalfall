@@ -31,6 +31,9 @@ pub enum InstallPhase {
     Libraries,
     Assets,
     Natives,
+    /// Forge / NeoForge：等前一个 Forge / NeoForge 安装做完再开始（见 [`crate::forge::ForgeTurn`]）。前面没有安装在跑
+    /// 时转眼就过，照样报；排在 Java 之前，等的这段时间界面停在这一步，不停在准备 Java 上。
+    LoaderQueue,
     Java,
     LoaderInstaller,
     LoaderLibraries,
@@ -78,6 +81,7 @@ impl InstallPhase {
             Self::Libraries => "libraries",
             Self::Assets => "assets",
             Self::Natives => "natives",
+            Self::LoaderQueue => "loader_queue",
             Self::Java => "java",
             Self::LoaderInstaller => "loader_installer",
             Self::LoaderLibraries => "loader_libraries",
