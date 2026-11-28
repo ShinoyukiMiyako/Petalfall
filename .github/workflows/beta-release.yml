@@ -1,12 +1,14 @@
 name: Beta 发布
 
-# beta 与正式版共用一把更新签名钥，这条流水线一旦被借道，签出来的包正式版客户端也认。所以四个作业各自隔开：
+# beta 与正式版共用一把更新签名钥，这条流水线一旦被借道，签出来的包正式版客户端也认。所以各作业各自隔开：
 # build 在一次性托管机上构建，不挂环境，拿不到任何发布凭据；sign 只拿签名私钥，签名前要维护者在网页上审批；
+# upload-cn 在国内的自托管机上只拿 cn 的凭据，把签过的两个包传进杭州 OSS；
 # stage 只拿桶凭据，传包、建 Release；publish-hk 只拿香港 beta 推送钥。私钥、桶凭据、推送钥不在同一个作业里出现。
 # 防降级照 dev 的两处配套：签名带 --app-version，打包注入 requireSignedVersion: true。
 # beta 客户端只问香港机上的 beta 清单，GitHub Release 不当清单来源：dev 的 publish 和 CLA 作业都能改写 Releases。
 
 # 不加 pull_request，也不用 tag 触发：tag 触发时工作流取自被打 tag 的任意提交，环境放行 tag 就等于放行任意代码拿机密。
+# upload-cn 跑在内网自托管机上，加了 pull_request 还等于让任何 fork 在内网跑代码。
 # workflow_dispatch 只用来在 dev 上演练构建，挂环境的作业在 beta 之外一律跳过。
 on:
   push:
@@ -591,11 +593,112 @@ jobs:
           overwrite: true
           retention-days: 90
 
+  # cn（杭州 OSS）由国内的自托管机上传，原因与做法见 dev-build.yml 的 upload-cn：stage 照旧传 hk、global，并按公网地址读回
+  # cn 核对字节，交接的信号同样是 cn-run。这台机器跨任务常驻，构建与签名都不放在这里（见 build 的注释）；这里只拿
+  # updates-beta-cn 环境里一对只能往 petalfall-dl-cn 的 beta/ 写的 OSS 凭据，传的是 build 交出、按审批时记下的 sha256 核对过的
+  # 字节。这台机器被污染时最多传错字节、或在 cn 的 beta/ 下多写对象，让这一版发不出去：stage 读回对不上就失败，
+  # 签名验不过的包客户端也不会装。
+  # 排在签名审批之后：被拒批的版本不该先往 beta/ 写删不掉的对象。往 cn 传之前跑与 stage 相同的版本号检查，理由相同；
+  # 检查要读香港 beta 清单与 GitHub 上的 tag，这台机器因此多了这两条外网依赖。
+  # 环境里没配凭据时只打警告、写进作业摘要后成功结束，stage 照旧自己往 cn 传。这里失败时 stage 跟着跳过，这一版不发：
+  # beta 一个桶都不许缺。并发靠工作流级的组，同一分支的运行整个串行，这里不另设。
+  upload-cn:
+    needs: [build, sign]
+    if: github.ref == 'refs/heads/beta'
+    runs-on: [self-hosted, Linux, X64, petalfall]
+    environment: updates-beta-cn
+    # 版本检查最多约 4 分钟，两个包各传一次 cn、传完即读回，每个包最多 600 秒（upload-to-mirrors.sh）
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      cn-run: ${{ steps.upload.outputs.run }}
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      INSTALLER: ${{ github.workspace }}/dist/${{ needs.build.outputs.installer-name }}
+      BOOTSTRAP: ${{ github.workspace }}/dist/${{ needs.build.outputs.bootstrap-name }}
+      HK_MANIFEST_URL: https://petalfall.org/updates/beta/latest.json
+    steps:
+      # 与 dev-build.yml 的同名步骤相同
+      - name: 检查国内上传凭据
+        id: credentials
+        env:
+          OSS_CN_ACCESS_KEY_ID: ${{ secrets.OSS_CN_ACCESS_KEY_ID }}
+          OSS_CN_ACCESS_KEY_SECRET: ${{ secrets.OSS_CN_ACCESS_KEY_SECRET }}
+        run: |
+          if [ -n "$OSS_CN_ACCESS_KEY_ID" ] && [ -n "$OSS_CN_ACCESS_KEY_SECRET" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$OSS_CN_ACCESS_KEY_ID" ] && [ -z "$OSS_CN_ACCESS_KEY_SECRET" ]; then
+            echo "::warning::作业所在的环境里没有配置 OSS_CN_ACCESS_KEY_ID 与 OSS_CN_ACCESS_KEY_SECRET，cn 照旧由托管机上的发布作业上传"
+            echo "**cn 由托管机上传**：作业所在的环境里没有配置国内上传凭据 OSS_CN_ACCESS_KEY_ID、OSS_CN_ACCESS_KEY_SECRET，这次 cn 照旧由托管机上的发布作业上传。" >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::作业所在的环境里 OSS_CN_ACCESS_KEY_ID 与 OSS_CN_ACCESS_KEY_SECRET 只配了一个"
+            exit 1
+          fi
+
+      # 这台机器的工作区跨作业保留，dev 的 build 也在这里检出；与它同样完整检出，不在共用的工作区里留下稀疏检出的设置。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.credentials.outputs.configured == 'true'
+        with:
+          persist-credentials: false
+
+      # 排在下载之前：会在这里失败的运行不用先把两个包拉到国内
+      - name: 检查版本号没有倒退
+        if: steps.credentials.outputs.configured == 'true'
+        run: bash .github/scripts/check-beta-version.sh "$VERSION" "$HK_MANIFEST_URL"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: steps.credentials.outputs.configured == 'true'
+        with:
+          name: ${{ needs.build.outputs.installer-name }}
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: steps.credentials.outputs.configured == 'true'
+        with:
+          name: ${{ needs.build.outputs.bootstrap-name }}
+          path: dist
+
+      # 传进 beta/ 的对象删不掉，传之前先核对就是审批时 summary 上列的那两份字节
+      - name: 核对两个安装包
+        if: steps.credentials.outputs.configured == 'true'
+        env:
+          WANT_BOOTSTRAP: ${{ needs.build.outputs.bootstrap-sha256 }}
+          WANT_INSTALLER: ${{ needs.build.outputs.installer-sha256 }}
+        run: |
+          check() {
+            local got
+            got="$(sha256sum "$1" | cut -d' ' -f1)"
+            if [ "$got" != "$2" ]; then
+              echo "::error::$(basename "$1") 的 sha256 是 $got，build 作业记下的是 $2"
+              exit 1
+            fi
+          }
+          check "$BOOTSTRAP" "$WANT_BOOTSTRAP"
+          check "$INSTALLER" "$WANT_INSTALLER"
+
+      # 与 dev-build.yml 的同名步骤相同；beta 上 cn 不许缺，传不上就让这个作业失败，stage 跟着跳过
+      - name: 上传到 cn
+        id: upload
+        if: steps.credentials.outputs.configured == 'true'
+        env:
+          OSS_CI_ACCESS_KEY_ID: ${{ secrets.OSS_CN_ACCESS_KEY_ID }}
+          OSS_CI_ACCESS_KEY_SECRET: ${{ secrets.OSS_CN_ACCESS_KEY_SECRET }}
+        run: |
+          for file in "$BOOTSTRAP" "$INSTALLER"; do
+            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
+            bash .github/scripts/upload-to-mirrors.sh --only cn "$key" "$file" "$RUNNER_TEMP/cn-record.tsv"
+          done
+          echo "run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
   # 传包、生成清单、建 Release。桶凭据放在 updates-beta 环境，只放行 beta 分支，各自只进用到它的那一步。
   # 最后一步是把草稿转成 prerelease，之后不再有会失败的步骤：转正之后失败的话，重跑这个作业会被版本检查挡下
   # （tag 已经在了），所以读回 GitHub 与推送香港都放在 publish-hk，失败时只用 Re-run failed jobs 重跑那个作业。
+  # 转正之前失败时，cn 已由 upload-cn 传过的话，单独重跑 upload-cn（这里与 publish-hk 跟着重跑）：只重跑这里，
+  # upload-cn 交来的还是上一次尝试的目录，这里只能退回托管机往 cn 跨境上传。
   stage:
-    needs: [build, sign]
+    needs: [build, sign, upload-cn]
     if: github.ref == 'refs/heads/beta'
     runs-on: ubuntu-24.04
     environment: updates-beta
@@ -664,54 +767,20 @@ jobs:
       - name: 再次验签
         run: node .github/scripts/verify-update-signature.mjs .github/release-updater.pub "$BOOTSTRAP" "$BOOTSTRAP.sig" "$VERSION"
 
-      # 插件只装比自己新的版本。香港清单是客户端唯一会问的地方，对照它；还没有时 404，跳过。
-      # 再对照所有 v* tag：香港清单被撤掉止血之后，这一条照样挡得住倒退，也挡得住同号重发。
+      # 插件只装比自己新的版本：对照香港 beta 清单与所有 v* tag，判法见脚本。upload-cn 往 cn 传之前跑的是同一个脚本，
+      # 这里照样再跑：upload-cn 没配凭据时什么都没查，只重跑这个作业时它也不跟着重跑。
       # 排在上传之前：会在这里失败的运行不该先往三个桶各传两个包。
       - name: 检查版本号没有倒退
-        run: |
-          status="$(curl --silent --show-error --retry 3 --max-time 60 --output "$RUNNER_TEMP/previous-hk.json" --write-out '%{http_code}' "$HK_MANIFEST_URL")"
-          case "$status" in
-            200)
-              previous="$(node -e "
-                const version = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).version;
-                if (typeof version !== 'string') throw new Error('香港 beta 清单里没有字符串形式的 version');
-                process.stdout.write(version);
-              " "$RUNNER_TEMP/previous-hk.json")"
-              order="$(node .github/scripts/dev-distribution.mjs compare "$VERSION" "$previous")"
-              if [ "$order" != 1 ]; then
-                echo "::error::版本号 $VERSION 不比香港 beta 清单上已发布的 $previous 新，beta 包不会更新过去"
-                exit 1
-              fi
-              ;;
-            404) echo "香港机上还没有 beta 清单，跳过" ;;
-            *)
-              echo "::error::读香港清单 $HK_MANIFEST_URL 返回 HTTP $status"
-              exit 1
-              ;;
-          esac
-          git ls-remote --tags --refs "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" | cut -f2 | sed 's#^refs/tags/##' > "$RUNNER_TEMP/tags.txt"
-          while IFS= read -r tag; do
-            case "$tag" in
-              "$TAG")
-                echo "::error::tag $TAG 已经存在：这个版本发布过了"
-                exit 1
-                ;;
-              v*)
-                order="$(node .github/scripts/dev-distribution.mjs compare "$VERSION" "${tag#v}" < /dev/null)"
-                if [ "$order" != 1 ]; then
-                  echo "::error::版本号 $VERSION 不比已有的 tag $tag 新"
-                  exit 1
-                fi
-                ;;
-            esac
-          done < "$RUNNER_TEMP/tags.txt"
+        run: bash .github/scripts/check-beta-version.sh "$VERSION" "$HK_MANIFEST_URL"
 
       # 对象键是 beta/<版本>-<运行标识>/<文件名>，运行标识是 <运行号>-<运行次数>，桶上同一个键只能写一次。传完包才失败的
       # 运行不建 tag、不占 beta 序号，下一次运行算出同一个版本号，只带运行次数的话又从 1 起，撞上上次留下、覆盖不了的对象；
       # 运行号分开各次运行，运行次数分开同一次运行的重跑。beta/ 不过期，测试版可能几周不更新，桶源不能先 404。
       # 必须排在验签之后，传上去的就是最终发出去的字节。每传完一个桶就不带凭据、按客户端会用的公网地址读回，一致才记进
       # 上传记录；每个桶每个包最多 600 秒。beta 没有允许缺的桶（dev-distribution.mjs 的 OPTIONAL_MIRRORS），哪个桶传不上
-      # 都让 stage 失败，重跑这个作业。
+      # 都让 stage 失败，重跑这个作业（cn 已由 upload-cn 传过时从 upload-cn 重跑，见作业上方）。
+      # cn 已由 upload-cn 在这一次尝试里从国内传过时，这里不往 cn 传、不用 cn 的凭据，只按公网地址读回 cn，对不上照样让
+      # stage 失败；upload-cn 没配凭据，或交来的是上一次尝试的结果时，照旧从这里往 cn 传。脚本与 dev-build.yml 的 publish 相同。
       - name: 上传到三个存储桶
         env:
           OSS_CI_ACCESS_KEY_ID: ${{ secrets.OSS_CI_ACCESS_KEY_ID }}
@@ -719,10 +788,23 @@ jobs:
           R2_CI_ACCESS_KEY_ID: ${{ secrets.R2_CI_ACCESS_KEY_ID }}
           R2_CI_SECRET_ACCESS_KEY: ${{ secrets.R2_CI_SECRET_ACCESS_KEY }}
           R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+          CN_RUN: ${{ needs.upload-cn.outputs.cn-run }}
+          CN_RESULT: ${{ needs.upload-cn.result }}
         run: |
+          cn=()
+          if [ "$CN_RUN" = "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]; then
+            cn=(--readback-only cn)
+            echo "cn 已由 upload-cn 从国内传过，这里只按公网地址读回核对"
+          elif [ -n "$CN_RUN" ]; then
+            echo "::warning::upload-cn 交来的是运行标识 $CN_RUN 的结果，这一次是 $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT：它没跟着重跑，传的是另一个目录，cn 改从托管机上传。要让国内机重传，单独重跑 upload-cn，依赖它的作业会跟着重跑"
+          elif [ "$CN_RESULT" != success ]; then
+            echo "::warning::upload-cn 的结果是 $CN_RESULT，cn 改从托管机上传"
+          else
+            echo "upload-cn 所在的环境里没有配置国内上传凭据，cn 照旧从托管机上传"
+          fi
           for file in "$BOOTSTRAP" "$INSTALLER"; do
             key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
-            bash .github/scripts/upload-to-mirrors.sh "$key" "$file" "$RUNNER_TEMP/mirror-record.tsv"
+            bash .github/scripts/upload-to-mirrors.sh "${cn[@]}" "$key" "$file" "$RUNNER_TEMP/mirror-record.tsv"
           done
 
       # url 取这一版 Release 的引导程序附件：每版一个 tag、永久保留，地址不会失效。github 源要等下面转正才存在，

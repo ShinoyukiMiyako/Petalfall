@@ -201,6 +201,24 @@ export const stepKeys = (step) => structure(step).filter((line) => line.column =
 /** 步骤里除去注释和空行的原始行（保留缩进），用来整段比对。 */
 export const stepText = (step) => step.filter((line) => line.kind !== 'comment' && line.raw.trim() !== '').map((line) => line.raw);
 
+/**
+ * 步骤 `run: |` 下的脚本，按 YAML 块纯量的规则去掉公共缩进（取第一个非空行的缩进），每行以换行结尾。
+ * 拿来交给 bash 真跑一遍，看脚本在各种输入下实际做了什么，而不只是比对文本。
+ */
+export function scriptOf(step) {
+  const at = step.findIndex((line) => line.kind === 'structure' && line.column === 8 && line.key === 'run' && line.valueKind === 'block');
+  assert.notEqual(at, -1, `步骤 ${stepKeys(step)[0]} 没有 run: | 脚本`);
+  const body = [];
+  for (const line of step.slice(at + 1)) {
+    if (line.kind !== 'content') break;
+    body.push(line.raw);
+  }
+  const first = body.find((raw) => raw.trim() !== '');
+  assert.notEqual(first, undefined, `步骤 ${stepKeys(step)[0]} 的 run 脚本是空的`);
+  const indent = first.length - first.trimStart().length;
+  return body.map((raw) => `${raw.slice(indent)}\n`).join('');
+}
+
 const SECRET = /\bsecrets\b(?:\s*\.\s*([A-Za-z0-9_-]+)|\s*\[\s*(?:'([^']*)'|"([^"]*)")\s*\])?/gi;
 
 /**

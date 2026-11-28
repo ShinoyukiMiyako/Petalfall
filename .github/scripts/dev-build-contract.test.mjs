@@ -7,18 +7,22 @@
 // 文件头和步骤上方的注释里也写着这些命令，拿全文找子串的话，删掉真正的那一行照样能过。
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { describe, it } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { randomBytes, randomInt } from 'node:crypto';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, describe, it } from 'node:test';
 
 import * as workflow from './workflow-lines.mjs';
 
-const { blockOf, codeOf, exposedOf, parseWorkflow, secretsIn, stepKeys, stepText, structure, tokenRefs } = workflow;
+const { blockOf, codeOf, exposedOf, parseWorkflow, scriptOf, secretsIn, stepKeys, stepText, structure, tokenRefs } = workflow;
 
 const REPO_ROOT = new URL('../../', import.meta.url);
 const WORKFLOW = readFileSync(new URL('.github/workflows/dev-build.yml', REPO_ROOT), 'utf8').replace(/\r\n/g, '\n');
 
 /** 允许的 flow 集合，整行比对。flow 集合能跨行、能嵌套，逐行看不出折成了什么，只放行这份工作流现有的这几处。 */
-const FLOW_ALLOWED = ['branches: [dev]', 'runs-on: [self-hosted, Linux, X64, petalfall]', 'needs: [build, publish]'];
+const FLOW_ALLOWED = ['branches: [dev]', 'runs-on: [self-hosted, Linux, X64, petalfall]', 'needs: [build, upload-cn]', 'needs: [build, publish]'];
 
 const PARSED = parseWorkflow(WORKFLOW, FLOW_ALLOWED);
 const LINES = PARSED.lines;
@@ -207,6 +211,26 @@ const SIGN_STEP = [
   '          test -s "$BOOTSTRAP.sig"',
 ];
 
+// upload-cn 在「检查国内上传凭据」之后的每一步都带这个条件：没配凭据时不检出、不下载、不上传
+const CONFIGURED = "if: steps.credentials.outputs.configured == 'true'";
+
+// 上传到 cn 那一步的全文。凭据只进这一步、换成脚本认的名字；只传 cn；记录写在本作业自己的文件里，不交给清单；
+// cn-run 在循环之后才写，任何一个包没传上时脚本已经以 1 退出，publish 拿到的是空的，照旧自己往 cn 传。
+const UPLOAD_CN_STEP = [
+  '      - name: 上传到 cn',
+  '        id: upload',
+  `        ${CONFIGURED}`,
+  '        env:',
+  '          OSS_CI_ACCESS_KEY_ID: ${{ secrets.OSS_CN_ACCESS_KEY_ID }}',
+  '          OSS_CI_ACCESS_KEY_SECRET: ${{ secrets.OSS_CN_ACCESS_KEY_SECRET }}',
+  '        run: |',
+  '          for file in "$BOOTSTRAP" "$INSTALLER"; do',
+  '            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"',
+  '            bash .github/scripts/upload-to-mirrors.sh --only cn "$key" "$file" "$RUNNER_TEMP/cn-record.tsv"',
+  '          done',
+  '          echo "run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"',
+];
+
 // 仓库里的文件路径：.github 下的脚本与公钥，以及锁定签名 CLI 的锁文件。前面紧挨着 / 的是稀疏检出名单自己的写法，不算引用。
 const PATH_REF = /(?<![\w./-])(\.github\/[\w./-]+|app\/pnpm-lock\.yaml)/g;
 const MODULE_REF = /^\s*(?:import|export)\b[^;]*?\bfrom\s+["'](\.{1,2}\/[^"']+)["']/gm;
@@ -250,10 +274,10 @@ describe('dev 构建工作流的契约', () => {
     assert.deepEqual(PARSED.problems, [], '工作流用了逐行解析认不出的写法，下面按行比对的检查都可能被绕过去');
   });
 
-  it('作业依次是 release-heads、build、publish、publish-hk，build 要等 release-heads 通过', () => {
+  it('作业依次是 release-heads、build、upload-cn、publish、publish-hk，build 要等 release-heads 通过', () => {
     assert.deepEqual(
       jobNames(),
-      ['release-heads', 'build', 'publish', 'publish-hk'],
+      ['release-heads', 'build', 'upload-cn', 'publish', 'publish-hk'],
       '作业变了：版本先后检查必须在编译之前单独成一个作业，不过时不用先白编',
     );
     assert.deepEqual(
@@ -479,12 +503,247 @@ describe('dev 构建工作流的契约', () => {
     assert.deepEqual(
       // 稀疏检出名单里也有这个文件名，只看调用它的行
       publish.filter((line) => line.includes('bash .github/scripts/upload-to-mirrors.sh')),
-      [`bash .github/scripts/upload-to-mirrors.sh "$key" "$file" ${record}`],
+      [`bash .github/scripts/upload-to-mirrors.sh "\${cn[@]}" "$key" "$file" ${record}`],
       'publish 上传时不再写上传记录',
     );
     const manifestCalls = publish.filter((line) => /dev-distribution\.mjs (?:build|validate) /.test(line));
     assert.equal(manifestCalls.length, 2, `publish 里生成、校验清单的地方变了：${manifestCalls}`);
     assert.ok(manifestCalls[0].endsWith(`"$GITHUB_SHA" ${record} "$manifest"`), `build 没读上传记录：${manifestCalls[0]}`);
     assert.ok(manifestCalls[1].endsWith(`"$TAG" ${record}`), `validate 没读上传记录：${manifestCalls[1]}`);
+  });
+
+  // 内网自托管机上跑的是仓库里的代码：多一个 pull_request 触发，任何 fork 都能在这台机器上跑代码、拿 upload-cn 的凭据
+  it('只由推送 dev 触发', () => {
+    assert.deepEqual(blockOf(LINES, 0, 'on'), ['push:', 'branches: [dev]'], '触发条件变了：自托管机上的作业只能由推送 dev 触发');
+  });
+
+  // 托管机往杭州跨境上传常挂住，cn 改由国内的自托管机传。作业级的键整组钉住：多一个 environment 或 concurrency、
+  // 少一个 permissions，交出的凭据、会不会被别的运行顶掉、令牌能做什么就都变了。
+  it('upload-cn 跑在国内的自托管机上，挂单独的环境 updates-dev-cn，只读权限，不进并发组，只交出 cn-run', () => {
+    assert.deepEqual(jobKeys('upload-cn'), [
+      'needs: build',
+      'runs-on: [self-hosted, Linux, X64, petalfall]',
+      'environment: updates-dev-cn',
+      'timeout-minutes: 30',
+      'permissions:',
+      'outputs:',
+      'env:',
+      'steps:',
+    ]);
+    assert.deepEqual(jobBlock('upload-cn', 'permissions'), ['contents: read']);
+    assert.deepEqual(jobBlock('upload-cn', 'outputs'), ['cn-run: ${{ steps.upload.outputs.run }}']);
+    // 传的必须是 publish 签名、读回的那两份字节，对象键也按同一个版本号算
+    assert.deepEqual(
+      jobBlock('upload-cn', 'env'),
+      jobBlock('publish', 'env').filter((line) => !line.startsWith('HK_MANIFEST_URL:')),
+      'upload-cn 的 VERSION、INSTALLER、BOOTSTRAP 与 publish 的不同，读回时对不上',
+    );
+  });
+
+  // 自托管机跨任务常驻：签名私钥、R2 与 hk 的凭据、香港推送钥任何一样进了这台机器上的作业，机器被污染时就跟着泄露
+  it('自托管机上的作业只拿得到要编进包里的 CurseForge key 与 cn 的那一对凭据，cn 的凭据只进检查与上传两步', () => {
+    const selfHosted = jobNames().filter((name) => jobKeys(name).includes('runs-on: [self-hosted, Linux, X64, petalfall]'));
+    assert.deepEqual(selfHosted, ['build', 'upload-cn']);
+    assert.deepEqual(secretsIn(exposedOf(jobLines('build'))), { names: ['PETALFALL_CURSEFORGE_API_KEY'], other: [] });
+    assert.deepEqual(secretsIn(exposedOf(jobLines('upload-cn'))), { names: ['OSS_CN_ACCESS_KEY_ID', 'OSS_CN_ACCESS_KEY_SECRET'], other: [] });
+    assert.deepEqual(tokenRefs(exposedOf(jobLines('upload-cn'))), [], 'upload-cn 引用了仓库令牌');
+    assert.deepEqual(codeOf(jobLines('upload-cn')).filter((line) => /\bvars\s*\./i.test(line)), [], 'upload-cn 读了仓库或环境变量，比如 R2 的账户 ID');
+    const own = steps('upload-cn');
+    const holders = own.flatMap((step, index) => (secretsIn(exposedOf(step)).names.length > 0 ? [index] : []));
+    assert.deepEqual(holders, [stepIndex('upload-cn', '检查国内上传凭据'), stepIndex('upload-cn', '上传到 cn')], 'cn 的凭据进了检查与上传以外的步骤');
+    const elsewhere = exposedOf(LINES.filter((line) => !jobLines('upload-cn').includes(line)));
+    assert.deepEqual(secretsIn(elsewhere).names.filter((name) => name.startsWith('OSS_CN_')), [], 'cn 的国内凭据出现在 upload-cn 之外');
+  });
+
+  it('upload-cn 先查凭据，后面每一步都只在配了凭据时跑；完整检出，只往 cn 传，cn-run 写在传完之后', () => {
+    const own = steps('upload-cn');
+    assert.deepEqual(stepKeys(own[0]), ['name: 检查国内上传凭据', 'id: credentials', 'env:', 'run: |']);
+    for (const step of own.slice(1)) {
+      assert.ok(stepKeys(step).includes(CONFIGURED), `${stepKeys(step)[0]} 没有限定只在配了凭据时跑`);
+    }
+    const checkout = own.findIndex((step) => stepKeys(step)[0].startsWith('uses: actions/checkout@'));
+    assert.equal(checkout, 1, 'upload-cn 第二步不再是检出');
+    // 稀疏检出的设置会留在这台机器跨作业保留的工作区里
+    assert.deepEqual(blockOf(own[checkout], 8, 'with'), ['persist-credentials: false']);
+    assert.equal(stepIndex('upload-cn', '上传到 cn'), own.length - 1, '「上传到 cn」之后还有别的步骤');
+    assert.deepEqual(pinned(own.at(-1)), UPLOAD_CN_STEP, '「上传到 cn」变了：应只往 cn 传、按通道规矩写本作业自己的记录，传完才交出 cn-run');
+  });
+
+  // 写了状态函数就不再默认要求前面的作业都成功：漏了 needs.build.result，build 失败时也会发布；
+  // publish-hk 不写条件时默认要求整条依赖链都成功，upload-cn 失败而 publish 已重建预发布时它会被跳过，香港停在旧版
+  it('upload-cn 失败时 publish 与 publish-hk 照样跑，build 没成功或运行被取消时都不跑', () => {
+    const conditions = (name) => jobKeys(name).filter((key) => /^(?:needs|if|continue-on-error)\s*:/.test(key));
+    assert.deepEqual(conditions('publish'), ['needs: [build, upload-cn]', "if: ${{ !cancelled() && needs.build.result == 'success' }}"]);
+    assert.deepEqual(conditions('publish-hk'), [
+      'needs: [build, publish]',
+      "if: ${{ !cancelled() && needs.build.result == 'success' && needs.publish.result == 'success' }}",
+    ]);
+  });
+
+  // 取舍见 docs/architecture.md 的并发一节：build 被新推送取消；publish、publish-hk 各自串行、不取消、不共用一个组；
+  // upload-cn 只写本次运行独有的目录，进了组反而会被后排进来的作业顶掉
+  it('并发组只设在作业上：build 可取消，publish 与 publish-hk 各一组不取消，upload-cn 与 release-heads 不进组', () => {
+    assert.ok(!structure(LINES).some((line) => line.indent === 0 && line.key === 'concurrency'), '设了工作流级的并发组');
+    const groups = Object.fromEntries(jobNames().map((name) => [name, jobKeys(name).includes('concurrency:') ? jobBlock(name, 'concurrency') : null]));
+    assert.deepEqual(groups, {
+      'release-heads': null,
+      build: ['group: dev-build', 'cancel-in-progress: true'],
+      'upload-cn': null,
+      publish: ['group: dev-publish', 'cancel-in-progress: false'],
+      'publish-hk': ['group: dev-publish-hk', 'cancel-in-progress: false'],
+    });
+  });
+});
+
+// 交接 cn 的几段脚本按 GitHub 跑 shell: bash 的方式（bash --noprofile --norc -eo pipefail）真跑一遍，看各种输入下实际做了什么。
+// beta-release.yml 的同名步骤与这里逐字相同，由那边的契约核对，这里测过的就是两边的行为。
+describe('upload-cn 与 publish 交接 cn 的脚本', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dev-build-contract-'));
+  after(() => rmSync(root, { recursive: true, force: true }));
+  let nextCase = 0;
+  const VERSION = `1.${randomInt(0, 30)}.0-dev.${randomInt(1, 100_000)}`;
+  const RUN_ID = String(randomInt(1, 2 ** 40));
+  const ATTEMPT = randomInt(1, 6);
+  const RUN = `${RUN_ID}-${ATTEMPT}`;
+  const BOOTSTRAP_NAME = `Petalfall-Installer-${VERSION}-x64.exe`;
+  const INSTALLER_NAME = `Petalfall_${VERSION}_x64-setup.exe`;
+  const keyOf = (name) => `dev/${VERSION}-${RUN}/${name}`;
+  // Windows 上 bash 的 basename 不认反斜杠
+  const posix = (path) => path.replaceAll('\\', '/');
+
+  // 工作区里放真的 dev-distribution.mjs 和一个假的 upload-to-mirrors.sh：假脚本把参数一行一个记进 $FAKE_LOG，
+  // 每次以 --- 结尾，第 $FAKE_FAIL_AT 次调用以 1 退出
+  function workspace() {
+    const dir = join(root, String(nextCase++));
+    mkdirSync(join(dir, '.github', 'scripts'), { recursive: true });
+    copyFileSync(new URL('./dev-distribution.mjs', import.meta.url), join(dir, '.github', 'scripts', 'dev-distribution.mjs'));
+    writeFileSync(
+      join(dir, '.github', 'scripts', 'upload-to-mirrors.sh'),
+      [
+        '{ printf "%s\\n" "$@"; echo ---; } >> "$FAKE_LOG"',
+        'if [ "$(grep -c "^---$" "$FAKE_LOG")" = "${FAKE_FAIL_AT:-0}" ]; then exit 1; fi',
+        '',
+      ].join('\n'),
+    );
+    mkdirSync(join(dir, 'temp'));
+    const env = {};
+    let path = '';
+    for (const [name, value] of Object.entries(process.env)) {
+      if (name.toUpperCase() === 'PATH') path = value;
+      else if (!/^(?:GITHUB_|RUNNER_|OSS_|CN_)/i.test(name)) env[name] = value;
+    }
+    Object.assign(env, {
+      PATH: path,
+      FAKE_LOG: posix(join(dir, 'calls.log')),
+      GITHUB_OUTPUT: posix(join(dir, 'output')),
+      GITHUB_STEP_SUMMARY: posix(join(dir, 'summary.md')),
+      RUNNER_TEMP: posix(join(dir, 'temp')),
+      GITHUB_RUN_ID: RUN_ID,
+      GITHUB_RUN_ATTEMPT: String(ATTEMPT),
+      VERSION,
+      BOOTSTRAP: posix(join(dir, 'dist', BOOTSTRAP_NAME)),
+      INSTALLER: posix(join(dir, 'dist', INSTALLER_NAME)),
+    });
+    const read = (name) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : '');
+    const calls = () =>
+      read('calls.log')
+        .split('---\n')
+        .filter((call) => call !== '')
+        .map((call) => call.split('\n').slice(0, -1));
+    return { dir, env, read, calls };
+  }
+
+  function runStep(step, { dir, env }, extra = {}) {
+    const file = join(dir, 'step.sh');
+    writeFileSync(file, scriptOf(step));
+    return spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', file], { encoding: 'utf8', cwd: dir, env: { ...env, ...extra } });
+  }
+
+  const credentialStep = () => steps('upload-cn')[stepIndex('upload-cn', '检查国内上传凭据')];
+  const uploadCnStep = () => steps('upload-cn')[stepIndex('upload-cn', '上传到 cn')];
+  const publishUploadStep = () => steps('publish')[stepIndex('publish', '上传到三个存储桶')];
+  const ID = `LTAI${randomBytes(8).toString('hex')}`;
+  const SECRET = randomBytes(15).toString('hex');
+
+  it('凭据两个都没配（为空或不存在）时只打一条警告、写进作业摘要，成功结束，交出 configured=false', () => {
+    for (const extra of [{ OSS_CN_ACCESS_KEY_ID: '', OSS_CN_ACCESS_KEY_SECRET: '' }, {}]) {
+      const ws = workspace();
+      const result = runStep(credentialStep(), ws, extra);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.equal(
+        result.stdout,
+        '::warning::作业所在的环境里没有配置 OSS_CN_ACCESS_KEY_ID 与 OSS_CN_ACCESS_KEY_SECRET，cn 照旧由托管机上的发布作业上传\n',
+      );
+      assert.equal(ws.read('output'), 'configured=false\n');
+      assert.match(ws.read('summary.md'), /^\*\*cn 由托管机上传\*\*：作业所在的环境里没有配置国内上传凭据 OSS_CN_ACCESS_KEY_ID、OSS_CN_ACCESS_KEY_SECRET/);
+    }
+  });
+
+  it('两个都配了时交出 configured=true，不打警告、不写摘要；只配了一个时失败，不交出 configured', () => {
+    const ws = workspace();
+    const result = runStep(credentialStep(), ws, { OSS_CN_ACCESS_KEY_ID: ID, OSS_CN_ACCESS_KEY_SECRET: SECRET });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(result.stdout, '');
+    assert.equal(ws.read('output'), 'configured=true\n');
+    assert.equal(ws.read('summary.md'), '');
+    for (const extra of [{ OSS_CN_ACCESS_KEY_ID: ID, OSS_CN_ACCESS_KEY_SECRET: '' }, { OSS_CN_ACCESS_KEY_ID: '', OSS_CN_ACCESS_KEY_SECRET: SECRET }]) {
+      const half = workspace();
+      const failed = runStep(credentialStep(), half, extra);
+      assert.equal(failed.status, 1, JSON.stringify(extra));
+      assert.equal(failed.stdout, '::error::作业所在的环境里 OSS_CN_ACCESS_KEY_ID 与 OSS_CN_ACCESS_KEY_SECRET 只配了一个\n');
+      assert.equal(half.read('output'), '');
+    }
+  });
+
+  it('上传到 cn：两个包依次只传 cn、写本作业自己的记录，都传完才交出这一次的运行标识', () => {
+    const ws = workspace();
+    const result = runStep(uploadCnStep(), ws);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const record = `${ws.env.RUNNER_TEMP}/cn-record.tsv`;
+    assert.deepEqual(ws.calls(), [
+      ['--only', 'cn', keyOf(BOOTSTRAP_NAME), ws.env.BOOTSTRAP, record],
+      ['--only', 'cn', keyOf(INSTALLER_NAME), ws.env.INSTALLER, record],
+    ]);
+    assert.equal(ws.read('output'), `run=${RUN}\n`);
+
+    for (const failAt of ['1', '2']) {
+      const failing = workspace();
+      const failed = runStep(uploadCnStep(), failing, { FAKE_FAIL_AT: failAt });
+      assert.equal(failed.status, 1, failAt);
+      assert.equal(failing.calls().length, Number(failAt));
+      assert.equal(failing.read('output'), '', `第 ${failAt} 个包没传上时交出了 cn-run，publish 会只读回、不再自己传`);
+    }
+  });
+
+  it('publish 上传：cn-run 等于这一次的运行标识时只读回 cn，其余情形一律照旧自己往 cn 传', () => {
+    const record = (ws) => `${ws.env.RUNNER_TEMP}/mirror-record.tsv`;
+    const plain = (ws) => [
+      [keyOf(BOOTSTRAP_NAME), ws.env.BOOTSTRAP, record(ws)],
+      [keyOf(INSTALLER_NAME), ws.env.INSTALLER, record(ws)],
+    ];
+
+    const current = workspace();
+    const readback = runStep(publishUploadStep(), current, { CN_RUN: RUN, CN_RESULT: 'success' });
+    assert.equal(readback.status, 0, readback.stdout + readback.stderr);
+    assert.deepEqual(current.calls(), plain(current).map((args) => ['--readback-only', 'cn', ...args]));
+    assert.equal(readback.stdout, 'cn 已由 upload-cn 从国内传过，这里只按公网地址读回核对\n');
+
+    const otherRuns = [`${RUN_ID}-${ATTEMPT + 1}`, `${Number(RUN_ID) + 1}-${ATTEMPT}`, `${RUN_ID}-${ATTEMPT}0`];
+    const cases = [
+      { CN_RUN: '', CN_RESULT: 'success', stdout: /^upload-cn 所在的环境里没有配置国内上传凭据，cn 照旧从托管机上传\n$/ },
+      ...['failure', 'cancelled', 'skipped'].map((result) => ({ CN_RUN: '', CN_RESULT: result, stdout: new RegExp(`^::warning::upload-cn 的结果是 ${result}，cn 改从托管机上传\\n$`) })),
+      ...otherRuns.map((run) => ({
+        CN_RUN: run,
+        CN_RESULT: 'success',
+        stdout: new RegExp(`^::warning::upload-cn 交来的是运行标识 ${run} 的结果，这一次是 ${RUN}：它没跟着重跑，传的是另一个目录，cn 改从托管机上传。`),
+      })),
+    ];
+    for (const { stdout, ...extra } of cases) {
+      const ws = workspace();
+      const result = runStep(publishUploadStep(), ws, extra);
+      assert.equal(result.status, 0, `${JSON.stringify(extra)}：${result.stdout}${result.stderr}`);
+      assert.deepEqual(ws.calls(), plain(ws), JSON.stringify(extra));
+      assert.match(result.stdout, stdout, JSON.stringify(extra));
+    }
   });
 });

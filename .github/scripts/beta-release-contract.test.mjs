@@ -19,6 +19,7 @@ import {
   jobLines,
   jobNames,
   parseWorkflow,
+  scriptOf,
   secretsIn,
   stepKeys,
   stepText,
@@ -28,6 +29,8 @@ import {
 } from './workflow-lines.mjs';
 
 const WORKFLOW = readFileSync(new URL('../workflows/beta-release.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+// 与 dev 共用的那几段交接 cn 的步骤，行为在 dev-build-contract.test.mjs 里真跑过，这里核对逐字相同
+const DEV_WORKFLOW = readFileSync(new URL('../workflows/dev-build.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const UPDATER_RS = readFileSync(new URL('../../app/src-tauri/src/commands/updater.rs', import.meta.url), 'utf8');
 
 // beta 客户端唯一会问的清单地址。客户端的 BETA_ENDPOINT 是编译期 concat! 出的整串，build 打包后直接在 Petalfall.exe 里
@@ -126,11 +129,31 @@ const PUBKEYS_SCRIPT = [
 const LOCKED_CLI_CALL = 'node .github/scripts/locked-cli.mjs app/pnpm-lock.yaml "$CLI_VERSION" > "$RUNNER_TEMP/tauri-cli.tsv"';
 
 /** 允许的 flow 集合，整行比对。flow 集合能跨行、能嵌套，逐行看不出折成了什么，只放行现有的这几处。 */
-const FLOW_ALLOWED = ['branches: [beta]', 'permissions: {}', 'needs: [build, sign]', 'needs: [build, stage]'];
+const FLOW_ALLOWED = [
+  'branches: [beta]',
+  'permissions: {}',
+  'needs: [build, sign]',
+  'runs-on: [self-hosted, Linux, X64, petalfall]',
+  'needs: [build, sign, upload-cn]',
+  'needs: [build, stage]',
+];
 
 const PARSED = parseWorkflow(WORKFLOW, FLOW_ALLOWED);
 const LINES = PARSED.lines;
 const CODE = codeOf(LINES);
+const DEV_LINES = parseWorkflow(DEV_WORKFLOW, ['branches: [dev]', 'runs-on: [self-hosted, Linux, X64, petalfall]', 'needs: [build, upload-cn]', 'needs: [build, publish]']).lines;
+
+const SELF_HOSTED = 'runs-on: [self-hosted, Linux, X64, petalfall]';
+// upload-cn 在「检查国内上传凭据」之后的每一步都带这个条件：没配凭据时不检出、不查、不下载、不上传
+const CONFIGURED = "if: steps.credentials.outputs.configured == 'true'";
+const CHECK_VERSION = 'run: bash .github/scripts/check-beta-version.sh "$VERSION" "$HK_MANIFEST_URL"';
+
+/** 作业 name 里叫 stepName 的那一步，找不到时直接失败。lines 是整份工作流的行。 */
+function stepNamed(lines, name, stepName) {
+  const step = steps(lines, name).find((candidate) => stepKeys(candidate).includes(`name: ${stepName}`));
+  assert.notEqual(step, undefined, `${name} 作业里找不到「${stepName}」这一步`);
+  return step;
+}
 
 describe('beta 发布工作流的契约', () => {
   it('结构行只用解析得了的写法：没有锚点、别名、合并键、带引号的键、续行和白名单以外的 flow 集合', () => {
@@ -155,10 +178,11 @@ describe('beta 发布工作流的契约', () => {
     );
   });
 
-  it('作业只有这四个，挂了环境的都在作业级限定只在 beta 上跑', () => {
-    assert.deepEqual(jobNames(LINES), ['build', 'sign', 'stage', 'publish-hk']);
+  it('作业只有这五个，挂了环境的都在作业级限定只在 beta 上跑', () => {
+    assert.deepEqual(jobNames(LINES), ['build', 'sign', 'upload-cn', 'stage', 'publish-hk']);
     for (const [name, environment] of [
       ['sign', 'release-signing'],
+      ['upload-cn', 'updates-beta-cn'],
       ['stage', 'updates-beta'],
       ['publish-hk', 'updates-beta'],
     ]) {
@@ -193,8 +217,8 @@ describe('beta 发布工作流的契约', () => {
   });
 
   // 只有作业里的机密才按作业核对得到；工作流级 env、concurrency 这些地方引用的机密，不在任何一个作业的核对范围里。
-  it('四个作业之外哪里都不引用机密', () => {
-    const inJobs = new Set(['build', 'sign', 'stage', 'publish-hk'].flatMap((name) => jobLines(LINES, name)));
+  it('作业之外哪里都不引用机密', () => {
+    const inJobs = new Set(jobNames(LINES).flatMap((name) => jobLines(LINES, name)));
     const outside = LINES.filter((line) => !inJobs.has(line));
     assert.deepEqual(secretsIn(exposedOf(outside)), { names: [], other: [] });
   });
@@ -424,13 +448,88 @@ describe('beta 发布工作流的契约', () => {
     assert.deepEqual(sign.filter((line) => /\b(?:npm|npx|pnpm|yarn)\s/.test(line)), [], 'sign 作业里跑了包管理器');
   });
 
-  it('桶凭据只进 stage，香港推送钥只进 publish-hk', () => {
+  it('桶凭据只进 stage，cn 的国内凭据只进 upload-cn，香港推送钥只进 publish-hk', () => {
     assert.deepEqual(secretsIn(exposedOf(jobLines(LINES, 'stage'))), {
       names: ['OSS_CI_ACCESS_KEY_ID', 'OSS_CI_ACCESS_KEY_SECRET', 'R2_CI_ACCESS_KEY_ID', 'R2_CI_SECRET_ACCESS_KEY'],
       other: [],
     });
+    assert.deepEqual(secretsIn(exposedOf(jobLines(LINES, 'upload-cn'))), { names: ['OSS_CN_ACCESS_KEY_ID', 'OSS_CN_ACCESS_KEY_SECRET'], other: [] });
     assert.deepEqual(secretsIn(exposedOf(jobLines(LINES, 'publish-hk'))), { names: ['HK_MANIFEST_SSH_KEY'], other: [] });
     assert.deepEqual(jobBlock(LINES, 'publish-hk', 'permissions'), ['contents: read']);
+  });
+
+  // 自托管机跨任务常驻：发布私钥、R2 与 hk 的凭据、香港推送钥、能写仓库的令牌任何一样进了这台机器，机器被污染时就跟着泄露。
+  // 作业级的键整组钉住：多一个 concurrency 会被同组排队的作业顶掉，多一个 continue-on-error 失败了也不挡 stage。
+  it('upload-cn 是唯一跑在自托管机上的作业：签名审批之后才跑，只拿 cn 的那一对凭据，只读权限，不拿仓库令牌与变量', () => {
+    assert.deepEqual(
+      jobNames(LINES).filter((name) => jobKeys(LINES, name).includes(SELF_HOSTED)),
+      ['upload-cn'],
+      '自托管机上多了别的作业：构建与签名都不能放在这台常驻的机器上',
+    );
+    assert.deepEqual(jobKeys(LINES, 'upload-cn'), [
+      'needs: [build, sign]',
+      BETA_ONLY,
+      SELF_HOSTED,
+      'environment: updates-beta-cn',
+      'timeout-minutes: 30',
+      'permissions:',
+      'outputs:',
+      'env:',
+      'steps:',
+    ]);
+    assert.deepEqual(jobBlock(LINES, 'upload-cn', 'permissions'), ['contents: read']);
+    assert.deepEqual(jobBlock(LINES, 'upload-cn', 'outputs'), ['cn-run: ${{ steps.upload.outputs.run }}']);
+    assert.deepEqual(tokenRefs(exposedOf(jobLines(LINES, 'upload-cn'))), [], 'upload-cn 引用了仓库令牌');
+    assert.deepEqual(job(LINES, 'upload-cn').filter((line) => /\bvars\s*\./i.test(line)), [], 'upload-cn 读了仓库或环境变量，比如 R2 的账户 ID');
+    const elsewhere = exposedOf(LINES.filter((line) => !jobLines(LINES, 'upload-cn').includes(line)));
+    assert.deepEqual(secretsIn(elsewhere).names.filter((name) => name.startsWith('OSS_CN_')), [], 'cn 的国内凭据出现在 upload-cn 之外');
+    // 传的必须是 stage 读回时比对的那两份字节，对象键按同一个版本号算
+    const env = jobBlock(LINES, 'upload-cn', 'env');
+    for (const name of ['VERSION', 'INSTALLER', 'BOOTSTRAP', 'HK_MANIFEST_URL']) {
+      const line = jobBlock(LINES, 'stage', 'env').find((candidate) => candidate.startsWith(`${name}:`));
+      assert.ok(env.includes(line), `upload-cn 的 ${name} 与 stage 的不同：${line}`);
+    }
+  });
+
+  // beta/ 下的对象禁止覆盖写、有锁：会在版本检查处失败的运行、字节不是审批时那一份的运行，都不该先往 cn 写删不掉的对象
+  it('upload-cn 先查凭据，配了才依次检出、查版本号、下载、核对 sha256、往 cn 传；与 dev 共用的两步逐字相同', () => {
+    const own = steps(LINES, 'upload-cn');
+    const at = (stepName) => own.findIndex((step) => stepKeys(step).includes(`name: ${stepName}`));
+    assert.equal(at('检查国内上传凭据'), 0, 'upload-cn 的第一步不再是检查国内上传凭据');
+    for (const step of own.slice(1)) {
+      assert.ok(stepKeys(step).includes(CONFIGURED), `${stepKeys(step)[0]} 没有限定只在配了凭据时跑`);
+    }
+    const checkout = own.findIndex((step) => stepKeys(step)[0].startsWith('uses: actions/checkout@'));
+    assert.equal(checkout, 1);
+    assert.deepEqual(blockOf(own[checkout], 8, 'with'), ['persist-credentials: false'], '自托管机上应完整检出，稀疏检出的设置会留在共用的工作区里');
+    const downloads = own.flatMap((step, index) => (stepKeys(step)[0].startsWith('uses: actions/download-artifact@') ? [index] : []));
+    assert.deepEqual(downloads.length, 2);
+    const order = [checkout, at('检查版本号没有倒退'), ...downloads, at('核对两个安装包'), at('上传到 cn')];
+    assert.deepEqual(order, [1, 2, 3, 4, 5, 6], `顺序应为检出、查版本号、两次下载、核对 sha256、上传，实际是 ${order}`);
+    assert.equal(own.length, 7, 'upload-cn 在上传之后还有别的步骤');
+    assert.deepEqual(stepText(own[at('检查版本号没有倒退')]).map((line) => line.trim()), ['- name: 检查版本号没有倒退', CONFIGURED, CHECK_VERSION]);
+    // 与 stage 的同名步骤只差一个条件
+    const shaCheck = stepText(own[at('核对两个安装包')]).filter((line) => line.trim() !== CONFIGURED);
+    assert.deepEqual(shaCheck, stepText(stepNamed(LINES, 'stage', '核对两个安装包')), '核对两个安装包与 stage 的不同，传进 cn 的可能不是审批时那两份字节');
+    for (const stepName of ['检查国内上传凭据', '上传到 cn']) {
+      assert.deepEqual(stepText(own[at(stepName)]), stepText(stepNamed(DEV_LINES, 'upload-cn', stepName)), `「${stepName}」与 dev-build.yml 的不同`);
+    }
+  });
+
+  // 不写状态函数时默认要求依赖都成功：upload-cn 失败（凭据配了却传不上）时 stage 跳过，这一版不发，beta 一个桶都不许缺
+  it('stage 要等 upload-cn，upload-cn 失败时跳过；版本检查与上传 cn 的分支和 dev 用的是同一份', () => {
+    assert.deepEqual(
+      jobKeys(LINES, 'stage').filter((key) => /^(?:needs|if|continue-on-error)\s*:/.test(key)),
+      ['needs: [build, sign, upload-cn]', BETA_ONLY],
+    );
+    assert.deepEqual(stepText(stepNamed(LINES, 'stage', '检查版本号没有倒退')).map((line) => line.trim()), ['- name: 检查版本号没有倒退', CHECK_VERSION]);
+    assert.equal(
+      scriptOf(stepNamed(LINES, 'stage', '上传到三个存储桶')),
+      scriptOf(stepNamed(DEV_LINES, 'publish', '上传到三个存储桶')),
+      'stage 上传那一步的脚本与 dev 的 publish 不同：只读回 cn 还是自己传 cn 的判法只在 dev 那边测过',
+    );
+    const env = blockOf(stepNamed(LINES, 'stage', '上传到三个存储桶'), 8, 'env');
+    assert.deepEqual(env.slice(-2), ['CN_RUN: ${{ needs.upload-cn.outputs.cn-run }}', 'CN_RESULT: ${{ needs.upload-cn.result }}']);
   });
 
   // 桶上同一个键只能写一次。传完包才失败的运行不建 tag，下一次运行算出同一个 beta.N，只带运行次数的话又从 1 起，
@@ -449,7 +548,7 @@ describe('beta 发布工作流的契约', () => {
     const record = '"$RUNNER_TEMP/mirror-record.tsv"';
     assert.deepEqual(
       stage.filter((line) => line.includes('bash .github/scripts/upload-to-mirrors.sh')),
-      [`bash .github/scripts/upload-to-mirrors.sh "$key" "$file" ${record}`],
+      [`bash .github/scripts/upload-to-mirrors.sh "\${cn[@]}" "$key" "$file" ${record}`],
       'stage 上传时不再写上传记录',
     );
     const manifestCalls = stage.filter((line) => /dev-distribution\.mjs (?:build|validate) /.test(line));
@@ -459,7 +558,7 @@ describe('beta 发布工作流的契约', () => {
   });
 
   // beta 客户端只问这一个地址：推送后回读、发布前比版本，读的都得是它，否则推上去了也核对不到客户端看到的那份。
-  it('stage 与 publish-hk 读写的香港清单、bundle 在 exe 里找的地址，都是客户端的 BETA_ENDPOINT', () => {
+  it('stage、upload-cn 与 publish-hk 读写的香港清单、bundle 在 exe 里找的地址，都是客户端的 BETA_ENDPOINT', () => {
     const declared = structure(LINES).filter((line) => line.key === 'HK_MANIFEST_URL' || line.key === 'BETA_MANIFEST_URL');
     assert.ok(declared.length > 0, '工作流里不再声明清单地址');
     for (const line of declared) assert.equal(line.raw.trim(), `${line.key}: ${BETA_MANIFEST_URL}`, `第 ${line.no} 行的清单地址变了`);
@@ -473,8 +572,11 @@ describe('beta 发布工作流的契约', () => {
       publishHk.some((line) => readsHkManifest(line) && line.includes("--write-out '%{content_type}'")),
       'publish-hk 推送之后不再经公网回读香港清单、核对 Content-Type',
     );
-    assert.ok(jobBlock(LINES, 'stage', 'env').includes(expected), 'stage 不再在作业级声明 beta 清单地址');
-    assert.ok(job(LINES, 'stage').some(readsHkManifest), 'stage 不再读香港清单检查版本号有没有倒退');
+    // 版本检查读的是交给 check-beta-version.sh 的地址，脚本按它读香港清单由 distribution-scripts.test.mjs 测过
+    for (const name of ['stage', 'upload-cn']) {
+      assert.ok(jobBlock(LINES, name, 'env').includes(expected), `${name} 不再在作业级声明 beta 清单地址`);
+      assert.ok(job(LINES, name).includes(CHECK_VERSION), `${name} 不再按 beta 清单地址检查版本号有没有倒退`);
+    }
     const bundle = steps(LINES, 'build').find((step) => codeOf(step).includes(BUILD_COMMAND));
     assert.ok(blockOf(bundle, 8, 'env').includes(`BETA_MANIFEST_URL: ${BETA_MANIFEST_URL}`), 'bundle 不再声明要在 exe 里找的清单地址');
 

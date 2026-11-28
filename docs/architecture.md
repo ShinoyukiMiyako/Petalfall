@@ -389,16 +389,16 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 
 这些都是防手误的闸，不是安全边界。真正挡住读不了本机数据的包的，是启动器下载验签之后读包头，与安装引导程序的数据格式关。
 
-dev 的发布链路在 `.github/workflows/dev-build.yml` 里：先在 GitHub 托管机（`ubuntu-24.04`）上跑 `release-heads` 作业，算出 dev 版本号（基础号加 `-dev.<运行序号>`），依次跑 `read`、`gate dev`、`data-format dev`。它只读、不挂环境、不引用任何机密与仓库令牌，时限 10 分钟：检查不过时不用先白编十几分钟，也不放在内网自托管机上，那台机器不该多一条外网依赖。dev 每次推送都发布，没有只打 notice 的演练。`build` 要等它通过，把它交出的版本号原样写进安装包，发出去的就是查过的那一个。自托管机上的 `build` 只构建：打包启动器之后在 `Petalfall.exe` 里核对没有编进 aws-lc 的 CPU 抖动熵源（它初始化失败时直接终止进程，由仓库根的 `.cargo/config.toml` 关掉；在 exe 里找到 `jent_entropy_collector_alloc` 就失败）；构建首装引导程序时 Rust 测试跑 `-p petalfall-setup-payload -p petalfall-release`，之后紧接着无条件「核对载荷头」（`inspect-setup` 读回四项，交给 `release-heads.mjs payload`）与「核对内嵌的更新公钥」（在 `Petalfall.exe` 里逐把找两个 `.pub` 文件去掉首尾空白后的内容，缺一把就失败：构建缓存里旧的编译产物没随 `.pub` 文件重编时，包里缺了哪一把，偏好那个通道的用户就收不到更新）。之后拆成 `publish` 与 `publish-hk` 两个作业，都跑在 GitHub 托管机（`ubuntu-24.04`）上，自托管的构建机不碰任何发布凭据。`publish` 取 `build` 传出的引导程序与 NSIS 包，依次：
+dev 的发布链路在 `.github/workflows/dev-build.yml` 里：先在 GitHub 托管机（`ubuntu-24.04`）上跑 `release-heads` 作业，算出 dev 版本号（基础号加 `-dev.<运行序号>`），依次跑 `read`、`gate dev`、`data-format dev`。它只读、不挂环境、不引用任何机密与仓库令牌，时限 10 分钟：检查不过时不用先白编十几分钟，也不放在内网自托管机上，那台机器不该多一条外网依赖。dev 每次推送都发布，没有只打 notice 的演练。`build` 要等它通过，把它交出的版本号原样写进安装包，发出去的就是查过的那一个。自托管机上的 `build` 只构建：打包启动器之后在 `Petalfall.exe` 里核对没有编进 aws-lc 的 CPU 抖动熵源（它初始化失败时直接终止进程，由仓库根的 `.cargo/config.toml` 关掉；在 exe 里找到 `jent_entropy_collector_alloc` 就失败）；构建首装引导程序时 Rust 测试跑 `-p petalfall-setup-payload -p petalfall-release`，之后紧接着无条件「核对载荷头」（`inspect-setup` 读回四项，交给 `release-heads.mjs payload`）与「核对内嵌的更新公钥」（在 `Petalfall.exe` 里逐把找两个 `.pub` 文件去掉首尾空白后的内容，缺一把就失败：构建缓存里旧的编译产物没随 `.pub` 文件重编时，包里缺了哪一把，偏好那个通道的用户就收不到更新）。之后是同一类自托管机上的 `upload-cn`，只把两个包传进 `cn`（见下文的国内上传 cn），再拆成 `publish` 与 `publish-hk` 两个作业，都跑在 GitHub 托管机（`ubuntu-24.04`）上。自托管机上的作业只拿得到一样发布凭据：`upload-cn` 那一对只能往 `cn` 本通道前缀写的 OSS 凭据；签名私钥、`hk` 与 `global` 的凭据、香港推送钥都不进那台跨任务常驻的机器。`publish` 取 `build` 传出的引导程序与 NSIS 包，依次：
 
-1. 版本号不倒退：GitHub 与香港机上已发布的清单都要比，新客户端先读香港那份；预发布上还没有 `latest.json`、香港机上还没有清单（404）时各自跳过，读香港清单连不上或回了 200、404 以外的状态时失败（见下文的停发）。这一步排在签名与上传之前：会在这里失败的运行（运行序号被重数，或整体重跑了已发布的运行）不该先往三个桶各传两个包、再跨境读回一遍，传上去的对象还会留在一个新目录里。检查之后要隔着上传与读回才重建预发布，这段时间别的运行改不了预发布：重建只在 `publish` 里做，各运行的 `publish` 在同一个并发组里串行（见下文的并发）。与已发布的版本相同也在这里停下，报错按情形给出走得通的补法：
+1. 版本号不倒退：GitHub 与香港机上已发布的清单都要比，新客户端先读香港那份；预发布上还没有 `latest.json`、香港机上还没有清单（404）时各自跳过，读香港清单连不上或回了 200、404 以外的状态时失败（见下文的停发）。这一步排在签名与上传之前：会在这里失败的运行（运行序号被重数，或整体重跑了已发布的运行）不该先往三个桶各传两个包、再跨境读回一遍，传上去的对象还会留在一个新目录里。`upload-cn` 却排在这一步之前（为什么挪不到后面见下文的国内上传 cn）：这样的运行已经往 `cn` 的 `dev/` 下写了一个目录，30 天后随生命周期规则删掉。检查之后要隔着上传与读回才重建预发布，这段时间别的运行改不了预发布：重建只在 `publish` 里做，各运行的 `publish` 在同一个并发组里串行（见下文的并发）。与已发布的版本相同也在这里停下，报错按情形给出走得通的补法：
    - GitHub 上已是这个版本，而这是本运行的第一次尝试：发布它的是另一个同号的运行，运行序号被重数了（工作流改名或重建），dev 包不会更新过去。
    - GitHub 上已是这个版本，不是第一次尝试，香港也已是这个版本：本运行在之前的尝试里已经发布完，这次整体重跑（Re-run all jobs）多余，不用再补。
    - GitHub 上已是这个版本，不是第一次尝试，香港落后或还没有清单：之前那次尝试重建了预发布、没推上香港，接着被整体重跑。`build` 已重编并覆盖了引导程序产物，`publish-hk` 读回 GitHub 一般会对不上；这次尝试里失败的又是 `publish`，再点 Re-run failed jobs 也只会在这里再停一次。这次运行补不了香港：往 dev 推新提交出新版本，或者手工把发布过的那次尝试留下的 `latest.json` 产物（与预发布上的 `latest.json` 字节相同，产物保留 14 天）推到香港。
    - 只有香港上已是这个版本：运行序号被重数，或推送香港之后预发布被手工删改过。
 2. 给引导程序签名，再按仓库里的公钥验签。签名用的 Tauri CLI 按锁文件取：`.github/scripts/locked-cli.mjs` 从 `app/pnpm-lock.yaml` 读出锁定版本的 `@tauri-apps/cli` 与 Linux 原生绑定 `cli-linux-x64-gnu` 两条 integrity，只下这两个 tarball，核对 integrity 后直接解开，不执行任何脚本；这一步不拿私钥。之后才在持钥的那一步跑 `signer sign --app-version`。持钥的作业里不跑 `npm exec`、`pnpm install` 这类包管理器：它们按 registry 当下给的元数据取包，还会跑安装脚本，拿到的不一定是锁文件里那一份。beta 的 `sign` 作业用同一个脚本取 CLI。
-3. 上传：引导程序与 NSIS 包按同一个对象键 `dev/<VERSION>-<RUN_ID>-<RUN_ATTEMPT>/<文件名>` 传进三个桶（`.github/scripts/upload-to-mirrors.sh`，aws-cli 2 的 `s3api put-object`，带 `Content-MD5`，`Cache-Control` 标一年、immutable）。键里带运行号与运行次数（工作流传 `$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT`）：`dev/` 下的对象不能覆盖（各桶的保护范围见上文），重跑时运行次数加一、换一个目录，不会撞上上次传了一半的对象；运行号对 dev 不是必需的，是与 beta 共用的键规则（见上文）。每传完一个桶就不带凭据、按客户端会用的公网地址匿名读回（经 `check-download.sh`，见下文），大小与 sha256 和本地一致才算传上：公共读没开、自定义域名配错时上传照样成功，只有读回看得出来。`put-object` 报错时（例如服务端已经写成、响应却在跨境路上丢了，aws-cli 自动重试同一个键，撞上不能覆盖的对象）照样读回，一致就算已传上，否则失败：不靠凭据去查，OSS 的凭据只能写，OSS 的 S3 兼容层与 R2 对「已存在」各报什么码也核实不了，比字节不依赖错误码。每个桶每个文件的上传加读回共用 600 秒，其中至少留 120 秒给最后一次读回：一次 `put-object` 外套 `timeout --kill-after=10 <秒>`，最多 90 秒，到时限（退出码 124，补发 KILL 后是 137）按超时处理；每次之后都读回，读回的时限就是剩下的秒数。读回对不上、`put-object` 又没报成功时重传，最多试 4 次，剩下的上传时间不到 30 秒就不再试；`put-object` 报了成功读回却对不上是公共读或域名的配置问题，不重传。之后还会重传的那几次读回失败只打警告，后面传上了作业就不挂错误注解。单次请求的连接与读超时管不住时快时慢的跨境链路，托管机到杭州 OSS 慢起来时一个包能传二十多分钟，aws-cli 的重试又让它一直传下去，直到作业时限把整个 `publish` 掐掉；跨境连接还会整个卡死，同一个包这次卡满时限、掐断重来几秒就传完，所以一次只等 90 秒（平时几秒，见过最慢的一次 46 秒）。排在签名之后，传上去的就是最终发出去的字节。
-4. 上传记录：工作流给上传脚本传一个记录文件 `$RUNNER_TEMP/mirror-record.tsv`，每个桶每个文件记一行「源名、`ok` 或 `failed`、对象键」，`ok` 是读回与本地一致。各通道上传不上也照样发版的桶写在 `dev-distribution.mjs` 的 `OPTIONAL_MIRRORS`：dev 只有 `cn`，beta 没有，stable 还不存在、按严格处理。dev 上 `cn` 传不上（含超过时限）只打警告、写进作业摘要、记为 `failed`，同一次运行里后面的文件不再传它（链路慢起来多半一阵子都慢，不再白等一轮时限），清单不列 `cn`、其余源照发：少一个源只是让大陆用户改走 `hk`，为它停发的话所有客户端都收不到这一版。`hk`、`global` 传不上照样让 `publish` 失败。分发试跑不传记录，三个桶都必须过。
+3. 上传：引导程序与 NSIS 包按同一个对象键 `dev/<VERSION>-<RUN_ID>-<RUN_ATTEMPT>/<文件名>` 传进三个桶（`.github/scripts/upload-to-mirrors.sh`，aws-cli 2 的 `s3api put-object`，带 `Content-MD5`，`Cache-Control` 标一年、immutable）。键里带运行号与运行次数（工作流传 `$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT`）：`dev/` 下的对象不能覆盖（各桶的保护范围见上文），重跑时运行次数加一、换一个目录，不会撞上上次传了一半的对象；运行号对 dev 不是必需的，是与 beta 共用的键规则（见上文）。每传完一个桶就不带凭据、按客户端会用的公网地址匿名读回（经 `check-download.sh`，见下文），大小与 sha256 和本地一致才算传上：公共读没开、自定义域名配错时上传照样成功，只有读回看得出来。`put-object` 报错时（例如服务端已经写成、响应却在跨境路上丢了，aws-cli 自动重试同一个键，撞上不能覆盖的对象）照样读回，一致就算已传上，否则失败：不靠凭据去查，OSS 的凭据只能写，OSS 的 S3 兼容层与 R2 对「已存在」各报什么码也核实不了，比字节不依赖错误码。每个桶每个文件的上传加读回共用 600 秒，其中至少留 120 秒给最后一次读回：一次 `put-object` 外套 `timeout --kill-after=10 <秒>`，最多 90 秒，到时限（退出码 124，补发 KILL 后是 137）按超时处理；每次之后都读回，读回的时限就是剩下的秒数。读回对不上、`put-object` 又没报成功时重传，最多试 4 次，剩下的上传时间不到 30 秒就不再试；`put-object` 报了成功读回却对不上是公共读或域名的配置问题，不重传。之后还会重传的那几次读回失败只打警告，后面传上了作业就不挂错误注解。单次请求的连接与读超时管不住时快时慢的跨境链路，托管机到杭州 OSS 慢起来时一个包能传二十多分钟，aws-cli 的重试又让它一直传下去，直到作业时限把整个 `publish` 掐掉；跨境连接还会整个卡死，同一个包这次卡满时限、掐断重来几秒就传完，所以一次只等 90 秒（平时几秒，见过最慢的一次 46 秒）。排在签名之后，传上去的就是最终发出去的字节。`cn` 已由 `upload-cn` 在这一次尝试里传过时，上传那一步给脚本加 `--readback-only cn`：不往 `cn` 传、不用 `cn` 的凭据，只按公网地址读回 `cn`，600 秒都给这一次读回、不重传，一致才记 `ok`，对不上与上传失败一样按 `cn` 在本通道的规矩处理；其余情形照旧从这里往 `cn` 传（见下文的国内上传 cn）。
+4. 上传记录：工作流给上传脚本传一个记录文件 `$RUNNER_TEMP/mirror-record.tsv`，每个桶每个文件记一行「源名、`ok` 或 `failed`、对象键」，`ok` 是读回与本地一致。各通道上传不上也照样发版的桶写在 `dev-distribution.mjs` 的 `OPTIONAL_MIRRORS`：dev 只有 `cn`，beta 没有，stable 还不存在、按严格处理。dev 上 `cn` 传不上（含超过时限）只打警告、写进作业摘要、记为 `failed`，同一次运行里后面的文件不再传它（链路慢起来多半一阵子都慢，不再白等一轮时限），清单不列 `cn`、其余源照发：少一个源只是让大陆用户改走 `hk`，为它停发的话所有客户端都收不到这一版。`hk`、`global` 传不上照样让 `publish` 失败。分发试跑不传记录，三个桶都必须过。只读回的 `cn` 照样每个文件记一行，格式不变，`ok` 同样只表示公网读回与本地一致；同一份记录里它读回失败过之后，后面的文件也不再读回它。
 5. 生成清单并从文件读回校验（`.github/scripts/dev-distribution.mjs` 的 `build` 与 `validate`）：键集合一字不差（拼错的键插件只会忽略，不会在任何地方报错）；`x-sources` 只列上传记录里传上了引导程序的桶，再加 `github`：`build` 按记录生成，`validate` 要求清单与记录一致、本通道不许缺的桶一个不少、`github` 必在，多列的桶源没有从公网核对过字节，客户端会先去试一个可能 404 的地址；源不重复，每个源名只认自己那台主机（比白名单更严）；https、规范形式的地址、带版本的路径；`url` 等于 `github`（旧客户端只认它，桶里的对象 30 天后过期，见上文）；`x-size` 等于引导程序的实际字节数，且不超过 256 MiB；`pub_date` 与 `toISOString` 往返后逐字相等，即 `build` 写出的 `YYYY-MM-DDTHH:mm:ss.sssZ` 形状、真实存在的 UTC 时刻（插件按 RFC 3339 严格解析，2 月 30 日、24 点这类会让整份清单作废，`Date.parse` 却把它们滚到下一天）。`github` 源的地址按工作流传入的 `$GITHUB_REPOSITORY` 拼出，`validate` 只要求它等于这样拼出的地址，没有另外钉死仓库前缀，在本仓库里跑时与客户端、`put-manifest` 钉的前缀相同。桶、端点、公网主机、对象键与清单里的地址都出自这个脚本的同一张表，传进哪个桶、从哪里读回、清单写哪个地址不会各算各的。
 6. 从写好的清单里取出 `version` 与 `signature` 按公钥再验一次：客户端从哪个源下载，验的都是这一对。
 7. 把写好的清单作为产物 `latest.json` 上传，交给 `publish-hk`。排在重建预发布之前：这一步失败时预发布还没动。
@@ -412,6 +412,16 @@ dev 的发布链路在 `.github/workflows/dev-build.yml` 里：先在 GitHub 托
 - 整次调用共用一个时限，默认 600 秒；上传脚本传的是每个桶 600 秒里剩下的秒数，拒收 0（curl 的 `--max-time 0` 是不限时）。每次的 `--max-time` 按剩下的时间给，等完间隔后剩不到 60 秒就不再试。
 - 末位可选参数是失败时打的注解级别，默认 `error`：允许缺的桶读回失败时作业照样往下走，打成 `error` 会让一次成功的运行挂着错误注解，上传脚本对它们传 `warning`。另设 `--connect-timeout 30`；每秒不到 1 KiB 持续 60 秒也按超时结束这次尝试，换一条连接重来，不把时限耗在一条死连接上。
 - 每次尝试前清空输出文件，上一次失败留下的残片不混进比对。
+
+国内上传 cn：从 GitHub 托管机往杭州 OSS 跨境上传常整个挂住，掐断重传几次也一样，托管机按公网地址读杭州却一直正常，所以 `cn` 改由国内的自托管机传，`publish` 只读回核对。`upload-cn` 作业：
+
+- 排在 `build` 之后，跑在同一类自托管机 `[self-hosted, Linux, X64, petalfall]` 上，挂单独的环境 `updates-dev-cn`，权限只有 `contents: read`，不引用仓库令牌与变量。凭据只有这个环境里的 `OSS_CN_ACCESS_KEY_ID`、`OSS_CN_ACCESS_KEY_SECRET`，只进「检查国内上传凭据」与「上传到 cn」两步，后一步以 `OSS_CI_ACCESS_KEY_ID`、`OSS_CI_ACCESS_KEY_SECRET` 的名字交给脚本。工作流只由推送 dev 触发，fork 的 PR 跑不到这台机器。这台机器上要装 aws-cli 2，`upload-to-mirrors.sh` 照样核对大版本。
+- 先查凭据：两个都为空时（环境或机密不存在，表达式取到的也是空串）只打一条 `::warning::`、写进作业摘要，作业成功结束，后面几步都跳过；只配了一个时作业失败。配了才检出、下载两个包，按与 `publish` 相同的对象键调 `upload-to-mirrors.sh --only cn <对象键> <文件> "$RUNNER_TEMP/cn-record.tsv"`。检出是完整检出，与 `build` 相同：这台机器的工作区跨作业保留，不在里面留下稀疏检出的设置。
+- `--only cn` 只处理 `cn`，只要 OSS 那一组凭据，不要 R2 的任何变量。给记录是为了按通道的规矩处理 `cn`：dev 上传不上只打警告、写进作业摘要，beta 上让作业失败；这份记录里只有 `cn`，只留在这个作业里，不拿去生成清单。两个包都处理完才写作业输出 `cn-run`，值是这一次的 `$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT`；脚本以 1 退出时这一步就此失败，`cn-run` 是空的。
+- `publish` 上传那一步拿 `cn-run` 和自己的运行标识比：相等时只读回 `cn`。`upload-cn` 没配凭据（`cn-run` 为空、作业成功）、失败了，或 `cn-run` 是上一次尝试的（只重跑了 `publish` 时 `upload-cn` 不跟着重跑，保留上一次的输出，对象在另一个目录）时，照旧从托管机往 `cn` 传，后两种打警告。所以凭据配好之前推上 dev 的代码照旧发布；配好之后 `updates-dev` 里托管机用的 OSS 子用户仍要留着 `petalfall-dl-cn/dev/*` 的写权限，退回时要用。dev 上 `upload-cn` 传不上 `cn` 只降级，照样交出 `cn-run`，`publish` 读回同样对不上，清单不列 `cn`。
+- `publish` 的条件是 `!cancelled() && needs.build.result == 'success'`：`upload-cn` 失败不挡发布，dev 上 `cn` 本来就允许缺。`publish-hk` 的条件另写成 `!cancelled() && needs.build.result == 'success' && needs.publish.result == 'success'`：不写时默认要求整条依赖链上的作业都成功，`upload-cn` 失败而 `publish` 已重建预发布时它会被跳过，香港停在旧版。
+- 排在 `publish` 的版本号不倒退检查之前，`release-heads` 的版本先后检查之后。那个检查要和重建预发布一起在 `dev-publish` 组里串行，挪不出 `publish`；`upload-cn` 也进不了那个组（见下文的并发）。代价是会在那个检查处失败的运行先往 `cn` 的 `dev/` 下写了一个目录，30 天后随生命周期规则删掉。
+- 自托管机只有一台时，`upload-cn` 和下一次推送的 `build` 排同一台机器，`publish` 会跟着等它。
 
 `publish-hk` 排在 `publish` 之后，取 `build` 传出的引导程序与 `publish` 交来的 `latest.json`，依次：
 
@@ -429,6 +439,7 @@ dev 的发布链路在 `.github/workflows/dev-build.yml` 里：先在 GitHub 托
 | 作业 | 并发组 | 取消正在跑的 | 为什么 |
 | --- | --- | --- | --- |
 | `build` | `dev-build` | 取消 | 新推送只取消还在构建的旧运行：滚动预发布只留最新一个包，旧构建做完也会被覆盖。运行过了这个作业就不再受新推送影响。反过来，重跑旧运行的 `build` 同样会取消新运行正在跑的构建 |
+| `upload-cn` | 不进组 | 不取消 | 只往本次运行独有的目录写，不碰预发布和清单，运行之间没有要串行的东西，版本检查到重建之间也碰不到。进了组反而会被同组后排进来的作业顶掉：自成一组时，重跑旧运行会把新运行排着的 `upload-cn` 顶掉，新运行的 `publish` 只好退回跨境上传；进 `dev-publish` 更糟，会顶掉别的运行排着的 `publish`；进 `dev-build` 的话，旧运行的 `upload-cn` 一排进去就会取消新运行正在跑的构建。也不随新推送取消：它很快做完，取消了，旧运行的 `publish` 反倒要跨境上传 |
 | `publish` | `dev-publish` | 不取消 | 重建预发布是先删后建，掐在中间 GitHub 上就没有预发布，旧客户端检查更新只剩 404。不取消也让各运行的 `publish` 串行，版本检查到重建之间不会有别的运行改预发布 |
 | `publish-hk` | `dev-publish-hk` | 不取消 | 推送、回读做到一半被掐，香港会停在旧版。不和 `publish` 共用一个组：同组只留一个排队者，共用时这里排进去会顶掉别的运行排着的 `publish`，那一版就没人发了。和别的运行的 `publish` 并行是安全的：那边先重建了预发布，这里读回 GitHub 不符就失败、拒推；读回之后那边才重建的，那个运行的 `publish-hk` 在这个组里排在后面，接着推上新版 |
 
@@ -440,15 +451,17 @@ dev 的发布链路在 `.github/workflows/dev-build.yml` 里：先在 GitHub 托
 - 重建预发布之后失败（`publish-hk` 里的任何一步）：用 Re-run failed jobs 只重跑 `publish-hk`。推的是 `publish` 交来的同一份字节，香港机落后时照常替换，已经写进去时视为无变化。不能整体重跑：`build` 会重编并覆盖引导程序产物，`publish` 又会在版本检查处停下，这次运行就补不了香港了（见上文版本检查的第三种报错）。香港停在旧版期间，新客户端先查香港、拿到 2xx 就不再问 GitHub，一直看不到这次更新。
 - `put-manifest` 以 1 拒收时（清单内容过不了它的校验，例如三份源表对不上），重跑也一样被拒，要先改好香港机上的脚本或 CI 再发版。
 - `publish-hk` 读回 GitHub 时发现预发布已被更新的运行重建、因此失败的，不用补：那个运行的 `publish-hk` 会推上更新的版本。
+- 用 Re-run failed jobs 只重跑 `publish` 时，`upload-cn` 不跟着重跑，交来的还是上一次尝试的 `cn-run`，`publish` 照旧从托管机往 `cn` 传。要让国内机重传，在这次运行上单独重跑 `upload-cn`（Re-run 这一个作业），依赖它的 `publish`、`publish-hk` 跟着重跑。
+- `upload-cn` 失败、`publish` 与 `publish-hk` 照样发完的运行显示失败，但不用补：再点 Re-run failed jobs 会连 `publish` 一起重跑，在版本检查处停下（GitHub 上已是这个版本），只多往 `cn` 写一个目录。
 
-停发：除 dev 上的 `cn` 之外，任一镜像传不上或读回失败（重试用完、或每桶 600 秒的时限用完），或读不到香港清单（连不上，或回了 200、404 以外的状态）时，`publish` 在重建预发布之前就失败，这一版哪里都不发，GitHub 预发布与香港清单都停在上一版。beta 没有允许缺的桶，三个桶都要过。这是有意的取舍：
+停发：除 dev 上的 `cn` 之外，任一镜像传不上或读回失败（重试用完、或每桶 600 秒的时限用完），或读不到香港清单（连不上，或回了 200、404 以外的状态）时，`publish` 在重建预发布之前就失败，这一版哪里都不发，GitHub 预发布与香港清单都停在上一版。beta 没有允许缺的桶，三个桶都要过。`cn` 由 `upload-cn` 传过、`publish` 只读回时同样按这条：读回对不上在 dev 上降级，在 beta 上停发。这是有意的取舍：
 
 - 发出去的清单里列的每个源，都在发布前从公网核对过字节。读不回的镜像多半是配置坏了（公共读被关、自定义域名或证书失效），把它从 `x-sources` 里悄悄去掉、清单照发的话，坏掉的源就一直没人发现；所以只有 dev 的 `cn` 能这样降级，并且每次都打警告、写进作业摘要，其余桶一律不许缺，`validate` 也按本通道不许缺的桶检查。
 - 读不到香港清单就比不了版本号，而 `publish-hk` 推送之后同样要经公网回读这个地址。放行的话，预发布重建之后 `publish-hk` 多半也过不了，香港落后于 GitHub，新客户端先查香港、拿到旧清单的 2xx 就不再问 GitHub。
 
 代价是：客户端本来容得下单个源的故障（换下一个源就是），发布这一侧却会因为一个桶或香港机出问题挡下整次发版，所有客户端都收不到这一版，dev.35 及更早只读 GitHub 的也一样，要等修好再重跑。
 
-dev 的发布凭据放在 GitHub 环境 `updates-dev` 里，`publish` 与 `publish-hk` 两个作业都声明了这个环境才拿得到，每样只进用到它的那一步：存储桶凭据只进 `publish` 的上传，`HK_MANIFEST_SSH_KEY` 只进 `publish-hk` 的推送。环境的部署分支限制必须只放行 dev，挡住别的分支拿机密靠的是它。dev 的更新签名私钥 `DEV_UPDATER_PRIVATE_KEY` 与它的口令 `DEV_UPDATER_KEY_PASSWORD` 也放在环境 `updates-dev` 里，只进 `publish` 的「给更新包签名」那一步，不建仓库级的同名机密：仓库级的机密任何分支的工作流都拿得到，而每个官方包都认 dev 钥（偏好为预览版时用它验包）。
+dev 的发布凭据放在 GitHub 环境 `updates-dev` 里，`publish` 与 `publish-hk` 两个作业都声明了这个环境才拿得到，每样只进用到它的那一步：存储桶凭据只进 `publish` 的上传，`HK_MANIFEST_SSH_KEY` 只进 `publish-hk` 的推送。环境的部署分支限制必须只放行 dev，挡住别的分支拿机密靠的是它。dev 的更新签名私钥 `DEV_UPDATER_PRIVATE_KEY` 与它的口令 `DEV_UPDATER_KEY_PASSWORD` 也放在环境 `updates-dev` 里，只进 `publish` 的「给更新包签名」那一步，不建仓库级的同名机密：仓库级的机密任何分支的工作流都拿得到，而每个官方包都认 dev 钥（偏好为预览版时用它验包）。`cn` 的国内上传凭据放在另一个环境 `updates-dev-cn` 里，只有 `upload-cn` 声明它，部署分支同样必须只放行 dev：它跑在自托管机上，`updates-dev` 里的东西一样都不能进那台机器。
 
 beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布分进两个环境，发布凭据（签名私钥、桶凭据、香港推送钥）都放在环境里，不建仓库级的：仓库级的机密任何分支的工作流都拿得到。
 
@@ -456,19 +469,22 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 | --- | --- | --- | --- |
 | `release-signing` | 只放发布签名私钥 `RELEASE_UPDATER_PRIVATE_KEY`，这把钥不设口令 | beta、main | 必需审批人是维护者，关闭管理员绕过 |
 | `updates-beta` | beta 专用的存储桶凭据、beta 的香港推送钥匙，以及变量 `R2_ACCOUNT_ID`，名称见下表 | beta | 不设审批，关闭管理员绕过 |
+| `updates-beta-cn` | 只放 beta 的 `cn` 国内上传凭据 `OSS_CN_ACCESS_KEY_ID`、`OSS_CN_ACCESS_KEY_SECRET`，名称见下表 | beta | 不设审批，关闭管理员绕过 |
 
-- 只有签名的作业挂 `release-signing`，这个作业里没有任何上传或推送凭据；传桶、建 Release 与推送香港的作业挂 `updates-beta`；构建作业不挂环境，拿不到任何发布凭据，只读要编进包里的仓库级机密 `PETALFALL_CURSEFORGE_API_KEY` 与仓库变量 `PETALFALL_MSA_CLIENT_ID`，和 dev 构建相同。
+- 只有签名的作业挂 `release-signing`，这个作业里没有任何上传或推送凭据；传桶、建 Release 与推送香港的作业挂 `updates-beta`；自托管机上的 `upload-cn` 只挂 `updates-beta-cn`；构建作业不挂环境，拿不到任何发布凭据，只读要编进包里的仓库级机密 `PETALFALL_CURSEFORGE_API_KEY` 与仓库变量 `PETALFALL_MSA_CLIENT_ID`，和 dev 构建相同。
 - 每发一版，在签名之前审批一次。更新签名是分离的 `.sig` 文件，批准之前从构建产物里下载到的引导程序就是最终发出去的字节，可以先装一遍再批。不开 Prevent self-review（禁止自审）：只有一个维护者，批准人就是触发人。
 - 发布签名钥不复用 dev 那把，公钥是 `.github/release-updater.pub`，打包时注入，编进每个测试版。这把钥由维护者在首个测试版之前生成，`.github/scripts/beta-release-contract.test.mjs` 钉住了它的密钥号：首个测试版发出之后，已装的用户只认这把，换钥必须是有意的，连测试一起改。main 留给以后的正式版，正式版与测试版共用这把钥。
 - `updates-beta` 里的名称沿用 dev 的，`upload-to-mirrors.sh` 与 `push-hk-manifest.sh` 两个通道共用，不用改变量名；值是另一套，不复用 `updates-dev` 的：OSS 子用户按通道限前缀，复用就等于让 dev 链路能往 `beta/` 传包；R2 凭据本来就不限前缀，分开只是让两个通道的凭据各自轮换、泄露时各自吊销，挡不住 dev 的 R2 凭据往 `beta/` 写没用过的键（已有的对象有锁）。
 - `stage` 作业传桶的做法与 dev 的 `publish` 相同（见上文的上传、上传记录与读回）：`upload-to-mirrors.sh` 每个桶每个文件 600 秒、传完即读回，工作流里没有单独的读回步骤；上传、生成清单、校验清单读同一份 `$RUNNER_TEMP/mirror-record.tsv`。beta 没有允许缺的桶，哪个桶传不上都让 `stage` 失败，重跑这个作业；清单三个桶源与 `github` 一个不少。
+- `cn` 同样由国内的自托管机上传（见上文的国内上传 cn），作业 `upload-cn` 在 beta 上只在 beta 分支跑，`needs: [build, sign]`：排在签名审批之后，被拒批的版本不该往 `beta/` 写删不掉的对象。它往 `cn` 传之前先跑与 `stage` 相同的版本号检查（`.github/scripts/check-beta-version.sh`：比香港 beta 清单与所有 `v*` tag，`stage` 上传之前照样再跑一遍），再按审批时记下的 sha256 核对两个包，会在这两处失败的运行不在 `cn` 留下删不掉的目录；这台机器因此要读香港 beta 清单与 GitHub 上的 tag。这台机器跨任务常驻，被污染时最多传错字节或在 `cn` 的 `beta/` 下多写对象，让这一版发不出去：`stage` 读回对不上就失败，签名验不过的包客户端也不会装。`upload-cn` 失败时 `stage` 跟着跳过，这一版不发；没配凭据时它只打警告，`stage` 照旧自己往 `cn` 传。`stage` 只读回 `cn` 还是自己传的判法与 dev 的 `publish` 相同。`stage` 在转正之前失败、`cn` 已由 `upload-cn` 传过时，在这次运行上单独重跑 `upload-cn`（`stage`、`publish-hk` 跟着重跑）：只重跑 `stage` 时 `upload-cn` 交来的是上一次尝试的目录，`stage` 只能退回托管机往 `cn` 跨境上传。`upload-cn` 不另设并发组，beta 同一分支的运行由工作流级的组整个串行。
 - 构建作业在「确定版本号」之后、编译之前跑「读出各通道已发布的版本」：`release-heads.mjs` 的 `read`、`gate beta`、`data-format beta`（见上文）。测试版低于预览版、核心号高于已发布的正式版都在这里查，正式版有没有发布同样只采信验得过签名的清单，不再读未验签的正式版清单。不在 beta 分支上的手动演练（`workflow_dispatch`）照常读取、照常验签，读取出错照样失败，检查不过只打 notice：演练的包本来就不发布。打包启动器之后同样在 `Petalfall.exe` 里核对没有编进 CPU 抖动熵源；构建首装引导程序之后同样无条件核对载荷头与内嵌的更新公钥；载荷头的 magic、数据格式号与能力位，上一个测试版的数据格式号（不倒退的检查跳过时照实写跳过）与各通道已发布的版本写进签名前审批看的 job summary，同一份内容存成 `build-info.json` 随 Release 发出去留档。
 
-两个环境里同名的几样：
+两个通道的环境里同名的几样：
 
 | 名称 | 类型 | 用途与权限 |
 | --- | --- | --- |
-| `OSS_CI_ACCESS_KEY_ID`、`OSS_CI_ACCESS_KEY_SECRET` | 机密 | 阿里云 RAM 子用户，只有 `oss:PutObject`，资源只限本通道的前缀：`updates-dev` 里的限 `petalfall-dl-cn/dev/*` 与 `petalfall-dl/dev/*`，`updates-beta` 里的限这两个桶的 `beta/*` |
+| `OSS_CI_ACCESS_KEY_ID`、`OSS_CI_ACCESS_KEY_SECRET` | 机密 | 阿里云 RAM 子用户，只有 `oss:PutObject`，资源只限本通道的前缀：`updates-dev` 里的限 `petalfall-dl-cn/dev/*` 与 `petalfall-dl/dev/*`，`updates-beta` 里的限这两个桶的 `beta/*`。`cn` 那一半要留着：国内凭据没配、`upload-cn` 失败或只重跑了发布作业时，`cn` 退回从托管机传 |
+| `OSS_CN_ACCESS_KEY_ID`、`OSS_CN_ACCESS_KEY_SECRET` | 机密 | 只在 `updates-dev-cn`、`updates-beta-cn` 里，给自托管机上的 `upload-cn`。阿里云 RAM 子用户，每个通道一个，只有 `oss:PutObject`，资源只限 `petalfall-dl-cn` 一个桶里本通道的前缀（`petalfall-dl-cn/dev/*` 或 `petalfall-dl-cn/beta/*`），碰不到 `hk` 与另一个通道 |
 | `R2_CI_ACCESS_KEY_ID`、`R2_CI_SECRET_ACCESS_KEY` | 机密 | R2 的 S3 凭据，只授 `petalfall-dl` 一个桶，但不限前缀：能写整个桶，也能删对象（保护范围见上文）。两个环境各用一把，可以单独吊销 |
 | `HK_MANIFEST_SSH_KEY` | 机密 | 推送香港清单的 ed25519 私钥，两个环境各一把，只能替换本通道的清单；脚本写到 `$RUNNER_TEMP`、权限 600，用完即删 |
 | `R2_ACCOUNT_ID` | 变量 | 拼 R2 的 S3 端点。它是环境变量，不是仓库变量，两个环境各配一份 |

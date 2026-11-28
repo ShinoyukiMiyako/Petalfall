@@ -3,8 +3,9 @@ name: Dev 构建
 # 更新清单本身没有签名，防降级靠两处配套：签名用 signer sign --app-version 把版本写进可信注释，
 # 打包时给更新插件注入 requireSignedVersion: true。以后的正式版、测试版流水线也必须同时带上这两处。
 
-# 分发链路：自托管机只构建。publish 在 GitHub 托管机上签名，把引导程序和 NSIS 包传到杭州 OSS（国内主源 cn）、
-# 香港 OSS（国内备源 hk）和 R2（海外 global，经 dl.petalfall.org），按公网地址逐个匿名读回核对，再生成带 x-size
+# 分发链路：自托管机构建，upload-cn 再在同一类国内的自托管机上把两个包传进杭州 OSS（国内主源 cn），只拿 cn 的凭据。
+# publish 在 GitHub 托管机上签名，把引导程序和 NSIS 包传到香港 OSS（国内备源 hk）和 R2（海外 global，经 dl.petalfall.org），
+# cn 没由 upload-cn 传过时也传 cn，三个桶都按公网地址逐个匿名读回核对，再生成带 x-size
 # 与 x-sources 的清单。同一份清单发两处：滚动预发布 dev-build（dev.35 及更早的客户端只认这里，下载也只走清单的
 # url，即 github），和香港机上的 petalfall.org/updates/dev/latest.json（新客户端先查这里，再按「文件下载源」在
 # cn、hk、global、github 之间换源）。两处字节相同：publish 重建预发布，publish-hk 把同一份清单推到香港机，
@@ -17,7 +18,7 @@ on:
     branches: [dev]
 
 # 并发组按作业分，不设工作流级的：工作流级取消会把已经重建预发布、还没推完香港的运行整个掐掉，香港停在旧版，
-# 新客户端先查香港、拿到 2xx 就不再问 GitHub。三个组各自的取舍写在各作业上。
+# 新客户端先查香港、拿到 2xx 就不再问 GitHub。三个组各自的取舍、upload-cn 为什么不进组，都写在各作业上。
 permissions:
   contents: read
 
@@ -290,10 +291,94 @@ jobs:
           overwrite: true
           retention-days: 14
 
+  # cn（杭州 OSS）由这台国内的自托管机上传：从 GitHub 托管机往杭州跨境上传常整个挂住，掐断重传几次也一样，托管机按公网
+  # 地址读杭州却一直正常。这里只往 cn 传两个包，publish 照旧传 hk、global，并按公网地址读回 cn、字节一致才记 ok：
+  # 这台机器传错了字节，清单也不会列 cn。凭据放在单独的环境 updates-dev-cn 里，只有一对只能往 petalfall-dl-cn 的 dev/ 写的
+  # OSS 凭据；签名私钥、R2 与 hk 的凭据、香港推送钥都不进这台跨任务常驻的机器。环境里没配凭据时只打警告、写进作业摘要，
+  # 作业照样成功，publish 照旧自己往 cn 传。
+  # 交给 publish 的信号是作业输出 cn-run：只在这一次尝试里走完了 cn 的上传才有值，等于这一次的 $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT。
+  # 只重跑 publish 时这个作业不跟着重跑，输出还是上一次尝试的，对象在另一个目录，publish 比对不上就照旧自己传。
+  # 排在 publish 的「检查版本号没有倒退」之前（release-heads 的版本先后检查仍在它之前）：那个检查要和重建预发布一起在
+  # dev-publish 组里串行，挪不出 publish；这个作业也进不了那个组，同组只留一个排队者，它排进去会顶掉别的运行排着的 publish。
+  # 代价是会在那里失败的运行（整体重跑了已发布的运行、运行序号被重数）先往 cn 的 dev/ 下写了一个目录，30 天后随生命周期规则删掉。
+  # 不设并发组：它只往本次运行独有的目录写，不碰预发布和清单，运行之间没有要串行的东西；进了组反而会被同组后排进来的作业顶掉，
+  # 重跑旧运行时会把新运行排着的这一步顶掉，新运行的 publish 只好退回跨境上传。
+  # 只由推送 dev 触发（见文件开头），fork 的 PR 跑不到这里。
+  upload-cn:
+    needs: build
+    runs-on: [self-hosted, Linux, X64, petalfall]
+    environment: updates-dev-cn
+    # 两个包各传一次 cn、传完即读回，每个包最多 600 秒（upload-to-mirrors.sh）
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      cn-run: ${{ steps.upload.outputs.run }}
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      INSTALLER: ${{ github.workspace }}/dist/${{ needs.build.outputs.installer-name }}
+      BOOTSTRAP: ${{ github.workspace }}/dist/${{ needs.build.outputs.bootstrap-name }}
+    steps:
+      # 两个都空是还没配：只打警告、记进作业摘要，后面几步跳过。只配了一个是配错了，照样失败，不能当成没配悄悄退回。
+      - name: 检查国内上传凭据
+        id: credentials
+        env:
+          OSS_CN_ACCESS_KEY_ID: ${{ secrets.OSS_CN_ACCESS_KEY_ID }}
+          OSS_CN_ACCESS_KEY_SECRET: ${{ secrets.OSS_CN_ACCESS_KEY_SECRET }}
+        run: |
+          if [ -n "$OSS_CN_ACCESS_KEY_ID" ] && [ -n "$OSS_CN_ACCESS_KEY_SECRET" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$OSS_CN_ACCESS_KEY_ID" ] && [ -z "$OSS_CN_ACCESS_KEY_SECRET" ]; then
+            echo "::warning::作业所在的环境里没有配置 OSS_CN_ACCESS_KEY_ID 与 OSS_CN_ACCESS_KEY_SECRET，cn 照旧由托管机上的发布作业上传"
+            echo "**cn 由托管机上传**：作业所在的环境里没有配置国内上传凭据 OSS_CN_ACCESS_KEY_ID、OSS_CN_ACCESS_KEY_SECRET，这次 cn 照旧由托管机上的发布作业上传。" >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::作业所在的环境里 OSS_CN_ACCESS_KEY_ID 与 OSS_CN_ACCESS_KEY_SECRET 只配了一个"
+            exit 1
+          fi
+
+      # 这台机器的工作区跨作业保留，build 也在这里检出；与 build 同样完整检出，不在共用的工作区里留下稀疏检出的设置。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.credentials.outputs.configured == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: steps.credentials.outputs.configured == 'true'
+        with:
+          name: ${{ needs.build.outputs.installer-name }}
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: steps.credentials.outputs.configured == 'true'
+        with:
+          name: ${{ needs.build.outputs.bootstrap-name }}
+          path: dist
+
+      # 对象键与 publish 同一条规则（dev-distribution.mjs key），publish 读回的就是这里传的地址。凭据换成脚本认的名字，只进这一步。
+      # 给上传记录是为了按通道的规矩处理 cn：dev 上 cn 传不上只打警告、写进作业摘要，照样交出 cn-run，publish 读回时同样对不上，
+      # 清单不列 cn；beta 上 cn 不许缺，传不上就让这个作业失败。记录只留在这个作业里，里面只有 cn，不拿去生成清单。
+      # cn-run 写在循环之后：脚本以 1 退出时这一步就此失败，cn-run 是空的，publish 照旧自己传。
+      - name: 上传到 cn
+        id: upload
+        if: steps.credentials.outputs.configured == 'true'
+        env:
+          OSS_CI_ACCESS_KEY_ID: ${{ secrets.OSS_CN_ACCESS_KEY_ID }}
+          OSS_CI_ACCESS_KEY_SECRET: ${{ secrets.OSS_CN_ACCESS_KEY_SECRET }}
+        run: |
+          for file in "$BOOTSTRAP" "$INSTALLER"; do
+            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
+            bash .github/scripts/upload-to-mirrors.sh --only cn "$key" "$file" "$RUNNER_TEMP/cn-record.tsv"
+          done
+          echo "run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
   # 签名与发布在 GitHub 托管的一次性机器上做，私钥只在这里出现，而且只给签名那一步。
   # 存储桶凭据和香港推送私钥同理，各自只进用到它的那一步。签名私钥与它们都放在 GitHub 环境 updates-dev 里，作业声明了环境才拿得到。
+  # upload-cn 失败也照样发布：dev 上 cn 本来就允许缺，这里照旧自己往 cn 传。条件里不能省 needs.build.result：
+  # 写了状态函数就不再默认要求前面的作业都成功，build 失败或被取消时这里不该跑。
   publish:
-    needs: build
+    needs: [build, upload-cn]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     # 上传用的是镜像预装的 aws-cli，publish-hk 推送用的是镜像里的 OpenSSH；固定镜像版本，免得 ubuntu-latest 换代时跟着悄悄变
     runs-on: ubuntu-24.04
     environment: updates-dev
@@ -470,6 +555,9 @@ jobs:
       # 每传完一个桶就不带凭据、按客户端会用的公网地址读回，一致才记进上传记录。dev 上 cn 传不上（含超过时限）只打警告、
       # 写进作业摘要，清单不列 cn、其余源照发：少一个源只是让大陆用户改走 hk，为它停发的话所有客户端都收不到这一版。
       # hk、global 传不上照样让 publish 失败。
+      # cn 已由 upload-cn 在这一次尝试里从国内传过（它交来的运行标识等于这一次的）时，这里不往 cn 传、不用 cn 的凭据，只按公网
+      # 地址读回 cn，一致才记 ok，对不上按上面 cn 的规矩降级。upload-cn 没配凭据、失败了，或交来的是上一次尝试的结果时，
+      # 照旧从这里往 cn 传。beta-release.yml 的 stage 用的是同一段脚本。
       - name: 上传到三个存储桶
         env:
           OSS_CI_ACCESS_KEY_ID: ${{ secrets.OSS_CI_ACCESS_KEY_ID }}
@@ -477,10 +565,23 @@ jobs:
           R2_CI_ACCESS_KEY_ID: ${{ secrets.R2_CI_ACCESS_KEY_ID }}
           R2_CI_SECRET_ACCESS_KEY: ${{ secrets.R2_CI_SECRET_ACCESS_KEY }}
           R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+          CN_RUN: ${{ needs.upload-cn.outputs.cn-run }}
+          CN_RESULT: ${{ needs.upload-cn.result }}
         run: |
+          cn=()
+          if [ "$CN_RUN" = "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]; then
+            cn=(--readback-only cn)
+            echo "cn 已由 upload-cn 从国内传过，这里只按公网地址读回核对"
+          elif [ -n "$CN_RUN" ]; then
+            echo "::warning::upload-cn 交来的是运行标识 $CN_RUN 的结果，这一次是 $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT：它没跟着重跑，传的是另一个目录，cn 改从托管机上传。要让国内机重传，单独重跑 upload-cn，依赖它的作业会跟着重跑"
+          elif [ "$CN_RESULT" != success ]; then
+            echo "::warning::upload-cn 的结果是 $CN_RESULT，cn 改从托管机上传"
+          else
+            echo "upload-cn 所在的环境里没有配置国内上传凭据，cn 照旧从托管机上传"
+          fi
           for file in "$BOOTSTRAP" "$INSTALLER"; do
             key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
-            bash .github/scripts/upload-to-mirrors.sh "$key" "$file" "$RUNNER_TEMP/mirror-record.tsv"
+            bash .github/scripts/upload-to-mirrors.sh "${cn[@]}" "$key" "$file" "$RUNNER_TEMP/mirror-record.tsv"
           done
 
       # url 是 dev.35 及更早的客户端唯一会用的源，取 github：桶里 dev/ 下的对象 30 天后被删，dev 停更久了指向桶的 url
@@ -554,8 +655,10 @@ jobs:
   # 只重跑这个作业：推的还是 publish 交来的同一份清单，香港机落后时照常替换，已经写进去时视为无变化。
   # 不能点 Re-run all jobs：build 会重编并覆盖引导程序产物，这里读回 GitHub 时对不上，publish 又会在版本检查处停下，
   # 这次运行就补不了香港了。
+  # 条件要写全：不写时默认要求整条依赖链上的作业都成功，upload-cn 失败而 publish 照样重建了预发布时，这里会被跳过，香港停在旧版。
   publish-hk:
     needs: [build, publish]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.publish.result == 'success' }}
     # 与 publish 同一个镜像
     runs-on: ubuntu-24.04
     environment: updates-dev
