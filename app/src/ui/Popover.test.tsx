@@ -354,6 +354,14 @@ describe("样式约定", () => {
     return decls;
   }
 
+  it("面板拿到键盘焦点时画标准焦点环，大阴影留着；只认 :focus-visible，鼠标点开后程序聚焦到面板不出环", () => {
+    const base = rule(".panel");
+    expect(base.get("outline")).toBe("none");
+    expect(base.get("box-shadow")).toBe("var(--sk-shadow-lg)");
+    expect(rule(".panel:focus-visible").get("box-shadow")).toBe("var(--sk-focus), var(--sk-shadow-lg)");
+    expect(() => rule(".panel:focus")).toThrow();
+  });
+
   it("带结构的外框只裁切不滚动：clip 不是滚动容器，缩放途中撑不出滚动条", () => {
     const structured = rule(".panel[data-structured]");
     expect(structured.get("overflow")).toBe("clip");
