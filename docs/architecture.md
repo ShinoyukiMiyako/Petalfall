@@ -61,7 +61,7 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 
 长任务在快照上挂取消令牌（`Petalfall::with_cancel`），常驻门面上从不挂令牌。令牌会传到下载池、整合包解压、Forge 处理器与安装用的元数据抓取（版本清单、版本 JSON、Fabric / Quilt meta、Forge / NeoForge 的 Maven 元数据与 installer 的 `.sha1`）：下载在文件粒度停下并清理临时文件；处理器子进程被结束，并等它真正退出后才返回；元数据只进内存，取消后 1 秒内直接丢下请求以 `cancelled` 返回，不换源、加载器列表也不退回缓存。安装一侧的令牌挂在 `petalfall_install::InstallContext` 上（`with_cancel`），与下载池上的是同一个；门面造上下文时必须给出令牌（`make_context` 的必填参数）。
 
-快照之间共享的磁盘资源另有进程级的排队：下载引擎按目标路径加锁，同一目标的并发下载排队，后到的一方等前一方落位后按 sha1 认出已就绪直接跳过；Forge 与 NeoForge 安装整个进程同时只跑一个（处理器的产物直接写进共享的 libraries）；natives 目录与旧版资源（virtual、map_to_resources 布局，1.7.2 及更早）的展开目录由 `petalfall-install` 的 `dir_lock` 按目录串行：这两处就地写文件，不走下载引擎「写临时文件再改名」的落位，几个以同一个原版为基底的实例、几个用同一份资源索引的旧版实例会写到同一个目录。键不分大小写（`inheritsFrom` 写的大小写可以与目录名不同），后到的一方排到时目录已写完，经戳记（natives）或大小比对（资源）直接跳过。三处等待期间都响应取消；natives 解压与资源展开一旦开始就做完为止，不看令牌，不留半截的目录。
+快照之间共享的磁盘资源另有进程级的排队：下载引擎按目标路径加锁，同一目标的并发下载排队，后到的一方等前一方落位后按 sha1 认出已就绪直接跳过；Forge 与 NeoForge 安装整个进程同时只跑一个（处理器的产物直接写进共享的 libraries），排队排在准备 Java 之前：调用方经 `ForgeTurn::acquire` 先报 `loader_queue` 一步、轮到之后再进 Java，凭据经 `with_turn` 交给安装器，安装器不再自己排（锁不可重入）；natives 目录与旧版资源（virtual、map_to_resources 布局，1.7.2 及更早）的展开目录由 `petalfall-install` 的 `dir_lock` 按目录串行：这两处就地写文件，不走下载引擎「写临时文件再改名」的落位，几个以同一个原版为基底的实例、几个用同一份资源索引的旧版实例会写到同一个目录。键不分大小写（`inheritsFrom` 写的大小写可以与目录名不同），后到的一方排到时目录已写完，经戳记（natives）或大小比对（资源）直接跳过。三处等待期间都响应取消；natives 解压与资源展开一旦开始就做完为止，不看令牌，不留半截的目录。
 
 `update` 的闭包里不碰磁盘：切换游戏目录先在快照上限时探测当前目录在不在（`Petalfall::probe_current_game_dir`，2 秒，跑在阻塞线程池），写锁里只看探测结果。当前目录在断开的网络盘上时，读配置的命令不会排在写锁后面等几十秒。
 
@@ -100,7 +100,7 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 
 启动器开着时还会在后台提前续期（`Petalfall::renew_current_ahead`，由外壳的 `renew_ahead_in_background` 驱动）：打开时查一次，之后每 15 分钟查一次，当前账户是微软账户、没被判定要重新登录、Minecraft 令牌 30 分钟内到期时就续。令牌只有一天的有效期，令牌链又是串行的几次 HTTPS 往返，不提前续的话一天玩一次的人每次点启动都要先等几秒。外置账户不提前续：令牌有没有失效在本地看不出来，启动时无论如何要校验一次。后台续期与启动前、手动刷新排同一把续期闸，点启动时后台正在续，启动等它落盘后直接用新令牌；后台续不了只记日志，启动时照常再续，失败按上面的失败码报给玩家。提前量（`RENEW_AHEAD_WITHIN`）与检查间隔（`RENEW_AHEAD_CHECK_EVERY`）都在 `core/auth.rs`，编译期断言提前量大于间隔，两次检查之间令牌才不会过期；两边的判定都扣同一个 60 秒余量，互相抵消。
 
-后台改写了账户记录之后，门面发一条账户变更通知（`core/auth.rs` 的 `AccountChanges`，广播通道挂在门面上随快照共享），外壳开机时在任何后台续期之前订阅，转成 `petalfall://account-changed` 推给前端，负载是改了的账户 uuid（`events.rs` 的 `forward_account_changes`）。发通知的是界面不知情的三处：后台提前续期续成了，或把账户判成要重新登录；启动前的验证与续期联网改写了记录（续出新令牌、名字与皮肤，记下验证时刻，或落成失效）；启动时外置令牌校验有效，在后台顺带取一次角色档案，名字或皮肤变了才发。账户页的刷新、登录、切换与删除由界面发起，做完就重读，不发。前端收到后重读账户列表，并让这个账户的 `skin:<uuid>` 失效重取，档案后来取到的皮肤与改过的名字不必等手动刷新、重新登录或重启。
+后台改写了账户记录之后，门面发一条账户变更通知（`core/auth.rs` 的 `AccountChanges`，广播通道挂在门面上随快照共享），外壳开机时在任何后台续期之前订阅，转成 `petalfall://account-changed` 推给前端，负载是改了的账户 uuid（`events.rs` 的 `forward_account_changes`）；通知积压、有几条被挤掉时负载的 uuid 为 null，前端整份重读账户列表，所有账户的皮肤查询都失效重取。发通知的是界面不知情的三处：后台提前续期续成了，或把账户判成要重新登录；启动前的验证与续期联网改写了记录（续出新令牌、名字与皮肤，记下验证时刻，或落成失效）；启动时外置令牌校验有效，在后台顺带取一次角色档案，名字或皮肤变了才发。账户页的刷新、登录、切换与删除由界面发起，做完就重读，不发。前端收到后重读账户列表，并让这个账户的 `skin:<uuid>` 失效重取，档案后来取到的皮肤与改过的名字不必等手动刷新、重新登录或重启。
 
 启动时的那次档案同步（`sync_authlib_profile_in_background`）不在启动的关键路径上：校验通过、记下验证时刻就往下走，同步在独立任务里跑，取不到档案、写不回去都只记 warn。校验有效时不刷新令牌，不顺带取的话，登录时没取到档案的外置账户要等令牌失效才换上真皮肤。同步只改名字与皮肤，不碰状态与验证时刻：同步期间别处的刷新判了令牌失效，也不会被它改回正常。同一账户同一时刻只跑一份（`PROFILE_SYNCS`，键与续期闸相同），连着点几次启动不会叠出几个档案请求；它不排续期闸，慢吞吞的档案接口挡不住下一次启动。
 
@@ -772,13 +772,13 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 | 事件 | 负载 |
 | --- | --- |
-| `petalfall://core-event` | `{ task_id, step?, kind: "stage" \| "warning" \| "download" \| "phase" \| "source", ... }`：阶段、告警、下载进度快照、多步任务的步骤、自更新换用的下载源；`step` 只出现在作为组合任务一项调用的命令上。`download` 快照的 `bytes` 是有效字节，含跳过的完整文件，用来画进度；`transferred` 是网络上实际读到的字节，含重传，跳过的文件与复用的分片不算，本地任务（打包、备份）恒为 0，下载类任务完成后报的是这个量（一个字节都没传写「文件已就绪」），不能拿它画进度。两者都每批从 0 计起。`phase` 是多步任务进到了哪一步：`{ plan, index }`，`plan` 是整份步骤表（各步的键，与 `InstallPhase::key` 一致），`index` 是这一步的下标，见「长任务」。`source` 只出现在 `download_update` 上，每个下载源开始前一条，第一个源也有：`{ index, count, name }`，`index` 是这个源在本次候选表里的下标（从 0 计），`count` 是候选总数，`name` 是源名（`cn`、`hk`、`global`、`github`，清单没给候选表时为 `default`），只供日志，界面不显示；换源后从头下，之后的 `download` 快照从 0 报起，见「自更新的清单与下载源」 |
+| `petalfall://core-event` | `{ task_id, step?, kind: "stage" \| "warning" \| "download" \| "phase" \| "source", ... }`：阶段、告警、下载进度快照、多步任务的步骤、自更新换用的下载源；`step` 只出现在作为组合任务一项调用的命令上。`download` 快照的 `bytes` 是有效字节，含跳过的完整文件，用来画进度；`transferred` 是网络上实际读到的字节，含重传，跳过的文件与复用的分片不算，本地任务（打包、备份）恒为 0，下载类任务完成后报的是这个量（一个字节都没传写「文件已就绪」），不能拿它画进度。两者都每批从 0 计起。快照另带 `batch`，标这是同一个任务里的第几批：转发器（`events.rs`）按同一批文件数与声明大小不变、已结束数与字节只增不减来认，接不上就记成新的一批，换备用地址整轮重下的那一轮因此是新的一批；前端的阶段条、总进度与传输量按它分批，不带 `batch` 的快照照总量判。`phase` 是多步任务进到了哪一步：`{ plan, index }`，`plan` 是整份步骤表（各步的键，与 `InstallPhase::key` 一致），`index` 是这一步的下标，见「长任务」。`source` 只出现在 `download_update` 上，每个下载源开始前一条，第一个源也有：`{ index, count, name }`，`index` 是这个源在本次候选表里的下标（从 0 计），`count` 是候选总数，`name` 是源名（`cn`、`hk`、`global`、`github`，清单没给候选表时为 `default`），只供日志，界面不显示；换源后从头下，之后的 `download` 快照从 0 报起，见「自更新的清单与下载源」 |
 | `petalfall://launch-phase` | 启动阶段与阶段内的下载进度 |
 | `petalfall://game-log` | 启动器日志与游戏进程的 stdout / stderr，成批推送 |
 | `petalfall://game-exit` | 游戏退出（收尾记账已写完）：退出码、是否崩溃、是否由启动器结束 |
 | `petalfall://world-backup` | 游戏退出后的自动备份做完了：`{ instance_id, backed_up, failed }`，`failed` 的元素为 `{ world, error }`；开着自动备份时每局都推 |
 | `petalfall://device-code` | 微软设备码登录的 user_code 与验证网址 |
-| `petalfall://account-changed` | 后台改写了账户记录（后台提前续期、启动前的验证与续期、启动时顺带同步的外置档案）：`{ uuid }`，前端重读账户列表并让这个账户的皮肤查询失效；界面自己发起的账户操作不推，见「账户续期」 |
+| `petalfall://account-changed` | 后台改写了账户记录（后台提前续期、启动前的验证与续期、启动时顺带同步的外置档案）：`{ uuid }`，前端重读账户列表并让这个账户的皮肤查询失效；通知积压时 `uuid` 为 null，前端整份重读、全部皮肤查询失效；界面自己发起的账户操作不推，见「账户续期」 |
 | `petalfall://art-changed` | 原版材质源或全景的可用性变化，前端据此清空位图缓存并重绘 |
 | `petalfall://window-drop` | 拖进、拖出、松开在主窗口上：`{ type: "enter" \| "drop", content }` 或 `{ type: "leave" }`，`content` 为 `{ kind: "files", paths }` 或 `{ kind: "auth_server", url }` |
 

@@ -184,7 +184,7 @@ pub fn forward_account_changes(
                 Err(RecvError::Lagged(missed)) => {
                     tracing::warn!(
                         missed,
-                        "账户变更通知积压，挤掉了几条：那几个账户的界面要等下一次重读才更新"
+                        "账户变更通知积压，挤掉了几条：让界面整份重读账户列表"
                     );
                     deliver(AccountChangedPayload { uuid: None });
                 }
