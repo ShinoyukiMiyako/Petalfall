@@ -308,6 +308,21 @@ describe("实例设置：Java 卡", () => {
     expect(appearLayer(fresh).style.opacity).toBe("0");
     expect(appearLayer(fresh).hasAttribute("inert")).toBe(false);
   });
+
+  it("固定的 Java 低于要求：说明块里的「改用自动」是幽灵小号", async () => {
+    settings = { ...settings, java: "C:/Java/jdk-17/bin/java.exe" };
+    await openSettings();
+    const useAuto = button(SETTINGS_COPY.useAuto, card(SETTINGS_COPY.javaTitle));
+    expect([useAuto.dataset.variant, useAuto.dataset.size]).toEqual(["ghost", "sm"]);
+  });
+
+  it("跟随的默认 Java 低于要求：说明块里的「去改默认 Java」是幽灵小号", async () => {
+    bootOverrides(ipc, { instances, config: configDto({ default_java: "C:/Java/jdk-17/bin/java.exe", memory: { max_mb: 4096, min_mb: null, auto: false } }) });
+    ipc.overrides.set("list_instances", () => instances);
+    await openSettings();
+    const fix = button(SETTINGS_COPY.openJavaSettings, card(SETTINGS_COPY.javaTitle));
+    expect([fix.dataset.variant, fix.dataset.size]).toEqual(["ghost", "sm"]);
+  });
 });
 
 describe("实例设置：JVM 参数卡", () => {
