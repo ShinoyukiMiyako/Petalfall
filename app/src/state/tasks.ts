@@ -46,12 +46,13 @@ export function progressTrack(task: Task): string {
 }
 
 /**
- * 任务当前这一批的标识：同一次尝试里总字节与文件数不变即同一批。按「这一批的字节」画的地方（下载任务页的总进度环）用它，
- * 分步任务也一样：它的 progress 是整次尝试的，bytes 与 totalBytes 却仍是当前这一批的，拿 progressTrack 当标识的话
- * 换批次时标识不变，环只增不减，第一批下完就停在满格不动了。
+ * 任务当前这一批的标识：同一次尝试里总字节与文件数不变即同一批，后端给了批次号时再带上它（总量相同的先后两批靠它分开）。
+ * 按「这一批的字节」画的地方（下载任务页的总进度环）用它，分步任务也一样：它的 progress 是整次尝试的，bytes 与 totalBytes
+ * 却仍是当前这一批的，拿 progressTrack 当标识的话换批次时标识不变，环只增不减，第一批下完就停在满格不动了。
  */
 export function batchTrack(task: Task): string {
-  return `${attemptTaskId(task)}:${task.totalBytes === null ? "count" : task.totalBytes}:${task.batchFiles}`;
+  const base = `${attemptTaskId(task)}:${task.totalBytes === null ? "count" : task.totalBytes}:${task.batchFiles}`;
+  return task.batchId === null ? base : `${base}:b${task.batchId}`;
 }
 
 /**
@@ -126,6 +127,7 @@ export function newTask(draft: TaskDraft, now: number): Task {
     transferredBytes: 0,
     batchTransferred: 0,
     batchFiles: 0,
+    batchId: null,
     phase: null,
     speedBps: 0,
     startedAt: null,
@@ -244,18 +246,34 @@ function update(tasks: readonly Task[], id: string, fn: (task: Task) => Task): T
 
 export function markRunning(tasks: readonly Task[], id: string, now: number): Task[] {
   return update(tasks, id, (t) =>
-    t.status === "queued" ? { ...t, status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0, batchFiles: 0, phase: null, speedBps: 0, startedAt: now } : t,
+    t.status === "queued" ? { ...t, status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0, batchFiles: 0, batchId: null, phase: null, speedBps: 0, startedAt: now } : t,
   );
 }
 
 /** 后端推来的一批下载的进度快照。 */
 export interface DownloadSnapshot {
+  /** 后端给的批次号（core-event 的 batch）；mock 不带。 */
+  batch?: number;
   total: number;
   finished: number;
   bytes: number;
   totalBytes: number | null;
   transferred: number;
   speed: number;
+}
+
+/** 快照带的批次号，不带为 null。 */
+function batchIdOf(event: DownloadSnapshot): number | null {
+  return event.batch === undefined ? null : event.batch;
+}
+
+/**
+ * 按批次号判这条快照是不是 mark 那一批的：两边都有号时只看号；有一边没有（mock 的快照，或还没收到过快照）时为 null，
+ * 由调用方按总量的旧规则判。总量相同的先后两批（整合包文件整批下载失败、换备用地址重下的那一轮）只有号分得开。
+ */
+function sameBatchById(mark: number | null, event: DownloadSnapshot): boolean | null {
+  const id = batchIdOf(event);
+  return mark === null || id === null ? null : mark === id;
 }
 
 /** 这一批完成了多少：总字节已知按字节，否则按文件数。 */
@@ -265,11 +283,13 @@ function snapshotFraction(event: DownloadSnapshot): number {
 }
 
 /**
- * 这条快照比上一条多传了多少。传输字节在一批内只增不减，判同一批不看有效字节：失败的文件退回时有效字节变少，
+ * 这条快照比上一条多传了多少。传输字节在一批内只增不减，没有批次号时判同一批不看有效字节：失败的文件退回时有效字节变少，
  * 那还是同一批，按新批次算会把这一批已传的再算一遍。
  */
-function transferredSince(mark: { totalBytes: number | null; transferred: number }, event: DownloadSnapshot): number {
-  return event.totalBytes === mark.totalBytes && event.transferred >= mark.transferred ? event.transferred - mark.transferred : event.transferred;
+function transferredSince(mark: { batch: number | null; totalBytes: number | null; transferred: number }, event: DownloadSnapshot): number {
+  const byId = sameBatchById(mark.batch, event);
+  const same = byId === null ? event.totalBytes === mark.totalBytes && event.transferred >= mark.transferred : byId;
+  return same ? event.transferred - mark.transferred : event.transferred;
 }
 
 /** 运行中的任务都从 0 算起；只有读回的旧记录没有这个数，它们已经结束，重试时也从 0 开始。 */
@@ -280,22 +300,24 @@ function transferredAfter(task: Task, added: number): number {
 
 /**
  * 一批下载的进度快照。一次安装连跑好几批，每批从 0 重新计。分步任务按步折成整体进度，只进不退，这一步那批的比例另记在
- * phase.fraction（见 phaseBatch）；其余任务按当前批次如实显示，批次内只进不退，新批次（已下字节变少，或批次大小、文件数变了）从头开始。
- * 累计字节跨批次往上加，分步任务不算进当前一步的快照也照样记账。
+ * phase.fraction（见 phaseBatch）；其余任务按当前批次如实显示，批次内只进不退，新批次从头开始。有批次号时按号分批；没有时
+ * 已下字节变少、或批次大小、文件数变了就算新批次。累计字节跨批次往上加，分步任务不算进当前一步的快照也照样记账。
  */
 export function applyTaskDownload(tasks: readonly Task[], attemptId: string, event: DownloadSnapshot): Task[] {
   return tasks.map((t) => {
     if (t.status !== "running" || attemptTaskId(t) !== attemptId) return t;
     const fraction = snapshotFraction(event);
-    const sameBatch = event.totalBytes === t.totalBytes && event.total === t.batchFiles && event.bytes >= t.bytes;
+    const byId = sameBatchById(t.batchId, event);
+    const sameBatch = byId === null ? event.totalBytes === t.totalBytes && event.total === t.batchFiles && event.bytes >= t.bytes : byId;
     const counted: Task = {
       ...t,
       bytes: event.bytes,
       totalBytes: event.totalBytes,
       doneBytes: t.doneBytes + (sameBatch ? event.bytes - t.bytes : event.bytes),
-      transferredBytes: transferredAfter(t, transferredSince({ totalBytes: t.totalBytes, transferred: t.batchTransferred }, event)),
+      transferredBytes: transferredAfter(t, transferredSince({ batch: t.batchId, totalBytes: t.totalBytes, transferred: t.batchTransferred }, event)),
       batchTransferred: event.transferred,
       batchFiles: event.total,
+      batchId: batchIdOf(event),
       speedBps: event.speed,
     };
     if (t.phase === null) return { ...counted, progress: sameBatch ? Math.max(t.progress, fraction) : fraction };
@@ -368,11 +390,18 @@ export function applyTaskPhase(tasks: readonly Task[], attemptId: string, plan: 
  * 后端只在上一批返回之后才报下一步，上一批晚到的快照都已下完：已下完、又不是这一步认下的那批，就是上一步的，不算。
  * 一出现就已下完的批次（文件全都现成）同样不算，它那一步的份额在下一步开始时一并补上。
  * 续的是认下的那批时比例只进不退：失败的文件退回时有效字节变少，那还是同一批。换了一批就从这一批自己的比例算起。
+ * 是不是认下的那批，有批次号时按号判，没有时看文件数与总字节：整合包文件整批下载失败、换备用地址重下的那一轮与首轮总量相同，
+ * 只按总量判会认成同一批，比例停在首轮的最高点，等新一轮追上来才动。
  */
 function phaseBatch(phase: TaskPhase, event: DownloadSnapshot, fraction: number): TaskPhase | null {
-  if (phase.batch !== null && phase.batch.total === event.total && phase.batch.totalBytes === event.totalBytes) return { ...phase, fraction: Math.max(phase.fraction, fraction) };
+  if (phase.batch !== null && continuesPhaseBatch(phase.batch, event)) return { ...phase, fraction: Math.max(phase.fraction, fraction) };
   if (event.finished >= event.total) return null;
-  return { ...phase, batch: { total: event.total, totalBytes: event.totalBytes }, fraction };
+  return { ...phase, batch: { id: batchIdOf(event), total: event.total, totalBytes: event.totalBytes }, fraction };
+}
+
+function continuesPhaseBatch(batch: NonNullable<TaskPhase["batch"]>, event: DownloadSnapshot): boolean {
+  const byId = sameBatchById(batch.id, event);
+  return byId === null ? batch.total === event.total && batch.totalBytes === event.totalBytes : byId;
 }
 
 /** 阶段进度条画什么：value 是当前这一步完成了多少，给不出为 null；track 是它的平滑标识，用法同 progressTrack。 */
@@ -394,7 +423,10 @@ export function stageProgress(task: Task): StageProgress {
   const attempt = attemptTaskId(task);
   if (task.phase === null) return { value: task.status === "done" ? 1 : 0, track: `${attempt}:stage` };
   const { index, batch, fraction } = task.phase;
-  const track = batch === null ? `${attempt}:stage:${index}` : `${attempt}:stage:${index}:${batch.totalBytes === null ? "count" : batch.totalBytes}:${batch.total}`;
+  const track =
+    batch === null
+      ? `${attempt}:stage:${index}`
+      : `${attempt}:stage:${index}:${batch.totalBytes === null ? "count" : batch.totalBytes}:${batch.total}${batch.id === null ? "" : `:b${batch.id}`}`;
   if (task.status === "done") return { value: 1, track };
   const measurable = batch !== null && (batch.totalBytes !== null || batch.total > 1);
   return { value: measurable ? fraction : null, track };
@@ -402,15 +434,17 @@ export function stageProgress(task: Task): StageProgress {
 
 // ---------------------------------------------------------------- 组合任务的进度
 
-/** 一批下载的标识：批次总量相同、已下字节没有变少即同一批。 */
+/** 一批下载的标识：有批次号时同号即同一批，没有时批次总量相同、已下字节没有变少即同一批。 */
 interface BatchMark {
+  batch: number | null;
   bytes: number;
   totalBytes: number | null;
   transferred: number;
 }
 
 function continues(mark: BatchMark, event: DownloadSnapshot): boolean {
-  return event.totalBytes === mark.totalBytes && event.bytes >= mark.bytes;
+  const byId = sameBatchById(mark.batch, event);
+  return byId === null ? event.totalBytes === mark.totalBytes && event.bytes >= mark.bytes : byId;
 }
 
 /**
@@ -500,7 +534,7 @@ export function applyCompositeDownload(
   const mark = cursor.batches[step];
   const added = mark !== null && continues(mark, event) ? event.bytes - mark.bytes : event.bytes;
   const itemBytes = replaced(cursor.itemBytes, step, cursor.itemBytes[step] + added);
-  const next: CompositeProgress = { ...cursor, batches: replaced(cursor.batches, step, { bytes: event.bytes, totalBytes: event.totalBytes, transferred: event.transferred }), itemBytes };
+  const next: CompositeProgress = { ...cursor, batches: replaced(cursor.batches, step, { batch: batchIdOf(event), bytes: event.bytes, totalBytes: event.totalBytes, transferred: event.transferred }), itemBytes };
   const doneBytes = task.doneBytes + added;
   const transferredBytes = transferredAfter(task, mark === null ? event.transferred : transferredSince(mark, event));
   if (step < cursor.index) {
@@ -691,6 +725,7 @@ export function retryTask(tasks: readonly Task[], id: string): Task[] {
     transferredBytes: 0,
     batchTransferred: 0,
     batchFiles: 0,
+    batchId: null,
     phase: null,
     speedBps: 0,
     startedAt: null,

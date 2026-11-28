@@ -1864,7 +1864,7 @@ export class LauncherStore {
     }
     if (event.kind === "download") {
       const attemptId = event.task_id;
-      const snapshot: DownloadSnapshot = { total: event.total, finished: event.finished, bytes: event.bytes, totalBytes: event.total_bytes, transferred: event.transferred, speed: event.speed };
+      const snapshot: DownloadSnapshot = { batch: event.batch, total: event.total, finished: event.finished, bytes: event.bytes, totalBytes: event.total_bytes, transferred: event.transferred, speed: event.speed };
       const cursor = this.composites.get(attemptId);
       if (cursor === undefined) {
         this.set((raw) => ({ tasks: applyTaskDownload(raw.tasks, attemptId, snapshot) }));

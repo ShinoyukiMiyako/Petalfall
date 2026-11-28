@@ -141,7 +141,7 @@ export function taskGroups(b: TaskBuckets, filter: TaskFilter): TaskGroup[] {
 }
 
 /** 下载进度快照只改这几个字段。 */
-const PROGRESS_FIELDS: ReadonlySet<string> = new Set<keyof Task>(["progress", "bytes", "totalBytes", "doneBytes", "transferredBytes", "batchTransferred", "batchFiles", "phase", "speedBps"]);
+const PROGRESS_FIELDS: ReadonlySet<string> = new Set<keyof Task>(["progress", "bytes", "totalBytes", "doneBytes", "transferredBytes", "batchTransferred", "batchFiles", "batchId", "phase", "speedBps"]);
 
 function sameApartFromProgress(a: Task, b: Task): boolean {
   if (a === b) return true;

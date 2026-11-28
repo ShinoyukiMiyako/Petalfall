@@ -171,8 +171,8 @@ export interface TaskPhase {
   plan: readonly InstallPhase[];
   /** 当前一步在 plan 里的下标。 */
   index: number;
-  /** 这一步认下的那批下载；还没认下为 null。上一步晚到的收尾快照不会被认下。 */
-  batch: { total: number; totalBytes: number | null } | null;
+  /** 这一步认下的那批下载；还没认下为 null。上一步晚到的收尾快照不会被认下。id 是后端给的批次号，快照不带号时为 null。 */
+  batch: { id: number | null; total: number; totalBytes: number | null } | null;
   /** 这一步认下的那批下载完成了多少（0-1），同一批内只进不退（失败的文件退回时有效字节会变少）；还没认下批次时为 0。 */
   fraction: number;
 }
@@ -208,6 +208,11 @@ export interface Task {
   batchTransferred: number;
   /** 当前这一批的文件数：有文件没声明大小时 totalBytes 是 null，前后两批只能靠它区分，不落盘；组合任务不用它，恒为 0。 */
   batchFiles: number;
+  /**
+   * 当前这一批的批次号（core-event 的 batch），有它就只按它分批，不落盘。快照不带号（mock）或还没收到快照时为 null，
+   * 按总字节与文件数区分；组合任务的批次按项记在进度游标里，恒为 null。
+   */
+  batchId: number | null;
   /** 新建、补全实例这类分步任务当前在哪一步；别的任务或还没报第一步时为 null。不落盘：读回的任务都已结束。 */
   phase: TaskPhase | null;
   speedBps: number;

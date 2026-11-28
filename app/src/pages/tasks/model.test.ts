@@ -229,7 +229,7 @@ describe("行内元信息", () => {
     });
 
     it("认下了这一步的那批：在第几步之后写这一批的量，右侧照常是速度与剩余时间", () => {
-      const t = task("r", { kind: "game", status: "running", bytes: 24_800_000, totalBytes: 124_000_000, speedBps: 4 * MB, phase: { plan: VANILLA, index: 2, batch: { total: 3000, totalBytes: 124_000_000 }, fraction: 0.2 } });
+      const t = task("r", { kind: "game", status: "running", bytes: 24_800_000, totalBytes: 124_000_000, speedBps: 4 * MB, phase: { plan: VANILLA, index: 2, batch: { id: null, total: 3000, totalBytes: 124_000_000 }, fraction: 0.2 } });
       const meta = rowMeta(t, ctx({ etaSpeed: 4 * MB, speed: 4 * MB, bytes: 24_800_000 }));
       expect(meta.left).toBe(`下载资源文件 · 第 3/4 步 · ${TASKS_COPY.row.transfer(formatBytes(24_800_000), formatBytes(124_000_000))}`);
       // 剩余 99.2 MB（这一批的），4 MB/s → 23.7 秒 → 约 25 秒
@@ -384,8 +384,8 @@ describe("吞吐采样与总览", () => {
 
   it("总进度环的标识：分步任务换批次也变。它自己的进度条整次尝试只认一个标识，环画的却是这一批的字节", () => {
     const plan: readonly InstallPhase[] = ["metadata", "libraries"];
-    const first = task("p", { status: "running", bytes: 200, totalBytes: 200, batchFiles: 1, phase: { plan, index: 0, batch: { total: 1, totalBytes: 200 }, fraction: 1 } });
-    const next = { ...first, bytes: 0, totalBytes: 9000, batchFiles: 40, phase: { plan, index: 1, batch: { total: 40, totalBytes: 9000 }, fraction: 0 } };
+    const first = task("p", { status: "running", bytes: 200, totalBytes: 200, batchFiles: 1, phase: { plan, index: 0, batch: { id: null, total: 1, totalBytes: 200 }, fraction: 1 } });
+    const next = { ...first, bytes: 0, totalBytes: 9000, batchFiles: 40, phase: { plan, index: 1, batch: { id: null, total: 40, totalBytes: 9000 }, fraction: 0 } };
     // 第一批下完是 100%，下一批从 0 起：标识不变的话环只增不减，会一直停在满格
     expect(overviewOf(bucketTasks([first])).fraction).toBe(1);
     expect(overviewOf(bucketTasks([next])).fraction).toBe(0);
@@ -538,7 +538,7 @@ describe("任务表的结构比较", () => {
   });
 
   it("分步任务换了一步、认下了一批：只是进度，结构相同", () => {
-    const stepped = { ...running, phase: { plan: ["metadata", "libraries"] as const, index: 1, batch: { total: 40, totalBytes: 10 * MB }, fraction: 0.75 } };
+    const stepped = { ...running, phase: { plan: ["metadata", "libraries"] as const, index: 1, batch: { id: null, total: 40, totalBytes: 10 * MB }, fraction: 0.75 } };
     expect(sameTaskLayout([running, queued], [stepped, queued])).toBe(true);
   });
 

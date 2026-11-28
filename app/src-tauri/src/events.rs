@@ -7,7 +7,7 @@
 //!
 //! 账户变更不属于哪一条命令，后台续期与启动时都会发，另走门面上的广播通道，由 [`forward_account_changes`] 常驻转发。
 
-use petalfall_core::{CoreEvent, EventSink};
+use petalfall_core::{CoreEvent, DownloadProgress, EventSink};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
@@ -58,6 +58,9 @@ pub enum CoreEventKind {
     Warning { message: String },
     /// 当前这一批下载的进度快照。安装要连跑好几批，每批都从 `finished = 0` 重新计起。
     Download {
+        /// 这一批在这次命令里的序号，从 0 计，同一批的快照同一个号（见 [`BatchNumbering`]）。前端按它分批：先后两批
+        /// 文件数与声明大小都相同时（整合包文件整批下载失败、换备用地址重下的那一轮），单看快照分不清。
+        batch: u32,
         /// 本批文件数。
         total: u64,
         /// 已结束文件数（成功与最终失败都计入）。
@@ -85,12 +88,14 @@ pub enum CoreEventKind {
     },
 }
 
-impl From<CoreEvent> for CoreEventKind {
-    fn from(event: CoreEvent) -> Self {
+impl CoreEventKind {
+    /// 译一条门面事件。下载快照的批次号要看同一次命令之前的快照，`batches` 一次命令用一个。
+    fn translate(event: CoreEvent, batches: &mut BatchNumbering) -> Self {
         match event {
             CoreEvent::Stage(message) => CoreEventKind::Stage { message },
             CoreEvent::Warning(message) => CoreEventKind::Warning { message },
             CoreEvent::Download(p) => CoreEventKind::Download {
+                batch: batches.number(p),
                 total: p.total,
                 finished: p.finished,
                 bytes: p.bytes,
@@ -107,6 +112,54 @@ impl From<CoreEvent> for CoreEventKind {
             }
         }
     }
+}
+
+/// 记着最近几批，见 [`BatchNumbering`]。前后两个池的快照只会交错一小段，留些余量。
+const RECENT_BATCHES: usize = 4;
+
+/// 给一次命令的下载快照编批次号。
+///
+/// 下载池不给批次编号，这里按池的约定认：同一批的文件数与声明大小不变，已结束文件数与传输字节只增不减。接不上最近
+/// 几批里任何一批的快照就是新的一批。记最近几批而不只是上一批：导入整合包装游戏与下整合包文件各用各的池，前一个池
+/// 最后一条快照可能夹在后一个池的快照中间才到，只记上一批的话，它与它后面那条都会被当成新的一批。
+///
+/// 认不出的只有一种：新的一批与之前某一批文件数、声明大小都相同，节流又正好挤掉了那一批的末尾与这一批的开头，
+/// 这一批送到的第一条快照里已结束文件数与传输字节都不比那一批最后送到的少。这时这一批已经追到那一批停下的地方，
+/// 当成同一批只进不退，界面最多停到它追上为止。
+#[derive(Debug, Default)]
+struct BatchNumbering {
+    /// 最近几批的批次号与它们最后一条快照，新开的在后。
+    recent: std::collections::VecDeque<(u32, DownloadProgress)>,
+    next: u32,
+}
+
+impl BatchNumbering {
+    fn number(&mut self, progress: DownloadProgress) -> u32 {
+        if let Some((batch, last)) = self
+            .recent
+            .iter_mut()
+            .rev()
+            .find(|(_, last)| continues_batch(last, &progress))
+        {
+            *last = progress;
+            return *batch;
+        }
+        let batch = self.next;
+        self.next += 1;
+        if self.recent.len() == RECENT_BATCHES {
+            self.recent.pop_front();
+        }
+        self.recent.push_back((batch, progress));
+        batch
+    }
+}
+
+/// `next` 能不能是 `last` 之后同一批的快照。有效字节不算：失败的文件退回时它会变少，那还是同一批。
+fn continues_batch(last: &DownloadProgress, next: &DownloadProgress) -> bool {
+    next.total == last.total
+        && next.total_bytes == last.total_bytes
+        && next.finished >= last.finished
+        && next.transferred >= last.transferred
 }
 
 /// [`ACCOUNT_CHANGED_EVENT`] 的负载：改了的账户。
@@ -170,12 +223,13 @@ impl CoreEventForwarder {
     ) -> Self {
         let (sink, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let task = tauri::async_runtime::spawn(async move {
+            let mut batches = BatchNumbering::default();
             // 发送端全部释放后 recv 返回 None，循环自然结束。
             while let Some(event) = rx.recv().await {
                 deliver(CoreEventPayload {
                     task_id: task_id.clone(),
                     step,
-                    event: event.into(),
+                    event: CoreEventKind::translate(event, &mut batches),
                 });
             }
         });
@@ -225,6 +279,7 @@ mod tests {
             task_id: Some("task-7".into()),
             step: None,
             event: CoreEventKind::Download {
+                batch: 2,
                 total: 3,
                 finished: 1,
                 bytes: 2048,
@@ -238,6 +293,7 @@ mod tests {
             json!({
                 "task_id": "task-7",
                 "kind": "download",
+                "batch": 2,
                 "total": 3,
                 "finished": 1,
                 "bytes": 2048,
@@ -267,16 +323,18 @@ mod tests {
         let payload = CoreEventPayload {
             task_id: Some("t#1".into()),
             step: None,
-            event: CoreEvent::Phase {
-                plan: vec![
-                    InstallPhase::Metadata,
-                    InstallPhase::Libraries,
-                    InstallPhase::Assets,
-                    InstallPhase::Natives,
-                ],
-                index: 2,
-            }
-            .into(),
+            event: CoreEventKind::translate(
+                CoreEvent::Phase {
+                    plan: vec![
+                        InstallPhase::Metadata,
+                        InstallPhase::Libraries,
+                        InstallPhase::Assets,
+                        InstallPhase::Natives,
+                    ],
+                    index: 2,
+                },
+                &mut BatchNumbering::default(),
+            ),
         };
         assert_eq!(
             serde_json::to_value(&payload).unwrap(),
@@ -295,12 +353,14 @@ mod tests {
         let payload = CoreEventPayload {
             task_id: Some("update#3".into()),
             step: None,
-            event: CoreEvent::Source {
-                index: 1,
-                count: 4,
-                name: "hk".into(),
-            }
-            .into(),
+            event: CoreEventKind::translate(
+                CoreEvent::Source {
+                    index: 1,
+                    count: 4,
+                    name: "hk".into(),
+                },
+                &mut BatchNumbering::default(),
+            ),
         };
         assert_eq!(
             serde_json::to_value(&payload).unwrap(),
@@ -344,6 +404,7 @@ mod tests {
         assert_eq!(
             delivered[1].event,
             CoreEventKind::Download {
+                batch: 0,
                 total: 2,
                 finished: 2,
                 bytes: 10,
@@ -386,6 +447,7 @@ mod tests {
             task_id: Some("all#1".into()),
             step: Some(0),
             event: CoreEventKind::Download {
+                batch: 0,
                 total: 1,
                 finished: 0,
                 bytes: 0,
@@ -400,6 +462,7 @@ mod tests {
                 "task_id": "all#1",
                 "step": 0,
                 "kind": "download",
+                "batch": 0,
                 "total": 1,
                 "finished": 0,
                 "bytes": 0,
@@ -418,6 +481,103 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&stage).unwrap(),
             json!({ "task_id": "all#1", "step": u32::MAX, "kind": "stage", "message": "准备更新" })
+        );
+    }
+
+    fn progress(
+        total: u64,
+        finished: u64,
+        bytes: u64,
+        total_bytes: Option<u64>,
+        transferred: u64,
+    ) -> DownloadProgress {
+        DownloadProgress {
+            total,
+            finished,
+            bytes,
+            total_bytes,
+            transferred,
+            speed: 0,
+        }
+    }
+
+    /// 整合包文件整批下载失败、换备用地址重下：第二轮与第一轮文件数、声明大小都一样，已结束文件数与传输字节从头报起，
+    /// 换一个批次号；同一轮里失败的文件退回、有效字节变少，还是同一批。
+    #[test]
+    fn a_retry_round_of_the_same_shape_gets_a_new_batch() {
+        let mut batches = BatchNumbering::default();
+        let rounds = [
+            progress(3, 0, 0, Some(3000), 0),
+            progress(3, 0, 1800, Some(3000), 1800),
+            // 主地址断流，下到一半的文件退回
+            progress(3, 2, 600, Some(3000), 2100),
+            progress(3, 3, 0, Some(3000), 2100),
+            // 换备用地址重下的那一轮
+            progress(3, 0, 0, Some(3000), 0),
+            progress(3, 1, 1000, Some(3000), 1000),
+            progress(3, 3, 3000, Some(3000), 3000),
+        ];
+        let numbered: Vec<u32> = rounds.into_iter().map(|p| batches.number(p)).collect();
+        assert_eq!(numbered, [0, 0, 0, 0, 1, 1, 1]);
+
+        // 边界：节流挤掉了第一轮的末尾，第二轮第一条只比第一轮最后送到的那条少了传输字节，照样认得出
+        let mut batches = BatchNumbering::default();
+        assert_eq!(batches.number(progress(1, 0, 900, Some(1000), 900)), 0);
+        assert_eq!(batches.number(progress(1, 0, 300, Some(1000), 300)), 1);
+    }
+
+    /// 前一个池的最后一条快照夹在后一个池的快照中间才到：它认回自己那一批，后一个池接着用原来的号，不当成新的一批。
+    /// 记不住的旧批次（超出 RECENT_BATCHES）再来快照时给新号。
+    #[test]
+    fn a_straggler_from_an_earlier_pool_keeps_its_own_batch() {
+        let mut batches = BatchNumbering::default();
+        assert_eq!(batches.number(progress(40, 30, 40, Some(50), 40)), 0);
+        assert_eq!(batches.number(progress(7, 2, 10, None, 10)), 1);
+        assert_eq!(batches.number(progress(40, 40, 50, Some(50), 50)), 0);
+        assert_eq!(batches.number(progress(7, 3, 15, None, 15)), 1);
+
+        let first = progress(1, 1, 1, Some(1), 1);
+        let mut batches = BatchNumbering::default();
+        assert_eq!(batches.number(first), 0);
+        for n in 1..=RECENT_BATCHES as u64 {
+            batches.number(progress(n + 1, 0, 0, None, 0));
+        }
+        assert_eq!(batches.number(first), RECENT_BATCHES as u32 + 1);
+    }
+
+    /// 转发器给每条下载快照标上批次号，一次命令一套号；组合任务每一项各有自己的转发器，各自从 0 编起。
+    #[tokio::test]
+    async fn forwarder_numbers_download_batches_per_command() {
+        let log = Log::default();
+        for step in 0..2 {
+            let forwarder = item_forwarder(&log, step);
+            for p in [
+                progress(2, 2, 10, Some(10), 10),
+                progress(2, 0, 0, Some(10), 0),
+                progress(2, 2, 10, Some(10), 10),
+            ] {
+                forwarder.sink().send(CoreEvent::Download(p)).unwrap();
+            }
+            forwarder.finish().await;
+        }
+        let log = log.lock().unwrap();
+        let numbered: Vec<(Option<u32>, u32)> = log
+            .iter()
+            .filter_map(|p| match p.event {
+                CoreEventKind::Download { batch, .. } => Some((p.step, batch)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            numbered,
+            [
+                (Some(0), 0),
+                (Some(0), 1),
+                (Some(0), 1),
+                (Some(1), 0),
+                (Some(1), 1),
+                (Some(1), 1)
+            ]
         );
     }
 

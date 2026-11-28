@@ -11,6 +11,7 @@ import {
   applyTaskDownload,
   applyTaskPhase,
   batchRetryable,
+  batchTrack,
   commandGameDir,
   compositeProgress,
   completeCompositeStep,
@@ -322,6 +323,26 @@ describe("下载队列：纯函数", () => {
     expect(c[0].transferredBytes).toBe(2000);
   });
 
+  it("带批次号时按号分批：总量相同的重下一轮是新批次，同号里有效字节退回还是同一批；不带号的快照照旧按总量判", () => {
+    const snap = (batch: number | undefined, finished: number, bytes: number, transferred: number): DownloadSnapshot => ({ batch, total: 3, finished, bytes, totalBytes: 3000, transferred, speed: 5 });
+    let tasks = applyTaskDownload([task("t1", { status: "running" })], "t1#1", snap(4, 1, 1800, 1800));
+    const firstTrack = batchTrack(tasks[0]);
+    expect(firstTrack).toBe("t1#1:3000:3:b4");
+    // 主地址断流：同号里有效字节退回，仍是这一批，进度不退、累计字节跟着退
+    tasks = applyTaskDownload(tasks, "t1#1", snap(4, 3, 0, 2400));
+    expect(tasks[0]).toMatchObject({ progress: 0.6, doneBytes: 0, transferredBytes: 2400, batchId: 4 });
+    expect(batchTrack(tasks[0])).toBe(firstTrack);
+    // 换备用地址重下的一轮：总量一样、传输字节也不比上一轮少，只有号分得开，从这一轮自己的进度与传输字节算起
+    tasks = applyTaskDownload(tasks, "t1#1", snap(5, 0, 2500, 2500));
+    expect(tasks[0]).toMatchObject({ progress: 2500 / 3000, doneBytes: 2500, transferredBytes: 4900, batchId: 5 });
+    expect(batchTrack(tasks[0])).toBe("t1#1:3000:3:b5");
+    // 边界：同样两条快照不带号，第二轮被认成同一批，传输量少算了上一轮的 2400
+    let legacy = applyTaskDownload([task("t1", { status: "running" })], "t1#1", snap(undefined, 3, 0, 2400));
+    legacy = applyTaskDownload(legacy, "t1#1", snap(undefined, 0, 2500, 2500));
+    expect(legacy[0]).toMatchObject({ transferredBytes: 2500, batchId: null });
+    expect(batchTrack(legacy[0])).toBe("t1#1:3000:3");
+  });
+
   it("读回的旧记录没有传输量，不会再运行；运行中却没有是状态层的契约错误", () => {
     const broken = task("t1", { status: "running", transferredBytes: null });
     expect(() => applyTaskDownload([broken], "t1#1", { total: 1, finished: 0, bytes: 1, totalBytes: 2, transferred: 1, speed: 1 })).toThrow("没有传输量");
@@ -507,6 +528,29 @@ describe("下载队列：纯函数", () => {
         expect(tasks[0].progress).toBeCloseTo(overall, 10);
         // 边界：换成没声明大小的一批，按文件数
         expect(download(10, 3, 0, null)).toBeCloseTo(0.3, 10);
+      });
+
+      it("带批次号时：总量相同的重下一轮换了号，从这一轮自己的比例算起、标识也换；不带号时停在首轮的最高点", () => {
+        const MODPACK: readonly InstallPhase[] = ["modpack_read", "modpack_files"];
+        const files = (batch: number | undefined, finished: number, bytes: number): DownloadSnapshot => ({ batch, total: 40, finished, bytes, totalBytes: 80e6, transferred: bytes, speed: 0 });
+        let tasks = applyTaskPhase([task("t1", { status: "running" })], "t1#1", MODPACK, 1);
+        // 上一步晚到的收尾快照：别的号、已下完，不认
+        tasks = applyTaskDownload(tasks, "t1#1", { batch: 3, total: 1, finished: 1, bytes: 5e6, totalBytes: 5e6, transferred: 5e6, speed: 0 });
+        expect(tasks[0].phase).toMatchObject({ batch: null });
+        tasks = applyTaskDownload(tasks, "t1#1", files(7, 10, 48e6));
+        expect(stageProgress(tasks[0])).toEqual({ value: 0.6, track: "t1#1:stage:1:80000000:40:b7" });
+        // 主地址整体失败，下到一半的都退回：同号，不变小
+        tasks = applyTaskDownload(tasks, "t1#1", files(7, 40, 0));
+        expect(stageProgress(tasks[0])).toEqual({ value: 0.6, track: "t1#1:stage:1:80000000:40:b7" });
+        // 换备用地址重下的一轮
+        tasks = applyTaskDownload(tasks, "t1#1", files(8, 4, 8e6));
+        expect(stageProgress(tasks[0])).toEqual({ value: 0.1, track: "t1#1:stage:1:80000000:40:b8" });
+        expect(tasks[0].phase).toMatchObject({ batch: { id: 8, total: 40, totalBytes: 80e6 } });
+
+        // 边界：同样几条快照不带号，重下的一轮被认成同一批
+        let legacy = applyTaskPhase([task("t1", { status: "running" })], "t1#1", MODPACK, 1);
+        for (const [finished, bytes] of [[10, 48e6], [40, 0], [4, 8e6]]) legacy = applyTaskDownload(legacy, "t1#1", files(undefined, finished, bytes));
+        expect(stageProgress(legacy[0])).toEqual({ value: 0.6, track: "t1#1:stage:1:80000000:40" });
       });
 
       it("stageProgress：没有步骤时按是否完成；这一步没认下批次时给不出（null）；认下了取 fraction；完成为 1 且标识不变", () => {
@@ -787,7 +831,7 @@ describe("下载队列：纯函数", () => {
   });
 
   it("开始运行时这一次尝试的进度全部从 0 算起", () => {
-    const phase = { plan: ["metadata", "libraries"] as const, index: 1, batch: { total: 3, totalBytes: 10 }, fraction: 0.9 };
+    const phase = { plan: ["metadata", "libraries"] as const, index: 1, batch: { id: null, total: 3, totalBytes: 10 }, fraction: 0.9 };
     const queued = task("t1", { progress: 0.5, bytes: 9, totalBytes: 10, doneBytes: 9, transferredBytes: 9, batchTransferred: 9, phase, speedBps: 9 });
     expect(markRunning([queued], "t1", T0 + 10)[0]).toMatchObject({ status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0, phase: null, speedBps: 0, startedAt: T0 + 10 });
   });

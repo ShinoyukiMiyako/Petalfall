@@ -39,6 +39,11 @@ export type CoreEvent =
       kind: "download";
       task_id: string | null;
       step?: number;
+      /**
+       * 这一批在这次命令里的序号，从 0 计，同一批的快照同一个号。先后两批文件数与总字节都相同时（整合包文件整批下载失败、
+       * 换备用地址重下的那一轮）只有它分得开。mock 不带，前端按总量与文件数判同一批。
+       */
+      batch?: number;
       /** 本批文件数。一次安装会连跑多批（版本 JSON、库、资源），每批 finished 都从 0 重新计起。 */
       total: number;
       /** 本批已结束文件数（成功与最终失败都计入）。 */
