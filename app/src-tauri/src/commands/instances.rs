@@ -265,7 +265,8 @@ impl InstanceLocks {
         self.unscoped().acquire_with_bases(id, activity, bases)
     }
 
-    /// 同 [`ScopedLocks::acquire_with_chain`]，不说是哪个游戏目录。
+    /// 同 [`ScopedLocks::acquire_with_chain`]，不说是哪个游戏目录；读链的调用方都已交出游戏目录，只有用例还用它。
+    #[cfg(test)]
     pub async fn acquire_with_chain(
         &self,
         id: &str,
