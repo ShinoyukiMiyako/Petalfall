@@ -599,20 +599,20 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 ### 实例互斥
 
-凡是会改动实例目录的命令，都要经过 `InstanceLocks` 占住实例，冲突时报 `instance_busy`，`detail.activity` 说明正在进行的操作。锁的键不区分大小写。
+凡是会改动实例目录的命令，都要经过 `InstanceLocks` 占住实例，冲突时报 `instance_busy`，`detail.activity` 说明正在进行的操作。锁的键不区分大小写，每份占用还记着它所在的游戏目录（`InstanceLocks::in_dir`，目录按 `same_path` 比）：同名实例在不同游戏目录里互不阻挡，启动与接回按那一局自己的游戏目录占，所以另一个目录里接回的那一局不挡当前目录的同名实例；移动另外以同一个名字占住目标目录。还没交出游戏目录的调用方（Mod、发现页、整合包导入、游玩历史）经不带目录的方法占，与每个目录里的同名实例都相交，行为同以前。
 
 | 活动 | 持有者 | 兼容 |
 | --- | --- | --- |
 | `installing` | 新建实例、导入整合包（实例名确定后、建目录前就占住，直到半成品清理完） | 互斥 |
 | `repairing` | 补全实例 | 互斥 |
 | `renaming` / `deleting` | 改名（新旧两个名字都占）、删除 | 互斥 |
-| `moving` | 移到其他游戏目录（`move_instance`），继承链上的基底一并以 `inherited` 占住：要读它们的版本 JSON 与客户端 jar 补到目标里 | 互斥 |
+| `moving` | 移到其他游戏目录（`move_instance`），继承链上的基底一并以只读的 `inherited` 占住：只读它们的版本 JSON 与客户端 jar 补到目标里，所以基底自己的游戏在 `running` 时也能移，基底还在 `launching`（启动可能重下客户端 jar）时不行；移动期间基底的删除、改名、补全、移动与启动照样被拒 | 互斥 |
 | `launching` -> `running` | 启动命令（Quick Play 直达同样走 `launch_game`），从启动一直持有到游戏退出 | 只与 `modifying` 兼容 |
 | `backing_up` | 备份、导出、恢复存档（都不占基底，基底的删除、改名由依赖检查挡着）；开着自动备份时，游戏退出后由启动命令把 `running` 转成它，基底当即放开（备份只读实例自己的版本 JSON、设置与存档，不碰基底的目录），备份做完才放开实例 | 只与 `modifying`、`inherited` 兼容 |
 | `modifying` | 装、删、启停、更新、回滚 Mod，批量启停、添加本地 Mod、更新检查设置，装资源包、光影、数据包，写实例设置，检查 Mod 更新（会回写卷宗），打开文件夹时创建缺失的工作子目录，导出整合包，删除存档备份，把实例存为新实例的默认设置 | 与自身、`launching`、`running`、`backing_up`、`inherited` 兼容 |
 | `inherited` | 继承链上的基底版本：别的实例启动到游戏退出（之后的自动备份不再占）、补全、移到其他游戏目录、导入整合包期间（导入时占将要继承的原版与要写的加载器自然版本目录），以那个实例的名义占住 | 与 `backing_up`、`modifying` 及别的 `inherited` 兼容，与基底自己的 `launching`、`running` 互斥：游戏映射着 natives，补全或导入要重写它们时会中途报 IO 错误，提前报 `instance_busy` 比让任务半路失败好 |
 
-写成集合就是四条：`modifying` 与 `{modifying, launching, running, backing_up, inherited}` 兼容；`inherited` 与 `{modifying, backing_up, inherited}` 兼容；`backing_up` 与 `{modifying, inherited}` 兼容；`launching`、`running` 只与 `modifying` 兼容；`installing`、`repairing`、`renaming`、`deleting`、`moving` 与一切互斥。这张表在后端（`InstanceActivity::compatible_with`）、前端的禁用判断（`domain/instance-locks.ts` 的 `instanceLocks`）与模拟后端（`ipc/mock/handlers/instances.ts` 的 `compatible`）三处保持一致。
+写成集合就是四条：`modifying` 与 `{modifying, launching, running, backing_up, inherited}` 兼容；`inherited` 与 `{modifying, backing_up, inherited}` 兼容，移动占的只读 `inherited` 另与基底自己的 `running` 兼容；`backing_up` 与 `{modifying, inherited}` 兼容；`launching`、`running` 只与 `modifying` 兼容；`installing`、`repairing`、`renaming`、`deleting`、`moving` 与一切互斥。这张表在后端（`InstanceActivity::compatible_with`）、前端的禁用判断（`domain/instance-locks.ts` 的 `instanceLocks`）与模拟后端（`ipc/mock/handlers/instances.ts` 的 `compatible`）三处保持一致。
 
 游戏运行时仍然可以改动 Mod。被游戏占用的文件由门面在动手前检测，检测到时报 `mod_file_busy`。`list_instances` 返回的 `activity` 就来自这张表，前端刷新之后也能据此知道哪个实例正在安装；几件事并行时按 `report_rank` 报排在最前的那件：实例自己的事 0，`modifying` 1，`inherited` 2。
 
