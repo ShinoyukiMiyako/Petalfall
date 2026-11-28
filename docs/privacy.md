@@ -33,6 +33,7 @@
 - `api.modrinth.com`、`api.curseforge.com`：搜索、浏览与安装。你输入的搜索词，以及游戏版本、加载器这类筛选条件，会作为查询条件发给它们。访问 CurseForge 时带着落樱的 API 密钥。
 - 打开装了加载器的实例时，落樱会检查其中的 Mod 有没有更新；导出整合包时，会查哪些 Mod 能在 Modrinth 上找到。这时落樱把 Mod 文件的哈希值（SHA-1，或 CurseForge 用的文件指纹）连同实例的游戏版本与加载器发给 Modrinth 与 CurseForge，查出它们是哪个 Mod、有没有更新。哈希值是按文件内容算出的一小段特征值，内容相同的文件算出来也相同，平台凭它认出是哪个文件；发出去的是哈希值，不是文件本身。
 - 文件与图片：`cdn.modrinth.com`、`edge.forgecdn.net`、`mediafilez.forgecdn.net`、`media.forgecdn.net`。导入 Modrinth 整合包时，还可能访问包里写着的 `github.com`、`raw.githubusercontent.com`、`gitlab.com` 上的文件。
+- 「自动下载受限的 CurseForge 文件」开着时（默认关），作者不允许经 CurseForge 接口分发的文件，落樱会按文件编号与文件名拼出 `edge.forgecdn.net` 上的地址直接下载；关着时，这类文件要你自己在浏览器里下载后交给落樱。
 
 ### 主页
 
