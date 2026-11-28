@@ -1976,7 +1976,7 @@ export class LauncherStore {
     // 玩家常常在资源管理器里往 mods 目录放了文件就直接启动：诊断页要拿日志点名的 Mod 对列表，旧列表里没有它，
     // 开关与「停用」就都出不来
     invalidateResources(`mods:${id}`);
-    // 游戏里调过的视距写在 options.txt，自动内存按它估算
+    // 自动内存按启用的 Mod 估算，上面说的手动放进 mods 目录的文件同样改了它；建议里的空闲内存也随游戏退出变了
     invalidateResources(`memory-advice:${id}`);
     invalidateResources("play-stats");
     // 启动时缺 Java，后端也会自己下载运行时

@@ -155,7 +155,7 @@ describe("游戏 · 内存卡的加载", () => {
     expect(memory.querySelector('input[type="range"]')).not.toBeNull();
     expect(memory.querySelector("[data-reserve]")).toBeNull();
     expect(memory.textContent).toContain("本机共 16 GB，这里是所有实例的默认值");
-    expect(memory.textContent).toContain("按每个实例的 Mod 数量、整合包推荐值与视距估算；没有当前实例，按原版估算，建议 4 GB");
+    expect(memory.textContent).toContain("按每个实例的 Mod 数量与整合包推荐值估算；没有当前实例，按原版估算，建议 4 GB");
     expect(memory.querySelector('[aria-busy="true"]')).toBeNull();
   });
 

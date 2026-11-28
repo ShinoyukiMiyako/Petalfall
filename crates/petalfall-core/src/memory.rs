@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use petalfall_instance::{DiscoveredVersion, discover_version, read_render_distance};
+use petalfall_instance::{DiscoveredVersion, discover_version};
 use petalfall_launch::{
     DISTANT_HORIZONS_MOD_ID, LimitReason, LoaderClass, MemoryAdvice, MemoryEstimate, MemoryProfile,
     NeedFactor, SystemMemory, probe_system_memory,
@@ -37,7 +37,6 @@ const VANILLA_PROFILE: MemoryProfile = MemoryProfile {
     loader: LoaderClass::Vanilla,
     enabled_mods: 0,
     modpack_recommended_mb: None,
-    render_distance: None,
     distant_horizons: false,
 };
 
@@ -109,7 +108,6 @@ impl Petalfall {
             loader,
             enabled_mods,
             modpack_recommended_mb,
-            render_distance: read_render_distance(working_dir).await?,
             distant_horizons,
         })
     }
@@ -164,7 +162,6 @@ fn factor_text(factor: &NeedFactor) -> String {
         }
         NeedFactor::Mods { count, mb } => format!("{count} 个 Mod {mb} MB"),
         NeedFactor::Modpack { mb } => format!("整合包推荐 {mb} MB"),
-        NeedFactor::RenderDistance { distance, mb } => format!("视距 {distance} 加 {mb} MB"),
         NeedFactor::DistantHorizons { floor_mb } => {
             format!("Distant Horizons 至少 {floor_mb} MB")
         }
@@ -240,18 +237,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advice_reads_mods_and_render_distance_of_the_selected_instance() {
+    async fn advice_reads_the_mods_of_the_selected_instance() {
         let dir = tempfile::tempdir().unwrap();
         let petalfall = petalfall_with(dir.path(), Some("fabric-1.20.1"));
         let wd = working_dir(&petalfall, "fabric-1.20.1").await;
         write_mod_jar(&wd.join("mods").join("sodium.jar"), "sodium");
         write_mod_jar(&wd.join("mods").join("lithium.jar"), "lithium");
         write_mod_jar(&wd.join("mods").join("old.jar.disabled"), "old");
-        std::fs::write(wd.join("options.txt"), "renderDistance:16\n").unwrap();
 
         let selected = petalfall.memory_advice(None).await.unwrap();
         assert_eq!(selected.version_id.as_deref(), Some("fabric-1.20.1"));
-        // 2765 + 2 × 1024 / 50 + (33² - 25²) / 10 = 2765 + 40 + 46 = 2851 -> 3072；停用的 Mod 不算。
+        // 2765 + 2 × 1024 / 50 = 2765 + 40 = 2805 -> 3072；停用的 Mod 不算。
         assert_eq!(
             selected.estimate.factors,
             vec![
@@ -260,10 +256,6 @@ mod tests {
                     mb: 2765
                 },
                 NeedFactor::Mods { count: 2, mb: 40 },
-                NeedFactor::RenderDistance {
-                    distance: 16,
-                    mb: 46
-                },
             ]
         );
         assert_eq!(selected.estimate.need_mb, 3072);
@@ -384,13 +376,12 @@ mod tests {
             loader: LoaderClass::Modded,
             enabled_mods: 120,
             modpack_recommended_mb: None,
-            render_distance: Some(16),
             distant_horizons: true,
         };
         let estimate = estimate_memory(&profile, system, true);
         assert_eq!(
             auto_memory_log(&estimate),
-            "自动内存：需要 6144 MB（Mod 加载器基数 2765 MB、120 个 Mod 2457 MB、视距 16 加 46 MB、\
+            "自动内存：需要 6144 MB（Mod 加载器基数 2765 MB、120 个 Mod 2457 MB、\
              Distant Horizons 至少 6144 MB），本机上限 8192 MB（物理内存的一半），给 6144 MB"
         );
         assert_eq!(

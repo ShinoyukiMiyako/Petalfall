@@ -187,7 +187,7 @@ export const MEMORY_COPY = {
   title: "内存",
   subtitle: (total: string) => `本机共 ${total}，这里是所有实例的默认值`,
   auto: "自动分配",
-  autoDesc: (current: string) => `按每个实例的 Mod 数量、整合包推荐值与视距估算；${current}`,
+  autoDesc: (current: string) => `按每个实例的 Mod 数量与整合包推荐值估算；${current}`,
   currentInstance: (name: string, summary: string) => `当前实例「${name}」：${summary}`,
   noInstance: (recommended: string) => `没有当前实例，按原版估算，建议 ${recommended}`,
   max: "最大内存",

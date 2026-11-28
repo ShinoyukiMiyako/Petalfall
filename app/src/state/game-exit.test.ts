@@ -130,19 +130,19 @@ describe("游戏退出后的缓存失效", () => {
     store.stop();
   });
 
-  it("游戏里调过视距：退出后这个实例的内存建议重新请求，别的实例不受影响", async () => {
+  it("启用的 Mod 在这一局前后变了：退出后这个实例的内存建议重新请求，别的实例不受影响", async () => {
     const store = await startedStore();
-    let distance = 12;
-    const advice = () => Promise.resolve({ distance });
-    const other = vi.fn(() => Promise.resolve({ distance: 12 }));
-    expect(await resources.read("memory-advice:生存", advice)).toEqual({ distance: 12 });
+    let mods = 2;
+    const advice = () => Promise.resolve({ mods });
+    const other = vi.fn(() => Promise.resolve({ mods: 2 }));
+    expect(await resources.read("memory-advice:生存", advice)).toEqual({ mods: 2 });
     await resources.read("memory-advice:创造", other);
 
-    distance = 32;
+    mods = 3;
     emit(GAME_EXIT_EVENT, exit("生存"));
     await settle();
 
-    expect(await resources.read("memory-advice:生存", advice)).toEqual({ distance: 32 });
+    expect(await resources.read("memory-advice:生存", advice)).toEqual({ mods: 3 });
     await resources.read("memory-advice:创造", other);
     expect(other).toHaveBeenCalledTimes(1);
     store.stop();

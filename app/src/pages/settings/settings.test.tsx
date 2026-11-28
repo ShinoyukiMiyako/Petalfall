@@ -1381,7 +1381,7 @@ describe("设置页：游戏", () => {
   it("内存：数据来自内存建议；关掉自动分配写入整组内存设置", async () => {
     await mount("game");
     expect(text()).toContain("本机共 16 GB，这里是所有实例的默认值");
-    expect(text()).toContain("按每个实例的 Mod 数量、整合包推荐值与视距估算；没有当前实例，按原版估算，建议 2.5 GB");
+    expect(text()).toContain("按每个实例的 Mod 数量与整合包推荐值估算；没有当前实例，按原版估算，建议 2.5 GB");
     expect(text()).toContain("现在空闲 9 GB");
     await click(button("自动分配"));
     expect(callsOf(ipc, "update_config")).toEqual([{ memory: { max_mb: 4096, min_mb: null, auto: false } }]);
@@ -1438,7 +1438,6 @@ describe("设置页：游戏", () => {
       factors: [
         { kind: "base", loader: "modded", mb: 2765 },
         { kind: "mods", count: 120, mb: 2457 },
-        { kind: "render_distance", distance: 16, mb: 46 },
       ],
     };
 
@@ -1465,9 +1464,9 @@ describe("设置页：游戏", () => {
       ipc.overrides.set("memory_advice", () => ADVICE);
       await mount("game");
       const card = section("内存");
-      expect(card.textContent).toContain("按每个实例的 Mod 数量、整合包推荐值与视距估算；当前实例「整合包A」：Forge 1.20.1 · 120 个 Mod · 视距 16，建议 5.5 GB");
+      expect(card.textContent).toContain("按每个实例的 Mod 数量与整合包推荐值估算；当前实例「整合包A」：Forge 1.20.1 · 120 个 Mod，建议 5.5 GB");
       expect(card.querySelector('[data-tone="warn"]')).toBeNull();
-      expect(await markerTip()).toBe("Forge 1.20.1 · 120 个 Mod · 视距 16，建议 5.5 GB");
+      expect(await markerTip()).toBe("Forge 1.20.1 · 120 个 Mod，建议 5.5 GB");
     });
 
     it("按当前实例的 id 取内存建议，没有当前实例时不带 id", async () => {
@@ -1486,7 +1485,7 @@ describe("设置页：游戏", () => {
     it("当前实例在实例列表里找不到：加载器与版本不编，从组成项写起", async () => {
       ipc.overrides.set("memory_advice", () => ({ ...ADVICE, version_id: "已删" }));
       await mount("game");
-      expect(section("内存").textContent).toContain("当前实例「已删」：120 个 Mod · 视距 16，建议 5.5 GB");
+      expect(section("内存").textContent).toContain("当前实例「已删」：120 个 Mod，建议 5.5 GB");
     });
 
     it("被封顶：开着自动分配时提示需要多少、本机最多给多少，提示整句补上原因；关掉后不再提示", async () => {

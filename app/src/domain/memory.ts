@@ -9,7 +9,7 @@ import type { InstanceSummary } from "./adapt";
 type BasisInstance = Pick<InstanceSummary, "loader" | "extraLoaders" | "mcVersion">;
 
 export interface MemoryBasis {
-  /** 估算依据的片段，按展示顺序：加载器与版本，其后按组成项的顺序（Mod 数、整合包推荐、视距、Distant Horizons）。 */
+  /** 估算依据的片段，按展示顺序：加载器与版本，其后按组成项的顺序（Mod 数、整合包推荐、Distant Horizons）。 */
   parts: string[];
   /** 「<片段>，建议 5.5 GB」；一个片段都没有时为「建议 5.5 GB」。 */
   summary: string;
@@ -50,8 +50,6 @@ function factorPart(factor: MemoryNeedFactor): string | null {
       return factor.count === 0 ? null : C.mods(factor.count);
     case "modpack":
       return C.modpack(factor.mb);
-    case "render_distance":
-      return C.renderDistance(factor.distance);
     case "distant_horizons":
       return C.distantHorizons;
   }

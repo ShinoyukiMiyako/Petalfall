@@ -5071,7 +5071,6 @@ mod tests {
             loader: petalfall_launch::LoaderClass::Vanilla,
             enabled_mods: 0,
             modpack_recommended_mb: None,
-            render_distance: None,
             distant_horizons: false,
         };
         let estimate = estimate_memory(&vanilla, system, false);

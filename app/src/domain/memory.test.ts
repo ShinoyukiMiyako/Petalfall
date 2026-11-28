@@ -11,7 +11,7 @@ const inst = (loader: Inst["loader"], mcVersion: string | null, extra: readonly 
   extraLoaders: extra.map((kind) => ({ kind, version: null })),
 });
 
-// 组成项的数值照后端的折算写（基数 2560 / 3072 / 2765，每 50 个 Mod 折 1024 MB，视距按多出的区块数），需求向上对齐到 512
+// 组成项的数值照后端的折算写（基数 2560 / 3072 / 2765，每 50 个 Mod 折 1024 MB），需求向上对齐到 512
 const VANILLA: MemoryNeedFactor = { kind: "base", loader: "vanilla", mb: 2560 };
 const OPTIFINE: MemoryNeedFactor = { kind: "base", loader: "optifine", mb: 3072 };
 const MODDED: MemoryNeedFactor = { kind: "base", loader: "modded", mb: 2765 };
@@ -22,23 +22,13 @@ function advice(factors: MemoryNeedFactor[], needMb: number, limit: MemoryAdvice
 }
 
 describe("内存估算依据", () => {
-  it("Forge 1.20.1、120 个 Mod、视距 16：加载器与版本打头，组成项按顺序跟上", () => {
-    const basis = memoryBasis(
-      advice(
-        [
-          MODDED,
-          { kind: "mods", count: 120, mb: 2457 },
-          { kind: "render_distance", distance: 16, mb: 46 },
-        ],
-        5632,
-      ),
-      inst("forge", "1.20.1"),
-    );
+  it("Forge 1.20.1、120 个 Mod：加载器与版本打头，组成项按顺序跟上", () => {
+    const basis = memoryBasis(advice([MODDED, { kind: "mods", count: 120, mb: 2457 }], 5632), inst("forge", "1.20.1"));
     expect(basis).toEqual({
-      parts: ["Forge 1.20.1", "120 个 Mod", "视距 16"],
-      summary: "Forge 1.20.1 · 120 个 Mod · 视距 16，建议 5.5 GB",
+      parts: ["Forge 1.20.1", "120 个 Mod"],
+      summary: "Forge 1.20.1 · 120 个 Mod，建议 5.5 GB",
       cap: null,
-      sentence: "Forge 1.20.1 · 120 个 Mod · 视距 16，建议 5.5 GB",
+      sentence: "Forge 1.20.1 · 120 个 Mod，建议 5.5 GB",
     });
   });
 
@@ -54,35 +44,24 @@ describe("内存估算依据", () => {
   });
 
   it("整合包写了推荐值：替代基数与 Mod 数，写成「整合包推荐」", () => {
-    const basis = memoryBasis(
-      advice(
-        [
-          { kind: "modpack", mb: 8192 },
-          { kind: "render_distance", distance: 16, mb: 46 },
-        ],
-        8704,
-        { mb: 16384, reason: "half_physical" },
-      ),
-      inst("neoforge", "1.21.1"),
-    );
-    expect(basis.parts).toEqual(["NeoForge 1.21.1", "整合包推荐 8 GB", "视距 16"]);
-    expect(basis.sentence).toBe("NeoForge 1.21.1 · 整合包推荐 8 GB · 视距 16，建议 8.5 GB");
+    const basis = memoryBasis(advice([{ kind: "modpack", mb: 8192 }], 8192, { mb: 16384, reason: "half_physical" }), inst("neoforge", "1.21.1"));
+    expect(basis.parts).toEqual(["NeoForge 1.21.1", "整合包推荐 8 GB"]);
+    expect(basis.sentence).toBe("NeoForge 1.21.1 · 整合包推荐 8 GB，建议 8 GB");
   });
 
-  it("检测到 Distant Horizons 排在视距之后", () => {
+  it("检测到 Distant Horizons 排在 Mod 数之后", () => {
     const basis = memoryBasis(
       advice(
         [
           MODDED,
           { kind: "mods", count: 40, mb: 819 },
-          { kind: "render_distance", distance: 32, mb: 360 },
           { kind: "distant_horizons", floor_mb: 6144 },
         ],
         6144,
       ),
       inst("fabric", "1.21.1"),
     );
-    expect(basis.sentence).toBe("Fabric 1.21.1 · 40 个 Mod · 视距 32 · Distant Horizons，建议 6 GB");
+    expect(basis.sentence).toBe("Fabric 1.21.1 · 40 个 Mod · Distant Horizons，建议 6 GB");
   });
 
   it("被物理内存的一半封顶：建议值是上限，整句补上需要多少与上限的来由", () => {
@@ -140,21 +119,12 @@ describe("内存估算依据", () => {
     });
   });
 
-  it("随机的 Mod 数与视距原样写进片段", () => {
+  it("随机的 Mod 数原样写进片段", () => {
     const count = 1 + Math.floor(Math.random() * 265);
-    const distance = 13 + Math.floor(Math.random() * 20);
     const basis = memoryBasis(
-      advice(
-        [
-          MODDED,
-          { kind: "mods", count, mb: Math.floor((count * 1024) / 50) },
-          { kind: "render_distance", distance, mb: Math.floor(((2 * distance + 1) ** 2 - 625) / 10) },
-        ],
-        9216,
-        { mb: 16384, reason: "half_physical" },
-      ),
+      advice([MODDED, { kind: "mods", count, mb: Math.floor((count * 1024) / 50) }], 9216, { mb: 16384, reason: "half_physical" }),
       inst("fabric", "1.21.4"),
     );
-    expect(basis.sentence, `count=${count} distance=${distance}`).toBe(`Fabric 1.21.4 · ${count} 个 Mod · 视距 ${distance}，建议 9 GB`);
+    expect(basis.sentence, `count=${count}`).toBe(`Fabric 1.21.4 · ${count} 个 Mod，建议 9 GB`);
   });
 });

@@ -16,8 +16,6 @@ export type MemoryNeedFactor =
   | { kind: "mods"; count: number; mb: number }
   /** 整合包作者写的推荐内存（CurseForge recommendedRam），替代 base 与 mods。 */
   | { kind: "modpack"; mb: number }
-  /** options.txt 的视距超过默认 12 时多出来的区块折算；distance 是视距。 */
-  | { kind: "render_distance"; distance: number; mb: number }
   /** 检测到 Distant Horizons：需求至少 floor_mb。 */
   | { kind: "distant_horizons"; floor_mb: number };
 

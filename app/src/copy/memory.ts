@@ -16,7 +16,6 @@ export const MEMORY_BASIS_COPY = {
   loaderVersion: (loader: string, mcVersion: string) => `${loader} ${mcVersion}`,
   mods: (count: number) => `${count} 个 Mod`,
   modpack: (mb: number) => `整合包推荐 ${formatMemory(mb)}`,
-  renderDistance: (distance: number) => `视距 ${distance}`,
   distantHorizons: "Distant Horizons",
   summary: (basis: string, mb: number) => `${basis}，建议 ${formatMemory(mb)}`,
   /** 一个片段都写不出来时（摘要拿不到、又只知道装了加载器）只说建议值。 */

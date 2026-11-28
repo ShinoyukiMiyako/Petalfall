@@ -78,7 +78,7 @@ pub use isolation::{
 pub use content::{
     InstanceContent, LevelInfo, PackEntry, ResourcePackEntry, ShaderPackEntry, WorldEntry,
     count_mod_files, count_resource_packs, count_worlds, dir_footprint, list_worlds,
-    read_instance_content, read_render_distance,
+    read_instance_content,
 };
 
 pub use level::{GameMode, LevelSummary};

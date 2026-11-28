@@ -1,6 +1,6 @@
 //! 内存配置：本机内存探测、按实例配置估算的自动分配，产出 `-Xmx` / `-Xms`。
 //!
-//! 自动分配分两步：先按实例的事实（加载器、启用的 Mod 数、整合包作者写的推荐值、视距、Distant Horizons）
+//! 自动分配分两步：先按实例的事实（加载器、启用的 Mod 数、整合包作者写的推荐值、Distant Horizons）
 //! 估出「这个实例需要多少」，再按「这台机器最多给多少」封顶：物理内存的一半，32 位 Java 另封 1 GB。
 //! 不按此刻的空闲内存缩小：`-Xmx` 只是上限，不会一开始就占满；给少了整合包会内存溢出崩溃、进度直接丢，
 //! 空闲不够只会卡一阵、关掉别的程序就恢复，所以空闲不足交给界面与启动日志提醒。
@@ -32,11 +32,6 @@ const STEEP_MB_PER_MODS: (u32, u32) = (1024, 50);
 const STEEP_MODS: u32 = 265;
 /// 拐点之后每个 Mod 的增量：75 个整合包的推荐内存对文件数做最小二乘，斜率 5.86 MB。
 const SHALLOW_MB_PER_MOD: u32 = 6;
-
-/// 游戏默认视距：超出部分才算额外需求。
-const DEFAULT_RENDER_DISTANCE: u32 = 12;
-/// 每个已加载区块按 0.1 MB 计（第三方对 1.21 服务端的实测，客户端没有官方数据，是几项里依据最弱的）。
-const CHUNKS_PER_MB: u64 = 10;
 
 /// Distant Horizons 在三种加载器下的 mod id（官方仓库 fabric.mod.json 与 mods.toml 一致）。
 pub const DISTANT_HORIZONS_MOD_ID: &str = "distanthorizons";
@@ -89,8 +84,6 @@ pub struct MemoryProfile {
     pub enabled_mods: u32,
     /// 整合包作者写的推荐内存（MB），即 CurseForge 清单的 `minecraft.recommendedRam`。
     pub modpack_recommended_mb: Option<u32>,
-    /// `options.txt` 里的视距；没有这个文件或没写这一项为 `None`，按游戏默认。
-    pub render_distance: Option<u32>,
     /// 启用的 Mod 里有 Distant Horizons。
     pub distant_horizons: bool,
 }
@@ -105,8 +98,6 @@ pub enum NeedFactor {
     Mods { count: u32, mb: u32 },
     /// 整合包作者写的推荐值，代替基数与 Mod 两项：作者是实测过才填的。
     Modpack { mb: u32 },
-    /// 视距超出默认时多加载的区块折算的内存。
-    RenderDistance { distance: u32, mb: u32 },
     /// 装了 Distant Horizons：需求至少 `floor_mb`。
     DistantHorizons { floor_mb: u32 },
 }
@@ -181,16 +172,10 @@ fn mods_mb(count: u32) -> u64 {
     steep + shallow
 }
 
-/// 视距超出默认时多加载的区块折算的内存。客户端加载以玩家为中心 (2r+1)² 个区块。
-fn render_distance_mb(distance: u32) -> u64 {
-    let chunks = |r: u32| (2 * u64::from(r) + 1).saturating_pow(2);
-    chunks(distance).saturating_sub(chunks(DEFAULT_RENDER_DISTANCE)) / CHUNKS_PER_MB
-}
-
 /// 实例的内存需求（MB，向上对齐到 512）与它的组成项。
 pub fn estimate_need(profile: &MemoryProfile) -> (u32, Vec<NeedFactor>) {
     let mut factors = Vec::new();
-    let mut sum = match profile.modpack_recommended_mb {
+    let sum = match profile.modpack_recommended_mb {
         Some(mb) => {
             factors.push(NeedFactor::Modpack { mb });
             u64::from(mb)
@@ -213,16 +198,6 @@ pub fn estimate_need(profile: &MemoryProfile) -> (u32, Vec<NeedFactor>) {
             sum
         }
     };
-    if let Some(distance) = profile.render_distance
-        && distance > DEFAULT_RENDER_DISTANCE
-    {
-        let mb = render_distance_mb(distance);
-        factors.push(NeedFactor::RenderDistance {
-            distance,
-            mb: saturate(mb),
-        });
-        sum = sum.saturating_add(mb);
-    }
     let mut need = saturate(
         sum.div_ceil(u64::from(ALIGN_MB))
             .saturating_mul(u64::from(ALIGN_MB)),
@@ -236,7 +211,7 @@ pub fn estimate_need(profile: &MemoryProfile) -> (u32, Vec<NeedFactor>) {
     (need, factors)
 }
 
-/// 超出 u32 的需求只可能来自写坏的配置（几十万的视距），按能表示的最大对齐值算，不 panic。
+/// 超出 u32 的需求只可能来自写坏的输入（整合包清单里接近 u32 上限的推荐值），按能表示的最大对齐值算，不 panic。
 fn saturate(mb: u64) -> u32 {
     u32::try_from(mb).unwrap_or(u32::MAX / ALIGN_MB * ALIGN_MB)
 }
@@ -342,7 +317,6 @@ mod tests {
             loader,
             enabled_mods: mods,
             modpack_recommended_mb: None,
-            render_distance: None,
             distant_horizons: false,
         }
     }
@@ -464,44 +438,11 @@ mod tests {
     }
 
     #[test]
-    fn render_distance_adds_only_beyond_default() {
-        let with_distance = |distance| MemoryProfile {
-            render_distance: Some(distance),
-            ..profile(LoaderClass::Modded, 20)
-        };
-        // 默认 12 与更近的视距不加，也不列出。
-        for distance in [2, 12] {
-            let (mb, factors) = estimate_need(&with_distance(distance));
-            assert_eq!(mb, 3584, "视距 {distance}");
-            assert_eq!(factors.len(), 2, "视距 {distance}");
-        }
-        // 视距 16：(33² - 25²) / 10 = 46；2765 + 409 + 46 = 3220 -> 3584。
-        let (mb, factors) = estimate_need(&with_distance(16));
-        assert_eq!(mb, 3584);
-        assert_eq!(
-            factors[2],
-            NeedFactor::RenderDistance {
-                distance: 16,
-                mb: 46
-            }
-        );
-        // 视距 32：(65² - 25²) / 10 = 360；2765 + 409 + 360 = 3534 -> 3584。
-        assert_eq!(
-            estimate_need(&with_distance(32)).1[2],
-            NeedFactor::RenderDistance {
-                distance: 32,
-                mb: 360
-            }
-        );
-        // 视距 64（模组放开上限）：(129² - 25²) / 10 = 1601；2765 + 409 + 1601 = 4775 -> 5120。
-        assert_eq!(estimate_need(&with_distance(64)).0, 5120);
-    }
-
-    #[test]
-    fn absurd_render_distance_saturates_instead_of_overflowing() {
+    fn absurd_modpack_recommendation_saturates_instead_of_overflowing() {
+        // u32::MAX 向上对齐到 512 的倍数就超出了 u32。
         let broken = MemoryProfile {
-            render_distance: Some(u32::MAX),
-            ..profile(LoaderClass::Vanilla, 0)
+            modpack_recommended_mb: Some(u32::MAX),
+            ..profile(LoaderClass::Modded, 0)
         };
         let estimate = estimate_memory(&broken, SIXTEEN_GB, true);
         assert_eq!(estimate.need_mb, u32::MAX / 512 * 512);
@@ -512,22 +453,12 @@ mod tests {
     fn modpack_recommendation_replaces_base_and_mods() {
         let pack = MemoryProfile {
             modpack_recommended_mb: Some(8736),
-            render_distance: Some(16),
             ..profile(LoaderClass::Modded, 374)
         };
-        // 8736 + 46 = 8782 -> 9216；作者的推荐值代替了按 374 个 Mod 的估算。
+        // 8736 -> 9216；作者的推荐值代替了按 374 个 Mod 的估算。
         let (mb, factors) = estimate_need(&pack);
         assert_eq!(mb, 9216);
-        assert_eq!(
-            factors,
-            vec![
-                NeedFactor::Modpack { mb: 8736 },
-                NeedFactor::RenderDistance {
-                    distance: 16,
-                    mb: 46
-                },
-            ]
-        );
+        assert_eq!(factors, vec![NeedFactor::Modpack { mb: 8736 }]);
     }
 
     #[test]
@@ -630,10 +561,7 @@ mod tests {
 
     #[test]
     fn advice_serializes_the_ipc_contract() {
-        let profile = MemoryProfile {
-            render_distance: Some(16),
-            ..profile(LoaderClass::Modded, 120)
-        };
+        let profile = profile(LoaderClass::Modded, 120);
         let advice = MemoryAdvice::new(SIXTEEN_GB, Some("整合包A".to_owned()), &profile);
         assert_eq!(advice.total_mb, 16384);
         assert_eq!(advice.available_mb, 9000);
@@ -646,7 +574,6 @@ mod tests {
                 "factors": [
                     {"kind": "base", "loader": "modded", "mb": 2765},
                     {"kind": "mods", "count": 120, "mb": 2457},
-                    {"kind": "render_distance", "distance": 16, "mb": 46},
                 ],
             })
         );
