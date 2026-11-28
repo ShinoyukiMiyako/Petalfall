@@ -204,8 +204,12 @@ describe("安装包配置", () => {
     expect(conf.bundle.windows.webviewInstallMode).toEqual({ type: "embedBootstrapper" });
   });
 
-  it("中文系统看到中文向导，其余回落英文", () => {
-    expect(conf.bundle.windows.nsis.languages).toEqual(["English", "SimpChinese"]);
+  // 语言只在安装进度页结束时记进注册表的「Installer Language」，引导程序的静默安装不经过这一页；卸载程序读不到它就弹
+  // LangDLL 的语言框，只有一种语言时 LangDLL 直接取它、不弹框（NSIS 3.11 Contrib/LangDLL/LangDLL.c）。
+  // 向导本身只在 displayLanguageSelector 打开时才弹框。启动器只有中文，不必先问语言。
+  it("向导与卸载程序只有简体中文，不弹语言选择框", () => {
+    expect(conf.bundle.windows.nsis.languages).toEqual(["SimpChinese"]);
+    expect(conf.bundle.windows.nsis.displayLanguageSelector).toBeUndefined();
   });
 
   it("协议全文同时进向导和安装目录", () => {
