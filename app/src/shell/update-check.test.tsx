@@ -4,7 +4,7 @@ import { act } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { UPDATE_FOUND_TOAST } from "../copy/updater";
-import { CHANNEL_CHECK_DEBOUNCE_MS } from "../domain/limits";
+import { CHANNEL_CHECK_DEBOUNCE_MS, TOAST_ACTION_MIN_TTL_MS } from "../domain/limits";
 import type { ConfigDto } from "../ipc/config";
 import type { UpdateChannel, UpdateDto, UpdaterInfoDto } from "../ipc/system";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
@@ -264,7 +264,11 @@ describe("启动器更新：改了更新通道之后的检查", () => {
   const checks = () => callsOf(ipc, "check_update").length;
   const foundAnyToasts = () => launcher.state.toasts.filter((t) => Object.values(FOUND).some((u) => t.title === UPDATE_FOUND_TOAST.title(u.version)));
 
-  it("连着改几次：只在最后一次之后停够才查一次；查到的新版本不弹通知、也不记成已提示", async () => {
+  /** 改到测试版之后查到 FOUND.beta 时的那条通知：包是正式版，正文写明装上以后就换过去。 */
+  const betaToast = () => ({ title: UPDATE_FOUND_TOAST.title(FOUND.beta.version), body: UPDATE_FOUND_TOAST.switchesBody("beta") });
+  const foundAnyToastTexts = () => foundAnyToasts().map((t) => ({ title: t.title, body: t.body }));
+
+  it("连着改几次：只在最后一次之后停够才查一次；查到的新版本弹一次通知，并记成已提示", async () => {
     const random = seeded(20261110);
     // 间隔含两头的边界：差一毫秒就停够了又改、紧接着再改，另有一个随机的
     const gaps = [CHANNEL_CHECK_DEBOUNCE_MS - 1, 0, 1 + Math.floor(random() * (CHANNEL_CHECK_DEBOUNCE_MS - 2))];
@@ -283,11 +287,26 @@ describe("启动器更新：改了更新通道之后的检查", () => {
     await advance(1);
     expect(checks()).toBe(1);
     expect(updater.state.phase).toEqual({ kind: "available", update: FOUND.beta });
-    expect(foundAnyToasts()).toEqual([]);
-    expect(callsOf(ipc, "update_config")).toEqual([]);
+    expect(foundAnyToastTexts()).toEqual([betaToast()]);
+    expect(callsOf(ipc, "update_config")).toEqual([{ notifiedUpdateVersion: FOUND.beta.version }]);
 
     await advance(CHANNEL_CHECK_DEBOUNCE_MS * 3);
     expect(checks()).toBe(1);
+  });
+
+  it("改通道之后提示过的那一版，之后的定时检查查到也不再弹", async () => {
+    await mount();
+    await choose("beta");
+    await advance(CHANNEL_CHECK_DEBOUNCE_MS);
+    expect(checks()).toBe(1);
+    expect(foundAnyToastTexts()).toEqual([betaToast()]);
+
+    // 第一条刚好到时消失；启动后 8 秒的那次定时检查已经跑过，它若再提示一次，新通知此刻一定还在
+    await advance(TOAST_ACTION_MIN_TTL_MS + 1);
+    expect(checks()).toBe(2);
+    expect(updater.state.phase).toEqual({ kind: "available", update: FOUND.beta });
+    expect(foundAnyToasts()).toEqual([]);
+    expect(callsOf(ipc, "update_config")).toEqual([{ notifiedUpdateVersion: FOUND.beta.version }]);
   });
 
   it("停够时断网：不查，联网之后马上查", async () => {
@@ -300,7 +319,7 @@ describe("启动器更新：改了更新通道之后的检查", () => {
     await advance(0);
     expect(checks()).toBe(1);
     expect(updater.state.phase).toEqual({ kind: "available", update: FOUND.beta });
-    expect(foundAnyToasts()).toEqual([]);
+    expect(foundAnyToastTexts()).toEqual([betaToast()]);
   });
 
   it("停够时还在检查：一直等到那次检查因改了通道作废、能检查了再查，不只在到点时试一次", async () => {
@@ -329,15 +348,16 @@ describe("启动器更新：改了更新通道之后的检查", () => {
     expect(updater.state.phase).toEqual({ kind: "available", update: FOUND.beta });
   });
 
-  it("「自动检查更新」关着也查；之后照旧不排自动检查", async () => {
+  it("「自动检查更新」关着也查，查到的新版本照样提示一次；之后照旧不排自动检查", async () => {
     config = configDto({ check_updates: false });
     await mount();
     await choose("beta");
     await advance(CHANNEL_CHECK_DEBOUNCE_MS);
     expect(checks()).toBe(1);
+    expect(foundAnyToastTexts()).toEqual([betaToast()]);
     await advance(AUTO_CHECK_DELAY_MS + AUTO_CHECK_INTERVAL_MS);
     expect(checks()).toBe(1);
-    expect(foundAnyToasts()).toEqual([]);
+    expect(callsOf(ipc, "update_config")).toEqual([{ notifiedUpdateVersion: FOUND.beta.version }]);
   });
 
   it("停够之前自己查过：欠着的那次随之清掉，不再补查", async () => {

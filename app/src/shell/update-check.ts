@@ -4,9 +4,10 @@
 // 查到没被跳过、没提示过的新版本时弹一次通知，并把这个版本记进配置，之后（包括重启以后）不再为它提示。
 //
 // 另一路是改了更新通道之后欠着的那次检查（状态里的 channelCheckDue）：停够 CHANNEL_CHECK_DEBOUNCE_MS 没再改才查，
-// 断网就等联网，不能检查就等到能检查。它是用户动作的后果，不看「自动检查更新」开关；用户正看着关于页的状态行，查到新版本不弹通知。
+// 断网就等联网，不能检查就等到能检查。它是用户动作的后果，不看「自动检查更新」开关。查到新版本时和定时检查一样弹一次通知、
+// 记为已提示：用户刚换了通道，该知道新通道上有什么；不记的话，之后的定时检查查到同一版还会再弹一次。
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { UPDATE_COPY, UPDATE_FOUND_TOAST, updateFoundToastBody } from "../copy/updater";
 import { CHANNEL_CHECK_DEBOUNCE_MS } from "../domain/limits";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
@@ -57,21 +58,14 @@ export function useUpdaterAutoCheck(openUpdatePanel: () => void, updater: () => 
   const latest = useRef({ settings, updater, openUpdatePanel });
   latest.current = { settings, updater, openUpdatePanel };
 
-  useEffect(() => {
-    if (!due || !online) return;
-    setDue(false);
-    const api = latest.current.updater();
-    const phase = api.snapshot().phase;
-    if (!canCheck(phase)) {
-      console.info(`[updater] 跳过这一轮自动检查：当前阶段 ${phase.kind}`);
-      return;
-    }
-    void (async () => {
+  // 查一次；查到没被跳过、没提示过的新版本就弹一次通知并记进配置。定时检查与改通道后欠着的那次共用这一条路
+  const checkAndAnnounce = useCallback(
+    async (api: Pick<UpdaterApi, "snapshot" | "check">) => {
       // 检查失败是更新卡的正式状态（卡内显示原因与重试），check 不会因此抛出；这里兜住的只是不该发生的调用错误
       const found = await run(async () => {
         await api.check();
         const now = latest.current;
-        if (now.settings === null) throw new Error("自动检查只在配置读到之后排期");
+        if (now.settings === null) throw new Error("检查更新只在配置读到之后发起");
         const state = now.updater().snapshot();
         const update = updateToAnnounce(state, now.settings.skippedUpdateVersion, now.settings.notifiedUpdateVersion);
         return update === null ? null : { version: update.version, body: foundToastBody(update, state.channels) };
@@ -82,8 +76,21 @@ export function useUpdaterAutoCheck(openUpdatePanel: () => void, updater: () => 
         action: { label: UPDATE_FOUND_TOAST.action, run: () => latest.current.openUpdatePanel(), errorTitle: UPDATE_COPY.openPanelFailed },
       });
       await run(() => actions.updateSettings({ notifiedUpdateVersion: version }), UPDATE_FOUND_TOAST.rememberFailed);
-    })();
-  }, [actions, due, online, run]);
+    },
+    [actions, run],
+  );
+
+  useEffect(() => {
+    if (!due || !online) return;
+    setDue(false);
+    const api = latest.current.updater();
+    const phase = api.snapshot().phase;
+    if (!canCheck(phase)) {
+      console.info(`[updater] 跳过这一轮自动检查：当前阶段 ${phase.kind}`);
+      return;
+    }
+    void checkAndAnnounce(api);
+  }, [checkAndAnnounce, due, online]);
 
   // 改通道欠着的检查。代次只增不减：每改一次换一个值、重新计时，计时器到点时把那一代记为停够了；
   // 停够之后联网与能检查两样随时变，下面按它们的变化反复判断，不只在到点那一刻试一次
@@ -104,7 +111,7 @@ export function useUpdaterAutoCheck(openUpdatePanel: () => void, updater: () => 
     // 渲染之后又改了一次通道、或阶段又变了：等那次变化带来的重渲染再判断，新的一代要重新停够
     if (state.channelCheckDue !== channelCheckDue || !canCheck(state.phase)) return;
     console.info(`[updater] 改了更新通道之后停够了（偏好代次 ${channelCheckDue}），按新的偏好检查一次`);
-    // 检查开始即把欠着的这次清掉；失败是更新卡的正式状态，这里兜住的只是不该发生的调用错误
-    void run(() => api.check(), UPDATE_COPY.checkStartFailed);
-  }, [channelCheckDue, channelCheckable, channelSettled, online, run]);
+    // 检查开始即把欠着的这次清掉
+    void checkAndAnnounce(api);
+  }, [channelCheckDue, channelCheckable, channelSettled, checkAndAnnounce, online]);
 }
