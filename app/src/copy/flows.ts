@@ -6,7 +6,7 @@ import { formatBytes, formatElapsed, formatMemory, formatRelative, formatSpeed }
 import type { BaseBusyLock, InstanceLock } from "../domain/instance-locks";
 import type { AccountKind, FailureCode, InstallPhase, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskPhase, TaskStatus } from "../domain/types";
 import type { CrashSource, ExitCodeKind, ExitCodeNoteDto, LaunchWarningCode } from "../ipc/diagnostics";
-import type { MoveBlockerDto, MoveFollowUpDto, NameRule, TemplateSkipReason } from "../ipc/instances";
+import type { BaseConflictDto, BaseConflictReason, MoveBlockerDto, MoveFollowUpDto, NameRule, TemplateSkipReason } from "../ipc/instances";
 import type { UpdateChannel } from "../ipc/system";
 import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
 import { DATA_FORMAT_TASK_FAILURE, moveTargetDataFormatUnreadableReason, moveTargetDataTooNewReason } from "./data-format";
@@ -1016,6 +1016,23 @@ function moveFollowUpText(item: MoveFollowUpDto): string {
   }
 }
 
+const BASE_CONFLICT_WHY: Record<BaseConflictReason, string> = {
+  differs: "内容却不同",
+  missing_json: "里面却缺版本 JSON",
+  unreadable_json: "里面的版本 JSON 却读不懂",
+};
+
+/**
+ * 目标里挡着一个基底版本的同名目录：哪个文件夹、为什么挡，以及玩家能怎么处理。有实例靠它运行时动不得它；实例库列着的
+ * 切过去在界面里处理；不列的是早先落下、没人用的依赖版本，界面里找不到，只能到文件夹里处理。不替玩家删。
+ */
+function baseConflictText(conflict: BaseConflictDto): string {
+  const blocked = `目标游戏目录里的文件夹 ${conflict.path} 和它依赖的版本「${conflict.id}」同名，${BASE_CONFLICT_WHY[conflict.reason]}，放不过去`;
+  if (conflict.dependents.length > 0) return `${blocked}。那边的实例${namedList(conflict.dependents, 2)}靠它运行，不能替换，可以改移到其他游戏目录`;
+  if (conflict.listed) return `${blocked}。它在那边的实例库里，切过去给它改个名字或删掉后再移`;
+  return `${blocked}。它是${APP_NAME}早先落下的依赖版本，没有实例在用，实例库里也看不到；手动删掉或改名这个文件夹后再移`;
+}
+
 /** 拦着一次移动的原因：预检弹窗逐条列出，执行时被拦下的失败原因也用它。 */
 export function moveBlockerReason(blocker: MoveBlockerDto): string {
   switch (blocker.kind) {
@@ -1032,8 +1049,11 @@ export function moveBlockerReason(blocker: MoveBlockerDto): string {
       const listed = blocker.paths.length > 3 ? joinMixed(shown, `等 ${blocker.paths.length} 处`) : shown;
       return `实例里有符号链接或目录联接：${listed}。复制与删除原件都处理不了它们，先换成普通文件夹`;
     }
+    // 较早的任务日志只记了基底的 id
     case "base_conflict":
-      return `目标游戏目录里已有同名、内容却不同的版本：${blocker.bases.join("、")}。它依赖的版本放不过去`;
+      return blocker.conflicts === undefined
+        ? `目标游戏目录里已有同名、内容却不同的版本：${blocker.bases.join("、")}。它依赖的版本放不过去`
+        : blocker.conflicts.map(baseConflictText).join("。");
     case "insufficient_space":
       return `目标盘空间不够：需要 ${formatBytes(blocker.needed)}，只剩 ${formatBytes(blocker.available)}`;
     case "pending":

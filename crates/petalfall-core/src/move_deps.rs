@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use petalfall_install::GameLayout;
 use petalfall_install::natives::native_jar_relpath;
 use petalfall_install::plan::{asset_object_tasks, library_tasks, logging_task, processor_outputs};
-use petalfall_instance::is_safe_instance_id;
+use petalfall_instance::{discover_versions, is_safe_instance_id};
 use petalfall_version::{
     RuntimeContext, VersionJson, check_path_segment, resolve, select_libraries,
 };
@@ -22,6 +22,8 @@ use serde_json::Value;
 
 use crate::InstanceError;
 use crate::error::{CoreError, Result};
+use crate::instance_move::{BaseConflict, BaseConflictReason};
+use crate::instances::{blocking_dependents, hide_base_versions};
 use crate::launch::read_asset_index;
 use crate::modfs::try_exists;
 use crate::workdir::read_version_json;
@@ -52,8 +54,8 @@ pub(crate) struct DependencyPlan {
     pub bases: Vec<BaseVersionCopy>,
     /// 目标里已有、可以当成同一个基底复用的基底版本（判法见 [`same_base`]）。
     pub reused_bases: Vec<String>,
-    /// 目标里已有同名目录、不能复用（或缺版本 JSON、版本 JSON 坏了）的基底版本。
-    pub conflicting_bases: Vec<String>,
+    /// 目标里已有同名目录、不能复用（内容不同、缺版本 JSON 或版本 JSON 坏了）的基底版本，由近及远。
+    pub conflicting_bases: Vec<BaseConflict>,
     /// 源里也缺的共用文件数。
     pub missing_in_source: u64,
 }
@@ -122,8 +124,12 @@ pub(crate) async fn plan_dependencies(
         missing_in_source,
         ..DependencyPlan::default()
     };
+    let mut blocked = Vec::new();
     for base in &chain.bases {
-        classify_base(&source, &target, base, &mut plan).await?;
+        blocked.extend(classify_base(&source, &target, base, &mut plan).await?);
+    }
+    if !blocked.is_empty() {
+        plan.conflicting_bases = describe_conflicts(&target, blocked).await?;
     }
     Ok(plan)
 }
@@ -351,25 +357,40 @@ fn files_under(dir: &Path) -> Result<Vec<(PathBuf, u64)>> {
     Ok(files)
 }
 
-/// 一个基底版本在目标里的处境：没有就带过去，有同名目录时按 [`same_base`] 比较两份版本 JSON。
+/// 目标里挡着一个基底版本的同名目录，还没看实例库列不列它、谁靠它运行（见 [`describe_conflicts`]）。
+struct Blocked {
+    id: String,
+    dir: PathBuf,
+    reason: BaseConflictReason,
+}
+
+/// 一个基底版本在目标里的处境：没有就带过去，有同名目录时按 [`same_base`] 比较两份版本 JSON，能复用就记下复用，
+/// 不能就交回挡路的目录。
 async fn classify_base(
     source: &GameLayout,
     target: &GameLayout,
     id: &str,
     plan: &mut DependencyPlan,
-) -> Result<()> {
+) -> Result<Option<Blocked>> {
     let source_json = source.version_json(id);
-    if try_exists(&target.version_dir(id)).await? {
-        let same = match target_json_value(&target.version_json(id)).await? {
-            Some(theirs) => same_base(theirs, source_json_value(&source_json).await?),
-            None => false,
+    let dir = target.version_dir(id);
+    if try_exists(&dir).await? {
+        let reason = match target_json(&target.version_json(id)).await? {
+            TargetJson::Parsed(theirs) => {
+                if same_base(theirs, source_json_value(&source_json).await?) {
+                    plan.reused_bases.push(id.to_owned());
+                    return Ok(None);
+                }
+                BaseConflictReason::Differs
+            }
+            TargetJson::Missing => BaseConflictReason::MissingJson,
+            TargetJson::Unreadable => BaseConflictReason::UnreadableJson,
         };
-        if same {
-            plan.reused_bases.push(id.to_owned());
-        } else {
-            plan.conflicting_bases.push(id.to_owned());
-        }
-        return Ok(());
+        return Ok(Some(Blocked {
+            id: id.to_owned(),
+            dir,
+            reason,
+        }));
     }
     let mut files = Vec::new();
     for src in [source_json, source.version_jar(id)] {
@@ -385,7 +406,7 @@ async fn classify_base(
         id: id.to_owned(),
         files,
     });
-    Ok(())
+    Ok(None)
 }
 
 /// 目标里的同名基底能不能当成源里的那个复用。同一个原版 id 的 JSON Mojang 会重发（2021-12 的 log4j 修补改了
@@ -420,18 +441,57 @@ fn without_times(mut json: Value) -> Value {
     json
 }
 
-/// 目标里同名基底的版本 JSON 解析成的值；文件不存在或解析不了时为 `None`。解析不了的那份已经坏了，和缺了一样
-/// 不能拿来复用，也不能覆盖（它属于目标里的别的实例），按冲突交给玩家处理。
-async fn target_json_value(path: &Path) -> Result<Option<Value>> {
+/// 目标里同名基底的版本 JSON。
+enum TargetJson {
+    Parsed(Value),
+    Missing,
+    /// 解析不了：那份已经坏了，和缺了一样不能拿来复用，也不能覆盖（它可能属于目标里的别的实例），按冲突交给玩家处理。
+    Unreadable,
+}
+
+async fn target_json(path: &Path) -> Result<TargetJson> {
     match tokio::fs::read(path).await {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Ok(bytes) => Ok(match serde_json::from_slice(&bytes) {
+            Ok(value) => TargetJson::Parsed(value),
+            Err(_) => TargetJson::Unreadable,
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(TargetJson::Missing),
         Err(source) => Err(petalfall_base::Error::Io {
             path: path.to_path_buf(),
             source,
         }
         .into()),
     }
+}
+
+/// 给挡路的同名目录补上玩家处理它要知道的两件事：目标的实例库列不列它，目标里有没有版本靠它运行。口径同实例库
+/// （[`hide_base_versions`]）与删除、改名前的依赖检查（[`blocking_dependents`]）：启动器早先落下、没当实例用过的
+/// 依赖版本目录实例库不列，玩家在界面里找不到它，只能到文件夹里删掉或改名。
+async fn describe_conflicts(
+    target: &GameLayout,
+    blocked: Vec<Blocked>,
+) -> Result<Vec<BaseConflict>> {
+    let scan = discover_versions(target.root()).await?;
+    let mut listed = scan.clone();
+    hide_base_versions(target.root(), &mut listed).await;
+    // 目录名与 inheritsFrom 的写法可能只差大小写，Windows 上是同一个目录。
+    let listed: HashSet<String> = listed
+        .versions
+        .iter()
+        .map(|version| version.id.to_lowercase())
+        .chain(listed.broken.iter().map(|broken| broken.id.to_lowercase()))
+        .collect();
+    let mut conflicts = Vec::with_capacity(blocked.len());
+    for Blocked { id, dir, reason } in blocked {
+        conflicts.push(BaseConflict {
+            listed: listed.contains(&id.to_lowercase()),
+            dependents: blocking_dependents(target.root(), &scan, &id).await,
+            id,
+            dir,
+            reason,
+        });
+    }
+    Ok(conflicts)
 }
 
 /// 源里基底的版本 JSON 解析成的值。读继承链时已经解析过一次，这里再出错照实报。比较解析后的值而不是字节：
@@ -490,6 +550,14 @@ mod tests {
         plan_dependencies(source, target, id, &runtime())
             .await
             .unwrap()
+    }
+
+    /// 挡路的基底版本 id 与原因，由近及远。
+    fn conflicts_of(plan: &DependencyPlan) -> Vec<(String, BaseConflictReason)> {
+        plan.conflicting_bases
+            .iter()
+            .map(|c| (c.id.clone(), c.reason))
+            .collect()
     }
 
     /// 文件清单换成目标下的相对路径与大小，按路径排序；同时核对源与目标是同一个相对位置。
@@ -902,14 +970,25 @@ mod tests {
         put_version(&differs, "1.20.1", &VANILLA.replace("release", "snapshot"));
         let plan = plan_between(&source, &differs, "整合包").await;
         assert_eq!(plan.reused_bases, vec![FORGE_ID.to_owned()]);
-        assert_eq!(plan.conflicting_bases, vec!["1.20.1".to_owned()]);
+        assert_eq!(
+            conflicts_of(&plan),
+            vec![("1.20.1".to_owned(), BaseConflictReason::Differs)]
+        );
+        assert_eq!(
+            plan.conflicting_bases[0].dir,
+            at(&differs, "versions/1.20.1"),
+            "报的是目标里挡路的那个目录"
+        );
         assert!(plan.bases.is_empty());
 
         // 加载器版本只有空目录（缺 JSON）：算冲突；原版没有就照常带。
         let broken = tmp.path().join("缺 JSON 的目标");
         std::fs::create_dir_all(at(&broken, &format!("versions/{FORGE_ID}"))).unwrap();
         let plan = plan_between(&source, &broken, "整合包").await;
-        assert_eq!(plan.conflicting_bases, vec![FORGE_ID.to_owned()]);
+        assert_eq!(
+            conflicts_of(&plan),
+            vec![(FORGE_ID.to_owned(), BaseConflictReason::MissingJson)]
+        );
         assert_eq!(
             plan.bases.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(),
             vec!["1.20.1"]
@@ -918,10 +997,58 @@ mod tests {
         put_version(&broken, "1.20.1", "{ not json");
         let plan = plan_between(&source, &broken, "整合包").await;
         assert_eq!(
-            plan.conflicting_bases,
-            vec![FORGE_ID.to_owned(), "1.20.1".to_owned()]
+            conflicts_of(&plan),
+            vec![
+                (FORGE_ID.to_owned(), BaseConflictReason::MissingJson),
+                ("1.20.1".to_owned(), BaseConflictReason::UnreadableJson),
+            ]
         );
         assert!(plan.bases.is_empty() && plan.reused_bases.is_empty());
+    }
+
+    /// 挡路的同名目录带上玩家处理它要知道的：没记成依赖版本的是玩家的实例，实例库列着；启动器早先落下、没人用的
+    /// 依赖版本目录实例库不列，也没有版本靠它；有实例继承它时照删除前的依赖检查列出来，实例库照旧不列它。
+    #[tokio::test]
+    async fn conflicting_bases_say_whether_the_library_lists_them_and_who_runs_on_them() {
+        use crate::instances::record_base_versions_in;
+        let (_tmp, source, target) = game_dirs();
+        put_version(
+            &source,
+            "1.20.1",
+            r#"{"id":"1.20.1","type":"release","mainClass":"M"}"#,
+        );
+        put_version(
+            &source,
+            "整合包",
+            r#"{"id":"整合包","inheritsFrom":"1.20.1","mainClass":"M"}"#,
+        );
+        put_version(
+            &target,
+            "1.20.1",
+            r#"{"id":"1.20.1","type":"snapshot","mainClass":"M"}"#,
+        );
+        let describe = async || {
+            let plan = plan_between(&source, &target, "整合包").await;
+            let [conflict] = plan.conflicting_bases.as_slice() else {
+                panic!("应恰有一处冲突：{:?}", plan.conflicting_bases);
+            };
+            assert_eq!(conflict.dir, at(&target, "versions/1.20.1"));
+            (conflict.listed, conflict.dependents.clone())
+        };
+
+        assert_eq!(describe().await, (true, Vec::new()));
+
+        record_base_versions_in(&target, &["1.20.1".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(describe().await, (false, Vec::new()));
+
+        put_version(
+            &target,
+            "老存档",
+            r#"{"id":"老存档","inheritsFrom":"1.20.1","mainClass":"M"}"#,
+        );
+        assert_eq!(describe().await, (false, vec!["老存档".to_owned()]));
     }
 
     /// 1.12.2 的原版 JSON：日志配置与 time 随 Mojang 重发而变，releaseTime 与客户端 jar 不变。
@@ -961,10 +1088,15 @@ mod tests {
         let classify = async |target: &Path| {
             let plan = plan_between(&source, target, "空岛").await;
             assert!(plan.bases.is_empty());
-            (plan.reused_bases, plan.conflicting_bases)
+            (plan.reused_bases.clone(), conflicts_of(&plan))
         };
-        let reused = || (vec!["1.12.2".to_owned()], Vec::<String>::new());
-        let conflicting = || (Vec::<String>::new(), vec!["1.12.2".to_owned()]);
+        let reused = || (vec!["1.12.2".to_owned()], Vec::new());
+        let conflicting = || {
+            (
+                Vec::<String>::new(),
+                vec![("1.12.2".to_owned(), BaseConflictReason::Differs)],
+            )
+        };
 
         let old = tmp.path().join("2021 年前装的");
         put_version(
@@ -1075,7 +1207,10 @@ mod tests {
         );
         let plan = plan_between(&source, &differs, "格雷科技").await;
         assert_eq!(plan.reused_bases, vec!["1.12.2".to_owned()]);
-        assert_eq!(plan.conflicting_bases, vec![forge_id.to_owned()]);
+        assert_eq!(
+            conflicts_of(&plan),
+            vec![(forge_id.to_owned(), BaseConflictReason::Differs)]
+        );
     }
 
     /// 只给别的平台的库按规则筛掉，源里有文件也不列。

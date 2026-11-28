@@ -161,6 +161,17 @@ describe("拦截项的形状", () => {
     expect(() => parseMoveBlocker({ kind: "insufficient_space", needed: -1, available: 3 }, "x")).toThrow("x.needed 应是非负整数");
   });
 
+  it("基底冲突逐个读回挡路的目录；较早任务日志里没有 conflicts 的照样读回；字段不对都抛错", () => {
+    const conflict = { id: "1.21", path: "D:\\新家\\.minecraft\\versions\\1.21", reason: "missing_json", listed: false, dependents: ["老存档"] };
+    expect(parseMoveBlocker({ kind: "base_conflict", bases: ["1.21"], conflicts: [conflict] }, "x")).toEqual({ kind: "base_conflict", bases: ["1.21"], conflicts: [conflict] });
+    expect(parseMoveBlocker({ kind: "base_conflict", bases: ["1.21"] }, "x")).toEqual({ kind: "base_conflict", bases: ["1.21"] });
+    expect(() => parseMoveBlocker({ kind: "base_conflict", bases: ["1.21"], conflicts: conflict }, "x")).toThrow("x.conflicts 应是数组");
+    expect(() => parseMoveBlocker({ kind: "base_conflict", bases: ["1.21"], conflicts: [{ ...conflict, reason: "gone" }] }, "x")).toThrow("x.conflicts[0].reason 不认识");
+    expect(() => parseMoveBlocker({ kind: "base_conflict", bases: ["1.21"], conflicts: [{ ...conflict, listed: "no" }] }, "x")).toThrow("x.conflicts[0].listed 应是布尔值");
+    expect(() => parseMoveBlocker({ kind: "base_conflict", bases: ["1.21"], conflicts: [{ ...conflict, path: null }] }, "x")).toThrow("x.conflicts[0].path 应是字符串");
+    expect(() => parseMoveBlocker({ kind: "base_conflict", bases: ["1.21"], conflicts: [{ ...conflict, dependents: "老存档" }] }, "x")).toThrow("x.conflicts[0].dependents 应是字符串数组");
+  });
+
   it("目标游戏目录的数据格式两种：字段原样读回，版本与通道可以同为 null；字段缺失、类型不对或通道不认识都抛错", () => {
     const tooNew = { kind: "data_too_new", path: HMCL, found: 2, supported: 1, written_by: "1.1.0-dev.57", written_by_channel: "dev" };
     expect(parseMoveBlocker(tooNew, "x")).toEqual(tooNew);

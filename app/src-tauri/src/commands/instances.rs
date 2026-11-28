@@ -9357,6 +9357,7 @@ mod tests {
     /// 预检的每一种拦截项按 kind 出 JSON，带上各自的参数，顺序照门面给的；其余字段原样搬过来。
     #[test]
     fn move_preview_dto_carries_every_blocker_kind() {
+        use petalfall_core::instance_move::{BaseConflict, BaseConflictReason};
         let preview = MovePreview {
             id: "生存".into(),
             source_game_dir: PathBuf::from(r"C:\Games\.minecraft"),
@@ -9380,7 +9381,31 @@ mod tests {
                 MoveBlocker::NameTaken,
                 MoveBlocker::HasDependents(vec!["fab".into()]),
                 MoveBlocker::Links(vec![PathBuf::from("mods").join("link")]),
-                MoveBlocker::BaseConflict(vec!["1.20.1".into()]),
+                MoveBlocker::BaseConflict(vec![
+                    BaseConflict {
+                        id: "1.20.1".into(),
+                        dir: PathBuf::from(r"D:\新家\.minecraft\versions\1.20.1"),
+                        reason: BaseConflictReason::Differs,
+                        listed: false,
+                        dependents: Vec::new(),
+                    },
+                    BaseConflict {
+                        id: "fabric-loader-0.16.10-1.20.1".into(),
+                        dir: PathBuf::from(
+                            r"D:\新家\.minecraft\versions\fabric-loader-0.16.10-1.20.1",
+                        ),
+                        reason: BaseConflictReason::MissingJson,
+                        listed: true,
+                        dependents: vec!["生存".into()],
+                    },
+                    BaseConflict {
+                        id: "1.19.4".into(),
+                        dir: PathBuf::from(r"D:\新家\.minecraft\versions\1.19.4"),
+                        reason: BaseConflictReason::UnreadableJson,
+                        listed: true,
+                        dependents: Vec::new(),
+                    },
+                ]),
                 MoveBlocker::InsufficientSpace {
                     needed: 339_091_456,
                     available: 9,
@@ -9427,7 +9452,33 @@ mod tests {
                     { "kind": "name_taken" },
                     { "kind": "has_dependents", "dependents": ["fab"] },
                     { "kind": "links", "paths": [path_text(&PathBuf::from("mods").join("link"))] },
-                    { "kind": "base_conflict", "bases": ["1.20.1"] },
+                    {
+                        "kind": "base_conflict",
+                        "bases": ["1.20.1", "fabric-loader-0.16.10-1.20.1", "1.19.4"],
+                        "conflicts": [
+                            {
+                                "id": "1.20.1",
+                                "path": r"D:\新家\.minecraft\versions\1.20.1",
+                                "reason": "differs",
+                                "listed": false,
+                                "dependents": [],
+                            },
+                            {
+                                "id": "fabric-loader-0.16.10-1.20.1",
+                                "path": r"D:\新家\.minecraft\versions\fabric-loader-0.16.10-1.20.1",
+                                "reason": "missing_json",
+                                "listed": true,
+                                "dependents": ["生存"],
+                            },
+                            {
+                                "id": "1.19.4",
+                                "path": r"D:\新家\.minecraft\versions\1.19.4",
+                                "reason": "unreadable_json",
+                                "listed": true,
+                                "dependents": [],
+                            },
+                        ],
+                    },
                     { "kind": "insufficient_space", "needed": 339_091_456, "available": 9 },
                     { "kind": "pending" },
                     { "kind": "source_changed" },

@@ -14,6 +14,7 @@
 use std::error::Error as StdError;
 use std::path::Path;
 
+use petalfall_core::instance_move::{BaseConflict, BaseConflictReason};
 use petalfall_core::{
     AuthError, BaseError, CoreError, CoverImageError, CredentialRealm, DownloadError, InstallError,
     InstanceError, JavaError, LaunchError, ModPlatformError, ModpackError, MoveBlocker,
@@ -338,7 +339,11 @@ pub(crate) fn move_blocker_json(blocker: &MoveBlocker) -> Value {
             "kind": "links",
             "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         }),
-        MoveBlocker::BaseConflict(ids) => json!({ "kind": "base_conflict", "bases": ids }),
+        MoveBlocker::BaseConflict(conflicts) => json!({
+            "kind": "base_conflict",
+            "bases": conflicts.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            "conflicts": conflicts.iter().map(base_conflict_json).collect::<Vec<_>>(),
+        }),
         MoveBlocker::InsufficientSpace { needed, available } => json!({
             "kind": "insufficient_space",
             "needed": needed,
@@ -360,6 +365,22 @@ pub(crate) fn move_blocker_json(blocker: &MoveBlocker) -> Value {
             data_format_unreadable_fields(path, reason),
         ),
     }
+}
+
+/// base_conflict 里的一处：挡路的目录、为什么挡、目标的实例库列不列它、谁靠它运行，前端据此说清怎么处理。
+fn base_conflict_json(conflict: &BaseConflict) -> Value {
+    let reason = match conflict.reason {
+        BaseConflictReason::Differs => "differs",
+        BaseConflictReason::MissingJson => "missing_json",
+        BaseConflictReason::UnreadableJson => "unreadable_json",
+    };
+    json!({
+        "id": conflict.id,
+        "path": conflict.dir.display().to_string(),
+        "reason": reason,
+        "listed": conflict.listed,
+        "dependents": conflict.dependents,
+    })
 }
 
 /// 两种数据格式拦截项与同名错误的 detail 只差一个 `kind`，字段由同一个函数给出。

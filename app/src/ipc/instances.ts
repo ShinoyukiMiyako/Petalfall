@@ -582,7 +582,8 @@ export const revealInFolder = (path: string): Promise<void> => invoke<void>("rev
  * 拦着一次移动的问题。预检把它们全列出来；执行前后端重新预检，遇到的第一个以 instance_move_blocked 拒绝，
  * detail.blocker 是同一形状。same_directory：目标就是实例现在所在的游戏目录；target_inside_source：目标在实例目录里面；
  * name_taken：目标里已有同名（不分大小写）的版本；has_dependents：别的实例经 inheritsFrom 依赖它；links：实例目录或它的
- * 备份目录里有符号链接、目录联接；base_conflict：目标里已有同名、内容不同的基底版本；insufficient_space：要写的字节加
+ * 备份目录里有符号链接、目录联接；base_conflict：目标里已有同名、却不能当成同一个复用的基底版本目录，bases 是这些基底的
+ * id，conflicts 逐个说明（较早的任务日志里没有 conflicts）；insufficient_space：要写的字节加
  * 256 MiB 余量超过目标盘剩余；pending：上一次移动中断后还没收尾；source_changed：只在执行时出现，当前游戏目录已不是
  * 发起移动时带上的 source（发起之后切换过），不动当前目录里同名的实例；data_too_new：目标游戏目录被更新的版本用过，
  * 字段同 game_dir_data_too_new 的 detail；data_format_unreadable：目标游戏目录里记数据格式的文件读不懂，字段同
@@ -594,12 +595,27 @@ export type MoveBlockerDto =
   | { kind: "name_taken" }
   | { kind: "has_dependents"; dependents: string[] }
   | { kind: "links"; paths: string[] }
-  | { kind: "base_conflict"; bases: string[] }
+  | { kind: "base_conflict"; bases: string[]; conflicts?: BaseConflictDto[] }
   | { kind: "insufficient_space"; needed: number; available: number }
   | { kind: "pending" }
   | { kind: "source_changed" }
   | ({ kind: "data_too_new" } & GameDirDataTooNewDto)
   | ({ kind: "data_format_unreadable" } & DataFormatUnreadableDto);
+
+/**
+ * 目标里挡着一个基底版本的同名目录。path 是那个目录；reason：differs 版本 JSON 内容不同，missing_json 目录里没有版本 JSON，
+ * unreadable_json 版本 JSON 读不懂；listed 为 false 时目标的实例库不列它（启动器早先落下、没当实例用过的依赖版本目录，
+ * 界面里找不到）；dependents 是目标里靠它运行的版本，同删除、改名前拦着的那份名单。
+ */
+export interface BaseConflictDto {
+  id: string;
+  path: string;
+  reason: BaseConflictReason;
+  listed: boolean;
+  dependents: string[];
+}
+
+export type BaseConflictReason = "differs" | "missing_json" | "unreadable_json";
 
 /** 移动前的预检，不写盘、不占实例。源是当前游戏目录，目标可以还不存在。 */
 export interface MovePreviewDto {
@@ -687,6 +703,26 @@ function byteCount(raw: unknown, what: string): number {
   return raw;
 }
 
+const BASE_CONFLICT_REASONS: readonly BaseConflictReason[] = ["differs", "missing_json", "unreadable_json"];
+
+function parseBaseConflict(raw: unknown, where: string): BaseConflictDto {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error(`${where} 应是对象，实为 ${JSON.stringify(raw)}`);
+  const r = raw as Record<string, unknown>;
+  if (typeof r.id !== "string") throw new Error(`${where}.id 应是字符串，实为 ${JSON.stringify(r.id)}`);
+  if (typeof r.path !== "string") throw new Error(`${where}.path 应是字符串，实为 ${JSON.stringify(r.path)}`);
+  const reason = BASE_CONFLICT_REASONS.find((known) => known === r.reason);
+  if (reason === undefined) throw new Error(`${where}.reason 不认识：${JSON.stringify(r.reason)}`);
+  if (typeof r.listed !== "boolean") throw new Error(`${where}.listed 应是布尔值，实为 ${JSON.stringify(r.listed)}`);
+  return { id: r.id, path: r.path, reason, listed: r.listed, dependents: stringList(r.dependents, `${where}.dependents`) };
+}
+
+/** base_conflict 的 conflicts：较早的任务日志里没有这一项，原样不带。 */
+function baseConflicts(raw: unknown, where: string): { conflicts?: BaseConflictDto[] } {
+  if (raw === undefined) return {};
+  if (!Array.isArray(raw)) throw new Error(`${where} 应是数组，实为 ${JSON.stringify(raw)}`);
+  return { conflicts: raw.map((item, index) => parseBaseConflict(item, `${where}[${index}]`)) };
+}
+
 /** 逐项校验一个拦截项（来自错误详情或任务日志），形状不对就抛错。 */
 export function parseMoveBlocker(raw: unknown, where: string): MoveBlockerDto {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error(`${where} 应是对象，实为 ${JSON.stringify(raw)}`);
@@ -703,7 +739,7 @@ export function parseMoveBlocker(raw: unknown, where: string): MoveBlockerDto {
     case "links":
       return { kind: r.kind, paths: stringList(r.paths, `${where}.paths`) };
     case "base_conflict":
-      return { kind: r.kind, bases: stringList(r.bases, `${where}.bases`) };
+      return { kind: r.kind, bases: stringList(r.bases, `${where}.bases`), ...baseConflicts(r.conflicts, `${where}.conflicts`) };
     case "insufficient_space":
       return { kind: r.kind, needed: byteCount(r.needed, `${where}.needed`), available: byteCount(r.available, `${where}.available`) };
     case "data_too_new":

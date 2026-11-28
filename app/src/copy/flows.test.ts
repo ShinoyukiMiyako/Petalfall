@@ -5,6 +5,7 @@ import { CREATE_COPY } from "../flows/create-instance/copy";
 import { FOOTER_COPY } from "../flows/onboarding/copy";
 import { INSTALL_COPY, SEARCH_COPY } from "../pages/discover/copy";
 import { HERO_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
+import type { BaseConflictDto, MoveBlockerDto } from "../ipc/instances";
 import { GPU_COPY } from "../pages/settings/copy";
 import { TASKS_COPY } from "../pages/tasks/copy";
 import { ACTION_ERROR, CONFIRM_COPY, DELETE_INSTANCE_COPY, failureCopy, failureToastLabel, INSTALL_PHASE_LABEL, lockReason, microsoftLoginFailure, moveBlockerReason, sentence, TASK_TEXT, TASK_TOAST, taskFailureReason, taskPhaseText, taskStatusLabel, TOAST_COPY, withoutSettingsAction, type FailureContext } from "./flows";
@@ -228,6 +229,44 @@ describe("移动的拦截项：目标游戏目录的数据格式", () => {
         moveBlockerReason({ kind: "data_format_unreadable", path: TARGET, reason: "x" }),
       ]),
     ).toEqual([]);
+  });
+});
+
+describe("移动的拦截项：目标里同名的基底版本目录挡路", () => {
+  const DIR = "D:\\新家\\.minecraft\\versions\\1.20.1";
+  const conflict: BaseConflictDto = { id: "1.20.1", path: DIR, reason: "differs", listed: false, dependents: [] };
+  const reasonOf = (...conflicts: BaseConflictDto[]) => moveBlockerReason({ kind: "base_conflict", bases: conflicts.map((c) => c.id), conflicts });
+
+  it("早先落下、没人用、实例库里看不到的依赖版本：说出是哪个文件夹，让玩家手动删掉或改名", () => {
+    expect(reasonOf(conflict)).toBe(
+      `目标游戏目录里的文件夹 ${DIR} 和它依赖的版本「1.20.1」同名，内容却不同，放不过去。它是${APP_NAME}早先落下的依赖版本，没有实例在用，实例库里也看不到；手动删掉或改名这个文件夹后再移`,
+    );
+  });
+
+  it("为什么挡：缺版本 JSON、版本 JSON 读不懂各有说法", () => {
+    expect(reasonOf({ ...conflict, reason: "missing_json" })).toContain("同名，里面却缺版本 JSON，放不过去");
+    expect(reasonOf({ ...conflict, reason: "unreadable_json" })).toContain("同名，里面的版本 JSON 却读不懂，放不过去");
+  });
+
+  it("实例库列着的：切过去在界面里改名或删掉；有实例靠它运行时动不得，改移别处", () => {
+    expect(reasonOf({ ...conflict, listed: true })).toBe(`目标游戏目录里的文件夹 ${DIR} 和它依赖的版本「1.20.1」同名，内容却不同，放不过去。它在那边的实例库里，切过去给它改个名字或删掉后再移`);
+    expect(reasonOf({ ...conflict, listed: true, dependents: ["老存档", "空岛", "周末"] })).toBe(
+      `目标游戏目录里的文件夹 ${DIR} 和它依赖的版本「1.20.1」同名，内容却不同，放不过去。那边的实例「老存档」「空岛」等 3 个靠它运行，不能替换，可以改移到其他游戏目录`,
+    );
+    expect(reasonOf({ ...conflict, dependents: ["老存档"] })).toContain("那边的实例「老存档」靠它运行");
+  });
+
+  it("几处一起挡路时逐个说明；较早的任务日志只有 id，照旧说法", () => {
+    const forge: BaseConflictDto = { id: "1.20.1-forge-47.3.0", path: "D:\\新家\\.minecraft\\versions\\1.20.1-forge-47.3.0", reason: "missing_json", listed: true, dependents: [] };
+    expect(reasonOf(conflict, forge).split("。").length).toBe(4);
+    expect(reasonOf(conflict, forge)).toContain(`。目标游戏目录里的文件夹 ${forge.path} 和它依赖的版本「1.20.1-forge-47.3.0」同名`);
+    expect(moveBlockerReason({ kind: "base_conflict", bases: ["1.20.1", "1.19.4"] })).toBe("目标游戏目录里已有同名、内容却不同的版本：1.20.1、1.19.4。它依赖的版本放不过去");
+  });
+
+  it("执行时被拦下的失败原因用同一句，不含禁用词", () => {
+    const move_blocker: MoveBlockerDto = { kind: "base_conflict", bases: ["1.20.1"], conflicts: [conflict] };
+    expect(taskFailureReason({ code: "instance_move_blocked", message: "后端原文", move_blocker })).toBe(reasonOf(conflict));
+    expect(bannedIn([reasonOf(conflict), reasonOf({ ...conflict, listed: true }), reasonOf({ ...conflict, dependents: ["老存档"] })])).toEqual([]);
   });
 });
 

@@ -62,8 +62,8 @@ pub enum MoveBlocker {
     /// 实例目录或它的备份目录里有符号链接、目录联接（相对实例目录或备份目录的路径）。复制会把链接指向的
     /// 内容复制一份，删原件时又可能顺着链接删到别处。
     Links(Vec<PathBuf>),
-    /// 目标里已有同名、内容不同的基底版本。
-    BaseConflict(Vec<String>),
+    /// 目标里已有同名、却不能当成同一个基底复用的版本目录，挡着要带过去的基底版本。
+    BaseConflict(Vec<BaseConflict>),
     /// 目标盘空间不够：这次要写的字节加上余量，与目标盘剩余的字节。
     InsufficientSpace { needed: u64, available: u64 },
     /// 同名（不分大小写）实例有一次移动还没彻底完成（没收拾完，或调用方还没确认），它的源或目标就是这次的源或
@@ -97,8 +97,16 @@ impl fmt::Display for MoveBlocker {
                 let listed: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
                 write!(f, "里面有链接：{}", listed.join("、"))
             }
-            MoveBlocker::BaseConflict(ids) => {
-                write!(f, "目标里的同名基底版本内容不同：{}", ids.join("、"))
+            MoveBlocker::BaseConflict(conflicts) => {
+                let listed: Vec<String> = conflicts
+                    .iter()
+                    .map(|c| format!("{}（{}）", c.dir.display(), c.reason))
+                    .collect();
+                write!(
+                    f,
+                    "目标里的同名版本目录挡着它依赖的版本：{}",
+                    listed.join("、")
+                )
             }
             MoveBlocker::InsufficientSpace { needed, available } => {
                 write!(f, "目标盘空间不够：要 {needed} 字节，剩 {available} 字节")
@@ -113,6 +121,43 @@ impl fmt::Display for MoveBlocker {
                 write!(f, "目标游戏目录里的数据格式记录读不懂：{reason}")
             }
         }
+    }
+}
+
+/// 目标里挡着一个基底版本的同名目录：要带过去的基底版本放不进去，又不能当成同一个复用。不替玩家删，报清是哪个
+/// 目录、为什么挡，以及玩家能不能在界面里处理它。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseConflict {
+    /// 要带过去的基底版本（`inheritsFrom` 里的写法）。
+    pub id: String,
+    /// 目标里挡路的目录，`<目标游戏目录>/versions/<id>`。
+    pub dir: PathBuf,
+    pub reason: BaseConflictReason,
+    /// 目标的实例库列不列它。不列的是启动器早先落下、没当实例用过的依赖版本目录，界面里找不到，只能到文件夹里处理。
+    pub listed: bool,
+    /// 目标里靠它运行、要玩家先处理的版本，与删除、改名前拦着的是同一份名单。不为空时删掉或改名它，那些版本就
+    /// 启动不了。
+    pub dependents: Vec<String>,
+}
+
+/// 目标里的同名目录为什么不能当成要带过去的基底复用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseConflictReason {
+    /// 版本 JSON 读得懂，与要带过去的不是同一个版本。
+    Differs,
+    /// 目录里没有版本 JSON，多半是装到一半或复制到一半留下的。
+    MissingJson,
+    /// 版本 JSON 读不懂。
+    UnreadableJson,
+}
+
+impl fmt::Display for BaseConflictReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            BaseConflictReason::Differs => "内容不同",
+            BaseConflictReason::MissingJson => "缺版本 JSON",
+            BaseConflictReason::UnreadableJson => "版本 JSON 读不懂",
+        })
     }
 }
 
