@@ -780,7 +780,9 @@ impl Petalfall {
         );
 
         let steps = Steps::new(events, preview.same_volume);
-        steps.enter(InstallPhase::MoveDependencies);
+        if let Err(err) = steps.enter(InstallPhase::MoveDependencies) {
+            return Err(self.abandon(&journal, err).await);
+        }
         if let Err(err) = self
             .copy_dependencies(&inspection.plan, &preview.target_game_dir, events, env)
             .await
@@ -788,13 +790,17 @@ impl Petalfall {
             return Err(self.abandon(&journal, err).await);
         }
         if !preview.same_volume {
-            steps.enter(InstallPhase::MoveCopy);
+            if let Err(err) = steps.enter(InstallPhase::MoveCopy) {
+                return Err(self.abandon(&journal, err).await);
+            }
             let staged = match self.stage_copies(&inspection, &journal, events, env).await {
                 Ok(staged) => staged,
                 Err(err) => return Err(self.abandon(&journal, err).await),
             };
             journal.backups_staged = staged.backups.is_some();
-            steps.enter(InstallPhase::MoveVerify);
+            if let Err(err) = steps.enter(InstallPhase::MoveVerify) {
+                return Err(self.abandon(&journal, err).await);
+            }
             if let Err(err) = self
                 .verify_copies(&inspection, &journal, staged, events, env)
                 .await
@@ -803,7 +809,9 @@ impl Petalfall {
             }
         }
 
-        steps.enter(InstallPhase::MoveCommit);
+        if let Err(err) = steps.enter(InstallPhase::MoveCommit) {
+            return Err(self.abandon(&journal, err).await);
+        }
         if self.is_cancelled() {
             return Err(self
                 .abandon(&journal, InstanceError::Cancelled.into())
@@ -1847,6 +1855,8 @@ async fn blocking<T: Send + 'static>(
 struct Steps<'a> {
     sink: Option<&'a EventSink>,
     plan: Vec<InstallPhase>,
+    /// 报错步骤时当场崩（测试与 debug 构建）还是让这次移动失败（正式构建）。
+    strict: bool,
 }
 
 impl<'a> Steps<'a> {
@@ -1861,15 +1871,24 @@ impl<'a> Steps<'a> {
                 InstallPhase::MoveCommit,
             ]
         };
-        Self { sink, plan }
+        Self {
+            sink,
+            plan,
+            strict: cfg!(any(test, debug_assertions)),
+        }
     }
 
-    fn enter(&self, phase: InstallPhase) {
-        let index = self
-            .plan
-            .iter()
-            .position(|planned| *planned == phase)
-            .expect("只进入步骤表里排定的步骤");
+    /// 报进到哪一步。报的步骤不在表里是程序缺陷：测试与 debug 构建当场崩；正式构建记 error 并让这次移动以内部
+    /// 错误失败（照常走收拾暂存的路），不把整个程序带崩。
+    fn enter(&self, phase: InstallPhase) -> Result<()> {
+        let Some(index) = self.plan.iter().position(|planned| *planned == phase) else {
+            let violation = format!("移动报了步骤表里没有的一步 {phase:?}，表是 {:?}", self.plan);
+            tracing::error!(%violation, "报步骤违反了开工时排定的步骤表（程序缺陷）");
+            if self.strict {
+                panic!("{violation}");
+            }
+            return Err(CoreError::PhaseOrder(violation));
+        };
         emit(
             self.sink,
             CoreEvent::Phase {
@@ -1877,6 +1896,7 @@ impl<'a> Steps<'a> {
                 index,
             },
         );
+        Ok(())
     }
 }
 
@@ -2444,6 +2464,35 @@ mod tests {
             events.push(event);
         }
         events
+    }
+
+    /// 同卷移动的表里没有复制一步：正式构建里报它不崩，以内部错误交回、不发步骤事件；表里有的步骤照常报。
+    #[test]
+    fn a_step_outside_the_plan_fails_the_move_instead_of_panicking_in_release() {
+        let (tx, mut rx) = unbounded_channel();
+        let mut steps = Steps::new(Some(&tx), true);
+        steps.strict = false;
+        match steps.enter(InstallPhase::MoveCopy) {
+            Err(CoreError::PhaseOrder(message)) => {
+                assert!(message.contains("MoveCopy"), "{message}")
+            }
+            other => panic!("应以步骤顺序出错交回：{other:?}"),
+        }
+        assert!(drain(&mut rx).is_empty());
+        steps.enter(InstallPhase::MoveCommit).unwrap();
+        assert_eq!(
+            steps_of(&drain(&mut rx))
+                .iter()
+                .map(|(phase, _)| *phase)
+                .collect::<Vec<_>>(),
+            vec![InstallPhase::MoveCommit]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "步骤表里没有的一步")]
+    fn a_step_outside_the_plan_panics_in_tests() {
+        let _ = Steps::new(None, true).enter(InstallPhase::MoveVerify);
     }
 
     /// 按步骤分好的下载进度：`(步骤, 这一步的全部进度快照)`。
