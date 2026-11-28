@@ -486,7 +486,7 @@ describe("进度填充的样式", () => {
     const file = "./ProgressRing.module.css";
     const css = strip(readFileSync(new URL(file, import.meta.url), "utf8"));
     expect(css).not.toMatch(/\.ring\[data-tone=/);
-    expect(css).toMatch(/\n\.fill\[data-tone="muted"\] \{\s*--ring-fill: var\(--sk-text-3\);\s*\}/);
+    expect(css).toMatch(/\n\.fill\[data-tone="muted"\] \{\s*--ring-fill: var\(--sk-line-strong\);\s*\}/);
     expect(css).toMatch(/\n\.fill\[data-tone="ok"\] \{\s*--ring-fill: var\(--sk-ok\);\s*\}/);
   });
 });

@@ -213,7 +213,7 @@
   line-height: var(--sk-lh-micro);
   font-weight: var(--sk-w-title);
   font-variant-numeric: tabular-nums;
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
   transition:
     background-color var(--sk-dur-hover) var(--sk-ease),
     color var(--sk-dur-hover) var(--sk-ease);

@@ -15,7 +15,7 @@
 
 /*
  * 色调按填充弧自己身上的标记取，不跟根：转为没有进度时调用方常在同一次渲染里把色调换成灰，
- * 退场中的弧留着退场那一刻的标记，以原来的颜色淡出，不边淡出边变成 text-3
+ * 退场中的弧留着退场那一刻的标记，以原来的颜色淡出，不边淡出边变成灰
  */
 .fill[data-tone="ok"] {
   --ring-fill: var(--sk-ok);
@@ -34,7 +34,7 @@
 }
 
 .fill[data-tone="muted"] {
-  --ring-fill: var(--sk-text-3);
+  --ring-fill: var(--sk-line-strong);
 }
 
 .track {

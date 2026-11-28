@@ -37,6 +37,29 @@ describe("并行通道里空闲通道的「空闲」", () => {
   });
 });
 
+// 通道左端的序号：空闲时也是要读到的编号，落在自己的 bg-2 小方块上，按文字 4.5:1 验收。
+// text-3 在这块底上只有日樱 1.90、夜樱 2.86。
+function laneNoRatio(appearance: AppearanceName, color = declarationOf(css, ".laneNo", "color")): number {
+  const tokens = tokensOf(appearance);
+  const tile = resolveColor(declarationOf(css, ".laneNo", "background"), tokens, cardGround(tokens));
+  return contrast(resolveColor(color, tokens, tile), tile);
+}
+
+describe("空闲通道的序号", () => {
+  it.each(Object.keys(APPEARANCES) as AppearanceName[])("%s：对序号块的底不低于 4.5:1", (appearance) => {
+    expect(laneNoRatio(appearance)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("取次要文字 text-2，底是 bg-2：日樱 4.899、夜樱 5.939；text-3 只有 1.903、2.862", () => {
+    expect(declarationOf(css, ".laneNo", "color")).toBe("var(--sk-text-2)");
+    expect(declarationOf(css, ".laneNo", "background")).toBe("var(--sk-bg-2)");
+    expect(laneNoRatio("日樱 · 樱粉")).toBeCloseTo(4.899, 3);
+    expect(laneNoRatio("夜樱 · 樱粉")).toBeCloseTo(5.939, 3);
+    expect(laneNoRatio("日樱 · 樱粉", "var(--sk-text-3)")).toBeCloseTo(1.903, 3);
+    expect(laneNoRatio("夜樱 · 樱粉", "var(--sk-text-3)")).toBeCloseTo(2.862, 3);
+  });
+});
+
 // 结局角标：18 圆的实心填充上压 12 的图标。图标是认出完成、失败、已取消要看的图形，按非文字 3:1 验收，
 // 对的是它自己的填充；填充是不透明色，它与底座之间另有一圈 surface 外描隔开。
 const BADGE_TONES = ["ok", "danger", "muted"] as const;

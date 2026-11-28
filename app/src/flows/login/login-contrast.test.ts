@@ -1,8 +1,8 @@
 // 登录弹窗里要被读到的次要文字：设备码等待行右端的「mm:ss 后过期」、登录成功胶囊里的「微软账户 · 已设为当前账户」、
 // 离线账户的 UUID 标签、名字为空时的「输入用户名后生成」与下方说明、外置登录步骤条上还没走到与已走过的步骤名
-// （没走到的那一步，圆点里的序号也继承这个颜色）、登录这一步服务器卡里的 API 地址。
+// （没走到的那一步，圆点里的序号也继承这个颜色）、登录这一步服务器卡里的 API 地址、过期后转灰的设备码格。
 // 它们都不是装饰也不是禁用态，不能用 text-3（日樱落在白底约 2.19:1），对各自所在的底至少 4.5:1。
-// 过期的设备码格转灰是代码作废后的失效态，不在此列。
+// 过期的设备码作废了，但格子里的字还留在原处显示，仍要读得出：转灰是从 text 降到 text-2，不降到 text-3。
 import { describe, expect, it } from "vitest";
 import { APPEARANCES, contrast, declarationOf, readCss, resolveColor, tokensOf, type AppearanceName, type Rgb } from "../../test/contrast";
 
@@ -10,7 +10,7 @@ const css = readCss(new URL("./login.module.css", import.meta.url));
 const modalCss = readCss(new URL("../../ui/Modal.module.css", import.meta.url));
 
 /** 弹窗面板本身的底（主体不另铺底），或者文字所在的那块自带底色的容器。 */
-type Ground = "dialog" | ".wait" | ".chip" | ".serverCard";
+type Ground = "dialog" | ".wait" | ".chip" | ".serverCard" | ".cell";
 
 const INFO_TEXT: readonly { selector: string; ground: Ground }[] = [
   { selector: ".countdown", ground: ".wait" },
@@ -20,6 +20,7 @@ const INFO_TEXT: readonly { selector: string; ground: Ground }[] = [
   { selector: ".note", ground: "dialog" },
   { selector: ".stepperItem", ground: "dialog" },
   { selector: ".serverUrl", ground: ".serverCard" },
+  { selector: ".code[data-expired] .cell", ground: ".cell" },
 ];
 
 function groundColor(ground: Ground, tokens: Map<string, string>): Rgb {
@@ -56,6 +57,7 @@ describe("登录弹窗里要被读到的次要文字", () => {
       ".note": 5.63,
       ".stepperItem": 5.63,
       ".serverUrl": 4.9,
+      ".code[data-expired] .cell": 5.63,
     });
     expect(rounded("夜樱 · 樱粉")).toEqual({
       ".countdown": 5.94,
@@ -65,7 +67,14 @@ describe("登录弹窗里要被读到的次要文字", () => {
       ".note": 5.73,
       ".stepperItem": 5.73,
       ".serverUrl": 5.94,
+      ".code[data-expired] .cell": 5.73,
     });
+  });
+
+  it("过期的设备码格仍比有效的淡一档：有效时 text，过期降到 text-2，格子的底不变", () => {
+    expect(declarationOf(css, ".cell", "color")).toBe("var(--sk-text)");
+    expect(declarationOf(css, ".cell", "background")).toBe("var(--sk-surface)");
+    expect(() => declarationOf(css, ".code[data-expired] .cell", "background")).toThrow();
   });
 
   it("步骤名只有当前这一步另设颜色：已走过与没走到的都沿用 .stepperItem，上面对它的比值就覆盖了这两种状态", () => {
