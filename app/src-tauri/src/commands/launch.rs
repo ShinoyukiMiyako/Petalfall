@@ -15,7 +15,7 @@
 //! 会话日志里留一行说明并落盘（[`mark_on_exit`]）。
 
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -25,7 +25,7 @@ use petalfall_core::{
     game_line_level, AccountType, AutoBackupOutcome, DownloadProgress, Finished, GameExit, GameRun,
     GameSlot, LaunchAccount, LaunchEvent, LaunchFailed, LaunchPhase, LaunchRequest, LaunchStage,
     LauncherLevel, LogLine, LogMarker, LogSource, Petalfall, PlayRange, PlayStats, QuickPlay,
-    RecordLoad, RunningRecord, SlotBusy, SlotReservation, SlotTicket,
+    RecordLoad, SlotBusy, SlotReservation, SlotTicket,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -568,6 +568,7 @@ async fn reserve_launch<'a>(
 ) -> Result<(SlotReservation<'a>, ChainGuard), CommandError> {
     let reservation = running.slot.reserve(version_id).map_err(busy)?;
     let instance = locks
+        .in_dir(petalfall.game_dir())
         .acquire_with_chain(version_id, InstanceActivity::Launching, async {
             petalfall.guard_game_dir(GuardMode::Use).await?;
             Ok(petalfall.inheritance_chain(version_id).await?)
@@ -814,7 +815,13 @@ async fn reattach_recorded(app: &AppHandle) -> petalfall_core::Result<()> {
             return Ok(());
         }
     };
-    let Some(instance) = hold_reattached(&app.state::<InstanceLocks>(), &petalfall, &record).await
+    let Some(instance) = hold_reattached(
+        &app.state::<InstanceLocks>(),
+        &petalfall,
+        &record.instance_id,
+        &record.game_dir,
+    )
+    .await
     else {
         // 开机时不该有人占着实例；占不住就不接，记录留着，下次打开再试。
         return Ok(());
@@ -838,11 +845,13 @@ async fn reattach_recorded(app: &AppHandle) -> petalfall_core::Result<()> {
 async fn hold_reattached(
     locks: &InstanceLocks,
     petalfall: &Petalfall,
-    record: &RunningRecord,
+    id: &str,
+    game_dir: &Path,
 ) -> Option<ChainGuard> {
-    let id = record.instance_id.as_str();
-    if petalfall_core::folders::same_path(&record.game_dir, petalfall.game_dir()) {
-        match locks
+    // 按这一局自己的游戏目录占：别的目录里的那一局不挡当前目录的同名实例
+    let scoped = locks.in_dir(game_dir);
+    if petalfall_core::folders::same_path(game_dir, petalfall.game_dir()) {
+        match scoped
             .acquire_with_chain(id, InstanceActivity::Launching, async {
                 Ok(petalfall.inheritance_chain(id).await?)
             })
@@ -858,7 +867,7 @@ async fn hold_reattached(
             }
         }
     }
-    match locks
+    match scoped
         .acquire_with_chain(id, InstanceActivity::Launching, async { Ok(Vec::new()) })
         .await
     {
@@ -1222,6 +1231,38 @@ mod tests {
             ..petalfall_core::PetalfallConfig::default()
         };
         Facade::new(Petalfall::open(config, dir.to_path_buf(), dir.join("config.json")).unwrap())
+    }
+
+    /// 接回的那一局按它自己的游戏目录占实例：另一个游戏目录里的同名那一局不挡当前目录的「生存」启动，同一目录里
+    /// 的那一局照挡。
+    #[tokio::test]
+    async fn a_reattached_game_only_holds_the_name_in_its_own_game_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let facade = facade_with(dir.path(), &[("生存", None)]);
+        let petalfall = facade.snapshot().await;
+        let locks = InstanceLocks::default();
+
+        let other = hold_reattached(&locks, &petalfall, "生存", elsewhere.path())
+            .await
+            .expect("别的目录里的那一局占得住");
+        let running = RunningGame::default();
+        let launched = reserve_launch(&running, &locks, &petalfall, "生存")
+            .await
+            .expect("别的目录里的同名那一局不挡这里的启动");
+        drop(launched);
+        drop(other);
+
+        let here = hold_reattached(&locks, &petalfall, "生存", petalfall.game_dir())
+            .await
+            .expect("当前目录里的那一局占得住");
+        let running = RunningGame::default();
+        let err = reserve_launch(&running, &locks, &petalfall, "生存")
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code, crate::commands::error::code::INSTANCE_BUSY);
+        drop(here);
     }
 
     /// 实例自己正被占着（安装、补全、改名、删除）时先报 instance_busy，不先去读它的版本 JSON：安装途中 JSON
