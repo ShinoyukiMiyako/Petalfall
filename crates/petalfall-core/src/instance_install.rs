@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use petalfall_base::error_with_causes;
+use petalfall_install::forge::ForgeTurn;
 use petalfall_install::instance::place_json_for_processors;
 use petalfall_install::{
     LoaderFlavor, LoaderInstaller, VanillaInstaller, ensure_complete, forge_installer_url,
@@ -331,6 +332,8 @@ impl Petalfall {
                     .java_version
                     .as_ref()
                     .map_or(LEGACY_JAVA_MAJOR, |java| java.major_version);
+                // 同一时刻只装一个 Forge / NeoForge：先排到队再准备 Java，排队的时间报成单独一步，不算在 Java 上
+                let turn = ForgeTurn::acquire(&cx).await?;
                 announcer.enter(InstallPhase::Java);
                 let (found, java) = self.resolve_java(major, events).await?;
                 let url = match choice {
@@ -354,6 +357,7 @@ impl Petalfall {
                 let java_major = found.first().map(|picked| picked.version.major);
                 let (embedded, summary) = self
                     .forge_installer(cx, major, java, java_major, events)
+                    .with_turn(turn)
                     .install_for_instance(&url, id)
                     .await?;
                 emit(
@@ -1073,6 +1077,7 @@ fn install_plan(request: &InstanceRequest) -> Vec<InstallPhase> {
             Libraries,
             Assets,
             Natives,
+            LoaderQueue,
             Java,
             LoaderInstaller,
             LoaderLibraries,
@@ -1625,6 +1630,7 @@ mod tests {
                         Libraries,
                         Assets,
                         Natives,
+                        LoaderQueue,
                         Java,
                         LoaderInstaller,
                         LoaderLibraries,
