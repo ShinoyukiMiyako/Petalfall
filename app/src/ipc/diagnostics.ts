@@ -79,7 +79,8 @@ export interface JavaUsedDto {
  * 不阻断启动、但值得在诊断里引用的提醒。game_path：游戏目录含 ! 或这个版本读不了的非 ASCII 字符（只有 1.17 之前的 Forge 才算）；
  * instance_name：实例名含同样的字符，且这个名字落在路径上；onedrive_folder / icloud_folder：游戏目录在同步盘里；
  * long_player_name：角色名超过 16 个字符且游戏不低于 1.20.3；player_name_chars：角色名含空格或非 ASCII 字符且游戏是 1.20.2 或 1.20.3；
- * jvm_*：自定义 JVM 参数里的内存写法不对、最小大于最大、最大低于 512 MB。
+ * jvm_*：自定义 JVM 参数里的内存写法不对、最小大于最大、最大低于 512 MB；
+ * auto_memory_short：自动分配的内存被本机上限封顶（物理内存的一半或 32 位 Java），或启动时空闲内存少于分配的量。
  */
 export type LaunchWarningCode =
   | "game_path"
@@ -90,7 +91,8 @@ export type LaunchWarningCode =
   | "player_name_chars"
   | "jvm_memory_unit"
   | "jvm_min_over_max"
-  | "jvm_max_too_low";
+  | "jvm_max_too_low"
+  | "auto_memory_short";
 
 export interface CrashReportDto {
   /** 游戏退出的 Unix 毫秒；对粘贴文本的诊断为 null。 */

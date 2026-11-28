@@ -262,7 +262,8 @@
       }
     ],
     "added_warnings": [
-      "player_name_chars"
+      "player_name_chars",
+      "auto_memory_short"
     ]
   }
 }

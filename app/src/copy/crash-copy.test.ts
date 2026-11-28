@@ -210,8 +210,14 @@ describe("启动提醒", () => {
     expect(byAction("change_game_dir")).toEqual(["game_path", "onedrive_folder", "icloud_folder"]);
     expect(byAction("rename_instance")).toEqual(["instance_name"]);
     expect(byAction("manage_accounts")).toEqual(["long_player_name", "player_name_chars"]);
-    expect(byAction("instance_settings")).toEqual(["jvm_memory_unit", "jvm_min_over_max", "jvm_max_too_low"]);
+    expect(byAction("instance_settings")).toEqual(["jvm_memory_unit", "jvm_min_over_max", "jvm_max_too_low", "auto_memory_short"]);
     expect(LAUNCH_WARNING.jvm_max_too_low.action.label).toBe("打开实例设置");
+    // 封顶与空闲不足共用一条：两种去处都要说到，32 位 Java 的出路也在
+    expect(LAUNCH_WARNING.auto_memory_short).toEqual({
+      title: "自动分配的内存可能不够",
+      body: "这个实例估计要的内存超过了本机能给的上限，或启动时空闲内存少于分配的量，内存吃紧时可能卡顿或崩溃。可以关掉些程序、减少 Mod；用的是 32 位 Java 时换成 64 位。",
+      action: { kind: "instance_settings", label: "打开实例设置" },
+    });
   });
 
   it("路径提醒分开说：游戏目录指向换目录，实例名指向重命名，都不点名加载器", () => {

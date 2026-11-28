@@ -35,7 +35,8 @@
       "account_type": "microsoft"
     },
     "added_warnings": [
-      "player_name_chars"
+      "player_name_chars",
+      "auto_memory_short"
     ]
   },
   {
@@ -74,7 +75,8 @@
       "account_type": "offline"
     },
     "added_warnings": [
-      "player_name_chars"
+      "player_name_chars",
+      "auto_memory_short"
     ]
   },
   {
@@ -113,7 +115,8 @@
       "account_type": "authlib_injector"
     },
     "added_warnings": [
-      "player_name_chars"
+      "player_name_chars",
+      "auto_memory_short"
     ]
   }
 ]

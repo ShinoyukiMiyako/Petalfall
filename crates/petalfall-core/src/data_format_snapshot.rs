@@ -274,7 +274,7 @@ fn account_type_spelling(value: AccountType) -> &'static str {
     }
 }
 
-const LAUNCH_WARNINGS: [LaunchWarning; 9] = [
+const LAUNCH_WARNINGS: [LaunchWarning; 10] = [
     LaunchWarning::GamePath,
     LaunchWarning::InstanceName,
     LaunchWarning::OnedriveFolder,
@@ -284,6 +284,7 @@ const LAUNCH_WARNINGS: [LaunchWarning; 9] = [
     LaunchWarning::JvmMemoryUnit,
     LaunchWarning::JvmMinOverMax,
     LaunchWarning::JvmMaxTooLow,
+    LaunchWarning::AutoMemoryShort,
 ];
 
 fn launch_warning_spelling(value: LaunchWarning) -> &'static str {
@@ -297,6 +298,7 @@ fn launch_warning_spelling(value: LaunchWarning) -> &'static str {
         LaunchWarning::JvmMemoryUnit => "jvm_memory_unit",
         LaunchWarning::JvmMinOverMax => "jvm_min_over_max",
         LaunchWarning::JvmMaxTooLow => "jvm_max_too_low",
+        LaunchWarning::AutoMemoryShort => "auto_memory_short",
     }
 }
 

@@ -154,6 +154,9 @@ pub enum LaunchWarning {
     JvmMinOverMax,
     /// 生效的最大堆低于 512 MB。
     JvmMaxTooLow,
+    /// 自动分配的内存可能不够：估计的需求被本机上限（物理内存的一半或 32 位 Java）封顶，或启动时的空闲内存
+    /// 少于这次分配的量（见 [`crate::memory::auto_memory_warnings`]）。
+    AutoMemoryShort,
 }
 
 impl LaunchWarning {
@@ -171,7 +174,7 @@ impl LaunchWarning {
             | LaunchWarning::JvmMemoryUnit
             | LaunchWarning::JvmMinOverMax
             | LaunchWarning::JvmMaxTooLow => true,
-            LaunchWarning::PlayerNameChars => false,
+            LaunchWarning::PlayerNameChars | LaunchWarning::AutoMemoryShort => false,
         }
     }
 
@@ -187,7 +190,8 @@ impl LaunchWarning {
             | LaunchWarning::IcloudFolder => LaunchStage::VerifyFiles,
             LaunchWarning::JvmMemoryUnit
             | LaunchWarning::JvmMinOverMax
-            | LaunchWarning::JvmMaxTooLow => LaunchStage::BuildArguments,
+            | LaunchWarning::JvmMaxTooLow
+            | LaunchWarning::AutoMemoryShort => LaunchStage::BuildArguments,
         }
     }
 }
@@ -1151,7 +1155,12 @@ impl Petalfall {
             reporter
                 .info(crate::memory::auto_memory_log(estimate))
                 .await;
-            for text in crate::memory::auto_memory_warnings(estimate, *system) {
+            let texts = crate::memory::auto_memory_warnings(estimate, *system);
+            // 两种情况可能同时出现，卡片上一条说清就够，具体的数留在启动日志里。
+            if !texts.is_empty() {
+                warnings.push(LaunchWarning::AutoMemoryShort);
+            }
+            for text in texts {
                 reporter.warn(text).await;
             }
         }
@@ -4797,6 +4806,7 @@ mod tests {
             LaunchWarning::JvmMemoryUnit,
             LaunchWarning::JvmMinOverMax,
             LaunchWarning::JvmMaxTooLow,
+            LaunchWarning::AutoMemoryShort,
         ];
         let json = serde_json::to_value(all).unwrap();
         assert_eq!(
@@ -4809,7 +4819,8 @@ mod tests {
                 "player_name_chars",
                 "jvm_memory_unit",
                 "jvm_min_over_max",
-                "jvm_max_too_low"
+                "jvm_max_too_low",
+                "auto_memory_short"
             ])
         );
         let back: Vec<LaunchWarning> = serde_json::from_value(json).unwrap();
@@ -4883,12 +4894,29 @@ mod tests {
             serde_json::json!(["player_name_chars"])
         );
         assert_eq!(read_back(json), record);
+
+        // 自动内存的提醒与自定义 JVM 参数的同属生成启动参数阶段，读回时接在它们后面、不越到前面去。
+        let record = noted(vec![
+            LaunchWarning::OnedriveFolder,
+            LaunchWarning::JvmMaxTooLow,
+            LaunchWarning::AutoMemoryShort,
+        ]);
+        let json = stored_json(record.clone());
+        assert_eq!(
+            json["warnings"],
+            serde_json::json!(["onedrive_folder", "jvm_max_too_low"])
+        );
+        assert_eq!(
+            json["added_warnings"],
+            serde_json::json!(["auto_memory_short"])
+        );
+        assert_eq!(read_back(json), record);
     }
 
     /// 启动按阶段先后记提醒，任一组合存下再读回都与原样相同。
     #[test]
     fn every_combination_of_warnings_survives_the_round_trip() {
-        const LAUNCH_ORDER: [LaunchWarning; 9] = [
+        const LAUNCH_ORDER: [LaunchWarning; 10] = [
             LaunchWarning::LongPlayerName,
             LaunchWarning::PlayerNameChars,
             LaunchWarning::GamePath,
@@ -4898,6 +4926,7 @@ mod tests {
             LaunchWarning::JvmMemoryUnit,
             LaunchWarning::JvmMinOverMax,
             LaunchWarning::JvmMaxTooLow,
+            LaunchWarning::AutoMemoryShort,
         ];
         for mask in 0u32..(1 << LAUNCH_ORDER.len()) {
             let warnings: Vec<LaunchWarning> = LAUNCH_ORDER
@@ -5046,7 +5075,8 @@ mod tests {
         );
     }
 
-    /// 自动内存生效时启动日志写明来由，32 位 Java 封顶并提醒换 64 位；自定义 -Xmx 盖过它时不再说自动给了多少。
+    /// 自动内存生效时启动日志写明来由，32 位 Java 封顶并提醒换 64 位，启动提醒里也记一条；自定义 -Xmx 盖过它时
+    /// 不再说自动给了多少，也不记这条提醒。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auto_memory_is_explained_in_the_launch_log_only_when_it_applies() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5065,7 +5095,10 @@ mod tests {
         };
 
         let (result, _) = launch(&petalfall, java.clone()).await;
-        result.expect("32 位 Java 照常启动").finish().await;
+        let run = result.expect("32 位 Java 照常启动");
+        // 日志里的那句之外，启动提醒里也记一条，崩溃页的卡片才看得到。
+        assert_eq!(run.info().warnings, vec![LaunchWarning::AutoMemoryShort]);
+        run.finish().await;
         let system = crate::memory::read_system_memory().await.unwrap();
         let vanilla = petalfall_launch::MemoryProfile {
             loader: petalfall_launch::LoaderClass::Vanilla,
@@ -5108,7 +5141,9 @@ mod tests {
         .await
         .unwrap();
         let (result, _) = launch(&petalfall, java).await;
-        result.expect("自定义 -Xmx 照常启动").finish().await;
+        let run = result.expect("自定义 -Xmx 照常启动");
+        assert_eq!(run.info().warnings, Vec::<LaunchWarning>::new());
+        run.finish().await;
         let lines = texts(petalfall.last_launch_log(VERSION).await.unwrap().unwrap());
         assert!(
             !lines

@@ -750,6 +750,7 @@ export const LAUNCH_WARNING_CODES = [
   "jvm_memory_unit",
   "jvm_min_over_max",
   "jvm_max_too_low",
+  "auto_memory_short",
 ] as const satisfies readonly LaunchWarningCode[];
 
 /** 提醒上的动作：更换游戏目录去设置的「游戏」分区，重命名实例在头图就地改名，管理账户去账户页，打开实例设置切到实例的「设置」标签。 */
@@ -811,6 +812,12 @@ export const LAUNCH_WARNING: Readonly<Record<LaunchWarningCode, LaunchWarningCop
   jvm_max_too_low: {
     title: "最大内存低于 512 MB",
     body: "游戏多半进不了主界面，可以调高 -Xmx，或删掉它改用内存设置。",
+    action: OPEN_INSTANCE_SETTINGS,
+  },
+  // 封顶与空闲不足合成一条，具体的数写在启动日志里
+  auto_memory_short: {
+    title: "自动分配的内存可能不够",
+    body: "这个实例估计要的内存超过了本机能给的上限，或启动时空闲内存少于分配的量，内存吃紧时可能卡顿或崩溃。可以关掉些程序、减少 Mod；用的是 32 位 Java 时换成 64 位。",
     action: OPEN_INSTANCE_SETTINGS,
   },
 };
